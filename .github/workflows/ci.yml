@@ -8,16 +8,17 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings   # treat compiler warnings as errors in CI
 
 jobs:
   build-and-test:
     name: Build & test (Windows)
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings   # rustc warnings fail the build gate
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned via rust-toolchain.toml; this just ensures the toolchain is present.
+      # Toolchain is pinned via rust-toolchain.toml; this just reports it.
       - name: Show Rust version
         run: rustc --version && cargo --version
 
@@ -38,8 +39,9 @@ jobs:
   clippy:
     name: Clippy (advisory)
     runs-on: windows-latest
-    # Informational — surfaces lint suggestions without blocking merges.
-    continue-on-error: true
+    # Informational: surfaces lint suggestions in the log without failing the
+    # run. Lints are NOT treated as errors here (no -D warnings), so the job
+    # stays green; tighten this once the workspace is fully clippy-clean.
     steps:
       - uses: actions/checkout@v4
       - name: Cache cargo registry & build

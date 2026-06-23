@@ -237,7 +237,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> LoadedTexture {
             .collect(),
         _ => {
             warn!("Unsupported texture format {:?}; using magenta placeholder", data.format);
-            vec![255u8, 0, 255, 255].iter()
+            [255u8, 0, 255, 255].iter()
                 .cycle()
                 .take((data.width * data.height * 4) as usize)
                 .copied()
