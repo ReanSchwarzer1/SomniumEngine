@@ -1,0 +1,10 @@
+[package]
+name = "somnium_asset"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gltf      = { workspace = true }
+bytemuck  = { workspace = true }
+glam      = { workspace = true }
+tracing   = { workspace = true }

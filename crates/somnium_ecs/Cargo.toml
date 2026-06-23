@@ -1,0 +1,11 @@
+[package]
+name        = "somnium_ecs"
+description = "Entity Component System for the Somnium Engine."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+
+[dependencies]
+rayon = { workspace = true }

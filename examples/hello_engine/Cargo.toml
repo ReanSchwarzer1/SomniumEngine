@@ -1,0 +1,25 @@
+[package]
+name    = "hello_engine"
+version = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+somnium_core       = { workspace = true }
+somnium_ecs = { workspace = true }
+somnium_renderer = { workspace = true }
+somnium_physics = { workspace = true }
+somnium_audio = { workspace = true }
+somnium_asset = { workspace = true }
+somnium_voxel = { workspace = true }
+somnium_ui = { workspace = true }
+glam = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand               = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
+wgpu = { workspace = true }

@@ -1,0 +1,47 @@
+# ── Rust build output ────────────────────────────────────────────────────────
+/target
+**/*.rs.bk
+*.pdb
+
+# ── Editor / OS cruft ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Runtime artifacts written to the working directory ───────────────────────
+# Scene saves + terrain heightmap/splat sidecars (Phase 11.5F / 14F-3).
+# Delete these lines if you want to commit a sample scene.
+/scene.somnium
+/scene.somnium.terrain*.bin
+
+# Log output (engine traces, captured run output, etc.)
+*.log
+
+# ── AI-assisted development artifacts ────────────────────────────────────────
+# Somnium is developed with AI assistance (Claude Code). The files below are the
+# assistant's local configuration and its persistent session-memory / planning
+# notes. They're useful while developing but are not part of the engine, and a
+# couple contain personal working-style notes — so they stay out of the public
+# repo. (Un-ignore any you'd rather publish; the engineering content they hold
+# is also captured in context.md / ATTRIBUTION.md, which ARE committed.)
+.claude/
+CLAUDE.md
+MEMORY.md
+user_profile.md
+feedback_approach.md
+project_somnium.md
+architecture_decisions.md
+wgpu_api_gotchas.md
+somnium_phase*.md
+
+# ── Reference repositories (see ATTRIBUTION.md) ──────────────────────────────
+# example_repo/ holds ~6 GB of third-party engines studied for architectural
+# patterns only. It is excluded from the Cargo workspace and must NOT be pushed
+# (size + redistribution licensing, e.g. the Unreal Engine EULA).
+#
+# EXCEPTION: somnium_physics_sys/build.rs compiles Jolt Physics (MIT) straight
+# out of this tree, so the Jolt subdirectory is kept tracked — without it a
+# fresh clone cannot build the physics crate.
+example_repo/*
+!example_repo/JoltPhysics-master/

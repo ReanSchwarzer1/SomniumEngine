@@ -1,0 +1,622 @@
+//! # Somnium Core
+//!
+//! The foundational crate for the **Somnium Engine** — a modular,
+//! high-performance, cross-platform 3D/2D game engine built in Rust.
+//!
+//! This crate provides the application lifecycle, platform event
+//! abstraction, timing, configuration, and the primary [`GameApp`]
+//! trait that all game applications implement.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌──────────────────────────────────────────┐
+//! │         User Game (impl GameApp)         │
+//! ├──────────────────────────────────────────┤
+//! │   EngineContext  │  EngineEvent (enum)   │
+//! ├──────────────────────────────────────────┤
+//! │   Engine<G>  (winit ApplicationHandler)  │
+//! ├──────────────────────────────────────────┤
+//! │          winit / Operating System        │
+//! └──────────────────────────────────────────┘
+//! ```
+//!
+//! The engine decouples OS-level events from game logic through a
+//! translation layer ([`event::translate_window_event`]), so that game
+//! code never depends on `winit` types directly. This enables testing
+//! with synthetic events and painless platform-layer swaps in the future.
+//!
+//! ## Reference Architecture
+//!
+//! The application lifecycle design draws inspiration from:
+//!
+//! - **Unreal Engine 5** (`FEngineLoop`: `PreInit → Init → Tick → Exit`)
+//!   © Epic Games, Inc. — see `example_repo/UnrealEngine-release/`.
+//!   Our `GameApp` trait mirrors UE5's phased lifecycle while using
+//!   Rust's trait system instead of C++ virtual dispatch.
+//!
+//! - **Unreal Engine 5** (`GenericApplication` / `GenericApplicationMessageHandler`)
+//!   © Epic Games, Inc. — platform abstraction with message handler
+//!   delegation. Our event translation layer follows this pattern of
+//!   decoupling OS events from game logic.
+
+#![warn(missing_docs)]
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
+
+/// Core application lifecycle and event loop management.
+pub mod app;
+pub mod config;
+pub mod context;
+pub mod editor_commands;
+pub mod error;
+pub mod event;
+pub mod log_capture;
+pub mod scene_serial;
+pub mod time;
+
+// ── Re-exports for ergonomic top-level access ──────────────────────────────
+
+pub use app::{Engine, GameApp};
+pub use config::EngineConfig;
+pub use context::EngineContext;
+pub use editor_commands::{
+    CreateEntityCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
+    ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
+};
+pub use error::EngineError;
+pub use event::{EngineEvent, InputState};
+pub use scene_serial::{parse_scene, save_scene};
+pub use time::TimeState;
+
+// Re-export input types so game code does not need a direct `winit` dependency.
+pub use winit::event::MouseButton;
+pub use winit::keyboard::KeyCode;
+
+// Re-export core ECS types so game code can use them from `somnium_core`.
+pub use somnium_ecs::{Component, ComponentBundle, Entity, World};
+pub use somnium_ecs::{ComponentId, ComponentSet};
+
+
+/// ECS Component for a mesh instance.
+#[derive(Debug, Clone, Copy)]
+pub struct MeshComponent {
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub index_count: u32,
+}
+impl somnium_ecs::Component for MeshComponent {}
+
+/// ECS Component for a material.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialComponent {
+    pub id: u32,
+}
+impl somnium_ecs::Component for MaterialComponent {}
+
+/// ECS Component for spatial transformation.
+#[derive(Debug, Clone, Copy)]
+pub struct Transform {
+    pub translation: glam::Vec3,
+    pub rotation: glam::Quat,
+    pub scale: glam::Vec3,
+}
+
+impl Transform {
+    pub fn from_translation(translation: glam::Vec3) -> Self {
+        Self {
+            translation,
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+        }
+    }
+
+    pub fn to_matrix(&self) -> glam::Mat4 {
+        glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
+}
+impl somnium_ecs::Component for Transform {}
+
+/// Light type selector for `LightComponent`.
+///
+/// `Directional` — infinite-range sun light (Phase 11).
+/// `Point` / `Spot` — local lights with range & falloff (Phase 13C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightType {
+    Directional,
+    Point,
+    Spot,
+}
+
+/// ECS component that marks an entity as a light source.
+///
+/// The light's world-space direction is derived from the entity's `Transform.rotation`:
+/// `forward = rotation.mul_vec3(Vec3::NEG_Z)` points FROM the light (i.e. light_direction = -forward).
+/// For a directional light, `Transform.translation` is ignored.
+///
+/// Phase 13C additions:
+/// - `range` — attenuation radius for point/spot lights (meters).
+/// - `inner_angle` / `outer_angle` — spot cone angles in **radians**.
+///   Inner is the fully-lit core; outer is where intensity fades to zero.
+///
+/// ```rust
+/// // Directional
+/// LightComponent::directional(5.0);
+/// // Point (white, intensity 3, range 10m)
+/// LightComponent::point(3.0, 10.0);
+/// // Spot (white, intensity 5, range 15m, 25° inner / 35° outer)
+/// LightComponent::spot(5.0, 15.0, 25.0_f32.to_radians(), 35.0_f32.to_radians());
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LightComponent {
+    pub light_type: LightType,
+    /// Linear-RGB color of the light.
+    pub color: glam::Vec3,
+    /// Intensity multiplier applied to `color` before GPU upload.
+    pub intensity: f32,
+    /// Attenuation radius for point/spot lights. Ignored for directional.
+    pub range: f32,
+    /// Spot inner cone half-angle (radians). Fully-lit region.
+    pub inner_angle: f32,
+    /// Spot outer cone half-angle (radians). Zero intensity at this edge.
+    pub outer_angle: f32,
+}
+
+impl LightComponent {
+    /// Convenience constructor for a white directional light.
+    pub fn directional(intensity: f32) -> Self {
+        Self {
+            light_type: LightType::Directional,
+            color: glam::Vec3::ONE,
+            intensity,
+            range: 0.0,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white point light.
+    pub fn point(intensity: f32, range: f32) -> Self {
+        Self {
+            light_type: LightType::Point,
+            color: glam::Vec3::ONE,
+            intensity,
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white spot light.
+    pub fn spot(intensity: f32, range: f32, inner_angle: f32, outer_angle: f32) -> Self {
+        Self {
+            light_type: LightType::Spot,
+            color: glam::Vec3::ONE,
+            intensity,
+            range,
+            inner_angle,
+            outer_angle,
+        }
+    }
+}
+
+impl somnium_ecs::Component for LightComponent {}
+
+/// ECS Component for an entity's display name.
+///
+/// Stored as a fixed-length null-terminated UTF-8 byte array so the component
+/// satisfies the ECS `Copy` requirement. Names longer than 63 bytes are silently
+/// truncated.
+#[derive(Clone, Copy)]
+pub struct Name(pub [u8; 64]);
+
+impl Name {
+    pub fn new(s: &str) -> Self {
+        let mut buf = [0u8; 64];
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(63);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Self(buf)
+    }
+
+    pub fn as_str(&self) -> &str {
+        let end = self.0.iter().position(|&b| b == 0).unwrap_or(64);
+        std::str::from_utf8(&self.0[..end]).unwrap_or("???")
+    }
+}
+
+impl std::fmt::Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Name({:?})", self.as_str())
+    }
+}
+
+impl somnium_ecs::Component for Name {}
+
+// ─── Phase 11.5F: Mesh kind tag ───────────────────────────────────────────
+
+/// Records which procedural mesh type backs this entity's `MeshComponent`.
+///
+/// Stored alongside `MeshComponent` so the scene serializer can recreate the
+/// mesh geometry on load. The value has no GPU-side meaning — it is purely
+/// for serialization bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshKind {
+    Cube,
+    Sphere,
+    Plane,
+    Cylinder,
+}
+impl somnium_ecs::Component for MeshKind {}
+
+// ─── Phase 14: Heightmap terrain ────────────────────────────────────────────
+
+/// Marks an entity as a heightmap terrain (Phase 14A-1).
+///
+/// Heightmap, splatmap, and layer data live OUTSIDE the ECS in the renderer's
+/// `TerrainData` storage (like `GeometryPool` owns mesh data) — this component
+/// only identifies the terrain and mirrors its configuration. `terrain_id`
+/// indexes `SomniumRenderer::terrains`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainComponent {
+    /// Index into the renderer's terrain storage.
+    pub terrain_id: u32,
+    /// Cells (quads) per chunk edge.
+    pub chunk_cells: u32,
+    /// Number of chunks along X.
+    pub grid_x: u32,
+    /// Number of chunks along Z.
+    pub grid_z: u32,
+    /// World-space distance between adjacent vertices (metres).
+    pub cell_size: f32,
+    /// World-space multiplier applied to raw heightmap values.
+    pub height_scale: f32,
+}
+impl somnium_ecs::Component for TerrainComponent {}
+
+// ─── Phase 11.5A: Scene Graph Components ──────────────────────────────────
+
+/// ECS component that marks an entity as a child of another entity.
+///
+/// The parent's world transform is pre-multiplied with this entity's `Transform`
+/// by the transform propagation system. The resulting world matrix is stored in
+/// `WorldTransform` and used by the renderer instead of `Transform::to_matrix()`.
+#[derive(Debug, Clone, Copy)]
+pub struct Parent {
+    pub entity: somnium_ecs::Entity,
+}
+impl somnium_ecs::Component for Parent {}
+
+/// ECS component that stores an entity's ordered list of child entities.
+///
+/// Fixed-size (16 children) so the component satisfies the ECS `Copy` constraint.
+/// Hierarchies deeper than 16 siblings can be built by chaining through multiple levels.
+#[derive(Debug, Clone, Copy)]
+pub struct Children {
+    pub entities: [somnium_ecs::Entity; 16],
+    pub count: u8,
+}
+
+impl Children {
+    pub fn empty() -> Self {
+        Self {
+            entities: [somnium_ecs::Entity::DANGLING; 16],
+            count: 0,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[somnium_ecs::Entity] {
+        &self.entities[..self.count as usize]
+    }
+
+    pub fn push(&mut self, child: somnium_ecs::Entity) -> bool {
+        if self.count as usize >= 16 {
+            return false;
+        }
+        self.entities[self.count as usize] = child;
+        self.count += 1;
+        true
+    }
+
+    pub fn remove(&mut self, child: somnium_ecs::Entity) {
+        if let Some(pos) = self.as_slice().iter().position(|&e| e == child) {
+            self.entities[pos..self.count as usize].rotate_left(1);
+            self.count -= 1;
+        }
+    }
+}
+impl somnium_ecs::Component for Children {}
+
+/// ECS component that stores the final world-space transform matrix for an entity.
+///
+/// Computed each frame by the transform propagation system:
+/// - Root entities: `WorldTransform = Transform::to_matrix()`
+/// - Child entities: `WorldTransform = parent_world * Transform::to_matrix()`
+///
+/// The renderer reads `WorldTransform` instead of calling `Transform::to_matrix()` directly.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldTransform(pub glam::Mat4);
+
+impl WorldTransform {
+    pub fn identity() -> Self {
+        Self(glam::Mat4::IDENTITY)
+    }
+}
+impl somnium_ecs::Component for WorldTransform {}
+
+// ─── Phase 11.5A-2: Transform Propagation System ──────────────────────────
+
+/// Propagates parent-child transform hierarchies, writing `WorldTransform` for
+/// every entity that has a `Transform` component.
+///
+/// Run this in `on_update` after physics sync and before rendering. Entities
+/// without a `Parent` component are treated as roots (parent = identity).
+///
+/// **Requires:** All spawned entities must include a `WorldTransform::identity()`
+/// component so the propagation system can write to them.
+///
+/// Algorithm: BFS starting from root entities (Transform + no Parent). For each
+/// root, `world_mat = Transform::to_matrix()`. For each child, `child_world =
+/// parent_world * local_transform.to_matrix()`.
+pub fn propagate_transforms(world: &mut World) {
+    use somnium_ecs::ComponentId;
+
+    let t_id = ComponentId::of::<Transform>();
+
+    // Phase 1 — collect all entities with Transform, regardless of Parent
+    // component, then determine roots by checking Parent contents at runtime.
+    // This correctly handles `Parent { entity: DANGLING }` as a root.
+    let t_req = ComponentSet::from_ids(vec![t_id]);
+    let mut all_entities: Vec<(Entity, glam::Mat4)> = Vec::new();
+    for arch in world.query_archetypes(&t_req, &ComponentSet::empty()) {
+        let t_col = arch.column_index(t_id).unwrap();
+        for row in 0..arch.len() {
+            let entity = arch.entities()[row];
+            let t = unsafe { arch.column(t_col).get::<Transform>(row) };
+            all_entities.push((entity, t.to_matrix()));
+        }
+    }
+
+    // Phase 1b — seed the BFS stack with roots:
+    // root = no Parent component, OR Parent.entity is DANGLING, OR parent is dead.
+    let mut stack: Vec<(Entity, glam::Mat4)> = Vec::new();
+    for &(entity, local_mat) in &all_entities {
+        let is_root = match world.get::<Parent>(entity) {
+            None    => true,
+            Some(p) => p.entity == Entity::DANGLING || !world.is_alive(p.entity),
+        };
+        if is_root {
+            stack.push((entity, local_mat));
+        }
+    }
+
+    // Phase 1c — BFS: accumulate world matrices for all children.
+    let mut i = 0;
+    while i < stack.len() {
+        let (entity, world_mat) = stack[i];
+        i += 1;
+        if let Some(children) = world.get::<Children>(entity) {
+            let children_copy = *children;
+            for &child in children_copy.as_slice() {
+                if world.is_alive(child) {
+                    if let Some(local_t) = world.get::<Transform>(child) {
+                        stack.push((child, world_mat * local_t.to_matrix()));
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2 — write WorldTransform. All immutable borrows from phase 1 are
+    // released here; &mut self borrows are safe.
+    for (entity, world_mat) in stack {
+        let _ = world.get_mut::<WorldTransform>(entity).map(|wt| wt.0 = world_mat);
+    }
+}
+
+// ─── Phase 11.5J: GPU Particle System ────────────────────────────────────────
+
+/// Per-particle runtime state (CPU-side).
+#[derive(Debug, Clone, Copy)]
+pub struct ParticleState {
+    pub position: glam::Vec3,
+    pub velocity: glam::Vec3,
+    /// Current age in seconds (0 = just born).
+    pub age:      f32,
+    /// Total lifetime in seconds.
+    pub lifetime: f32,
+}
+
+/// ECS component that drives a GPU particle emitter.
+///
+/// Add this component to an entity together with `Transform` and `WorldTransform`.
+/// The engine simulates particles each frame and uploads the results to the
+/// `ParticlePass` for instanced billboard rendering.
+#[derive(Debug, Clone)]
+pub struct ParticleEmitter {
+    // ── Emitter parameters ────────────────────────────────────────────────────
+    /// Maximum number of live particles at once.
+    pub max_particles:  u32,
+    /// New particles spawned per second.
+    pub spawn_rate:     f32,
+    /// Each particle's lifetime in seconds.
+    pub lifetime:       f32,
+    /// Initial speed in m/s (direction is randomized within `spread_angle`).
+    pub initial_speed:  f32,
+    /// Cone half-angle (radians) for direction randomization (0 = straight up).
+    pub spread_angle:   f32,
+    /// Particle size at birth (metres, billboard half-width).
+    pub size_start:     f32,
+    /// Particle size at end of life.
+    pub size_end:       f32,
+    /// Linear RGBA color at birth.
+    pub color_start:    [f32; 4],
+    /// Linear RGBA color at end of life.
+    pub color_end:      [f32; 4],
+    /// Downward gravity acceleration (m/s²).
+    pub gravity:        f32,
+
+    // ── Runtime state (not user-facing) ──────────────────────────────────────
+    /// Live particles owned by this emitter.
+    pub particles:       Vec<ParticleState>,
+    /// Fractional carry-over for sub-frame spawning.
+    pub spawn_accum:     f32,
+}
+
+impl Default for ParticleEmitter {
+    fn default() -> Self {
+        Self {
+            max_particles: 1000,
+            spawn_rate:    100.0,
+            lifetime:      3.0,
+            initial_speed: 5.0,
+            spread_angle:  0.8,
+            size_start:    1.0,
+            size_end:      0.2,
+            color_start:   [1.0, 0.4, 0.1, 1.0],
+            color_end:     [0.2, 0.0, 0.0, 0.0],
+            gravity:       1.0,
+            particles:     Vec::new(),
+            spawn_accum:   0.0,
+        }
+    }
+}
+impl somnium_ecs::Component for ParticleEmitter {}
+
+
+/// Simulate all particle emitters and return a flat list of GPU instances.
+///
+/// Call each frame in `about_to_wait` after physics and before `render()`.
+/// `seed` increments each frame (used for deterministic pseudo-random spawn direction).
+pub fn simulate_particles(
+    world: &mut somnium_ecs::World,
+    dt: f32,
+    frame: u64,
+) -> Vec<somnium_renderer::pass::particle::GpuParticle> {
+    use somnium_renderer::pass::particle::GpuParticle;
+
+    let mut gpu_particles = Vec::new();
+
+    let emitter_entities: Vec<somnium_ecs::Entity> = world
+        .entities()
+        .filter(|e| world.get::<ParticleEmitter>(*e).is_some())
+        .collect();
+
+    for entity in emitter_entities {
+        // Borrow world piecemeal to satisfy the borrow checker.
+        let origin = world.get::<WorldTransform>(entity)
+            .map(|wt| glam::Vec3::new(wt.0.w_axis.x, wt.0.w_axis.y, wt.0.w_axis.z))
+            .or_else(|| world.get::<Transform>(entity).map(|t| t.translation))
+            .unwrap_or(glam::Vec3::ZERO);
+
+        let Some(emitter) = world.get_mut::<ParticleEmitter>(entity) else { continue };
+
+        // ── 1. Advance existing particles ─────────────────────────────────────
+        let gravity = emitter.gravity;
+        emitter.particles.retain_mut(|p| {
+            p.age += dt;
+            p.velocity.y -= gravity * dt;
+            p.position   += p.velocity * dt;
+            p.age < p.lifetime
+        });
+
+        // ── 2. Spawn new particles ────────────────────────────────────────────
+        emitter.spawn_accum += emitter.spawn_rate * dt;
+        let to_spawn = emitter.spawn_accum.floor() as u32;
+        emitter.spawn_accum -= to_spawn as f32;
+        let available = emitter.max_particles.saturating_sub(emitter.particles.len() as u32);
+        let count = to_spawn.min(available);
+
+        let speed         = emitter.initial_speed;
+        let spread        = emitter.spread_angle;
+        let lifetime      = emitter.lifetime;
+
+        for i in 0..count {
+            // Deterministic LCG pseudo-random — good enough for particles.
+            let seed = frame.wrapping_mul(1_000_003).wrapping_add((i as u64).wrapping_mul(6_364_136_223_846_793_005));
+            let r1 = ((seed >> 33) & 0xFFFF) as f32 / 65535.0;       // 0..1
+            let r2 = ((seed >> 17) & 0xFFFF) as f32 / 65535.0 * 2.0 * std::f32::consts::PI;
+            let theta = r1 * spread;
+            let dir = glam::Vec3::new(theta.sin() * r2.cos(), theta.cos(), theta.sin() * r2.sin());
+            emitter.particles.push(ParticleState {
+                position: origin,
+                velocity: dir * speed,
+                age:      0.0,
+                lifetime,
+            });
+        }
+
+        // ── 3. Emit GPU instances ─────────────────────────────────────────────
+        let size_start   = emitter.size_start;
+        let size_end     = emitter.size_end;
+        let color_start  = emitter.color_start;
+        let color_end    = emitter.color_end;
+
+        for p in &emitter.particles {
+            let frac = (p.age / p.lifetime).clamp(0.0, 1.0);
+            let size = size_start + (size_end - size_start) * frac;
+            let color = [
+                color_start[0] + (color_end[0] - color_start[0]) * frac,
+                color_start[1] + (color_end[1] - color_start[1]) * frac,
+                color_start[2] + (color_end[2] - color_start[2]) * frac,
+                color_start[3] + (color_end[3] - color_start[3]) * frac,
+            ];
+            gpu_particles.push(GpuParticle {
+                position: p.position.to_array(),
+                size,
+                color,
+            });
+        }
+    }
+
+    gpu_particles
+}
+
+// ── Water Component ─────────────────────────────────────────────────────────
+
+/// Configuration for the procedural water shader (Phase 13).
+#[derive(Debug, Clone)]
+pub struct WaterComponent {
+    /// Deep water color.
+    pub deep_color: [f32; 4],
+    /// Shallow water color (near edges/shore).
+    pub shallow_color: [f32; 4],
+    /// Foam/edge highlight color.
+    pub edge_color: [f32; 4],
+    /// Clarity factor (higher = clearer).
+    pub clarity: f32,
+    /// Distance factor for the edge intersection.
+    pub edge_scale: f32,
+    /// Wave amplitude multiplier.
+    pub amplitude: f32,
+    /// UV/Coordinate scale.
+    pub coord_scale: [f32; 2],
+    /// UV/Coordinate offset.
+    pub coord_offset: [f32; 2],
+    /// Direction of primary waves.
+    pub wave_dir_a: [f32; 2],
+    /// Direction of secondary waves.
+    pub wave_dir_b: [f32; 2],
+    /// Wave blending factor.
+    pub wave_blend: f32,
+}
+
+impl Default for WaterComponent {
+    fn default() -> Self {
+        Self {
+            deep_color: [0.01, 0.05, 0.15, 0.9],
+            shallow_color: [0.1, 0.4, 0.6, 0.5],
+            edge_color: [0.8, 0.9, 1.0, 1.0],
+            clarity: 0.1,
+            edge_scale: 1.0,
+            amplitude: 1.0,
+            coord_scale: [1.0, 1.0],
+            coord_offset: [0.0, 0.0],
+            wave_dir_a: [1.0, 0.0],
+            wave_dir_b: [0.0, 1.0],
+            wave_blend: 0.5,
+        }
+    }
+}
+
+impl somnium_ecs::Component for WaterComponent {}

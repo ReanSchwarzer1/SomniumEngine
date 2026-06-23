@@ -1,0 +1,24 @@
+[package]
+name        = "somnium_core"
+description = "Core application loop, timing, events, and configuration for the Somnium Engine."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+
+[dependencies]
+somnium_ecs = { workspace = true }
+somnium_renderer = { workspace = true }
+somnium_physics = { workspace = true }
+somnium_audio   = { workspace = true }
+somnium_ui      = { workspace = true }
+somnium_asset   = { workspace = true }
+winit              = { workspace = true }
+glam               = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+pollster           = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }

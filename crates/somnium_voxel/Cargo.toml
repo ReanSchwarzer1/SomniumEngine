@@ -1,0 +1,16 @@
+[package]
+name = "somnium_voxel"
+description = "Voxel world for the Somnium Engine — chunked terrain, block_mesh meshing, async generation, LOD (Phase 14)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+somnium_asset = { workspace = true }
+glam          = { workspace = true }
+block-mesh    = { workspace = true }
+ndshape       = { workspace = true }
+rayon         = { workspace = true }
+tracing       = { workspace = true }

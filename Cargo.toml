@@ -1,0 +1,95 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/somnium_core",
+    "crates/somnium_ecs",
+    "crates/somnium_renderer",
+    "crates/somnium_physics_sys",
+    "crates/somnium_physics",
+    "crates/somnium_audio",
+    "crates/somnium_ui",
+    "crates/somnium_asset",
+    "crates/somnium_voxel",
+    "examples/hello_engine",
+]
+
+# The `example_repo/` directory contains reference source code from
+# Unreal Engine 5 (Epic Games) and the DirectX Shader Compiler (Microsoft).
+# These are consulted for architectural patterns only — no source code is
+# copied. See ATTRIBUTION.md for details.
+exclude = ["example_repo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Somnium Engine Contributors"]
+
+# ---------------------------------------------------------------------------
+# Workspace-wide dependency declarations.
+# Individual crate `Cargo.toml` files reference these via
+# `dep = { workspace = true }` to keep versions in sync.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# -- Internal crates --------------------------------------------------------
+somnium_core     = { path = "crates/somnium_core" }
+somnium_ecs      = { path = "crates/somnium_ecs" }
+somnium_renderer = { path = "crates/somnium_renderer" }
+somnium_physics_sys = { path = "crates/somnium_physics_sys" }
+somnium_physics  = { path = "crates/somnium_physics" }
+somnium_audio    = { path = "crates/somnium_audio" }
+somnium_ui       = { path = "crates/somnium_ui" }
+somnium_asset    = { path = "crates/somnium_asset" }
+somnium_voxel    = { path = "crates/somnium_voxel" }
+
+# -- Windowing & Input ------------------------------------------------------
+winit = "0.30"
+
+# -- Graphics (Phase 2) -----------------------------------------------------
+wgpu = "29.0"
+
+# -- Math --------------------------------------------------------------------
+glam = "0.29"
+bytemuck = { version = "1.21", features = ["derive"] }
+
+# -- ECS concurrency (Phase 2) ----------------------------------------------
+rayon = "1.12"
+
+# -- Async Initialization ---------------------------------------------------
+pollster = "0.3"
+
+# -- Error handling ----------------------------------------------------------
+thiserror = "2.0"
+anyhow    = "1.0"
+
+# -- Logging -----------------------------------------------------------------
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# -- Build dependencies ------------------------------------------------------
+cc = "1.2"
+
+# -- Audio -------------------------------------------------------------------
+kira = "0.9"
+
+# -- UI (Phase 6/9) ------------------------------------------------------------
+egui       = "0.34"
+egui-wgpu  = "0.34"
+egui-winit = "0.34"
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# -- Asset loading -----------------------------------------------------------
+gltf = { version = "1", features = ["names", "utils", "image"] }
+image = "0.25"
+
+# -- Font rasterization (Phase 12A-4) ----------------------------------------
+fontdue = "0.7"
+
+# -- Voxel world (Phase 14) ---------------------------------------------------
+block-mesh = "0.2"
+ndshape    = "0.3"
+
+# -- Utilities ---------------------------------------------------------------
+rand = "0.8"

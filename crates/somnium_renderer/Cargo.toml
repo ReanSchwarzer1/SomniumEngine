@@ -1,0 +1,19 @@
+[package]
+name        = "somnium_renderer"
+description = "wgpu-based rendering backend for the Somnium Engine."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+
+[dependencies]
+somnium_ecs  = { workspace = true }
+wgpu         = { workspace = true }
+winit        = { workspace = true }
+glam         = { workspace = true }
+tracing      = { workspace = true }
+pollster     = { workspace = true }
+somnium_ui   = { workspace = true }
+bytemuck     = { workspace = true }
+somnium_asset = { workspace = true }
