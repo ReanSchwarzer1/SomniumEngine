@@ -1,6 +1,5 @@
 //! Bindless texture management.
 
-use std::num::NonZeroU32;
 use crate::bindless::MAX_BINDLESS_TEXTURES;
 
 /// Manages a pool of textures for bindless rendering.

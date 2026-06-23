@@ -17,6 +17,7 @@ use tracing_subscriber::Layer;
 pub struct LogEntry {
     /// "info" | "warn" | "error"
     pub level:   &'static str,
+    /// The formatted log message text.
     pub message: String,
 }
 

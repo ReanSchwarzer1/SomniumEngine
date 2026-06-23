@@ -116,10 +116,6 @@ fn load_texture_from_path(device: &wgpu::Device, queue: &wgpu::Queue, path: &str
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Debug, Clone, Copy)]
-struct Position { x: f32, y: f32 }
-impl Component for Position {}
-
-#[derive(Debug, Clone, Copy)]
 struct PhysicsBody { id: BodyId }
 impl Component for PhysicsBody {}
 
@@ -193,6 +189,7 @@ impl EditorCamera {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Paused is a planned play-mode state, not yet wired up.
 enum EditorMode { Editing, Playing, Paused }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

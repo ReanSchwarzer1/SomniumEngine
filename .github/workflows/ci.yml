@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings   # treat compiler warnings as errors in CI
+
+jobs:
+  build-and-test:
+    name: Build & test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned via rust-toolchain.toml; this just ensures the toolchain is present.
+      - name: Show Rust version
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      # The physics crate compiles Jolt C++ (vendored at
+      # example_repo/JoltPhysics-master/), so a C++ toolchain is required.
+      # windows-latest ships MSVC, which the cc crate picks up automatically.
+      - name: Build (workspace)
+        run: cargo build --workspace --all-targets
+
+      # GPU-dependent paths are not exercised in CI (no adapter on the runner);
+      # the library unit tests are pure CPU (ECS, voxel, terrain math).
+      - name: Test (library unit tests)
+        run: cargo test --workspace --lib
+
+  clippy:
+    name: Clippy (advisory)
+    runs-on: windows-latest
+    # Informational — surfaces lint suggestions without blocking merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets

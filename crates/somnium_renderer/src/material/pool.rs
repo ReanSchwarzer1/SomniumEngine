@@ -1,7 +1,6 @@
 //! Material data management for the shading pass.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec4;
 
 /// Material structure that matches the GPU layout in shading.wgsl.
 #[repr(C)]

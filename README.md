@@ -18,6 +18,24 @@ The engine is organized around three deliberate commitments:
 > rough edges and churn — see [`context.md`](context.md) for the current phase
 > and the full phase history.
 
+## Screenshots
+
+> 📸 _Screenshots coming soon._ Captures live in [`media/`](media/) — see that
+> folder's README for the suggested shots. Once images are added, uncomment the
+> block below (or drop files matching these names and they'll appear).
+
+<!--
+| Editor | Heightmap terrain |
+|---|---|
+| ![Editor](media/editor.png) | ![Terrain](media/terrain.png) |
+
+| Voxel world | Shadows & PBR |
+|---|---|
+| ![Voxel world](media/voxel.png) | ![Shadows](media/shadows.png) |
+
+![Demo](media/demo.gif)
+-->
+
 ## Highlights
 
 **Rendering**

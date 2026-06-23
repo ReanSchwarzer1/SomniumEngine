@@ -222,10 +222,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         let size = LogicalSize::new(self.config.window_size.0, self.config.window_size.1);
         let attrs = WindowAttributes::default()
             .with_title(&self.config.window_title)
-            .with_inner_size(LogicalSize::new(
-                self.config.window_size.0,
-                self.config.window_size.1,
-            ))
+            .with_inner_size(size)
             .with_resizable(self.config.resizable);
 
         match event_loop.create_window(attrs) {

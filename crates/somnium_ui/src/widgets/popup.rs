@@ -35,8 +35,7 @@ impl Control for Popup {
         }
         let ox = widget.actual_local_position.x;
         let oy = widget.actual_local_position.y;
-        let rect = Rect::new(ox, oy, final_size.x, final_size.y);
-        
+
         for &ch in &widget.children {
             let ds = ctx.desired_size(ch);
             // The content should position itself via desired_local_position and margins
@@ -60,7 +59,7 @@ impl Control for Popup {
     ) {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
-                WidgetMessage::MouseDown { pos, .. } => {
+                WidgetMessage::MouseDown { .. } => {
                     if self.is_open {
                         // If clicked directly on the transparent backdrop, close
                         if msg.destination == widget.handle {

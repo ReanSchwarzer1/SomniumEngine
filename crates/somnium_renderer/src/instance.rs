@@ -1,7 +1,6 @@
 //! Instance data management for the Visibility Buffer pipeline.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
 
 /// Per-instance data matching the GPU layout.
 #[repr(C)]

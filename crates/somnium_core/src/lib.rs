@@ -81,8 +81,11 @@ pub use somnium_ecs::{ComponentId, ComponentSet};
 /// ECS Component for a mesh instance.
 #[derive(Debug, Clone, Copy)]
 pub struct MeshComponent {
+    /// Base offset of this mesh's vertices in the global vertex buffer.
     pub vertex_offset: u32,
+    /// Base offset of this mesh's indices in the global index buffer.
     pub index_offset: u32,
+    /// Number of indices to draw for this mesh.
     pub index_count: u32,
 }
 impl somnium_ecs::Component for MeshComponent {}
@@ -90,6 +93,7 @@ impl somnium_ecs::Component for MeshComponent {}
 /// ECS Component for a material.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialComponent {
+    /// Index into the renderer's material pool.
     pub id: u32,
 }
 impl somnium_ecs::Component for MaterialComponent {}
@@ -97,12 +101,16 @@ impl somnium_ecs::Component for MaterialComponent {}
 /// ECS Component for spatial transformation.
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
+    /// Local-space position.
     pub translation: glam::Vec3,
+    /// Local-space orientation.
     pub rotation: glam::Quat,
+    /// Local-space scale (per-axis).
     pub scale: glam::Vec3,
 }
 
 impl Transform {
+    /// Create a transform at `translation` with identity rotation and unit scale.
     pub fn from_translation(translation: glam::Vec3) -> Self {
         Self {
             translation,
@@ -111,6 +119,7 @@ impl Transform {
         }
     }
 
+    /// Compose this TRS into a 4×4 model matrix.
     pub fn to_matrix(&self) -> glam::Mat4 {
         glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
@@ -123,8 +132,11 @@ impl somnium_ecs::Component for Transform {}
 /// `Point` / `Spot` — local lights with range & falloff (Phase 13C).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightType {
+    /// Infinite-range sun light (direction only).
     Directional,
+    /// Local omnidirectional light with range falloff.
     Point,
+    /// Local cone light with range falloff and inner/outer angles.
     Spot,
 }
 
@@ -149,6 +161,7 @@ pub enum LightType {
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct LightComponent {
+    /// Which kind of light this is (directional / point / spot).
     pub light_type: LightType,
     /// Linear-RGB color of the light.
     pub color: glam::Vec3,
@@ -211,6 +224,7 @@ impl somnium_ecs::Component for LightComponent {}
 pub struct Name(pub [u8; 64]);
 
 impl Name {
+    /// Create a `Name`, truncating to 63 bytes if necessary.
     pub fn new(s: &str) -> Self {
         let mut buf = [0u8; 64];
         let bytes = s.as_bytes();
@@ -219,6 +233,7 @@ impl Name {
         Self(buf)
     }
 
+    /// Borrow the name as a `&str` (up to the null terminator).
     pub fn as_str(&self) -> &str {
         let end = self.0.iter().position(|&b| b == 0).unwrap_or(64);
         std::str::from_utf8(&self.0[..end]).unwrap_or("???")
@@ -242,9 +257,13 @@ impl somnium_ecs::Component for Name {}
 /// for serialization bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshKind {
+    /// Unit cube.
     Cube,
+    /// UV sphere.
     Sphere,
+    /// Flat XZ plane.
     Plane,
+    /// Capped cylinder.
     Cylinder,
 }
 impl somnium_ecs::Component for MeshKind {}
@@ -283,6 +302,7 @@ impl somnium_ecs::Component for TerrainComponent {}
 /// `WorldTransform` and used by the renderer instead of `Transform::to_matrix()`.
 #[derive(Debug, Clone, Copy)]
 pub struct Parent {
+    /// The parent entity (`Entity::DANGLING` means "root / no parent").
     pub entity: somnium_ecs::Entity,
 }
 impl somnium_ecs::Component for Parent {}
@@ -293,11 +313,14 @@ impl somnium_ecs::Component for Parent {}
 /// Hierarchies deeper than 16 siblings can be built by chaining through multiple levels.
 #[derive(Debug, Clone, Copy)]
 pub struct Children {
+    /// Fixed-capacity child slots; only the first `count` are valid.
     pub entities: [somnium_ecs::Entity; 16],
+    /// Number of valid entries in `entities`.
     pub count: u8,
 }
 
 impl Children {
+    /// An empty child list.
     pub fn empty() -> Self {
         Self {
             entities: [somnium_ecs::Entity::DANGLING; 16],
@@ -305,10 +328,12 @@ impl Children {
         }
     }
 
+    /// The valid child entities as a slice.
     pub fn as_slice(&self) -> &[somnium_ecs::Entity] {
         &self.entities[..self.count as usize]
     }
 
+    /// Append a child; returns `false` if the 16-slot capacity is full.
     pub fn push(&mut self, child: somnium_ecs::Entity) -> bool {
         if self.count as usize >= 16 {
             return false;
@@ -318,6 +343,7 @@ impl Children {
         true
     }
 
+    /// Remove a child if present, preserving order.
     pub fn remove(&mut self, child: somnium_ecs::Entity) {
         if let Some(pos) = self.as_slice().iter().position(|&e| e == child) {
             self.entities[pos..self.count as usize].rotate_left(1);
@@ -338,6 +364,7 @@ impl somnium_ecs::Component for Children {}
 pub struct WorldTransform(pub glam::Mat4);
 
 impl WorldTransform {
+    /// A `WorldTransform` holding the identity matrix.
     pub fn identity() -> Self {
         Self(glam::Mat4::IDENTITY)
     }
@@ -419,7 +446,9 @@ pub fn propagate_transforms(world: &mut World) {
 /// Per-particle runtime state (CPU-side).
 #[derive(Debug, Clone, Copy)]
 pub struct ParticleState {
+    /// World-space position.
     pub position: glam::Vec3,
+    /// World-space velocity (m/s).
     pub velocity: glam::Vec3,
     /// Current age in seconds (0 = just born).
     pub age:      f32,

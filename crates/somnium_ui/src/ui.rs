@@ -528,7 +528,7 @@ impl UserInterface {
 
     /// Show or hide a widget and invalidate layout.
     pub fn set_visibility(&mut self, handle: NodeHandle, visible: bool) {
-        if let Ok(mut node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
             if node.widget.visibility != visible {
                 node.widget.visibility = visible;
                 node.widget.invalidate_layout();

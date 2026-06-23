@@ -1,5 +1,3 @@
-// use somnium_asset::WaterComponent;
-use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
