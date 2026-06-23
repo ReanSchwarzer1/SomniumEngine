@@ -6,7 +6,7 @@ project — issues, discussion, and PRs are welcome.
 ## Getting set up
 
 Requirements:
-- **Rust 1.85+** (the toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml))
+- **Rust 1.88+** (the toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml))
 - A **C++ toolchain** for the Jolt physics bridge (MSVC on Windows; clang/gcc elsewhere)
 
 ```sh

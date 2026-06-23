@@ -22,7 +22,9 @@ exclude = ["example_repo"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Engine code targets 1.85 (edition 2024); the dependency tree raises the
+# effective minimum to 1.88 (image), so that's what's declared and CI uses.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Somnium Engine Contributors"]
 

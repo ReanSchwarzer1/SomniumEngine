@@ -68,7 +68,7 @@ For the complete, continuously updated architecture reference, read
 ## Building
 
 Requires:
-- **Rust 1.85+** (edition 2024)
+- **Rust 1.88+** (edition 2024; the dependency tree sets the effective minimum)
 - A **C++ toolchain** for the Jolt physics bridge — MSVC Build Tools on Windows,
   clang/gcc elsewhere
 
