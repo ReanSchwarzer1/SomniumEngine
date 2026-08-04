@@ -728,6 +728,7 @@ Every frame, `about_to_wait()` runs in this exact sequence:
       ├── [Grid Overlay]      fullscreen ray march → XZ plane grid → Rgba16Float HDR (if enabled)
       ├── [PostProcess Pass]  ACES tone map + vignette → swapchain (Rgba16Float → sRGB)
       ├── [Gizmo Pass]        procedural arrow/ring/cube axes → swapchain (if entity selected)
+      ├── [Light Gizmo Pass]  batched world-space LineList light bounds → swapchain (Phase 13E, if enabled)
       ├── ui.end_frame()      (rebuild outliner/inspector → layout → draw → UiPass::prepare + render)
       ├── queue.submit()
       └── output.present()
@@ -1142,6 +1143,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | BUG-006 | ✅ Fixed | UI buttons respond perfectly to clicks, and events are correctly dispatched |
 | BUG-007 | ✅ Fixed | Viewport WASD + RMB movement works smoothly, and keyboard events are only consumed when a text-input widget has focus |
 | 13 | ✅ Complete | Water shader (PBR textures, Beer's law, FBM waves, dual-panning UVs, analytic GGX specular) |
+| 13E | ✅ Complete | Light gizmos: `LightGizmoPass` (`pass/light_gizmo.rs` + `light_gizmo.wgsl`) draws editor wire bounds per light type — point = sphere at range, spot = inner/outer cones (`height = range·cos θ`, `radius = range·sin θ`) + aim line, directional = arrow + parallel rays; every light also gets an origin cross. All lights batch into one world-space `LineList` draw over the swapchain (no depth test); selected light draws at full brightness, others dimmed to 45%. `L` toggles. Submitted engine-side by `app.rs::submit_light_gizmos()`. |
 | 14 | ✅ Complete | Voxel world (`somnium_voxel` crate): 32³ chunks padded to 34³, `block_mesh::visible_block_faces` meshing, FBM heightmap terrain, async generation (rayon + mpsc), 3 LOD levels via nearest-neighbour downsample, `set_voxel` edit overlay with version-guarded remeshing, `GeometryPool` free-list for chunk mesh recycling, palette-texture material; chunks rendered as direct DrawCommands (not ECS entities). See §19. |
 | 14 SSS | ✅ Complete | Heightmap terrain system: chunked heightmap (`somnium_renderer::terrain`), 5 LOD levels with CPU-side block-fan stitching (no T-junction cracks), splatmap PBR (4 procedural layers, height-based blending, triplanar cliffs), `TerrainPass` into HDR target with CSM shadows + clustered lights, sculpt brushes (Raise/Lower/Smooth/Flatten/Noise) + splat painting with undo, editor terrain mode (F6, toolbar palette, in-shader brush cursor ring), Create > Terrain, scene-save sidecar binaries. See §20. |
 | 15 | ⬜ Planned | GPU-driven indirect draw, instance culling, meshlets |

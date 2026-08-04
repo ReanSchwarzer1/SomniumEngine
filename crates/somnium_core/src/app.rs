@@ -22,7 +22,7 @@ use crate::editor_commands::{
 use crate::error::EngineError;
 use crate::event::{translate_window_event, EngineEvent};
 use crate::time::TimeState;
-use crate::{LightComponent, MeshComponent, MaterialComponent, MeshKind, Name, TerrainComponent, Transform, WorldTransform, simulate_particles};
+use crate::{LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, TerrainComponent, Transform, WorldTransform, simulate_particles};
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
 
@@ -698,6 +698,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.update_terrain_editing(dt);
         self.submit_terrains();
 
+        // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
+        self.submit_light_gizmos();
+
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
             &self.render_ctx,
@@ -975,6 +978,46 @@ impl<G: GameApp> Engine<G> {
                     }
                     terrain.splatmap.mark_dirty(x0, z0, x1, z1);
                 }
+            }
+        }
+    }
+
+    /// Queue a light gizmo for every light entity (Phase 13E).
+    ///
+    /// The selected light draws at full brightness so it stands out while being
+    /// positioned; the rest are dimmed. Direction follows the same convention as
+    /// shading: the light travels along the entity's forward axis (`-Z`).
+    fn submit_light_gizmos(&mut self) {
+        use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
+
+        let selected_idx = self.selected_entity.map(|e| e.index());
+        let gizmos: Vec<LightGizmoDesc> = self
+            .world
+            .entities()
+            .filter_map(|e| {
+                let light = self.world.get::<LightComponent>(e)?;
+                let transform = self.world.get::<Transform>(e)?;
+                let kind = match light.light_type {
+                    LightType::Directional => LightGizmoKind::Directional,
+                    LightType::Point => LightGizmoKind::Point,
+                    LightType::Spot => LightGizmoKind::Spot,
+                };
+                Some(LightGizmoDesc {
+                    kind,
+                    position: transform.translation,
+                    direction: transform.rotation.mul_vec3(glam::Vec3::NEG_Z),
+                    color: light.color,
+                    range: light.range,
+                    inner_angle: light.inner_angle,
+                    outer_angle: light.outer_angle,
+                    selected: selected_idx == Some(e.index()),
+                })
+            })
+            .collect();
+
+        if let Some(r) = self.renderer.as_mut() {
+            for g in gizmos {
+                r.submit_light_gizmo(g);
             }
         }
     }

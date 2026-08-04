@@ -56,7 +56,7 @@ The engine is organized around three deliberate commitments:
 
 **Editor & runtime**
 - Archetype ECS with parent/child hierarchy and world-transform propagation
-- Transform gizmos, selection outline, infinite editor grid
+- Transform gizmos, light gizmos (range/cone visualization), selection outline, infinite editor grid
 - Undo/redo (command stack), scene save/load (`.somnium` JSON)
 - Native UI widget library (Grid, StackPanel, ScrollViewer, TextBox, NumericField, …)
 - Jolt physics integration; Kira audio scaffolding
@@ -87,6 +87,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 
 - **Right mouse + WASD/QE** — fly camera (Shift = faster)
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
+- **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
 - **Create menu** — spawn primitives, lights, particle emitter, or a terrain
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
   pick a brush, `[` / `]` size, `-` / `=` strength, `F7` auto-splat by slope/height

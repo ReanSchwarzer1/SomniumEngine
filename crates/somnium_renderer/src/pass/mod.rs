@@ -1,5 +1,6 @@
 pub mod gizmo;
 pub mod grid;
+pub mod light_gizmo;
 pub mod outline;
 pub mod particle;
 pub mod postprocess;

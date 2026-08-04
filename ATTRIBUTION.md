@@ -45,6 +45,7 @@
   - 13.18 Phase 12 Native UI — ScrollViewer, TextBox, NumericField (12D-full)
   - 13.19 Ocean PBR Textures (Phase 13)
   - 13.20 Heightmap Terrain — Fyrox terrain + CDLOD + triplanar splatting (Phase 14 SSS)
+  - 13.21 Light Gizmos — Bevy light gizmo shapes (Phase 13E)
 
 ---
 
@@ -700,6 +701,34 @@ Architecture follows the same wgpu 29 pass conventions established in `GridPass`
 
 The four procedural layer textures (value-noise grass/dirt/rock/snow) and the in-shader brush cursor ring are original code.
 
+### 13.21 Light Gizmos — Bevy light gizmo shapes (Phase 13E)
+
+**Reference:** `example_repo/bevy/bevy-main/crates/bevy_light/src/gizmos.rs`
+(plus `examples/gizmos/light_gizmos.rs`).
+
+**Copyright:** Bevy contributors (MIT/Apache-2.0 dual-licensed).
+
+**Patterns studied:**
+
+| Bevy pattern | Reference detail | Somnium adaptation |
+|---|---|---|
+| Point light gizmo | `point_light_gizmo()` — sphere at `range`, plus a small sphere at the light `radius` | Wire sphere at `range` built from 3 great circles. Somnium's `LightComponent` has no `radius` field, so the inner sphere is replaced by a small axis cross marking the origin |
+| Spot light gizmo | `spot_light_gizmo()` — a cone per angle with `height = range * cos(angle)`, `radius = range * sin(angle)`, offset from the light along its direction, plus two 3-D arcs across the cap | Same cone sizing (so the rim lies exactly on the range sphere — asserted by a unit test). Cap arcs replaced by 4 apex→rim spokes: cheaper and reads the same at editor scale. Inner cone dimmed to distinguish it from the outer |
+| Directional light gizmo | `directional_light_gizmo()` — a single arrow along `rotation * Vec3::NEG_Z` | Same direction convention and arrow, plus 4 parallel offset rays so the light reads as directional at a glance |
+| `LightGizmoColor::MatchLightColor` (default) | Gizmo takes the color of the light it represents | Same, with the light color normalized to full brightness so dim/HDR colors stay legible |
+| `draw_all` config + `ShowLightGizmo` marker component | Opt-in per light, or all lights via config | All lights draw; the **selected** light is full brightness and the rest are dimmed to 45%, which suits a single-viewport editor. `L` toggles the whole overlay |
+
+**Architecture note:** Bevy has a retained immediate-mode gizmo system with generic
+3-D primitives (`bevy_gizmos::primitives::dim3`). Somnium has no such layer, so
+`LightGizmoPass` emits world-space line segments on the CPU into one growable
+vertex buffer and issues a single `LineList` draw for every light — no per-light
+draw call and no model matrix (unlike the transform `GizmoPass`, whose geometry
+is static and placed by a uniform).
+
+**Files:** `somnium_renderer/src/pass/light_gizmo.rs`,
+`somnium_renderer/src/shaders/light_gizmo.wgsl`,
+`somnium_core/src/app.rs` (`submit_light_gizmos`).
+
 ## 14. Pattern Index
 
 Cross-reference: which Somnium file implements which reference pattern.
@@ -774,6 +803,8 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/shaders/terrain.wgsl` | bevy_triplanar_splatting triplanar blend; shadow/cluster helpers mirror `shading.wgsl`; height blend + brush ring original (Phase 14 SSS) |
 | `somnium_core/src/editor_commands.rs` (TerrainEditCmd) | Fyrox editor brush-stroke undo concept → region snapshot + restore-op queue (Phase 14 SSS) |
 | `somnium_core/src/app.rs` (terrain editing) | Fyrox `editor/src/interaction/terrain.rs` interaction model — mode toggle, cursor raycast, stroke lifecycle (Phase 14 SSS) |
+| `somnium_renderer/src/pass/light_gizmo.rs` | Bevy `bevy_light/src/gizmos.rs` — per-light-type gizmo shapes and cone sizing; batched LineList emission is original (Phase 13E) |
+| `somnium_renderer/src/shaders/light_gizmo.wgsl` | Original — world-space unlit line shader (no model matrix), mirrors `gizmo.wgsl` (Phase 13E) |
 
 ---
 

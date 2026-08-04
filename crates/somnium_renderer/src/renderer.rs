@@ -111,6 +111,13 @@ pub struct SomniumRenderer {
 
     /// Editor transform gizmo pass.
     gizmo_pass: GizmoPass,
+
+    /// Phase 13E: light visualization pass (point/spot/directional bounds).
+    light_gizmo_pass: crate::pass::light_gizmo::LightGizmoPass,
+    /// Light gizmos submitted this frame.
+    light_gizmo_queue: Vec<crate::pass::light_gizmo::LightGizmoDesc>,
+    /// When true, submitted light gizmos are drawn (toggle with `L`).
+    light_gizmos_enabled: bool,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -187,6 +194,11 @@ impl SomniumRenderer {
 
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
+            &ctx.device, ctx.config.format, &global_pool.view_proj_buffer,
+        );
+
+        // Phase 13E: light gizmos (drawn to the swapchain like the transform gizmo).
+        let light_gizmo_pass = crate::pass::light_gizmo::LightGizmoPass::new(
             &ctx.device, ctx.config.format, &global_pool.view_proj_buffer,
         );
 
@@ -271,6 +283,9 @@ impl SomniumRenderer {
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
+            light_gizmo_pass,
+            light_gizmo_queue: Vec::new(),
+            light_gizmos_enabled: true,
             outline_pass,
             outline_entity: None,
             particle_pass,
@@ -439,6 +454,30 @@ impl SomniumRenderer {
     /// Set the active gizmo mode (Translate / Rotate / Scale).
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
         self.gizmo_mode = mode;
+    }
+
+    /// Submit one light's gizmo for this frame (Phase 13E).
+    ///
+    /// Cleared every frame like the draw queue; the editor re-submits each
+    /// light it wants visualized.
+    pub fn submit_light_gizmo(&mut self, desc: crate::pass::light_gizmo::LightGizmoDesc) {
+        self.light_gizmo_queue.push(desc);
+    }
+
+    /// Show or hide light gizmos (on by default).
+    pub fn set_light_gizmos_enabled(&mut self, enabled: bool) {
+        self.light_gizmos_enabled = enabled;
+    }
+
+    /// Toggle light gizmos and return the new state.
+    pub fn toggle_light_gizmos(&mut self) -> bool {
+        self.light_gizmos_enabled = !self.light_gizmos_enabled;
+        self.light_gizmos_enabled
+    }
+
+    /// Whether light gizmos are currently drawn.
+    pub fn light_gizmos_enabled(&self) -> bool {
+        self.light_gizmos_enabled
     }
 
     /// Update the world-space position the gizmo should appear at.
@@ -768,6 +807,19 @@ impl SomniumRenderer {
             );
         }
 
+        // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
+        if self.light_gizmos_enabled && !self.light_gizmo_queue.is_empty() {
+            let lines =
+                crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
+            self.light_gizmo_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                &lines,
+            );
+        }
+
         // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
         if !self.pending_particles.is_empty() {
             self.particle_pass.record(
@@ -789,5 +841,6 @@ impl SomniumRenderer {
         self.draw_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();
+        self.light_gizmo_queue.clear();
     }
 }

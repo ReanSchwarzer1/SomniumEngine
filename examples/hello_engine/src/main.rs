@@ -526,6 +526,31 @@ impl GameApp for HelloGame {
             WorldTransform::identity(),
         ));
 
+        // Phase 13C/13E: a point and a spot light so clustered local lighting is
+        // visible in the demo — and so the light gizmos (L) have something to
+        // draw beyond the sun. Both sit near the origin scene.
+        ctx.world.spawn((
+            Transform::from_translation(Vec3::new(4.0, 3.0, 2.0)),
+            LightComponent::point(4.0, 12.0),
+            Name::new("PointLight"),
+            WorldTransform::identity(),
+        ));
+        ctx.world.spawn((
+            Transform {
+                translation: Vec3::new(-4.0, 6.0, 1.0),
+                // -Z forward rotated to aim (mostly) straight down.
+                rotation: glam::Quat::from_rotation_x((-75.0_f32).to_radians()),
+                scale: Vec3::ONE,
+            },
+            LightComponent::spot(
+                8.0, 20.0,
+                20.0_f32.to_radians(),
+                30.0_f32.to_radians(),
+            ),
+            Name::new("SpotLight"),
+            WorldTransform::identity(),
+        ));
+
         ctx.physics.optimize_broad_phase();
 
         // Send initial content browser listing
@@ -565,6 +590,13 @@ impl GameApp for HelloGame {
                         self.cascade_debug = !self.cascade_debug;
                         if let Some(renderer) = &mut ctx.renderer {
                             renderer.set_cascade_debug(self.cascade_debug);
+                        }
+                    }
+                    // L: toggle light gizmos (Phase 13E)
+                    KeyCode::KeyL if pressed => {
+                        if let Some(renderer) = &mut ctx.renderer {
+                            let on = renderer.toggle_light_gizmos();
+                            info!("Light gizmos: {}", if on { "ON" } else { "off" });
                         }
                     }
                     _ => {}
