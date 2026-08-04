@@ -159,7 +159,7 @@ pub enum LightType {
 /// // Spot (white, intensity 5, range 15m, 25° inner / 35° outer)
 /// LightComponent::spot(5.0, 15.0, 25.0_f32.to_radians(), 35.0_f32.to_radians());
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LightComponent {
     /// Which kind of light this is (directional / point / spot).
     pub light_type: LightType,
@@ -292,6 +292,29 @@ pub struct TerrainComponent {
     pub height_scale: f32,
 }
 impl somnium_ecs::Component for TerrainComponent {}
+
+/// Marks an entity as a voxel-terrain world (Phase 14 / 13E follow-up).
+///
+/// Like [`TerrainComponent`] this is only a handle: the voxel chunks, their GPU
+/// allocations, and the streaming state live outside the ECS (in the game
+/// layer's voxel driver), because chunks stream in and out constantly and would
+/// otherwise flood the outliner and undo stack. The component exists so the
+/// voxel world is created explicitly from **Create → Voxel Terrain**, shows up
+/// in the outliner, and can be selected and deleted like any other entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoxelTerrainComponent {
+    /// Streaming radius in chunks around the camera.
+    pub radius_chunks: u32,
+    /// Terrain generator seed.
+    pub seed: u32,
+}
+
+impl Default for VoxelTerrainComponent {
+    fn default() -> Self {
+        Self { radius_chunks: 5, seed: 1337 }
+    }
+}
+impl somnium_ecs::Component for VoxelTerrainComponent {}
 
 // ─── Phase 11.5A: Scene Graph Components ──────────────────────────────────
 

@@ -312,6 +312,18 @@ impl VoxelTerrain {
         }
     }
 
+    /// Release every chunk's GPU allocation back to the geometry pool.
+    ///
+    /// Called when the voxel-terrain entity is deleted — without this the
+    /// chunk meshes would leak the pool until the app exits.
+    fn free_all(&mut self, renderer: &mut somnium_renderer::SomniumRenderer) {
+        for (_, entry) in self.chunks.drain() {
+            if let Some(alloc) = entry {
+                renderer.geometry.free_mesh(alloc);
+            }
+        }
+    }
+
     /// Submit one DrawCommand per non-empty chunk.
     fn submit_draws(&self, renderer: &mut somnium_renderer::SomniumRenderer) {
         for (coord, entry) in &self.chunks {
@@ -358,6 +370,42 @@ impl HelloGame {
             default_material_id: None,
             default_cube_alloc:  None,
             voxel_terrain:       None,
+        }
+    }
+
+    /// Keep the voxel streaming driver in sync with the ECS.
+    ///
+    /// The voxel world is created from **Create > Voxel Terrain**, which spawns
+    /// an entity carrying `VoxelTerrainComponent`. Chunks themselves are not
+    /// entities (they stream constantly), so the driver lives here in game code
+    /// and is built/torn down to follow that single entity.
+    fn sync_voxel_terrain(&mut self, ctx: &mut EngineContext) {
+        let wants_voxel = ctx
+            .world
+            .entities()
+            .any(|e| ctx.world.get::<somnium_core::VoxelTerrainComponent>(e).is_some());
+
+        match (wants_voxel, self.voxel_terrain.is_some()) {
+            // Entity appeared — spin up the streaming driver.
+            (true, false) => {
+                if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+                    let vt = VoxelTerrain::new(renderer, render_ctx);
+                    info!(
+                        "Voxel terrain created (radius {} chunks)",
+                        vt.world.config().radius_chunks
+                    );
+                    self.voxel_terrain = Some(vt);
+                }
+            }
+            // Entity deleted — free the chunk meshes and drop the driver.
+            (false, true) => {
+                if let (Some(vt), Some(renderer)) = (&mut self.voxel_terrain, &mut ctx.renderer) {
+                    vt.free_all(renderer);
+                }
+                self.voxel_terrain = None;
+                info!("Voxel terrain removed");
+            }
+            _ => {}
         }
     }
 }
@@ -454,12 +502,9 @@ impl GameApp for HelloGame {
 
 
 
-        // Phase 14: Voxel terrain — hills surrounding the central basin.
-        if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
-            self.voxel_terrain = Some(VoxelTerrain::new(renderer, render_ctx));
-            info!("Voxel terrain initialised (radius {} chunks)",
-                self.voxel_terrain.as_ref().unwrap().world.config().radius_chunks);
-        }
+        // Phase 14: the voxel world is no longer spawned automatically — create
+        // it from the editor via Create > Voxel Terrain. `sync_voxel_terrain`
+        // builds the streaming driver when that entity appears.
 
         // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
         // meshing, LODs, sculpt brushes, and auto-splat without editor input.
@@ -651,8 +696,10 @@ impl GameApp for HelloGame {
         self.camera.update(dt);
         self.log_timer += dt;
 
-        // Phase 14: Stream voxel chunks around the camera (async generation;
-        // finished meshes are uploaded here, freed allocations recycled).
+        // Phase 14: create/destroy the voxel driver to match the ECS, then
+        // stream chunks around the camera (async generation; finished meshes
+        // are uploaded here, freed allocations recycled).
+        self.sync_voxel_terrain(ctx);
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {

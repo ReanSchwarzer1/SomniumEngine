@@ -10,6 +10,7 @@ pub enum CreateKind {
     SpotLight,
     Particle,
     Terrain,
+    VoxelTerrain,
 }
 
 impl CreateKind {
@@ -24,6 +25,7 @@ impl CreateKind {
             Self::SpotLight        => "Spot Light",
             Self::Particle         => "Particle Emitter",
             Self::Terrain          => "Terrain",
+            Self::VoxelTerrain     => "Voxel Terrain",
         }
     }
 }
@@ -34,6 +36,12 @@ pub enum InspectorField {
     PosX, PosY, PosZ,
     RotX, RotY, RotZ,
     ScaleX, ScaleY, ScaleZ,
+    // Light properties (Phase 13E) — only meaningful when the selected entity
+    // has a `LightComponent`. Angles are edited in degrees.
+    LightIntensity,
+    LightRange,
+    LightInnerAngle,
+    LightOuterAngle,
 }
 
 /// High-level editor commands produced by the native UI layer.

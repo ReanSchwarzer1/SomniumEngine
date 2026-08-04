@@ -8,7 +8,7 @@
 use somnium_ecs::{Entity, World};
 use crate::{
     Children, LightComponent, MaterialComponent, MeshComponent, MeshKind,
-    Name, Parent, TerrainComponent, Transform, WorldTransform,
+    Name, Parent, TerrainComponent, Transform, VoxelTerrainComponent, WorldTransform,
 };
 
 // ─── EditorCommand trait ──────────────────────────────────────────────────
@@ -115,6 +115,7 @@ pub struct EntitySnapshot {
     pub mesh_kind: Option<MeshKind>,
     pub is_particle_emitter: bool,
     pub terrain: Option<TerrainComponent>,
+    pub voxel_terrain: Option<VoxelTerrainComponent>,
 }
 
 impl EntitySnapshot {
@@ -130,6 +131,7 @@ impl EntitySnapshot {
             mesh_kind: world.get::<MeshKind>(entity).copied(),
             is_particle_emitter: world.get::<crate::ParticleEmitter>(entity).is_some(),
             terrain: world.get::<TerrainComponent>(entity).copied(),
+            voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
         }
     }
 
@@ -147,6 +149,12 @@ impl EntitySnapshot {
         // TerrainData survives deletion, so respawning reattaches to it.
         if let Some(terrain) = self.terrain {
             return world.spawn((transform, name, wt, terrain));
+        }
+
+        // Voxel terrain: the game-layer driver is rebuilt from this component,
+        // so respawning restores a working voxel world.
+        if let Some(voxel) = self.voxel_terrain {
+            return world.spawn((transform, name, wt, voxel));
         }
 
         // Archetype ECS requires all components at spawn time.

@@ -15,7 +15,7 @@ pub use editor_event::{CreateKind, EditorEvent, InspectorField};
 
 use crate::{
     editor_event::InspectorField as IF,
-    message::{MessageDirection, NodeHandle, TextMessage, UiMessage},
+    message::{MessageDirection, NodeHandle, UiMessage},
     pass::UiPass,
     types::Thickness,
     ui::UserInterface,
@@ -45,12 +45,20 @@ struct InspectorHandles {
     pos_x: NodeHandle, pos_y: NodeHandle, pos_z: NodeHandle,
     rot_x: NodeHandle, rot_y: NodeHandle, rot_z: NodeHandle,
     sc_x:  NodeHandle, sc_y:  NodeHandle, sc_z:  NodeHandle,
+    // Light section (Phase 13E) — hidden unless a light is selected.
+    light_section:   NodeHandle,
+    light_intensity: NodeHandle,
+    light_range:     NodeHandle,
+    light_inner:     NodeHandle,
+    light_outer:     NodeHandle,
 }
+
+/// Light values shown in the inspector: intensity, range, inner°, outer°.
+pub type LightInspectorValues = [f32; 4];
 
 // ── Layout build result ───────────────────────────────────────────────────────
 
 struct EditorLayout {
-    fps_text:           NodeHandle,
     outliner_scroll:    NodeHandle,
     outliner_stack:     NodeHandle,
     inspector_stack:    NodeHandle,
@@ -78,7 +86,6 @@ pub struct UiManager {
     ui_pass:             UiPass,
     font_id:             u8,
     // Live-update widget handles
-    fps_text:            NodeHandle,
     outliner_scroll:     NodeHandle,
     outliner_stack:      NodeHandle,
     #[allow(dead_code)]
@@ -149,7 +156,6 @@ impl UiManager {
             native_ui,
             ui_pass,
             font_id,
-            fps_text:           layout.fps_text,
             outliner_scroll:    layout.outliner_scroll,
             outliner_stack:     layout.outliner_stack,
             inspector_stack:    layout.inspector_stack,
@@ -247,11 +253,6 @@ impl UiManager {
 
     // ── Live UI updates ───────────────────────────────────────────────────────
 
-    /// Update the FPS counter text.
-    pub fn update_fps(&mut self, fps: f32) {
-        self.native_ui.send(TextMessage::set_text(self.fps_text, format!("FPS: {:.0}", fps)));
-    }
-
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
     pub fn update_outliner(&mut self, entities: &[(u32, String)], selected: Option<u32>) {
         let new_state = (entities.to_vec(), selected);
@@ -326,6 +327,27 @@ impl UiManager {
         }
     }
 
+    /// Show or hide the inspector's Light section and refresh its values
+    /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
+    ///
+    /// `values` is `[intensity, range, inner_deg, outer_deg]`.
+    pub fn update_light_inspector(&mut self, values: Option<LightInspectorValues>) {
+        let h = &self.inspector_handles;
+        let (section, intensity, range, inner, outer) = (
+            h.light_section, h.light_intensity, h.light_range, h.light_inner, h.light_outer,
+        );
+        match values {
+            Some([i, r, ia, oa]) => {
+                self.native_ui.set_visibility(section, true);
+                self.native_ui.send(NumericFieldMessage::set_value(intensity, i));
+                self.native_ui.send(NumericFieldMessage::set_value(range, r));
+                self.native_ui.send(NumericFieldMessage::set_value(inner, ia));
+                self.native_ui.send(NumericFieldMessage::set_value(outer, oa));
+            }
+            None => self.native_ui.set_visibility(section, false),
+        }
+    }
+
     /// Append a line to the output log panel (max 200 entries).
     pub fn append_log(&mut self, text: &str) {
         const MAX: usize = 200;
@@ -353,6 +375,10 @@ impl UiManager {
             (h.pos_x, IF::PosX), (h.pos_y, IF::PosY), (h.pos_z, IF::PosZ),
             (h.rot_x, IF::RotX), (h.rot_y, IF::RotY), (h.rot_z, IF::RotZ),
             (h.sc_x,  IF::ScaleX), (h.sc_y, IF::ScaleY), (h.sc_z, IF::ScaleZ),
+            (h.light_intensity, IF::LightIntensity),
+            (h.light_range,     IF::LightRange),
+            (h.light_inner,     IF::LightInnerAngle),
+            (h.light_outer,     IF::LightOuterAngle),
         ];
 
         for msg in msgs {
@@ -509,19 +535,6 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .with_color(theme::TEXT_PRIMARY)
     .build();
     ui.add_node(view_item, menu_stack_h);
-
-    // FPS counter — in col 1 (right side of menu bar)
-    let fps_node = TextBuilder::new(
-        WidgetBuilder::new()
-            .with_row(0).with_column(1)
-            .with_margin(Thickness { left: 8.0, right: 12.0, top: 6.0, bottom: 0.0 }),
-    )
-    .with_text("FPS: --")
-    .with_font_size(12.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    let fps_text = ui.add_node(fps_node, menu_grid_h);
 
     // ── Row 1: inner grid — toolbar | viewport | right panel ─────────────────
     let inner_grid = GridBuilder::new(
@@ -765,7 +778,6 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
 
     EditorLayout {
-        fps_text,
         outliner_scroll,
         outliner_stack,
         inspector_stack,
@@ -788,7 +800,12 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
 /// Build the 9 NumericFields for the inspector TRS section.
 /// Returns the inspector handle bundle.
 fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> InspectorHandles {
-    let make_row = |ui: &mut UserInterface, label: &str, font_id: u8, parent: NodeHandle| {
+    // `label_w` widens the gutter for the light section's longer labels.
+    let make_row_w = |ui: &mut UserInterface,
+                      label: &str,
+                      label_w: f32,
+                      font_id: u8,
+                      parent: NodeHandle| {
         let row = StackPanelBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -800,7 +817,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
 
         let lbl = TextBuilder::new(
             WidgetBuilder::new()
-                .with_width(20.0)
+                .with_width(label_w)
                 .with_margin(Thickness { left: 6.0, top: 4.0, right: 4.0, bottom: 0.0 }),
         )
         .with_text(label)
@@ -818,6 +835,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         .with_font_id(font_id)
         .build();
         ui.add_node(field, row_h)
+    };
+    let make_row = |ui: &mut UserInterface, label: &str, font_id: u8, parent: NodeHandle| {
+        make_row_w(ui, label, 20.0, font_id, parent)
     };
 
     let sec_label = |ui: &mut UserInterface, text: &str, font_id: u8, parent: NodeHandle| {
@@ -848,7 +868,28 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let sc_y  = make_row(ui, "Y", font_id, parent);
     let sc_z  = make_row(ui, "Z", font_id, parent);
 
-    InspectorHandles { pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z }
+    // ── Light section (Phase 13E) ────────────────────────────────────────────
+    // Lives in its own panel so it can be hidden when the selection isn't a
+    // light. Angles are shown in degrees; range/angles only apply to
+    // point/spot lights (a directional light ignores them).
+    let light_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let light_section = ui.add_node(light_panel, parent);
+
+    sec_label(ui, "Light", font_id, light_section);
+    let light_intensity = make_row_w(ui, "Int",  34.0, font_id, light_section);
+    let light_range     = make_row_w(ui, "Rng",  34.0, font_id, light_section);
+    let light_inner     = make_row_w(ui, "In°",  34.0, font_id, light_section);
+    let light_outer     = make_row_w(ui, "Out°", 34.0, font_id, light_section);
+    ui.set_visibility(light_section, false);
+
+    InspectorHandles {
+        pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
+        light_section, light_intensity, light_range, light_inner, light_outer,
+    }
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).
@@ -891,6 +932,7 @@ fn build_create_popup(
         CreateKind::SpotLight,
         CreateKind::Particle,
         CreateKind::Terrain,
+        CreateKind::VoxelTerrain,
     ];
 
     let mut items = Vec::with_capacity(KINDS.len());

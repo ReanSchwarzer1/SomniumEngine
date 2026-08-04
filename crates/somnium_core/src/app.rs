@@ -16,8 +16,8 @@ use somnium_ui::{EditorEvent, UiManager};
 use crate::config::EngineConfig;
 use crate::context::EngineContext;
 use crate::editor_commands::{
-    CreateEntityCmd, DeleteEntityCmd, EntitySnapshot, SetTransformCmd, TerrainEditCmd,
-    TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
+    CreateEntityCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd, SetTransformCmd,
+    TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
 use crate::event::{translate_window_event, EngineEvent};
@@ -640,9 +640,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let selected_idx = self.selected_entity.map(|e| e.index());
             let sel_t = self.selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
-            let fps = 1.0 / dt.max(0.001);
+            // Phase 13E: light properties for the inspector (angles in degrees).
+            let sel_light = self.selected_entity
+                .and_then(|e| self.world.get::<LightComponent>(e).copied())
+                .map(|lc| [
+                    lc.intensity,
+                    lc.range,
+                    lc.inner_angle.to_degrees(),
+                    lc.outer_angle.to_degrees(),
+                ]);
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_fps(fps);
                 ui.update_outliner(&entity_list, selected_idx);
                 if let Some(t) = sel_t {
                     let (rx, ry, rz) = t.rotation.to_euler(glam::EulerRot::XYZ);
@@ -655,6 +662,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 } else {
                     ui.update_inspector(None, None, None, None);
                 }
+                ui.update_light_inspector(sel_light);
             }
         }
 
@@ -1064,6 +1072,27 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::CreateEntity(CreateKind::VoxelTerrain) => {
+                // The voxel world itself is owned by the game layer, which
+                // spins its streaming driver up when it sees this component
+                // (and tears it down when the entity is deleted).
+                let snapshot = EntitySnapshot {
+                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    name: Some(Name::new("Voxel Terrain")),
+                    light: None,
+                    mesh: None,
+                    mat: None,
+                    wt: Some(WorldTransform::identity()),
+                    mesh_kind: None,
+                    is_particle_emitter: false,
+                    terrain: None,
+                    voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
+                };
+                let cmd = Box::new(CreateEntityCmd::new(snapshot));
+                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                info!("Created voxel terrain entity");
+            }
+
             EditorEvent::CreateEntity(CreateKind::Terrain) => {
                 // Phase 14F-2: terrain is created directly in the engine layer
                 // (it needs renderer + render_ctx for GPU resources).
@@ -1088,6 +1117,7 @@ impl<G: GameApp> Engine<G> {
                     wt: Some(WorldTransform::identity()),
                     mesh_kind: None,
                     is_particle_emitter: false,
+                    voxel_terrain: None,
                     terrain: Some(TerrainComponent {
                         terrain_id,
                         chunk_cells: desc.chunk_cells,
@@ -1186,6 +1216,7 @@ impl<G: GameApp> Engine<G> {
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
+                    voxel_terrain: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -1217,24 +1248,57 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::SetInspectorValue { field, value } => {
-                if let Some(entity) = self.selected_entity {
-                    if let Some(&old_t) = self.world.get::<Transform>(entity) {
-                        let mut new_t = old_t;
-                        let (ex, ey, ez) = old_t.rotation.to_euler(glam::EulerRot::XYZ);
+                let Some(entity) = self.selected_entity else { return };
+
+                // Phase 13E: light fields edit LightComponent, not Transform.
+                if matches!(
+                    field,
+                    IF::LightIntensity | IF::LightRange | IF::LightInnerAngle | IF::LightOuterAngle
+                ) {
+                    if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
+                        let mut new_light = old_light;
                         match field {
-                            IF::PosX => new_t.translation.x = value,
-                            IF::PosY => new_t.translation.y = value,
-                            IF::PosZ => new_t.translation.z = value,
-                            IF::RotX => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, value.to_radians(), ey, ez),
-                            IF::RotY => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, value.to_radians(), ez),
-                            IF::RotZ => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, ey, value.to_radians()),
-                            IF::ScaleX => new_t.scale.x = value,
-                            IF::ScaleY => new_t.scale.y = value,
-                            IF::ScaleZ => new_t.scale.z = value,
+                            // Negative intensity/range would break attenuation.
+                            IF::LightIntensity => new_light.intensity = value.max(0.0),
+                            IF::LightRange => new_light.range = value.max(0.0),
+                            // Keep inner <= outer so the spot falloff stays sane.
+                            IF::LightInnerAngle => {
+                                new_light.inner_angle =
+                                    value.to_radians().clamp(0.0, new_light.outer_angle);
+                            }
+                            IF::LightOuterAngle => {
+                                new_light.outer_angle = value
+                                    .to_radians()
+                                    .clamp(new_light.inner_angle, std::f32::consts::FRAC_PI_2);
+                            }
+                            _ => unreachable!(),
                         }
-                        let cmd = Box::new(SetTransformCmd::new(entity.index(), old_t, new_t));
-                        self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                        if new_light != old_light {
+                            let cmd =
+                                Box::new(SetLightCmd::new(entity.index(), old_light, new_light));
+                            self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                        }
                     }
+                    return;
+                }
+
+                if let Some(&old_t) = self.world.get::<Transform>(entity) {
+                    let mut new_t = old_t;
+                    let (ex, ey, ez) = old_t.rotation.to_euler(glam::EulerRot::XYZ);
+                    match field {
+                        IF::PosX => new_t.translation.x = value,
+                        IF::PosY => new_t.translation.y = value,
+                        IF::PosZ => new_t.translation.z = value,
+                        IF::RotX => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, value.to_radians(), ey, ez),
+                        IF::RotY => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, value.to_radians(), ez),
+                        IF::RotZ => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, ey, value.to_radians()),
+                        IF::ScaleX => new_t.scale.x = value,
+                        IF::ScaleY => new_t.scale.y = value,
+                        IF::ScaleZ => new_t.scale.z = value,
+                        _ => unreachable!("light fields handled above"),
+                    }
+                    let cmd = Box::new(SetTransformCmd::new(entity.index(), old_t, new_t));
+                    self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
                 }
             }
 
@@ -1317,6 +1381,7 @@ impl<G: GameApp> Engine<G> {
                         // Terrains are not duplicated — two entities sharing
                         // one terrain_id would draw the same terrain twice.
                         terrain: None,
+                        voxel_terrain: None,
                     };
                     let cmd = Box::new(CreateEntityCmd::new(snapshot));
                     self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
