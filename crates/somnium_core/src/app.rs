@@ -1457,6 +1457,12 @@ impl<G: GameApp> Engine<G> {
                     }
                     let cmd = Box::new(SetTransformCmd::new(entity.index(), old_t, new_t));
                     self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                    // The gizmo otherwise only re-syncs on selection or on its
+                    // own drag, so typing a position left it stranded at the
+                    // object's old location.
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_gizmo_world_pos(new_t.translation);
+                    }
                 }
             }
 

@@ -36,6 +36,15 @@ pub struct NumericField {
     pub color:       [u8; 4],
     pub font_id:     u8,
     pub focused:     bool,
+    /// True from the moment the field gains focus until the first edit.
+    ///
+    /// Focusing pre-fills the edit buffer with the current value so it can be
+    /// amended, but the overwhelmingly common action is replacing it outright.
+    /// Without this, typing appended: clicking a field reading `0.000` and
+    /// typing `7` committed `0.0007`, which looks exactly like a field that
+    /// does not respond at all. The first keystroke now clears the buffer, the
+    /// same select-all-on-focus every other editor does.
+    select_all:      bool,
 }
 
 impl NumericField {
@@ -60,8 +69,16 @@ impl Control for NumericField {
         ctx.push_rect_border(b, 1.0, bdr);
         let text   = self.display_text();
         let origin = Vec2::new(b.x + 4.0, b.y + 3.0);
+        // Selection highlight goes down before the glyphs so the text stays legible.
+        if self.focused && self.select_all && !text.is_empty() {
+            let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
+            ctx.push_rect_filled(
+                Rect::new(b.x + 4.0, b.y + 3.0, advance, self.px),
+                [60, 90, 150, 255],
+            );
+        }
         ctx.push_text(&text, origin, self.font_id, self.px, self.color);
-        if self.focused {
+        if self.focused && !self.select_all {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
             let cx = b.x + 4.0 + advance;
             ctx.push_rect_filled(Rect::new(cx, b.y + 3.0, 1.0, self.px), self.color);
@@ -92,14 +109,21 @@ impl Control for NumericField {
                 WidgetMessage::Focus => {
                     self.focused      = true;
                     self.editing_text = Some(format!("{:.3}", self.value));
+                    self.select_all   = true;
+                    widget.invalidate_layout();
                     msg.handled       = true;
                 }
                 WidgetMessage::Unfocus => {
                     self.focused = false;
+                    self.select_all = false;
                     if let Some(text) = self.editing_text.take() {
+                        // An empty buffer means everything was deleted; that is
+                        // an abandoned edit, not a request to set zero.
                         if let Ok(v) = text.trim().parse::<f32>() {
-                            self.value = v;
-                            emit.push(NumericFieldMessage::value_changed(widget.handle, v));
+                            if v != self.value {
+                                self.value = v;
+                                emit.push(NumericFieldMessage::value_changed(widget.handle, v));
+                            }
                         }
                     }
                     widget.invalidate_layout();
@@ -107,12 +131,21 @@ impl Control for NumericField {
                 }
                 WidgetMessage::Text(s) => {
                     if self.focused {
+                        // Only clear on a character this field would actually
+                        // accept, so a stray keypress does not wipe the value.
+                        let accepted =
+                            s.chars().any(|c| c.is_ascii_digit() || c == '.' || c == '-');
+                        if self.select_all && accepted {
+                            self.editing_text = Some(String::new());
+                            self.select_all = false;
+                        }
                         let t = self.editing_text.get_or_insert_with(String::new);
                         for ch in s.chars() {
                             if ch.is_ascii_digit() || ch == '.' || ch == '-' {
                                 t.push(ch);
                             }
                         }
+                        widget.invalidate_layout();
                         msg.handled = true;
                     }
                 }
@@ -120,21 +153,32 @@ impl Control for NumericField {
                     if self.focused {
                         match key {
                             KeyCode::Backspace => {
-                                if let Some(t) = &mut self.editing_text {
+                                // Backspace on a whole-field selection clears
+                                // it, matching every other text field.
+                                if self.select_all {
+                                    self.editing_text = Some(String::new());
+                                    self.select_all = false;
+                                } else if let Some(t) = &mut self.editing_text {
                                     if !t.is_empty() {
                                         let mut chars = t.chars();
                                         chars.next_back();
                                         *t = chars.as_str().to_owned();
                                     }
                                 }
+                                widget.invalidate_layout();
                                 msg.handled = true;
                             }
                             KeyCode::Enter | KeyCode::NumpadEnter => {
                                 self.focused = false;
+                                self.select_all = false;
                                 if let Some(text) = self.editing_text.take() {
                                     if let Ok(v) = text.trim().parse::<f32>() {
-                                        self.value = v;
-                                        emit.push(NumericFieldMessage::value_changed(widget.handle, v));
+                                        if v != self.value {
+                                            self.value = v;
+                                            emit.push(
+                                                NumericFieldMessage::value_changed(widget.handle, v),
+                                            );
+                                        }
                                     }
                                 }
                                 widget.invalidate_layout();
@@ -142,6 +186,7 @@ impl Control for NumericField {
                             }
                             KeyCode::Escape => {
                                 self.focused      = false;
+                                self.select_all   = false;
                                 self.editing_text = None;
                                 widget.invalidate_layout();
                                 msg.handled = true;
@@ -187,6 +232,7 @@ impl NumericFieldBuilder {
             color:        self.color,
             font_id:      self.font_id,
             focused:      false,
+            select_all:   false,
         }))
     }
 }
