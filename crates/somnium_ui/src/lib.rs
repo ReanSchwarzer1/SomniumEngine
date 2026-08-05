@@ -79,6 +79,9 @@ struct EditorLayout {
     create_button:      NodeHandle,
     create_popup:       NodeHandle,
     create_popup_items: Vec<(NodeHandle, CreateKind)>,
+    file_button:        NodeHandle,
+    file_popup:         NodeHandle,
+    file_import_item:   NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, u8)>,
     inspector_handles:  InspectorHandles,
     viewport_handle:    NodeHandle,
@@ -110,6 +113,11 @@ pub struct UiManager {
     create_popup:        NodeHandle,
     create_popup_open:   bool,
     create_popup_items:  Vec<(NodeHandle, CreateKind)>,
+    // File menu (Phase 19B): Import
+    file_button:         NodeHandle,
+    file_popup:          NodeHandle,
+    file_popup_open:     bool,
+    file_import_item:    NodeHandle,
     // Terrain tool buttons (Phase 14F): (button_handle, BrushMode index)
     terrain_tool_items:  Vec<(NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -178,6 +186,10 @@ impl UiManager {
             create_popup:       layout.create_popup,
             create_popup_open:  false,
             create_popup_items: layout.create_popup_items,
+            file_button:        layout.file_button,
+            file_popup:         layout.file_popup,
+            file_popup_open:    false,
+            file_import_item:   layout.file_import_item,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows:      Vec::new(),
             inspector_handles:  layout.inspector_handles,
@@ -438,6 +450,18 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::SelectEntity(Some(eidx)));
                     continue;
                 }
+                // File > Import Model (Phase 19B)
+                if msg.destination == self.file_import_item {
+                    self.editor_events.push_back(EditorEvent::ImportModel);
+                    self.file_popup_open = false;
+                    self.native_ui.send(UiMessage::new(
+                        self.file_popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::Close,
+                    ));
+                    self.native_ui.invalidate_ancestors(self.file_popup);
+                    continue;
+                }
                 // Post FX toggles (Phase 15A1)
                 if msg.destination == self.inspector_handles.post_vig_toggle {
                     self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
@@ -470,7 +494,31 @@ impl UiManager {
                     continue;
                 }
             } else if let Some(MenuMessage::Click) = msg.data::<MenuMessage>() {
+                if msg.destination == self.file_button {
+                    // Only one menu open at a time.
+                    self.create_popup_open = false;
+                    self.native_ui.send(UiMessage::new(
+                        self.create_popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::Close,
+                    ));
+                    self.file_popup_open = !self.file_popup_open;
+                    let open = self.file_popup_open;
+                    self.native_ui.send(UiMessage::new(
+                        self.file_popup,
+                        MessageDirection::ToWidget,
+                        if open { PopupMessage::Open } else { PopupMessage::Close },
+                    ));
+                    self.native_ui.invalidate_ancestors(self.file_popup);
+                    continue;
+                }
                 if msg.destination == self.create_button {
+                    self.file_popup_open = false;
+                    self.native_ui.send(UiMessage::new(
+                        self.file_popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::Close,
+                    ));
                     self.create_popup_open = !self.create_popup_open;
                     let open = self.create_popup_open;
                     self.native_ui.send(UiMessage::new(
@@ -482,6 +530,10 @@ impl UiManager {
                     continue;
                 }
             } else if let Some(PopupMessage::Close) = msg.data::<PopupMessage>() {
+                if msg.destination == self.file_popup {
+                    self.file_popup_open = false;
+                    self.native_ui.invalidate_ancestors(self.file_popup);
+                }
                 if msg.destination == self.create_popup {
                     self.create_popup_open = false;
                     self.native_ui.invalidate_ancestors(self.create_popup);
@@ -559,12 +611,27 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     ui.add_node(title, menu_stack_h);
 
-    // "File" / "Edit" — plain text (no action yet)
-    for label in ["File", "Edit"] {
+    // "File" — Menu so clicks are captured (holds Import).
+    let file_btn_node = MenuBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    ).build();
+    let file_button = ui.add_node(file_btn_node, menu_stack_h);
+    let file_lbl = TextBuilder::new(
+        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)),
+    )
+    .with_text("File")
+    .with_font_size(13.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(file_lbl, file_button);
+
+    // "Edit" — plain text (no action yet)
+    {
         let item = TextBuilder::new(
             WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)),
         )
-        .with_text(label)
+        .with_text("Edit")
         .with_font_size(13.0)
         .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)
@@ -838,8 +905,9 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     let log_stack = ui.add_node(log_stack_node, log_scroll_h);
 
-    // ── Create popup overlay (child of root, drawn on top) ────────────────────
+    // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
+    let (file_popup, file_import_item) = build_file_popup(ui, root, font_id);
 
     EditorLayout {
         outliner_scroll,
@@ -849,6 +917,9 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         create_button,
         create_popup,
         create_popup_items,
+        file_button,
+        file_popup,
+        file_import_item,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
@@ -1009,6 +1080,56 @@ fn make_toggle(
     .build();
     let lbl_h = ui.add_node(lbl, btn_h);
     (btn_h, lbl_h)
+}
+
+/// Build the File dropdown popup (initially hidden, child of root).
+/// Returns `(popup, import_item)`.
+fn build_file_popup(
+    ui:      &mut UserInterface,
+    root:    NodeHandle,
+    font_id: u8,
+) -> (NodeHandle, NodeHandle) {
+    let popup_backdrop = PopupBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    ).build();
+    let popup_h = ui.add_node(popup_backdrop, root);
+
+    let popup_border = BorderBuilder::new(
+        WidgetBuilder::new()
+            // Sits under the "File" item in the menu bar.
+            .with_desired_position(Vec2::new(52.0, 28.0))
+            .with_width(180.0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(1.0))
+    .build();
+    let popup_border_h = ui.add_node(popup_border, popup_h);
+
+    let popup_stack = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
+
+    let btn = ButtonBuilder::new(
+        WidgetBuilder::new().with_height(22.0).with_background(theme::TRANSPARENT),
+    ).build();
+    let import_item = ui.add_node(btn, popup_stack_h);
+
+    let lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness { left: 8.0, top: 4.0, right: 0.0, bottom: 0.0 }),
+    )
+    .with_text("Import Model...")
+    .with_font_size(12.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(lbl, import_item);
+
+    (popup_h, import_item)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).

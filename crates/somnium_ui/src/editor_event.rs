@@ -77,4 +77,7 @@ pub enum EditorEvent {
     SetTerrainTool(u8),
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
+    /// File > Import Model — opens a native file picker and imports a glTF/GLB
+    /// model into the scene at the world origin (Phase 19B).
+    ImportModel,
 }

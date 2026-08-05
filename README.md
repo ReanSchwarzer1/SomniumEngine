@@ -48,7 +48,7 @@ The engine is organized around three deliberate commitments:
 - Water shader (FBM waves, dual-direction crossfade, Beer's-law depth)
 
 **World & content**
-- glTF 2.0 asset loading (meshes, PBR materials, textures)
+- glTF 2.0 asset loading (meshes, PBR materials, textures), importable at runtime from **File > Import Model**
 - **Voxel world** — 32³ padded chunks, `block_mesh` face culling, async generation
   (rayon + mpsc), 3 LOD levels, sparse edit overlay ([`context.md` §19](context.md))
 - **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching,
@@ -91,6 +91,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
 - **F10** — A/B GPU frustum culling (a correct cull is invisible)
+- **File > Import Model…** — import any glTF/GLB into the scene at the origin
 - **Create menu** — spawn primitives, lights, particle emitter, heightmap terrain, or voxel terrain
 - Select a light to edit its intensity / range / cone angles in the inspector
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`

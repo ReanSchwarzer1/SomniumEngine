@@ -93,5 +93,8 @@ fontdue = "0.7"
 block-mesh = "0.2"
 ndshape    = "0.3"
 
+# -- Native file dialogs (editor import, Phase 19B) --------------------------
+rfd = "0.15"
+
 # -- Utilities ---------------------------------------------------------------
 rand = "0.8"

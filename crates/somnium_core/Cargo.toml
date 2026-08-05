@@ -22,3 +22,4 @@ tracing-subscriber = { workspace = true }
 pollster           = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
+rfd                = { workspace = true }

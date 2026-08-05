@@ -1003,6 +1003,73 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// File > Import Model: pick a glTF/GLB and spawn it into the scene.
+    ///
+    /// glTF node transforms are relative to the scene origin, so a normally
+    /// authored model lands at world (0, 0, 0) while multi-part models keep
+    /// their relative layout. One entity is spawned per renderable node, named
+    /// from the glTF node so it is identifiable in the outliner.
+    fn import_model(&mut self) {
+        // Native modal picker. It blocks the event loop for as long as it is
+        // open, which is fine for an editor action.
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import 3D Model")
+            .add_filter("glTF model", &["glb", "gltf"])
+            .pick_file()
+        else {
+            return; // cancelled
+        };
+        let path_str = path.to_string_lossy().to_string();
+
+        let Some((renderer, render_ctx)) =
+            self.renderer.as_mut().zip(self.render_ctx.as_ref())
+        else {
+            warn!("Cannot import before the renderer is ready");
+            return;
+        };
+
+        let scene = match somnium_asset::load_gltf(&path_str) {
+            Ok(scene) => scene,
+            Err(e) => {
+                warn!("Failed to import {}: {}", path_str, e);
+                return;
+            }
+        };
+
+        let uploaded = renderer.upload_scene(render_ctx, &scene);
+        if uploaded.is_empty() {
+            warn!("{} contained no renderable meshes", path_str);
+            return;
+        }
+
+        let count = uploaded.len();
+        for node in uploaded {
+            let (scale, rotation, translation) =
+                node.transform.to_scale_rotation_translation();
+            let name = if node.entity_name.is_empty() {
+                Name::new("Imported Mesh")
+            } else {
+                Name::new(&node.entity_name)
+            };
+            let entity = self.world.spawn((
+                Transform { translation, rotation, scale },
+                name,
+                WorldTransform::identity(),
+                MeshComponent {
+                    vertex_offset: node.vertex_offset,
+                    index_offset: node.index_offset,
+                    index_count: node.index_count,
+                },
+                MaterialComponent { id: node.material_id },
+            ));
+            // Select the last node so the import is immediately visible in the
+            // inspector and the gizmo lands on it.
+            self.selected_entity = Some(entity);
+        }
+
+        info!("Imported {} ({} mesh nodes)", path_str, count);
+    }
+
     /// Push the scene's post-processing settings to the renderer (Phase 15A1).
     ///
     /// Driven by the first entity carrying a `PostProcessComponent`. With no
@@ -1443,6 +1510,10 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);
+            }
+
+            EditorEvent::ImportModel => {
+                self.import_model();
             }
 
             EditorEvent::TogglePostFx(which) => {
