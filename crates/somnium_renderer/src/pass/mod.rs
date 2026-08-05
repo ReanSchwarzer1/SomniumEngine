@@ -10,5 +10,6 @@ pub mod postprocess;
 pub mod shading;
 pub mod shadow;
 pub mod terrain;
+pub mod transparent;
 pub mod visibility;
 pub mod water;

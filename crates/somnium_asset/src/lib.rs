@@ -32,6 +32,22 @@ pub struct LoadedTexture {
     pub height: u32,
 }
 
+/// How a material's alpha is interpreted (glTF `alphaMode`).
+///
+/// The renderer routes `Blend` materials to a separate forward pass — the
+/// visibility buffer stores one triangle per pixel and structurally cannot
+/// represent see-through surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlphaMode {
+    /// Alpha ignored; surface is fully opaque.
+    #[default]
+    Opaque,
+    /// Fragments below `alpha_cutoff` are discarded, the rest are opaque.
+    Mask,
+    /// Alpha-blended against what is already in the frame buffer.
+    Blend,
+}
+
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
     pub base_color:            [f32; 4],
@@ -40,6 +56,13 @@ pub struct LoadedMaterial {
     pub albedo_map:            Option<usize>,
     pub normal_map:            Option<usize>,
     pub metallic_roughness_map: Option<usize>,
+    /// glTF `alphaMode`. Dropping this was why blended glass rendered as
+    /// opaque grey panels.
+    pub alpha_mode:            AlphaMode,
+    /// Threshold for [`AlphaMode::Mask`].
+    pub alpha_cutoff:          f32,
+    /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
+    pub double_sided:          bool,
 }
 
 /// A single mesh primitive (position + normal + UV geometry + triangle indices).
@@ -92,6 +115,13 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             base_color:            pbr.base_color_factor(),
             roughness:             pbr.roughness_factor(),
             metallic:              pbr.metallic_factor(),
+            alpha_mode: match mat.alpha_mode() {
+                gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf::material::AlphaMode::Mask   => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend  => AlphaMode::Blend,
+            },
+            alpha_cutoff:          mat.alpha_cutoff().unwrap_or(0.5),
+            double_sided:          mat.double_sided(),
             albedo_map:            pbr.base_color_texture().map(|t| t.texture().source().index()),
             normal_map:            mat.normal_texture().map(|t| t.texture().source().index()),
             metallic_roughness_map: pbr.metallic_roughness_texture()
@@ -107,6 +137,9 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             albedo_map:            None,
             normal_map:            None,
             metallic_roughness_map: None,
+            alpha_mode:            AlphaMode::Opaque,
+            alpha_cutoff:          0.5,
+            double_sided:          false,
         });
     }
 

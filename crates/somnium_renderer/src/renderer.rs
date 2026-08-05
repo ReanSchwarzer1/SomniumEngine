@@ -174,6 +174,14 @@ pub struct SomniumRenderer {
     /// When false the cull shader keeps every draw (useful for A/B checks).
     pub culling_enabled: bool,
 
+    /// Phase 21: forward pass for alpha-blended materials.
+    transparent_pass: crate::pass::transparent::TransparentPass,
+    /// Blended draws submitted this frame (routed automatically by material).
+    transparent_queue: Vec<DrawCommand>,
+    /// Per-material flag: true when the material is alpha-blended. Lets
+    /// `submit` route draws without any call site needing to know.
+    material_blend: Vec<bool>,
+
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
 }
@@ -270,6 +278,16 @@ impl SomniumRenderer {
             &ibl_pass.sampler,
         );
 
+        // Phase 21: forward pass for blended materials. Built here because it
+        // needs the global bind group layout and the environment cubemap.
+        let transparent_pass = crate::pass::transparent::TransparentPass::new(
+            &ctx.device,
+            HDR_FORMAT,
+            &global_pool.layout,
+            &ibl_pass.cube_view,
+            &ibl_pass.sampler,
+        );
+
         let texture_pool = TexturePool::new(&ctx.device);
 
         // Default sun direction (normalized (1,2,-1)) and white light at intensity 5.
@@ -332,6 +350,9 @@ impl SomniumRenderer {
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
+            transparent_pass,
+            transparent_queue: Vec::new(),
+            material_blend: Vec::new(),
             ibl_pass,
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
@@ -433,7 +454,7 @@ impl SomniumRenderer {
         };
 
         let material_ids: Vec<u32> = scene.materials.iter().map(|mat| {
-            self.materials_pool.add_material(&ctx.queue, GpuMaterial {
+            let id = self.materials_pool.add_material(&ctx.queue, GpuMaterial {
                 base_color:             mat.base_color,
                 roughness:              mat.roughness,
                 metallic:               mat.metallic,
@@ -441,7 +462,14 @@ impl SomniumRenderer {
                 normal_map:             resolve_tex(mat.normal_map),
                 metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
                 _padding:               [0; 3],
-            })
+            });
+            // Phase 21: remember which materials are blended so `submit` can
+            // route their draws to the forward transparent pass.
+            self.set_material_blend(
+                id,
+                mat.alpha_mode == somnium_asset::AlphaMode::Blend,
+            );
+            id
         }).collect();
 
         // 3. Meshes ----------------------------------------------------------
@@ -616,9 +644,32 @@ impl SomniumRenderer {
         }
     }
 
-    /// Submit a draw command to the queue.
+    /// Submit a draw command.
+    ///
+    /// Blended materials are routed to the forward transparent pass instead of
+    /// the visibility buffer, which can only resolve one triangle per pixel.
+    /// Callers do not need to know which is which.
     pub fn submit(&mut self, cmd: DrawCommand) {
-        self.draw_queue.push(cmd);
+        let blended = self
+            .material_blend
+            .get(cmd.material_id as usize)
+            .copied()
+            .unwrap_or(false);
+        if blended {
+            self.transparent_queue.push(cmd);
+        } else {
+            self.draw_queue.push(cmd);
+        }
+    }
+
+    /// Record whether a material is alpha-blended, so `submit` can route it.
+    /// Materials default to opaque when never registered.
+    pub fn set_material_blend(&mut self, material_id: u32, blended: bool) {
+        let idx = material_id as usize;
+        if self.material_blend.len() <= idx {
+            self.material_blend.resize(idx + 1, false);
+        }
+        self.material_blend[idx] = blended;
     }
 
     /// Submit a water rendering command.
@@ -743,6 +794,28 @@ impl SomniumRenderer {
                 _padding:           0,
             });
         }
+        // Phase 21: blended draws share the same instance buffer, appended
+        // after the opaque ones. The visibility pass only draws the opaque
+        // range; the transparent pass indexes into the tail.
+        let transparent_base = self.draw_queue.len() as u32;
+        let mut transparent_draws: Vec<crate::pass::transparent::TransparentDraw> =
+            Vec::with_capacity(self.transparent_queue.len());
+        for (i, cmd) in self.transparent_queue.iter().enumerate() {
+            self.instances.add_instance(crate::instance::GpuInstanceData {
+                model_matrix:       cmd.transform.to_cols_array_2d(),
+                material_id:        cmd.material_id,
+                mesh_vertex_offset: cmd.vertex_offset,
+                mesh_index_offset:  cmd.index_offset,
+                _padding:           0,
+            });
+            let origin = cmd.transform.w_axis.truncate();
+            transparent_draws.push(crate::pass::transparent::TransparentDraw {
+                instance_index: transparent_base + i as u32,
+                index_count: cmd.index_count,
+                depth_sq: (origin - self.camera_pos).length_squared(),
+            });
+        }
+        crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
         self.instances.upload(&ctx.queue);
 
         // ── 3. Sort draw queue ───────────────────────────────────────────────
@@ -925,6 +998,18 @@ impl SomniumRenderer {
             );
         }
 
+        // ── 7.6 Phase 21: blended geometry → HDR texture ─────────────────────
+        // After opaque shading, terrain and water have filled the target, so
+        // blended surfaces composite over a complete image. Depth-tested
+        // against the opaque depth, never writing it.
+        self.transparent_pass.record(
+            &mut encoder,
+            &self.postprocess_pass.hdr_view,
+            &self.vis_pass.depth_view,
+            &self.global_pool.bind_group,
+            &transparent_draws,
+        );
+
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.grid_enabled {
             self.grid_pass.record(&mut encoder, &self.postprocess_pass.hdr_view);
@@ -1008,6 +1093,7 @@ impl SomniumRenderer {
         self.draw_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();
+        self.transparent_queue.clear();
         self.light_gizmo_queue.clear();
     }
 }
