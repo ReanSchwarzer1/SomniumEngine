@@ -28,6 +28,7 @@
 18. [Known Issues & Active Bugs](#18-known-issues--active-bugs)
 19. [somnium_voxel — Voxel World](#19-somnium_voxel--voxel-world-phase-14-complete)
 20. [Heightmap Terrain System](#20-heightmap-terrain-system-phase-14-sss-complete)
+21. [Phase 15 — GPU-Driven Rendering](#21-phase-15--gpu-driven-rendering-plan--progress)
 
 ---
 
@@ -1148,8 +1149,10 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 13E-b | ✅ Complete | Editor cleanup: voxel terrain is no longer auto-spawned — it is created from **Create > Voxel Terrain**, backed by a `VoxelTerrainComponent` marker entity so it appears in the outliner and can be selected/deleted (the game-layer streaming driver is built/torn down to follow that entity, freeing chunk allocations on delete). The menu-bar FPS counter was removed. |
 | 14 | ✅ Complete | Voxel world (`somnium_voxel` crate): 32³ chunks padded to 34³, `block_mesh::visible_block_faces` meshing, FBM heightmap terrain, async generation (rayon + mpsc), 3 LOD levels via nearest-neighbour downsample, `set_voxel` edit overlay with version-guarded remeshing, `GeometryPool` free-list for chunk mesh recycling, palette-texture material; chunks rendered as direct DrawCommands (not ECS entities). See §19. |
 | 14 SSS | ✅ Complete | Heightmap terrain system: chunked heightmap (`somnium_renderer::terrain`), 5 LOD levels with CPU-side block-fan stitching (no T-junction cracks), splatmap PBR (4 procedural layers, height-based blending, triplanar cliffs), `TerrainPass` into HDR target with CSM shadows + clustered lights, sculpt brushes (Raise/Lower/Smooth/Flatten/Noise) + splat painting with undo, editor terrain mode (F6, toolbar palette, in-shader brush cursor ring), Create > Terrain, scene-save sidecar binaries. See §20. |
-| 15 | ⬜ Planned | GPU-driven indirect draw, instance culling, meshlets |
+| 15A | ✅ Complete | GPU-driven indirect draw: `indirect.rs` builds a `DrawIndirectArgs` buffer (`INDIRECT \| STORAGE \| COPY_DST`) from the sorted draw queue each frame, and the visibility pass submits the whole scene with one `multi_draw_indirect` instead of one `draw()` per object. `multi_draw_indirect` is core in wgpu 29; only `INDIRECT_FIRST_INSTANCE` is feature-gated (each draw's `first_instance` is its instance-buffer slot), so it's requested optionally and the renderer falls back to the per-draw CPU loop when absent. `F9` A/B-toggles the two paths — they must render identically. |
+| 15B–15F | ⬜ Planned | GPU frustum culling → draw compaction (lifts the 1022-draw cap) → meshlet generation → Hi-Z occlusion culling → meshlet rendering. See §21. |
 | 16 | ⬜ Planned | Scripting (Rhai or Lua) |
+| 17 | ⬜ Planned | Terrain improvements: foliage scattering, terrain colliders, layer UI |
 
 ---
 
@@ -1305,3 +1308,39 @@ ECS                              somnium_renderer
   tessellation / virtual texturing (explicit non-goals for this phase).
 - Demo smoke test: run `hello_engine` with `SOMNIUM_TERRAIN=1` to spawn a
   pre-sculpted 4×4-chunk terrain (hill + valley + auto-splat).
+
+---
+
+## 21. Phase 15 — GPU-Driven Rendering (plan & progress)
+
+Goal: move draw submission and visibility decisions onto the GPU, so frame cost
+scales with what is *visible* rather than with what exists. Reference material is
+UE5's `InstanceCullingDefinitions.h` / `NaniteDefinitions.h` (ATTRIBUTION §13.12).
+
+Deliberately split into small, independently shippable steps — each one builds,
+tests, and runs on its own, so the engine is never left half-converted.
+
+| Step | Status | What it does |
+|---|---|---|
+| **15A** | ✅ Complete | **Indirect draw plumbing.** `DrawIndirectArgs` buffer built from the draw queue; visibility pass uses one `multi_draw_indirect` call. Feature-gated on `INDIRECT_FIRST_INSTANCE` with a CPU fallback. `F9` A/B-toggles the paths. |
+| **15B** | ⬜ Next | **GPU frustum culling.** Track a per-mesh AABB in `GeometryPool` at upload; a compute shader transforms each instance's AABB, tests it against the 6 frustum planes, and writes `instance_count = 0` for failures. The indirect buffer already carries `STORAGE` usage for this. |
+| **15C** | ⬜ | **Draw compaction + instance-cap fix.** Compact survivors into a dense buffer with an atomic counter, and repack `vis_data` so the 10-bit instance ID no longer caps the scene at 1022 draws (today's hard limit, §6.3). |
+| **15D** | ⬜ | **Meshlet generation.** Split meshes into ~128-triangle clusters at upload with per-cluster bounds + normal cone (UE5 `NANITE_MAX_CLUSTER_TRIANGLES = 128`). |
+| **15E** | ⬜ | **Hi-Z occlusion culling.** Depth mip pyramid from the previous frame; two-phase cull so occluded clusters cost nothing. |
+| **15F** | ⬜ | **Meshlet rendering.** Draw surviving clusters indirectly through the visibility buffer. |
+
+### 15A notes for whoever picks up 15B
+
+- Argument `i` corresponds to instance `i` — the indirect buffer is built **after**
+  the draw-queue sort so the two stay aligned. Keep that ordering.
+- `instance_count` is the keep/discard flag: culling writes `0`, never removes
+  entries, so indices stay stable.
+- The buffer is already `INDIRECT | STORAGE | COPY_DST`, so a compute shader can
+  bind and write it without any allocation changes.
+- What 15B still needs: per-mesh AABBs (compute them in
+  `GeometryPool::upload_mesh*`, store alongside `MeshAllocation`), the 6 frustum
+  planes uploaded in the view buffer, and a compute pipeline dispatched before
+  the visibility pass.
+- Verify culling actually happened by reading back the arg buffer (`COPY_SRC`) in
+  a test, or by counting non-zero `instance_count` values — not by eyeballing the
+  image, since a correct cull is invisible.

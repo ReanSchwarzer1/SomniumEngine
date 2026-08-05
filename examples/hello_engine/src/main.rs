@@ -637,6 +637,22 @@ impl GameApp for HelloGame {
                             renderer.set_cascade_debug(self.cascade_debug);
                         }
                     }
+                    // F9: A/B the GPU-driven indirect draw path (Phase 15A).
+                    // Both paths must render identically — if the image changes,
+                    // the indirect arguments are wrong.
+                    KeyCode::F9 if pressed => {
+                        if let Some(renderer) = &mut ctx.renderer {
+                            if renderer.supports_gpu_driven() {
+                                let on = renderer.toggle_gpu_driven();
+                                info!(
+                                    "Draw path: {}",
+                                    if on { "GPU-driven (multi-draw indirect)" } else { "CPU (per-draw)" }
+                                );
+                            } else {
+                                info!("GPU-driven draw path not supported on this device");
+                            }
+                        }
+                    }
                     // L: toggle light gizmos (Phase 13E)
                     KeyCode::KeyL if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {

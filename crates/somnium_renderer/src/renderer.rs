@@ -145,6 +145,14 @@ pub struct SomniumRenderer {
     /// Terrain ids (+ model matrices) submitted for the current frame.
     terrain_queue: Vec<(u32, glam::Mat4)>,
 
+    /// Phase 15A: indirect draw arguments for the visibility pass.
+    indirect: crate::indirect::IndirectDrawBuffer,
+    /// Whether the GPU-driven indirect path is currently active.
+    /// When false the renderer falls back to one `draw()` per object.
+    gpu_driven: bool,
+    /// Whether the device supports it at all (gates the runtime toggle).
+    supports_gpu_driven: bool,
+
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
 }
@@ -290,6 +298,9 @@ impl SomniumRenderer {
             outline_entity: None,
             particle_pass,
             pending_particles: Vec::new(),
+            indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
+            gpu_driven: ctx.supports_gpu_driven(),
+            supports_gpu_driven: ctx.supports_gpu_driven(),
             water_pass,
             water_queue: Vec::new(),
             terrain_pass,
@@ -454,6 +465,29 @@ impl SomniumRenderer {
     /// Set the active gizmo mode (Translate / Rotate / Scale).
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
         self.gizmo_mode = mode;
+    }
+
+    /// Toggle the Phase 15 GPU-driven indirect draw path, returning the new
+    /// state. Returns `false` (and does nothing) if the device lacks support.
+    ///
+    /// Both paths must produce an identical image, so this doubles as an A/B
+    /// check: flip it and the scene should not change.
+    pub fn toggle_gpu_driven(&mut self) -> bool {
+        if !self.supports_gpu_driven {
+            return false;
+        }
+        self.gpu_driven = !self.gpu_driven;
+        self.gpu_driven
+    }
+
+    /// Whether the GPU-driven indirect path is currently in use.
+    pub fn gpu_driven(&self) -> bool {
+        self.gpu_driven
+    }
+
+    /// Whether this device supports the GPU-driven path at all.
+    pub fn supports_gpu_driven(&self) -> bool {
+        self.supports_gpu_driven
     }
 
     /// Submit one light's gizmo for this frame (Phase 13E).
@@ -645,6 +679,12 @@ impl SomniumRenderer {
         // ── 3. Sort draw queue ───────────────────────────────────────────────
         self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
 
+        // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
+        // Must come after the sort so argument `i` lines up with instance `i`.
+        if self.gpu_driven {
+            self.indirect.update(&ctx.device, &ctx.queue, &self.draw_queue);
+        }
+
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
         let output = match ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)    => tex,
@@ -697,8 +737,15 @@ impl SomniumRenderer {
             rpass.set_pipeline(&self.vis_pass.pipeline);
             rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
 
-            for (inst_id, cmd) in self.draw_queue.iter().enumerate() {
-                rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));
+            if self.gpu_driven && !self.indirect.is_empty() {
+                // Phase 15A: the whole scene in one call. Culled draws (Phase
+                // 15B) simply carry instance_count = 0 and cost nothing.
+                rpass.multi_draw_indirect(&self.indirect.buffer, 0, self.indirect.len() as u32);
+            } else {
+                // Fallback for devices without multi-draw indirect.
+                for (inst_id, cmd) in self.draw_queue.iter().enumerate() {
+                    rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));
+                }
             }
         }
 

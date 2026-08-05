@@ -30,7 +30,22 @@ pub struct RenderContext {
     pub surface: wgpu::Surface<'static>,
     /// The surface configuration (size, format, present mode).
     pub config: wgpu::SurfaceConfiguration,
+    /// Features actually granted by the device.
+    ///
+    /// Phase 15 checks this to decide whether the GPU-driven indirect path is
+    /// available; anything optional must degrade gracefully when it isn't.
+    pub features: wgpu::Features,
 }
+
+/// Optional features the GPU-driven renderer (Phase 15) needs.
+///
+/// `multi_draw_indirect` itself is core in wgpu 29 (it only needs the
+/// `INDIRECT_EXECUTION` downlevel flag, and wgpu emulates it where a backend
+/// lacks it). What *is* gated is `INDIRECT_FIRST_INSTANCE`: a non-zero
+/// `first_instance` in the draw args, which is how each indirect draw finds its
+/// slot in the instance buffer. Without it every draw would read instance 0, so
+/// the renderer falls back to the per-draw CPU loop instead.
+pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
@@ -86,6 +101,20 @@ impl RenderContext {
             warn!("GPU does not support full bindless rendering. Attempting to request anyway, which may fail.");
         }
 
+        // Phase 15: ask for the GPU-driven draw features only if the adapter has
+        // them, so a GPU without them still starts (just on the CPU draw path).
+        let gpu_driven = available_features.contains(GPU_DRIVEN_FEATURES);
+        if gpu_driven {
+            info!("GPU-driven rendering available (multi-draw indirect)");
+        } else {
+            info!("GPU-driven rendering unavailable — using the per-draw CPU path");
+        }
+        let required_features = if gpu_driven {
+            required_features | GPU_DRIVEN_FEATURES
+        } else {
+            required_features
+        };
+
         let mut limits = wgpu::Limits::default();
         limits.max_binding_array_elements_per_shader_stage = 1024;
         limits.max_storage_buffers_per_shader_stage = 16;
@@ -126,6 +155,8 @@ impl RenderContext {
 
         surface.configure(&device, &config);
 
+        let features = device.features();
+
         Self {
             instance,
             adapter,
@@ -133,7 +164,13 @@ impl RenderContext {
             queue,
             surface,
             config,
+            features,
         }
+    }
+
+    /// Whether the GPU-driven indirect draw path (Phase 15) can be used.
+    pub fn supports_gpu_driven(&self) -> bool {
+        self.features.contains(GPU_DRIVEN_FEATURES)
     }
 
     /// Resize the surface.

@@ -15,6 +15,7 @@ pub mod cluster;
 pub mod command;
 pub mod context;
 pub mod geometry;
+pub mod indirect;
 pub mod instance;
 pub mod material;
 pub mod pass;
