@@ -3,7 +3,7 @@
 //! The shadow atlas is a single 4096×4096 Depth32Float texture divided into
 //! four 2048×2048 quadrants, one per cascade:
 //!
-//! ```
+//! ```text
 //! ┌──────────┬──────────┐
 //! │ cascade 0│ cascade 1│  (0,0)..(2048,2048) / (2048,0)..(4096,2048)
 //! ├──────────┼──────────┤
@@ -39,7 +39,7 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
 /// GPU-uploadable directional light struct (320 bytes, std140-aligned).
 ///
 /// Layout:
-/// ```
+/// ```text
 /// offset   0 :  direction     vec3<f32>          (12 bytes)
 /// offset  12 :  _pad0         f32                ( 4 bytes)
 /// offset  16 :  color         vec3<f32>          (12 bytes)  pre-multiplied by intensity

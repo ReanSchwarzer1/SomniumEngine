@@ -158,6 +158,7 @@ pub enum LightType {
 ///   Inner is the fully-lit core; outer is where intensity fades to zero.
 ///
 /// ```rust
+/// use somnium_core::LightComponent;
 /// // Directional
 /// LightComponent::directional(5.0);
 /// // Point (white, intensity 3, range 10m)
