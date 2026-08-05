@@ -598,6 +598,34 @@ impl GameApp for HelloGame {
             WorldTransform::identity(),
         ));
 
+        // Test hook: import a model at startup without clicking through the
+        // UI. `SOMNIUM_IMPORT=<path> cargo run -p hello_engine`.
+        if let Ok(import_path) = std::env::var("SOMNIUM_IMPORT") {
+            if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+                match somnium_asset::load_gltf(&import_path) {
+                    Ok(scene) => {
+                        let uploaded = renderer.upload_scene(render_ctx, &scene);
+                        info!("IMPORT: {} nodes from {}", uploaded.len(), import_path);
+                        for n in uploaded.iter() {
+                            let (sc, rot, tr) = n.transform.to_scale_rotation_translation();
+                            ctx.world.spawn((
+                                Transform { translation: tr, rotation: rot, scale: sc },
+                                Name::new(&n.entity_name),
+                                WorldTransform::identity(),
+                                MeshComponent {
+                                    vertex_offset: n.vertex_offset,
+                                    index_offset: n.index_offset,
+                                    index_count: n.index_count,
+                                },
+                                MaterialComponent { id: n.material_id },
+                            ));
+                        }
+                    }
+                    Err(e) => info!("IMPORT failed: {e}"),
+                }
+            }
+        }
+
         // Phase 15A1: scene-wide post-processing settings, selectable in the
         // outliner. All effects start off — the viewport shows the raw image
         // until a look is dialled in.

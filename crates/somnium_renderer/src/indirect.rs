@@ -78,7 +78,10 @@ impl IndirectDrawBuffer {
             size: capacity as u64 * ARGS_SIZE,
             usage: wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST,
+                | wgpu::BufferUsages::COPY_DST
+                // Lets the cull-stats diagnostic read back what each phase
+                // decided. Costs nothing when the diagnostic is off.
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         })
     }

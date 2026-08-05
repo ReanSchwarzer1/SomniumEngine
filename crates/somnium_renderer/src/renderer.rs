@@ -175,6 +175,15 @@ pub struct SomniumRenderer {
     /// False until a pyramid has been built from real geometry. Occlusion
     /// culling is held off until then — see the note at the cull dispatch.
     hiz_ready: bool,
+    /// `SOMNIUM_CULL_STATS=1` reads the indirect args back after each cull
+    /// phase and logs how many draws survived. Off by default: the readback
+    /// stalls the pipeline waiting on the GPU.
+    cull_stats: bool,
+    /// Staging copies of the indirect args after phase one and phase two.
+    cull_stats_buffers: Option<[wgpu::Buffer; 2]>,
+    /// `SOMNIUM_NO_OCCLUSION=1` keeps frustum culling but skips the Hi-Z half,
+    /// so the two can be measured apart.
+    occlusion_off: bool,
 
     /// Phase 15B: GPU frustum-culling compute pass.
     cull_pass: crate::pass::cull::CullPass,
@@ -369,6 +378,9 @@ impl SomniumRenderer {
             ibl_pass,
             hiz_pass,
             hiz_ready: false,
+            cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
+            cull_stats_buffers: None,
+            occlusion_off: std::env::var("SOMNIUM_NO_OCCLUSION").is_ok_and(|v| v == "1"),
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
             culling_enabled: true,
@@ -654,6 +666,66 @@ impl SomniumRenderer {
     }
 
     /// Resize all internal renderer targets.
+    /// Copy the indirect args into the phase's staging buffer.
+    fn snapshot_indirect(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        phase: usize,
+    ) {
+        let bytes = (self.indirect.len() * 16) as u64;
+        let needs_alloc = self
+            .cull_stats_buffers
+            .as_ref()
+            .is_none_or(|b| b[phase].size() < bytes);
+        if needs_alloc {
+            let make = || {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Cull Stats Readback"),
+                    size: bytes.max(16),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })
+            };
+            self.cull_stats_buffers = Some([make(), make()]);
+        }
+        let dst = &self.cull_stats_buffers.as_ref().unwrap()[phase];
+        encoder.copy_buffer_to_buffer(&self.indirect.buffer, 0, dst, 0, bytes);
+    }
+
+    /// Map both snapshots and log how many draws each phase left alive.
+    ///
+    /// `instance_count` doubles as the cull verdict, so counting the non-zero
+    /// entries is exactly the number of draws that phase submitted.
+    fn report_cull_stats(&self, ctx: &RenderContext, draw_count: usize) {
+        let Some(buffers) = &self.cull_stats_buffers else { return };
+        let bytes = (draw_count * 16) as u64;
+        let mut alive = [0usize; 2];
+
+        for (phase, buf) in buffers.iter().enumerate() {
+            let slice = buf.slice(0..bytes);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            {
+                let data = slice.get_mapped_range();
+                // DrawIndirectArgs: vertex_count, instance_count, first_vertex,
+                // first_instance — instance_count is the second u32.
+                alive[phase] = data
+                    .chunks_exact(16)
+                    .filter(|a| u32::from_le_bytes([a[4], a[5], a[6], a[7]]) != 0)
+                    .count();
+            }
+            buf.unmap();
+        }
+
+        tracing::info!(
+            "CULLSTATS total={draw_count} phase1_drawn={} phase2_drawn={} culled={}",
+            alive[0],
+            alive[1],
+            draw_count - alive[0] - alive[1],
+        );
+    }
+
     /// Record one visibility pass.
     ///
     /// `clear` distinguishes the two occlusion phases: phase one clears the
@@ -929,7 +1001,7 @@ impl SomniumRenderer {
                 !self.culling_enabled,
                 self.hiz_pass.size(),
                 self.hiz_pass.mip_count(),
-                self.hiz_ready,
+                self.hiz_ready && !self.occlusion_off,
             );
         }
 
@@ -982,6 +1054,10 @@ impl SomniumRenderer {
             );
         }
 
+        if self.cull_stats && cull_active {
+            self.snapshot_indirect(&ctx.device, &mut encoder, 0);
+        }
+
         // ── 6. Visibility Pass (phase 1) ─────────────────────────────────────
         self.record_visibility(&mut encoder, true);
 
@@ -999,6 +1075,10 @@ impl SomniumRenderer {
                 1,
                 self.indirect.len(),
             );
+
+            if self.cull_stats {
+                self.snapshot_indirect(&ctx.device, &mut encoder, 1);
+            }
 
             // ── 6.8 Visibility Pass (phase 2) — disocclusions ────────────────
             self.record_visibility(&mut encoder, false);
@@ -1188,7 +1268,11 @@ impl SomniumRenderer {
         // ── 9. UI Overlay ────────────────────────────────────────────────────
         ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
 
+        let stats_draws = if self.cull_stats { self.indirect.len() } else { 0 };
         ctx.queue.submit(std::iter::once(encoder.finish()));
+        if stats_draws > 0 {
+            self.report_cull_stats(ctx, stats_draws);
+        }
         output.present();
 
         self.draw_queue.clear();
