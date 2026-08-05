@@ -240,3 +240,199 @@ mod tests {
         assert!(aabb_in_frustum(&planes, wmin, wmax), "should be visible at origin");
     }
 }
+
+// ── Phase 15E: Hi-Z occlusion test ──────────────────────────────────────────
+//
+// The test projects a candidate's world-space AABB to screen, looks up the
+// furthest recorded depth over that footprint in the Hi-Z pyramid, and rejects
+// the candidate when its own nearest point is behind that. Everything here errs
+// toward drawing: a false "visible" costs one wasted draw, a false "occluded"
+// deletes geometry from the image.
+
+/// A candidate's screen footprint plus how near it gets to the camera.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenBounds {
+    /// Screen-space rect in UV units, `[min_x, min_y, max_x, max_y]`, clamped
+    /// to `0..1`.
+    pub rect: [f32; 4],
+    /// Nearest NDC depth of the box, `0` at the near plane.
+    pub min_depth: f32,
+}
+
+/// Project a world-space AABB through `view_proj` to a screen rect.
+///
+/// Returns `None` when the box crosses or sits behind the camera plane, where
+/// the perspective divide is meaningless — such a box is treated as visible
+/// rather than guessed at.
+pub fn project_aabb_to_screen(
+    min: [f32; 3],
+    max: [f32; 3],
+    view_proj: glam::Mat4,
+) -> Option<ScreenBounds> {
+    let mut lo = [f32::INFINITY; 2];
+    let mut hi = [f32::NEG_INFINITY; 2];
+    let mut min_depth = f32::INFINITY;
+
+    for i in 0..8 {
+        let corner = glam::Vec3::new(
+            if i & 1 == 0 { min[0] } else { max[0] },
+            if i & 2 == 0 { min[1] } else { max[1] },
+            if i & 4 == 0 { min[2] } else { max[2] },
+        );
+        let clip = view_proj * corner.extend(1.0);
+        // w <= 0 means the corner is at or behind the eye.
+        if clip.w <= 1e-6 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        // NDC x/y are -1..1; screen V runs downward, hence the flip.
+        let u = ndc.x * 0.5 + 0.5;
+        let v = 1.0 - (ndc.y * 0.5 + 0.5);
+        lo[0] = lo[0].min(u);
+        lo[1] = lo[1].min(v);
+        hi[0] = hi[0].max(u);
+        hi[1] = hi[1].max(v);
+        min_depth = min_depth.min(ndc.z);
+    }
+
+    if !min_depth.is_finite() {
+        return None;
+    }
+
+    Some(ScreenBounds {
+        rect: [
+            lo[0].clamp(0.0, 1.0),
+            lo[1].clamp(0.0, 1.0),
+            hi[0].clamp(0.0, 1.0),
+            hi[1].clamp(0.0, 1.0),
+        ],
+        min_depth: min_depth.max(0.0),
+    })
+}
+
+/// Pick the pyramid level whose texels are large enough that the footprint
+/// spans at most 2x2 of them.
+///
+/// That bound is what keeps the lookup constant-time: four samples cover any
+/// candidate, however large on screen. Choosing a level too low would need more
+/// samples and could miss an occluder between them.
+pub fn hiz_mip_level(rect: [f32; 4], width: u32, height: u32, mip_count: u32) -> u32 {
+    let w_px = (rect[2] - rect[0]) * width as f32;
+    let h_px = (rect[3] - rect[1]) * height as f32;
+    let extent = w_px.max(h_px).max(1.0);
+    // ceil(log2(extent)) - 1: at 2 texels the 2x2 block already covers it.
+    let level = extent.log2().ceil() as i32 - 1;
+    level.clamp(0, mip_count as i32 - 1) as u32
+}
+
+/// Decide whether a candidate is hidden.
+///
+/// `furthest_depth` is the maximum of the (up to) four Hi-Z texels covering the
+/// footprint. Occluded means the candidate's nearest point is strictly behind
+/// everything recorded there.
+pub fn is_occluded(bounds: &ScreenBounds, furthest_depth: f32) -> bool {
+    // A cleared pyramid holds 1.0, the far plane, which occludes nothing.
+    if furthest_depth >= 1.0 {
+        return false;
+    }
+    bounds.min_depth > furthest_depth
+}
+
+#[cfg(test)]
+mod hiz_tests {
+    use super::*;
+
+    fn persp() -> glam::Mat4 {
+        let proj = glam::Mat4::perspective_rh(60f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0);
+        let view = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 0.0, 10.0),
+            glam::Vec3::ZERO,
+            glam::Vec3::Y,
+        );
+        proj * view
+    }
+
+    #[test]
+    fn a_box_in_front_of_the_camera_projects_to_a_rect() {
+        let b = project_aabb_to_screen([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], persp()).unwrap();
+        assert!(b.rect[0] < 0.5 && b.rect[2] > 0.5, "rect {:?}", b.rect);
+        assert!(b.rect[1] < 0.5 && b.rect[3] > 0.5, "rect {:?}", b.rect);
+        assert!(b.min_depth > 0.0 && b.min_depth < 1.0, "depth {}", b.min_depth);
+    }
+
+    #[test]
+    fn a_box_behind_the_camera_is_not_projected() {
+        // Behind the eye the divide flips signs and would produce a bogus rect.
+        let b = project_aabb_to_screen([-1.0, -1.0, 20.0], [1.0, 1.0, 22.0], persp());
+        assert!(b.is_none());
+    }
+
+    #[test]
+    fn a_box_straddling_the_camera_plane_is_not_projected() {
+        let b = project_aabb_to_screen([-1.0, -1.0, -1.0], [1.0, 1.0, 30.0], persp());
+        assert!(b.is_none());
+    }
+
+    #[test]
+    fn a_nearer_box_reports_a_smaller_depth() {
+        let near = project_aabb_to_screen([-1.0, -1.0, 4.0], [1.0, 1.0, 5.0], persp()).unwrap();
+        let far  = project_aabb_to_screen([-1.0, -1.0, -50.0], [1.0, 1.0, -49.0], persp()).unwrap();
+        assert!(near.min_depth < far.min_depth);
+    }
+
+    #[test]
+    fn the_rect_is_clamped_to_the_screen() {
+        let b = project_aabb_to_screen([-500.0, -500.0, -1.0], [500.0, 500.0, 1.0], persp()).unwrap();
+        assert_eq!(b.rect, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_bigger_footprint_selects_a_coarser_level() {
+        let small = hiz_mip_level([0.5, 0.5, 0.5039, 0.5039], 1024, 1024, 11); // ~4 px
+        let large = hiz_mip_level([0.0, 0.0, 1.0, 1.0], 1024, 1024, 11);       // 1024 px
+        assert!(large > small, "small {small} large {large}");
+    }
+
+    #[test]
+    fn a_footprint_of_two_texels_uses_the_base_level() {
+        // 2 px across is already covered by one 2x2 block at level 0.
+        assert_eq!(hiz_mip_level([0.0, 0.0, 2.0 / 1024.0, 2.0 / 1024.0], 1024, 1024, 11), 0);
+    }
+
+    #[test]
+    fn the_level_never_leaves_the_pyramid() {
+        // A full-screen footprint must not index past the top level.
+        let level = hiz_mip_level([0.0, 0.0, 1.0, 1.0], 4096, 4096, 5);
+        assert!(level < 5, "level {level} outside a 5-level pyramid");
+        // A degenerate rect must not produce a negative level.
+        assert_eq!(hiz_mip_level([0.5, 0.5, 0.5, 0.5], 1024, 1024, 11), 0);
+    }
+
+    #[test]
+    fn a_candidate_behind_the_recorded_depth_is_occluded() {
+        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.8 };
+        assert!(is_occluded(&b, 0.5));
+    }
+
+    #[test]
+    fn a_candidate_in_front_of_the_recorded_depth_is_visible() {
+        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.3 };
+        assert!(!is_occluded(&b, 0.5));
+    }
+
+    #[test]
+    fn an_empty_region_never_occludes() {
+        // Cleared depth is 1.0. Even a candidate at the far plane must survive,
+        // or the first frame would cull the entire scene.
+        let b = ScreenBounds { rect: [0.0, 0.0, 1.0, 1.0], min_depth: 1.0 };
+        assert!(!is_occluded(&b, 1.0));
+    }
+
+    #[test]
+    fn equal_depths_count_as_visible() {
+        // A candidate exactly coplanar with the occluder is the object itself on
+        // the next frame; rejecting it would make geometry flicker out.
+        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.5 };
+        assert!(!is_occluded(&b, 0.5));
+    }
+}

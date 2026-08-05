@@ -169,6 +169,10 @@ pub struct SomniumRenderer {
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
 
+    /// Phase 15E: Hi-Z depth pyramid, rebuilt from the visibility depth buffer
+    /// each frame. Consumed by the two-phase occlusion cull in 15E2.
+    pub hiz_pass: crate::pass::hiz::HiZPass,
+
     /// Phase 15B: GPU frustum-culling compute pass.
     cull_pass: crate::pass::cull::CullPass,
     /// Per-draw local AABBs for culling, rebuilt each frame.
@@ -269,6 +273,9 @@ impl SomniumRenderer {
         let vis_pass = VisibilityBufferPass::new(
             &ctx.device, ctx.config.width, ctx.config.height, &global_pool.layout,
         );
+        let hiz_pass = crate::pass::hiz::HiZPass::new(
+            &ctx.device, ctx.config.width, ctx.config.height, &vis_pass.depth_view,
+        );
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
@@ -357,6 +364,7 @@ impl SomniumRenderer {
             transparent_queue: Vec::new(),
             material_blend: Vec::new(),
             ibl_pass,
+            hiz_pass,
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
             culling_enabled: true,
@@ -649,6 +657,8 @@ impl SomniumRenderer {
             self.postprocess_pass.resize(&ctx.device, width, height);
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
+            // Must follow vis_pass: the level-0 bind group references its depth view.
+            self.hiz_pass.resize(&ctx.device, width, height, &self.vis_pass.depth_view);
         }
     }
 
@@ -941,6 +951,11 @@ impl SomniumRenderer {
                 }
             }
         }
+
+        // ── 6.9 Phase 15E: Hi-Z pyramid from this frame's depth ──────────────
+        // Built right after the visibility pass, while the depth buffer holds
+        // exactly the opaque geometry — the only thing that may occlude.
+        self.hiz_pass.record(&mut encoder);
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         {
