@@ -367,29 +367,19 @@ impl SomniumRenderer {
     ) -> Vec<UploadedNode> {
         // 1. Textures --------------------------------------------------------
         let texture_indices: Vec<Option<i32>> = scene.textures.iter().map(|tex| {
-            let row_bytes  = tex.width * 4;
-            let align      = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-            let padded_row = (row_bytes + align - 1) / align * align;
-
-            let upload_data: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
-                std::borrow::Cow::Borrowed(&tex.data)
-            } else {
-                let mut buf = vec![0u8; padded_row as usize * tex.height as usize];
-                for row in 0..tex.height as usize {
-                    let src = row * row_bytes as usize;
-                    let dst = row * padded_row as usize;
-                    buf[dst..dst + row_bytes as usize]
-                        .copy_from_slice(&tex.data[src..src + row_bytes as usize]);
-                }
-                std::borrow::Cow::Owned(buf)
-            };
+            // Full mip chain. Without it, minified textures alias badly — the
+            // sampler asks for trilinear filtering but a single level leaves
+            // nothing to filter between, so detailed materials shimmer at
+            // distance and read as noise.
+            let levels = build_mip_chain(&tex.data, tex.width, tex.height);
+            let mip_level_count = levels.len() as u32;
 
             let wgpu_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Scene Texture"),
                 size: wgpu::Extent3d {
                     width: tex.width, height: tex.height, depth_or_array_layers: 1,
                 },
-                mip_level_count:  1,
+                mip_level_count,
                 sample_count:     1,
                 dimension:        wgpu::TextureDimension::D2,
                 format:           wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -397,21 +387,41 @@ impl SomniumRenderer {
                 view_formats:     &[],
             });
 
-            ctx.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture:   &wgpu_tex,
-                    mip_level: 0,
-                    origin:    wgpu::Origin3d::ZERO,
-                    aspect:    wgpu::TextureAspect::All,
-                },
-                &upload_data,
-                wgpu::TexelCopyBufferLayout {
-                    offset:         0,
-                    bytes_per_row:  Some(padded_row),
-                    rows_per_image: Some(tex.height),
-                },
-                wgpu::Extent3d { width: tex.width, height: tex.height, depth_or_array_layers: 1 },
-            );
+            for (level, (lw, lh, data)) in levels.iter().enumerate() {
+                // write_texture requires rows padded to COPY_BYTES_PER_ROW_ALIGNMENT.
+                let row_bytes  = lw * 4;
+                let align      = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                let padded_row = row_bytes.div_ceil(align) * align;
+
+                let upload: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
+                    std::borrow::Cow::Borrowed(data)
+                } else {
+                    let mut buf = vec![0u8; padded_row as usize * *lh as usize];
+                    for row in 0..*lh as usize {
+                        let src = row * row_bytes as usize;
+                        let dst = row * padded_row as usize;
+                        buf[dst..dst + row_bytes as usize]
+                            .copy_from_slice(&data[src..src + row_bytes as usize]);
+                    }
+                    std::borrow::Cow::Owned(buf)
+                };
+
+                ctx.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture:   &wgpu_tex,
+                        mip_level: level as u32,
+                        origin:    wgpu::Origin3d::ZERO,
+                        aspect:    wgpu::TextureAspect::All,
+                    },
+                    &upload,
+                    wgpu::TexelCopyBufferLayout {
+                        offset:         0,
+                        bytes_per_row:  Some(padded_row),
+                        rows_per_image: Some(*lh),
+                    },
+                    wgpu::Extent3d { width: *lw, height: *lh, depth_or_array_layers: 1 },
+                );
+            }
 
             let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
             Some(self.add_texture(ctx, view) as i32)
@@ -999,5 +1009,85 @@ impl SomniumRenderer {
         self.water_queue.clear();
         self.terrain_queue.clear();
         self.light_gizmo_queue.clear();
+    }
+}
+
+/// Build a full mip chain by repeated 2×2 box filtering.
+///
+/// Returns `(width, height, rgba8)` per level, starting with the original.
+/// Done on the CPU because the imported data is already in system memory and
+/// this runs once per texture at import; a GPU blit chain would be faster but
+/// needs a render pass per level.
+fn build_mip_chain(data: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = vec![(width, height, data.to_vec())];
+    let (mut w, mut h) = (width, height);
+
+    while w > 1 || h > 1 {
+        let (pw, ph, prev) = levels.last().unwrap();
+        let (pw, ph) = (*pw, *ph);
+        let nw = (pw / 2).max(1);
+        let nh = (ph / 2).max(1);
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+
+        for y in 0..nh {
+            for x in 0..nw {
+                // Source 2x2 block, clamped for odd dimensions.
+                let x0 = (x * 2).min(pw - 1);
+                let x1 = (x * 2 + 1).min(pw - 1);
+                let y0 = (y * 2).min(ph - 1);
+                let y1 = (y * 2 + 1).min(ph - 1);
+                let texel = |tx: u32, ty: u32, c: usize| -> u32 {
+                    prev[((ty * pw + tx) * 4) as usize + c] as u32
+                };
+                for c in 0..4 {
+                    let sum = texel(x0, y0, c) + texel(x1, y0, c)
+                            + texel(x0, y1, c) + texel(x1, y1, c);
+                    next[((y * nw + x) * 4) as usize + c] = (sum / 4) as u8;
+                }
+            }
+        }
+
+        levels.push((nw, nh, next));
+        w = nw;
+        h = nh;
+    }
+    levels
+}
+
+#[cfg(test)]
+mod mip_tests {
+    use super::build_mip_chain;
+
+    #[test]
+    fn chain_halves_down_to_one_by_one() {
+        let data = vec![255u8; 8 * 8 * 4];
+        let levels = build_mip_chain(&data, 8, 8);
+        let dims: Vec<(u32, u32)> = levels.iter().map(|(w, h, _)| (*w, *h)).collect();
+        assert_eq!(dims, vec![(8, 8), (4, 4), (2, 2), (1, 1)]);
+    }
+
+    #[test]
+    fn a_flat_colour_survives_downsampling() {
+        let data = vec![100u8; 4 * 4 * 4];
+        for (_, _, level) in build_mip_chain(&data, 4, 4) {
+            assert!(level.iter().all(|&v| v == 100), "box filter shifted a flat colour");
+        }
+    }
+
+    #[test]
+    fn non_square_and_odd_sizes_terminate() {
+        // Odd dimensions must not loop forever or index out of bounds.
+        let data = vec![7u8; 5 * 3 * 4];
+        let levels = build_mip_chain(&data, 5, 3);
+        assert_eq!(levels.last().unwrap().0, 1);
+        assert_eq!(levels.last().unwrap().1, 1);
+    }
+
+    #[test]
+    fn each_level_has_the_expected_byte_count() {
+        let data = vec![0u8; 16 * 16 * 4];
+        for (w, h, level) in build_mip_chain(&data, 16, 16) {
+            assert_eq!(level.len(), (w * h * 4) as usize);
+        }
     }
 }

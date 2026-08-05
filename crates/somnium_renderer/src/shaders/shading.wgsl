@@ -111,6 +111,15 @@ struct ClusterParams {
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
 
+/// Scale applied to image-based ambient.
+///
+/// Physically this should be 1.0, but the engine has no ambient occlusion yet,
+/// so sky light reaches every surface unattenuated — including the insides of
+/// creases and anything sitting in the sun's shadow. At full strength that
+/// washes shadows out badly. Until SSAO (or a glTF occlusion map) lands, the
+/// indirect term is scaled back so shadow contrast survives.
+const IBL_INTENSITY: f32 = 0.35;
+
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
 /// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
 /// is a smooth two-parameter function.
@@ -143,7 +152,7 @@ fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
     let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
 
-    return diffuse + specular;
+    return (diffuse + specular) * IBL_INTENSITY;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
