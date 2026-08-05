@@ -783,7 +783,15 @@ impl SomniumRenderer {
             bytemuck::bytes_of(&gpu_light),
         );
 
-        // ── 2. Build and upload instance buffer ──────────────────────────────
+        // ── 2. Sort draw queue ───────────────────────────────────────────────
+        // This has to happen before the instance buffer is built. Instance `i`
+        // is what draw `i` pulls its model matrix and geometry offsets from, so
+        // reordering the queue afterwards pairs every draw with a different
+        // mesh's offsets — which renders as triangles stretched between
+        // unrelated parts of the geometry pool.
+        self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
+
+        // ── 3. Build and upload instance buffer ──────────────────────────────
         self.instances.clear();
         for cmd in &self.draw_queue {
             self.instances.add_instance(crate::instance::GpuInstanceData {
@@ -818,11 +826,8 @@ impl SomniumRenderer {
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
         self.instances.upload(&ctx.queue);
 
-        // ── 3. Sort draw queue ───────────────────────────────────────────────
-        self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
-
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
-        // Must come after the sort so argument `i` lines up with instance `i`.
+        // Argument `i` lines up with instance `i`, which the sort above keeps true.
         if self.gpu_driven {
             self.indirect.update(&ctx.device, &ctx.queue, &self.draw_queue);
 

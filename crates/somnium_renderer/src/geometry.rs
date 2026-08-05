@@ -75,6 +75,7 @@ impl GeometryPool {
 
     /// Upload mesh data to the GPU and return its allocation info.
     pub fn upload_mesh(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
+        debug_assert_indices_in_range(vertices.len(), indices);
         let v_offset = self.next_vertex;
         let i_offset = self.next_index;
 
@@ -98,6 +99,7 @@ impl GeometryPool {
     /// (first-fit). Pair with [`GeometryPool::free_mesh`] — used by the Phase
     /// 14 voxel chunks, which are remeshed and despawned continuously.
     pub fn upload_mesh_pooled(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
+        debug_assert_indices_in_range(vertices.len(), indices);
         let v_count = vertices.len() as u32;
         let i_count = indices.len() as u32;
 
@@ -224,5 +226,24 @@ mod tests {
     fn empty_mesh_yields_an_inverted_box() {
         let (min, max) = compute_aabb(&[]);
         assert!(min[0] > max[0], "empty mesh must not produce a visible box");
+    }
+}
+
+/// Every index must address a vertex this mesh actually uploaded.
+///
+/// The pool is a bump allocator, so an index past `vertex_count` silently reads
+/// into whichever mesh was uploaded next: the shader pulls a valid-looking
+/// vertex from unrelated geometry and stretches a triangle to it, which on
+/// screen is a fan of long thin shards radiating out of the model.
+/// Nothing traps this on the GPU, so it is worth one pass over the indices at
+/// upload time.
+fn debug_assert_indices_in_range(vertex_count: usize, indices: &[u32]) {
+    if let Some(&max) = indices.iter().max() {
+        if max as usize >= vertex_count {
+            tracing::warn!(
+                "mesh upload: index {max} exceeds its {vertex_count} vertices                  ({} indices) — geometry will render as stray triangles",
+                indices.len(),
+            );
+        }
     }
 }
