@@ -142,8 +142,14 @@ pub enum LightType {
 
 /// ECS component that marks an entity as a light source.
 ///
-/// The light's world-space direction is derived from the entity's `Transform.rotation`:
-/// `forward = rotation.mul_vec3(Vec3::NEG_Z)` points FROM the light (i.e. light_direction = -forward).
+/// Direction comes from the entity's `Transform.rotation`, and two opposite
+/// vectors are in play — mixing them up aims a spot light backwards:
+///
+/// - `forward = rotation * Vec3::NEG_Z` — the direction light **travels**.
+///   This is the spot cone's axis (`GpuLocalLight::direction_ws`).
+/// - `-forward` — the direction **toward** the light, which is what the
+///   directional BRDF wants for `N·L` (`set_directional_light`).
+///
 /// For a directional light, `Transform.translation` is ignored.
 ///
 /// Phase 13C additions:

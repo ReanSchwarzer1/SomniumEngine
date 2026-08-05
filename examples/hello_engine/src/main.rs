@@ -767,12 +767,20 @@ impl GameApp for HelloGame {
                         let transform = unsafe { archetype.column(t_col).get::<Transform>(row) };
                         let light     = unsafe { archetype.column(l_col).get::<LightComponent>(row) };
                         
+                        // Two different conventions, easy to mix up:
+                        //  * `forward` — the direction light TRAVELS (entity -Z).
+                        //    This is the spot cone's axis: the shader tests
+                        //    dot(-L, direction_ws) with -L pointing light→surface.
+                        //  * `to_light` — the direction TOWARD the light, which is
+                        //    what the directional BRDF wants for N·L.
+                        // Passing `to_light` as the spot axis aimed the cone 180°
+                        // away from where the gizmo (correctly) drew it.
                         let forward = transform.rotation.mul_vec3(glam::Vec3::NEG_Z);
-                        let dir = -forward;
-                        
+                        let to_light = -forward;
+
                         match light.light_type {
                             LightType::Directional => {
-                                renderer.set_directional_light(dir, light.color * light.intensity);
+                                renderer.set_directional_light(to_light, light.color * light.intensity);
                             }
                             LightType::Point | LightType::Spot => {
                                 let l_type = if light.light_type == LightType::Point { 0 } else { 1 };
@@ -781,7 +789,8 @@ impl GameApp for HelloGame {
                                     range: light.range,
                                     color: (light.color * light.intensity).to_array(),
                                     light_type: l_type,
-                                    direction_ws: dir.to_array(),
+                                    // Spot axis = travel direction. Unused for point lights.
+                                    direction_ws: forward.to_array(),
                                     spot_cos_outer: light.outer_angle.cos(),
                                     spot_cos_inner: light.inner_angle.cos(),
                                     _pad: [0.0; 3],
