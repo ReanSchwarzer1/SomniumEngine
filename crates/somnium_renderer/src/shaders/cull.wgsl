@@ -1,4 +1,5 @@
 // Phase 15B: GPU instance frustum culling.
+// Phase 15E2: plus two-phase Hi-Z occlusion culling.
 //
 // One thread per draw. Transforms the draw's local AABB into world space,
 // tests it against the six frustum planes, and writes the verdict straight
@@ -38,15 +39,91 @@ struct CullParams {
     planes: array<vec4<f32>, 6>,
     draw_count: u32,
     disabled: u32,
-    _pad0: u32,
-    _pad1: u32,
+    // 0 = phase one, 1 = phase two. See the note above `cs_main`.
+    phase: u32,
+    occlusion_enabled: u32,
+    view_proj: mat4x4<f32>,
+    hiz_size: vec2<f32>,
+    hiz_mip_count: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read>       instances: array<Instance>;
 @group(0) @binding(1) var<storage, read>       aabbs:     array<CullAabb>;
 @group(0) @binding(2) var<storage, read_write> draws:     array<DrawArgs>;
 @group(0) @binding(3) var<uniform>             params:    CullParams;
+@group(0) @binding(4) var                      hiz:       texture_2d<f32>;
+/// Per-draw record of what phase one rejected *on occlusion*. Frustum rejects
+/// are not recorded: they are still off-screen in phase two, and resurrecting
+/// them would draw geometry outside the view.
+@group(0) @binding(5) var<storage, read_write> occluded_flags: array<u32>;
 
+/// Is this world AABB hidden behind what the pyramid already records?
+///
+/// A transliteration of `is_occluded`/`project_aabb_to_screen`/`hiz_mip_level`
+/// in `culling.rs`, which carry the unit tests. Every ambiguous case answers
+/// "not occluded": a wrong `false` costs one wasted draw, a wrong `true`
+/// deletes geometry from the image.
+fn is_occluded(world_min: vec3<f32>, world_max: vec3<f32>) -> bool {
+    var lo = vec2<f32>(1e30);
+    var hi = vec2<f32>(-1e30);
+    var min_z = 1e30;
+
+    for (var c = 0u; c < 8u; c = c + 1u) {
+        let corner = vec3<f32>(
+            select(world_min.x, world_max.x, (c & 1u) != 0u),
+            select(world_min.y, world_max.y, (c & 2u) != 0u),
+            select(world_min.z, world_max.z, (c & 4u) != 0u),
+        );
+        let clip = params.view_proj * vec4<f32>(corner, 1.0);
+        // At or behind the eye the perspective divide is meaningless, so the
+        // box is treated as visible rather than guessed at.
+        if clip.w <= 1e-6 {
+            return false;
+        }
+        let ndc = clip.xyz / clip.w;
+        // Screen V runs downward, hence the flip.
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+        lo = min(lo, uv);
+        hi = max(hi, uv);
+        min_z = min(min_z, ndc.z);
+    }
+
+    lo = clamp(lo, vec2<f32>(0.0), vec2<f32>(1.0));
+    hi = clamp(hi, vec2<f32>(0.0), vec2<f32>(1.0));
+    min_z = max(min_z, 0.0);
+
+    // Pick the level where the footprint spans at most 2x2 texels, so four
+    // samples cover any candidate however large it is on screen.
+    let extent = max(max((hi.x - lo.x) * params.hiz_size.x,
+                         (hi.y - lo.y) * params.hiz_size.y), 1.0);
+    let level = clamp(i32(ceil(log2(extent))) - 1, 0, i32(params.hiz_mip_count) - 1);
+
+    let dims = vec2<f32>(textureDimensions(hiz, level));
+    let t0 = vec2<i32>(clamp(lo * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+    let t1 = vec2<i32>(clamp(hi * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+
+    var furthest = 0.0;
+    furthest = max(furthest, textureLoad(hiz, vec2<i32>(t0.x, t0.y), level).r);
+    furthest = max(furthest, textureLoad(hiz, vec2<i32>(t1.x, t0.y), level).r);
+    furthest = max(furthest, textureLoad(hiz, vec2<i32>(t0.x, t1.y), level).r);
+    furthest = max(furthest, textureLoad(hiz, vec2<i32>(t1.x, t1.y), level).r);
+
+    // A region still at the far plane records no occluder at all.
+    if furthest >= 1.0 {
+        return false;
+    }
+    return min_z > furthest;
+}
+
+// Both phases run this entry point; `params.phase` selects the behaviour.
+//
+// Phase one tests frustum then occlusion against the pyramid left over from the
+// previous frame, and records what it rejected on occlusion. Phase two re-tests
+// exactly that set against the pyramid rebuilt from phase one's depth, which is
+// what catches geometry that became visible this frame. Anything phase two is
+// not re-testing has its instance count zeroed, or phase one's draws would be
+// submitted a second time.
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -56,8 +133,19 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Escape hatch: keep everything (used to A/B the culling result).
     if params.disabled != 0u {
-        draws[i].instance_count = 1u;
+        // Only phase one draws when culling is off, so phase two must not
+        // resubmit the same geometry.
+        draws[i].instance_count = select(1u, 0u, params.phase == 1u);
+        occluded_flags[i] = 0u;
         return;
+    }
+
+    if params.phase == 1u {
+        if occluded_flags[i] == 0u {
+            draws[i].instance_count = 0u;
+            return;
+        }
+        occluded_flags[i] = 0u;
     }
 
     let local_min = aabbs[i].min.xyz;
@@ -66,6 +154,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Empty/degenerate bounds (min > max) never draw.
     if local_min.x > local_max.x || local_min.y > local_max.y || local_min.z > local_max.z {
         draws[i].instance_count = 0u;
+        if params.phase == 0u {
+            occluded_flags[i] = 0u;
+        }
         return;
     }
 
@@ -102,5 +193,22 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    draws[i].instance_count = select(0u, 1u, visible);
+    if !visible {
+        draws[i].instance_count = 0u;
+        if params.phase == 0u {
+            occluded_flags[i] = 0u;
+        }
+        return;
+    }
+
+    var hidden = false;
+    if params.occlusion_enabled != 0u {
+        hidden = is_occluded(world_min, world_max);
+    }
+
+    draws[i].instance_count = select(1u, 0u, hidden);
+    if params.phase == 0u {
+        // Remember it for phase two, which re-tests against a fresher pyramid.
+        occluded_flags[i] = select(0u, 1u, hidden);
+    }
 }

@@ -170,8 +170,11 @@ pub struct SomniumRenderer {
     ibl_pass: crate::pass::ibl::IblPass,
 
     /// Phase 15E: Hi-Z depth pyramid, rebuilt from the visibility depth buffer
-    /// each frame. Consumed by the two-phase occlusion cull in 15E2.
+    /// each frame and consumed by the two-phase occlusion cull.
     pub hiz_pass: crate::pass::hiz::HiZPass,
+    /// False until a pyramid has been built from real geometry. Occlusion
+    /// culling is held off until then — see the note at the cull dispatch.
+    hiz_ready: bool,
 
     /// Phase 15B: GPU frustum-culling compute pass.
     cull_pass: crate::pass::cull::CullPass,
@@ -365,6 +368,7 @@ impl SomniumRenderer {
             material_blend: Vec::new(),
             ibl_pass,
             hiz_pass,
+            hiz_ready: false,
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
             culling_enabled: true,
@@ -650,6 +654,54 @@ impl SomniumRenderer {
     }
 
     /// Resize all internal renderer targets.
+    /// Record one visibility pass.
+    ///
+    /// `clear` distinguishes the two occlusion phases: phase one clears the
+    /// targets, phase two loads them so it adds to what phase one drew rather
+    /// than starting over.
+    fn record_visibility(&self, encoder: &mut wgpu::CommandEncoder, clear: bool) {
+        let color_load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let depth_load = if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load };
+
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Visibility Pass"),
+            multiview_mask: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.vis_pass.view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.vis_pass.depth_view,
+                depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        rpass.set_pipeline(&self.vis_pass.pipeline);
+        rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
+
+        if self.gpu_driven && !self.indirect.is_empty() {
+            // Phase 15A: the whole scene in one call. Culled draws simply carry
+            // instance_count = 0 and cost nothing.
+            rpass.multi_draw_indirect(&self.indirect.buffer, 0, self.indirect.len() as u32);
+        } else if clear {
+            // Fallback for devices without multi-draw indirect. There are no
+            // indirect args to cull, so everything is drawn in phase one and
+            // phase two has nothing to add.
+            for (inst_id, cmd) in self.draw_queue.iter().enumerate() {
+                rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));
+            }
+        }
+    }
+
     pub fn resize(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.vis_pass.resize(&ctx.device, width, height, &self.global_pool.layout);
@@ -659,6 +711,9 @@ impl SomniumRenderer {
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
             self.hiz_pass.resize(&ctx.device, width, height, &self.vis_pass.depth_view);
+            // The new texture is zero-filled, i.e. everything at the near
+            // plane, so occlusion has to stand down until it is rebuilt.
+            self.hiz_ready = false;
         }
     }
 
@@ -872,6 +927,9 @@ impl SomniumRenderer {
                 &self.cull_aabbs,
                 self.view_proj,
                 !self.culling_enabled,
+                self.hiz_pass.size(),
+                self.hiz_pass.mip_count(),
+                self.hiz_ready,
             );
         }
 
@@ -898,64 +956,61 @@ impl SomniumRenderer {
             &self.draw_queue,
         );
 
-        // ── 5.5 Phase 15B: GPU instance culling ──────────────────────────────
-        // Writes instance_count = 0 into the indirect args for off-screen
-        // draws, so the visibility pass skips them at no cost.
-        if self.gpu_driven && !self.indirect.is_empty() {
+        // ── 5.5 Phase 15B/15E2: two-phase GPU instance culling ───────────────
+        //
+        //   cull phase 1   frustum, then occlusion against LAST frame's pyramid
+        //   visibility     draw the survivors (clears the targets)
+        //   Hi-Z build     pyramid now reflects what is actually on screen
+        //   cull phase 2   re-test only what phase 1 rejected on occlusion
+        //   visibility     draw whatever became visible (loads, never clears)
+        //   Hi-Z build     final pyramid, which next frame's phase 1 reads
+        //
+        // Reprojecting the previous frame alone would drop geometry the moment
+        // the camera moves. The second phase is what makes that safe: anything
+        // wrongly rejected gets a look at fresh depth within the same frame.
+        let cull_active = self.gpu_driven && !self.indirect.is_empty();
+
+        if cull_active {
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
                 &self.instances.buffer,
                 &self.indirect.buffer,
+                &self.hiz_pass.view,
+                0,
                 self.indirect.len(),
             );
         }
 
-        // ── 6. Visibility Pass ───────────────────────────────────────────────
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Visibility Pass"),
-                multiview_mask: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.vis_pass.view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.vis_pass.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load:  wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        // ── 6. Visibility Pass (phase 1) ─────────────────────────────────────
+        self.record_visibility(&mut encoder, true);
 
-            rpass.set_pipeline(&self.vis_pass.pipeline);
-            rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
+        // ── 6.5 Hi-Z pyramid from phase 1 depth ──────────────────────────────
+        self.hiz_pass.record(&mut encoder);
 
-            if self.gpu_driven && !self.indirect.is_empty() {
-                // Phase 15A: the whole scene in one call. Culled draws (Phase
-                // 15B) simply carry instance_count = 0 and cost nothing.
-                rpass.multi_draw_indirect(&self.indirect.buffer, 0, self.indirect.len() as u32);
-            } else {
-                // Fallback for devices without multi-draw indirect.
-                for (inst_id, cmd) in self.draw_queue.iter().enumerate() {
-                    rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));
-                }
-            }
+        if cull_active {
+            // ── 6.7 Cull phase 2 ─────────────────────────────────────────────
+            self.cull_pass.record(
+                &ctx.device,
+                &mut encoder,
+                &self.instances.buffer,
+                &self.indirect.buffer,
+                &self.hiz_pass.view,
+                1,
+                self.indirect.len(),
+            );
+
+            // ── 6.8 Visibility Pass (phase 2) — disocclusions ────────────────
+            self.record_visibility(&mut encoder, false);
+
+            // ── 6.9 Final pyramid, for the next frame's phase 1 ──────────────
+            self.hiz_pass.record(&mut encoder);
         }
 
-        // ── 6.9 Phase 15E: Hi-Z pyramid from this frame's depth ──────────────
-        // Built right after the visibility pass, while the depth buffer holds
-        // exactly the opaque geometry — the only thing that may occlude.
-        self.hiz_pass.record(&mut encoder);
+        // Occlusion culling stays off until a pyramid has been built from real
+        // geometry. wgpu zero-fills a new texture, and zero is the near plane,
+        // which would read as "everything is occluded" on the first frame.
+        self.hiz_ready = true;
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         {

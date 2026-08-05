@@ -42,7 +42,21 @@ pub struct GpuCullParams {
     pub draw_count: u32,
     /// `0` = cull normally, `1` = force everything visible (debug / fallback).
     pub disabled: u32,
-    pub _pad: [u32; 2],
+    /// Phase 15E2. `0` = phase one, which tests frustum then occlusion against
+    /// the *previous* frame's pyramid. `1` = phase two, which re-tests only the
+    /// draws phase one rejected on occlusion, against the pyramid just rebuilt
+    /// from phase one's depth.
+    pub phase: u32,
+    /// `0` leaves frustum culling in place but skips the occlusion half. Held
+    /// off on the first frame, before the pyramid has any real content.
+    pub occlusion_enabled: u32,
+    /// View-projection used to project bounds to screen for the Hi-Z lookup.
+    pub view_proj: [[f32; 4]; 4],
+    /// Hi-Z level 0 dimensions, in texels.
+    pub hiz_size: [f32; 2],
+    /// Levels in the pyramid, so the shader can clamp its mip choice.
+    pub hiz_mip_count: u32,
+    pub _pad: u32,
 }
 
 /// Extract the six frustum planes from a view-projection matrix.
@@ -434,5 +448,50 @@ mod hiz_tests {
         // the next frame; rejecting it would make geometry flicker out.
         let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.5 };
         assert!(!is_occluded(&b, 0.5));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn cull_params_matches_the_wgsl_struct() {
+        // `CullParams` in cull.wgsl, under std140-ish uniform rules:
+        //   planes            array<vec4<f32>, 6>   offset   0, size 96
+        //   draw_count        u32                   offset  96
+        //   disabled          u32                   offset 100
+        //   phase             u32                   offset 104
+        //   occlusion_enabled u32                   offset 108
+        //   view_proj         mat4x4<f32>           offset 112 (align 16), size 64
+        //   hiz_size          vec2<f32>             offset 176
+        //   hiz_mip_count     u32                   offset 184
+        //   _pad              u32                   offset 188
+        //                                           total  192
+        //
+        // A mismatch here does not fail to compile or validate — the shader
+        // simply reads the wrong words and culls the wrong things, which shows
+        // up as geometry flickering out rather than as an error.
+        assert_eq!(std::mem::size_of::<GpuCullParams>(), 192);
+        assert_eq!(std::mem::align_of::<GpuCullParams>(), 4);
+
+        let p = GpuCullParams {
+            planes: [[0.0; 4]; 6],
+            draw_count: 0,
+            disabled: 0,
+            phase: 0,
+            occlusion_enabled: 0,
+            view_proj: [[0.0; 4]; 4],
+            hiz_size: [0.0; 2],
+            hiz_mip_count: 0,
+            _pad: 0,
+        };
+        let base = &p as *const _ as usize;
+        let off = |field: *const _| field as usize - base;
+        assert_eq!(off(&p.draw_count as *const _ as *const u8), 96);
+        assert_eq!(off(&p.phase as *const _ as *const u8), 104);
+        assert_eq!(off(&p.view_proj as *const _ as *const u8), 112);
+        assert_eq!(off(&p.hiz_size as *const _ as *const u8), 176);
+        assert_eq!(off(&p.hiz_mip_count as *const _ as *const u8), 184);
     }
 }

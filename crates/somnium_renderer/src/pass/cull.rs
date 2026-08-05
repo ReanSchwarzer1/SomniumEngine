@@ -18,8 +18,12 @@ pub struct CullPass {
     layout: wgpu::BindGroupLayout,
     /// Per-draw local AABBs, rebuilt each frame alongside the indirect args.
     aabb_buffer: wgpu::Buffer,
-    /// Frustum planes + draw count.
-    params_buffer: wgpu::Buffer,
+    /// Frustum planes, draw count and Hi-Z parameters — one per phase, because
+    /// both dispatches are encoded before either runs and a single uniform
+    /// buffer could not hold two different `phase` values.
+    params_buffers: [wgpu::Buffer; 2],
+    /// Phase 15E2: per-draw record of what phase one rejected on occlusion.
+    flags_buffer: wgpu::Buffer,
     /// Capacity in draws.
     capacity: usize,
     /// CPU staging for the AABB array, reused across frames.
@@ -78,6 +82,29 @@ impl CullPass {
                     },
                     count: None,
                 },
+                // 4: Hi-Z pyramid (read). Sampled with textureLoad only, so it
+                // never needs to filter.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 5: occlusion-reject flags (read_write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -105,15 +132,29 @@ impl CullPass {
             pipeline,
             layout,
             aabb_buffer: Self::alloc_aabbs(device, INITIAL_CAPACITY),
-            params_buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Cull Params"),
-                size: std::mem::size_of::<GpuCullParams>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+            params_buffers: std::array::from_fn(|phase| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(if phase == 0 { "Cull Params P1" } else { "Cull Params P2" }),
+                    size: std::mem::size_of::<GpuCullParams>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
             }),
+            flags_buffer: Self::alloc_flags(device, INITIAL_CAPACITY),
             capacity: INITIAL_CAPACITY,
             staging: Vec::with_capacity(INITIAL_CAPACITY),
         }
+    }
+
+    fn alloc_flags(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Occlusion Flags"),
+            // Phase one writes every entry it reads, so this never needs
+            // clearing between frames.
+            size: (capacity * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
     }
 
     fn alloc_aabbs(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -136,6 +177,9 @@ impl CullPass {
         aabbs: &[GpuCullAabb],
         view_proj: glam::Mat4,
         disabled: bool,
+        hiz_size: (u32, u32),
+        hiz_mip_count: u32,
+        occlusion_enabled: bool,
     ) {
         self.staging.clear();
         self.staging.extend_from_slice(aabbs);
@@ -146,6 +190,7 @@ impl CullPass {
                 cap *= 2;
             }
             self.aabb_buffer = Self::alloc_aabbs(device, cap);
+            self.flags_buffer = Self::alloc_flags(device, cap);
             self.capacity = cap;
         }
 
@@ -153,22 +198,34 @@ impl CullPass {
             queue.write_buffer(&self.aabb_buffer, 0, bytemuck::cast_slice(&self.staging));
         }
 
-        let params = GpuCullParams {
+        let mut params = GpuCullParams {
             planes: crate::culling::frustum_planes(view_proj),
             draw_count: self.staging.len() as u32,
             disabled: u32::from(disabled),
-            _pad: [0; 2],
+            phase: 0,
+            occlusion_enabled: u32::from(occlusion_enabled),
+            view_proj: view_proj.to_cols_array_2d(),
+            hiz_size: [hiz_size.0 as f32, hiz_size.1 as f32],
+            hiz_mip_count,
+            _pad: 0,
         };
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
+        queue.write_buffer(&self.params_buffers[0], 0, bytemuck::bytes_of(&params));
+        params.phase = 1;
+        queue.write_buffer(&self.params_buffers[1], 0, bytemuck::bytes_of(&params));
     }
 
-    /// Dispatch the cull, writing verdicts into `indirect_buffer`.
+    /// Dispatch one phase of the cull, writing verdicts into `indirect_buffer`.
+    ///
+    /// `phase` is 0 or 1; see the note above `cs_main` in `cull.wgsl`.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         instance_buffer: &wgpu::Buffer,
         indirect_buffer: &wgpu::Buffer,
+        hiz_view: &wgpu::TextureView,
+        phase: usize,
         draw_count: usize,
     ) {
         if draw_count == 0 {
@@ -184,12 +241,14 @@ impl CullPass {
                 wgpu::BindGroupEntry { binding: 0, resource: instance_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.aabb_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: indirect_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.params_buffers[phase].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(hiz_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: self.flags_buffer.as_entire_binding() },
             ],
         });
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Instance Cull Pass"),
+            label: if phase == 0 { Some("Instance Cull Phase 1") } else { Some("Instance Cull Phase 2") },
             timestamp_writes: None,
         });
         cpass.set_pipeline(&self.pipeline);
