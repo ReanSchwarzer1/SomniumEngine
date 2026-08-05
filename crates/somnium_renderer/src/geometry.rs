@@ -45,6 +45,14 @@ pub struct GeometryPool {
     /// the renderer looks the box up when it builds the cull buffer, and a draw
     /// with no entry is simply never culled.
     aabbs: std::collections::HashMap<u32, ([f32; 3], [f32; 3])>,
+
+    /// Phase 15D: per-mesh clusters, keyed by `vertex_offset` like `aabbs`.
+    ///
+    /// Only static uploads are clustered. Pooled uploads are the voxel chunks,
+    /// which are remeshed continuously as the camera moves — paying the sort on
+    /// every remesh would cost more than the culling saves, and a chunk is
+    /// already small enough to cull as a unit.
+    meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
 }
 
 impl GeometryPool {
@@ -70,12 +78,20 @@ impl GeometryPool {
             next_index: 0,
             free_blocks: Vec::new(),
             aabbs: std::collections::HashMap::new(),
+            meshlets: std::collections::HashMap::new(),
         }
     }
 
     /// Upload mesh data to the GPU and return its allocation info.
     pub fn upload_mesh(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
         debug_assert_indices_in_range(vertices.len(), indices);
+
+        // Phase 15D: cluster the mesh and upload the permuted index buffer, so
+        // each meshlet is a contiguous range that 15F can draw directly.
+        // Triangle order within a draw does not affect the image.
+        let build = crate::meshlet::build_meshlets(vertices, indices);
+        let indices: &[u32] = if build.meshlets.is_empty() { indices } else { &build.indices };
+
         let v_offset = self.next_vertex;
         let i_offset = self.next_index;
 
@@ -92,7 +108,20 @@ impl GeometryPool {
             index_capacity: indices.len() as u32,
         };
         self.write_mesh(queue, &alloc, vertices, indices);
+        if !build.meshlets.is_empty() {
+            self.meshlets.insert(v_offset, build.meshlets);
+        }
         alloc
+    }
+
+    /// Clusters for the mesh at `vertex_offset`, if it was clustered.
+    pub fn mesh_meshlets(&self, vertex_offset: u32) -> Option<&[crate::meshlet::Meshlet]> {
+        self.meshlets.get(&vertex_offset).map(|v| v.as_slice())
+    }
+
+    /// Total clusters across every uploaded mesh. Diagnostic for 15E/15F.
+    pub fn meshlet_count(&self) -> usize {
+        self.meshlets.values().map(|m| m.len()).sum()
     }
 
     /// Upload a dynamic mesh, reusing a freed block when one is big enough

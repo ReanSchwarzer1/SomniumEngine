@@ -19,6 +19,7 @@ pub mod geometry;
 pub mod indirect;
 pub mod instance;
 pub mod material;
+pub mod meshlet;
 pub mod pass;
 pub mod renderer;
 pub mod shadow;
