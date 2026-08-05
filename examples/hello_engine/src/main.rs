@@ -135,7 +135,6 @@ struct EditorCamera {
     position:      Vec3,
     yaw:           f32,
     pitch:         f32,
-    speed:         f32,
     sensitivity:   f32,
     is_rmb_down:   bool,
     move_forward:  bool,
@@ -151,7 +150,7 @@ impl EditorCamera {
     fn new(position: Vec3) -> Self {
         Self {
             position, yaw: -90.0, pitch: -20.0,
-            speed: 5.0, sensitivity: 0.1,
+            sensitivity: 0.1,
             is_rmb_down: false,
             move_forward: false, move_backward: false,
             move_left: false, move_right: false,
@@ -160,9 +159,12 @@ impl EditorCamera {
         }
     }
 
-    fn update(&mut self, dt: f32) {
+    /// `base_speed` is the editor camera speed from the viewport toolbar
+    /// (Phase 20B) — the camera no longer owns it, so the slider and the
+    /// RMB+wheel shortcut both drive movement directly.
+    fn update(&mut self, dt: f32, base_speed: f32) {
         if !self.is_rmb_down { return; }
-        let speed = if self.is_shifting { self.speed * 3.0 } else { self.speed };
+        let speed = if self.is_shifting { base_speed * 3.0 } else { base_speed };
         let forward = self.forward_vector();
         let right = forward.cross(Vec3::Y).normalize();
         if self.move_forward  { self.position += forward * speed * dt; }
@@ -688,6 +690,18 @@ impl GameApp for HelloGame {
                 self.camera.is_rmb_down = *state == InputState::Pressed;
             }
 
+            // RMB + scroll wheel adjusts fly speed, matching UE5's muscle
+            // memory. Steps are multiplicative so the feel is the same at
+            // 0.5 m/s and at 500 m/s.
+            EngineEvent::MouseWheel { delta_y } => {
+                if self.camera.is_rmb_down {
+                    let current = ctx.camera_speed;
+                    let scaled = current * 1.15_f32.powf(*delta_y as f32);
+                    let norm = somnium_core::normalized_from_camera_speed(scaled);
+                    ctx.set_camera_speed(norm);
+                }
+            }
+
             EngineEvent::MouseMotion { delta_x, delta_y } => {
                 if self.camera.is_rmb_down {
                     self.camera.yaw   += delta_x * self.camera.sensitivity;
@@ -727,7 +741,7 @@ impl GameApp for HelloGame {
             }
         }
 
-        self.camera.update(dt);
+        self.camera.update(dt, ctx.camera_speed);
         self.log_timer += dt;
 
         // Phase 14: create/destroy the voxel driver to match the ECS, then

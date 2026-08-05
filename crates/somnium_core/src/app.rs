@@ -121,6 +121,9 @@ pub struct Engine<G: GameApp> {
     terrain_stroke: Option<TerrainStroke>,
     /// Restore ops produced by `TerrainEditCmd` undo/redo, applied before render.
     terrain_restore_queue: TerrainRestoreQueue,
+    /// Phase 20B: editor camera speed as a normalized 0..1 slider position.
+    /// Game code reads the mapped speed via `EngineContext::camera_speed`.
+    camera_speed_norm: f32,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -176,6 +179,7 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_brush: TerrainBrush::default(),
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
+            camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
         };
 
         event_loop
@@ -212,6 +216,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_event(&mut ctx, &EngineEvent::Resumed);
             return;
@@ -258,6 +263,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.renderer.as_mut(),
                     &mut self.selected_entity,
                     self.ui_manager.as_mut().unwrap(),
+                    crate::camera_speed_from_normalized(self.camera_speed_norm),
                 );
                 self.game.on_init(&mut ctx);
 
@@ -288,6 +294,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_event(&mut ctx, &EngineEvent::Suspended);
         }
@@ -530,8 +537,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_event(&mut ctx, &engine_event);
+            let speed_request = ctx.camera_speed_request;
 
             if ctx.should_exit {
                 self.initiate_shutdown(event_loop);
@@ -540,6 +549,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
             if matches!(engine_event, EngineEvent::WindowCloseRequested) {
                 self.initiate_shutdown(event_loop);
+            }
+
+            // Phase 20B: apply a camera-speed change requested by game code
+            // (RMB + wheel) and keep the toolbar slider in sync with it.
+            if let Some(norm) = speed_request {
+                self.camera_speed_norm = norm;
+                let speed = crate::camera_speed_from_normalized(norm);
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_camera_speed(norm, speed);
+                }
             }
         }
     }
@@ -575,6 +594,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_event(&mut ctx, &ev);
         }
@@ -622,6 +642,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_update(&mut ctx);
         }
@@ -693,6 +714,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer.as_mut(),
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
             );
             self.game.on_render(&mut ctx);
             
@@ -1510,6 +1532,14 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);
+            }
+
+            EditorEvent::SetCameraSpeed(normalized) => {
+                self.camera_speed_norm = normalized.clamp(0.0, 1.0);
+                let speed = crate::camera_speed_from_normalized(self.camera_speed_norm);
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_camera_speed(self.camera_speed_norm, speed);
+                }
             }
 
             EditorEvent::ImportModel => {

@@ -26,6 +26,7 @@ use crate::{
         grid::{Column, GridBuilder, Row},
         numeric_field::{NumericFieldBuilder, NumericFieldMessage},
         scroll_viewer::ScrollViewerBuilder,
+        slider::{SliderBuilder, SliderMessage},
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
         popup::{PopupBuilder, PopupMessage},
@@ -82,6 +83,8 @@ struct EditorLayout {
     file_button:        NodeHandle,
     file_popup:         NodeHandle,
     file_import_item:   NodeHandle,
+    camera_speed_slider: NodeHandle,
+    camera_speed_label:  NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, u8)>,
     inspector_handles:  InspectorHandles,
     viewport_handle:    NodeHandle,
@@ -118,6 +121,9 @@ pub struct UiManager {
     file_popup:          NodeHandle,
     file_popup_open:     bool,
     file_import_item:    NodeHandle,
+    // Viewport toolbar (Phase 20B): camera speed
+    camera_speed_slider: NodeHandle,
+    camera_speed_label:  NodeHandle,
     // Terrain tool buttons (Phase 14F): (button_handle, BrushMode index)
     terrain_tool_items:  Vec<(NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -190,6 +196,8 @@ impl UiManager {
             file_popup:         layout.file_popup,
             file_popup_open:    false,
             file_import_item:   layout.file_import_item,
+            camera_speed_slider: layout.camera_speed_slider,
+            camera_speed_label:  layout.camera_speed_label,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows:      Vec::new(),
             inspector_handles:  layout.inspector_handles,
@@ -277,6 +285,20 @@ impl UiManager {
     }
 
     // ── Live UI updates ───────────────────────────────────────────────────────
+
+    /// Update the camera-speed slider and its readout (Phase 20B).
+    ///
+    /// `normalized` is the slider position in `0..=1`; `speed` is the resulting
+    /// world speed, shown as text. Called when the scroll wheel changes the
+    /// speed so the widget stays in sync with the camera.
+    pub fn update_camera_speed(&mut self, normalized: f32, speed: f32) {
+        self.native_ui
+            .send(SliderMessage::set_value(self.camera_speed_slider, normalized));
+        self.native_ui.send(TextMessage::set_text(
+            self.camera_speed_label,
+            format!("{speed:.1} m/s"),
+        ));
+    }
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
     pub fn update_outliner(&mut self, entities: &[(u32, String)], selected: Option<u32>) {
@@ -540,6 +562,13 @@ impl UiManager {
                 }
             }
 
+            // — Camera speed slider (Phase 20B) ————————
+            if let Some(SliderMessage::Value(v)) = msg.data::<SliderMessage>() {
+                if msg.destination == self.camera_speed_slider {
+                    self.editor_events.push_back(EditorEvent::SetCameraSpeed(*v));
+                }
+            }
+
             // — NumericField value changes ————————
             if let Some(NumericFieldMessage::ValueChanged(v)) = msg.data::<NumericFieldMessage>() {
                 let v = *v;
@@ -560,9 +589,10 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     let outer_grid = GridBuilder::new(
         WidgetBuilder::new().with_background(theme::TRANSPARENT),
     )
-    .add_row(Row::strict(28.0))
-    .add_row(Row::stretch())
-    .add_row(Row::strict(160.0))
+    .add_row(Row::strict(28.0))   // menu bar
+    .add_row(Row::strict(26.0))   // viewport toolbar (camera speed)
+    .add_row(Row::stretch())      // main area
+    .add_row(Row::strict(160.0))  // output log
     .add_column(Column::stretch())
     .build();
     let outer_h = ui.add_node(outer_grid, root);
@@ -667,10 +697,73 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     ui.add_node(view_item, menu_stack_h);
 
-    // ── Row 1: inner grid — toolbar | viewport | right panel ─────────────────
-    let inner_grid = GridBuilder::new(
+    // ── Row 1: viewport toolbar — camera speed (Phase 20B) ───────────────────
+    // Sits between the menu bar and the viewport, like UE5's viewport toolbar.
+    let vp_bar = BorderBuilder::new(
         WidgetBuilder::new()
             .with_row(1).with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness { left: 0.0, right: 0.0, top: 0.0, bottom: 1.0 })
+    .build();
+    let vp_bar_h = ui.add_node(vp_bar, outer_h);
+
+    let vp_stack = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let vp_stack_h = ui.add_node(vp_stack, vp_bar_h);
+
+    let cam_lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness { left: 10.0, top: 6.0, right: 6.0, bottom: 0.0 }),
+    )
+    .with_text("Camera Speed")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_SECONDARY)
+    .build();
+    ui.add_node(cam_lbl, vp_stack_h);
+
+    let cam_slider_node = SliderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(140.0)
+            .with_margin(Thickness { left: 0.0, top: 4.0, right: 8.0, bottom: 0.0 }),
+    )
+    .with_value(0.5)
+    .build();
+    let camera_speed_slider = ui.add_node(cam_slider_node, vp_stack_h);
+
+    // Numeric readout, updated as the slider (or RMB+wheel) changes speed.
+    let cam_val = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_width(84.0)
+            .with_margin(Thickness { left: 0.0, top: 6.0, right: 0.0, bottom: 0.0 }),
+    )
+    .with_text("5.0 m/s")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
+
+    let hint = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness { left: 4.0, top: 6.0, right: 0.0, bottom: 0.0 }),
+    )
+    .with_text("(RMB + scroll wheel)")
+    .with_font_size(10.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_SECONDARY)
+    .build();
+    ui.add_node(hint, vp_stack_h);
+
+    // ── Row 2: inner grid — toolbar | viewport | right panel ─────────────────
+    let inner_grid = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_row(2).with_column(0)
             .with_background(theme::TRANSPARENT),
     )
     .add_row(Row::stretch())
@@ -850,7 +943,7 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     // ── Row 2: bottom log panel ───────────────────────────────────────────────
     let bottom = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(2).with_column(0)
+            .with_row(3).with_column(0)
             .with_background(theme::BG_DARK)
             .with_foreground(theme::BORDER_DARK),
     )
@@ -920,6 +1013,8 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         file_button,
         file_popup,
         file_import_item,
+        camera_speed_slider,
+        camera_speed_label,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,

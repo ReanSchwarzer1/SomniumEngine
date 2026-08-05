@@ -87,6 +87,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 ### Editor controls (demo)
 
 - **Right mouse + WASD/QE** — fly camera (Shift = faster)
+- **RMB + scroll wheel** — adjust fly speed (0.5–500 m/s), or drag the **Camera Speed** slider above the viewport
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path

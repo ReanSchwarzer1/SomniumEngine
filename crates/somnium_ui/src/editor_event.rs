@@ -77,6 +77,9 @@ pub enum EditorEvent {
     SetTerrainTool(u8),
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
+    /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
+    /// (the engine maps it exponentially to a world speed).
+    SetCameraSpeed(f32),
     /// File > Import Model — opens a native file picker and imports a glTF/GLB
     /// model into the scene at the world origin (Phase 19B).
     ImportModel,

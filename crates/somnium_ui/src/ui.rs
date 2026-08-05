@@ -558,6 +558,17 @@ impl UserInterface {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+                // While a widget holds the mouse (a slider being dragged), it
+                // keeps receiving moves even when the cursor leaves its bounds.
+                let captured = to_nh(self.captured_ih);
+                if captured.is_some() {
+                    let pos = self.cursor_pos;
+                    self.send(UiMessage::new(
+                        captured,
+                        MessageDirection::ToWidget,
+                        WidgetMessage::MouseMove { pos },
+                    ));
+                }
                 false // Never consumed — both UI and game need cursor tracking
             }
 
@@ -595,11 +606,24 @@ impl UserInterface {
                         self.send(UiMessage::new(hit, MessageDirection::ToWidget, WidgetMessage::Focus));
                     }
                 }
-                let wmsg = match state {
-                    ElementState::Pressed  => WidgetMessage::MouseDown { pos, button: *button },
-                    ElementState::Released => WidgetMessage::MouseUp   { pos, button: *button },
+
+                // Press captures the mouse; release delivers to the capturing
+                // widget rather than whatever is under the cursor. Without this
+                // a widget that was pressed and then released elsewhere never
+                // sees its MouseUp and stays stuck in the pressed state.
+                let (target, wmsg) = match state {
+                    ElementState::Pressed => {
+                        self.captured_ih = to_ih(hit);
+                        (hit, WidgetMessage::MouseDown { pos, button: *button })
+                    }
+                    ElementState::Released => {
+                        let captured = to_nh(self.captured_ih);
+                        self.captured_ih = IH::NONE;
+                        let target = if captured.is_some() { captured } else { hit };
+                        (target, WidgetMessage::MouseUp { pos, button: *button })
+                    }
                 };
-                self.send(UiMessage::new(hit, MessageDirection::ToWidget, wmsg));
+                self.send(UiMessage::new(target, MessageDirection::ToWidget, wmsg));
                 true
             }
 

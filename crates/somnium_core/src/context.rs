@@ -55,6 +55,16 @@ pub struct EngineContext<'a> {
     /// The currently selected entity.
     pub selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
 
+    /// Editor camera speed in m/s, driven by the viewport toolbar slider and
+    /// RMB + scroll wheel (Phase 20B). Game code reads this each frame rather
+    /// than owning its own speed.
+    pub camera_speed: f32,
+
+    /// Set by [`Self::set_camera_speed`]; the engine applies it after the
+    /// callback returns. Same read-back pattern as `should_exit`, since the
+    /// context is rebuilt per callback and cannot own the state.
+    pub camera_speed_request: Option<f32>,
+
     /// The UI manager for sending messages to the HTML frontend.
     pub ui: &'a mut UiManager,
 
@@ -67,6 +77,13 @@ pub struct EngineContext<'a> {
 }
 
 impl<'a> EngineContext<'a> {
+    /// Request a new editor camera speed, as a normalized `0..=1` slider
+    /// position. Applied by the engine once the callback returns, which also
+    /// refreshes the viewport toolbar so the slider tracks the change.
+    pub fn set_camera_speed(&mut self, normalized: f32) {
+        self.camera_speed_request = Some(normalized.clamp(0.0, 1.0));
+    }
+
     /// Construct a new context.
     ///
     /// This is called internally by [`Engine`](crate::app::Engine) each
@@ -81,6 +98,7 @@ impl<'a> EngineContext<'a> {
         renderer: Option<&'a mut SomniumRenderer>,
         selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
         ui: &'a mut UiManager,
+        camera_speed: f32,
     ) -> Self {
         Self {
             time,
@@ -91,6 +109,8 @@ impl<'a> EngineContext<'a> {
             render_ctx,
             renderer,
             selected_entity,
+            camera_speed,
+            camera_speed_request: None,
             ui,
             should_exit: false,
         }

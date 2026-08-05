@@ -322,6 +322,37 @@ impl Default for VoxelTerrainComponent {
 }
 impl somnium_ecs::Component for VoxelTerrainComponent {}
 
+// ─── Phase 20B: Editor camera speed ─────────────────────────────────────────
+
+/// Slowest editor camera speed (m/s) at slider position 0.
+pub const MIN_CAMERA_SPEED: f32 = 0.5;
+/// Fastest editor camera speed (m/s) at slider position 1.
+///
+/// Generous on purpose: imported scenes are often authored at wildly different
+/// scales, and crawling across a city-sized glTF at 5 m/s is unusable.
+pub const MAX_CAMERA_SPEED: f32 = 500.0;
+/// Slider position giving the historical default of ~5 m/s.
+pub const DEFAULT_CAMERA_SPEED_NORM: f32 = 0.334;
+
+/// Map a normalized slider position to a world speed.
+///
+/// Exponential rather than linear: the useful range spans three orders of
+/// magnitude, and a linear slider would spend most of its travel on speeds too
+/// fast to control while making slow, precise movement unselectable.
+#[must_use]
+pub fn camera_speed_from_normalized(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    MIN_CAMERA_SPEED * (MAX_CAMERA_SPEED / MIN_CAMERA_SPEED).powf(t)
+}
+
+/// Inverse of [`camera_speed_from_normalized`], for driving the slider from
+/// the scroll wheel.
+#[must_use]
+pub fn normalized_from_camera_speed(speed: f32) -> f32 {
+    let s = speed.clamp(MIN_CAMERA_SPEED, MAX_CAMERA_SPEED);
+    (s / MIN_CAMERA_SPEED).ln() / (MAX_CAMERA_SPEED / MIN_CAMERA_SPEED).ln()
+}
+
 // ─── Phase 15A1: Post-processing volume ─────────────────────────────────────
 
 /// Scene-wide post-processing settings, exposed as a selectable entity.
@@ -736,3 +767,38 @@ impl Default for WaterComponent {
 }
 
 impl somnium_ecs::Component for WaterComponent {}
+
+#[cfg(test)]
+mod camera_speed_tests {
+    use super::*;
+
+    #[test]
+    fn slider_ends_map_to_the_configured_range() {
+        assert!((camera_speed_from_normalized(0.0) - MIN_CAMERA_SPEED).abs() < 1e-4);
+        assert!((camera_speed_from_normalized(1.0) - MAX_CAMERA_SPEED).abs() < 1e-2);
+    }
+
+    #[test]
+    fn the_default_position_is_about_five_metres_per_second() {
+        let s = camera_speed_from_normalized(DEFAULT_CAMERA_SPEED_NORM);
+        assert!((s - 5.0).abs() < 0.5, "default speed was {s}");
+    }
+
+    #[test]
+    fn mapping_round_trips() {
+        for t in [0.0_f32, 0.15, 0.5, 0.75, 1.0] {
+            let back = normalized_from_camera_speed(camera_speed_from_normalized(t));
+            assert!((back - t).abs() < 1e-4, "{t} -> {back}");
+        }
+    }
+
+    #[test]
+    fn speed_increases_monotonically() {
+        let mut prev = 0.0;
+        for i in 0..=20 {
+            let s = camera_speed_from_normalized(i as f32 / 20.0);
+            assert!(s > prev, "not monotonic at {i}");
+            prev = s;
+        }
+    }
+}
