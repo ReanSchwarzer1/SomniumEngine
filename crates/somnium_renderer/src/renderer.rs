@@ -164,6 +164,9 @@ pub struct SomniumRenderer {
     /// Whether the device supports it at all (gates the runtime toggle).
     supports_gpu_driven: bool,
 
+    /// Phase 19: environment cubemap for image-based lighting.
+    ibl_pass: crate::pass::ibl::IblPass,
+
     /// Phase 15B: GPU frustum-culling compute pass.
     cull_pass: crate::pass::cull::CullPass,
     /// Per-draw local AABBs for culling, rebuilt each frame.
@@ -248,6 +251,11 @@ impl SomniumRenderer {
         // Phase 11B: Depth-only shadow pass (4 cascades into the atlas).
         let shadow_pass = ShadowPass::new(&ctx.device, &ctx.queue, &global_pool.layout);
 
+        // Phase 19: build the environment cubemap before the shading pass, which
+        // binds it. Contents are generated on the first frame (and whenever the
+        // sun changes), not here.
+        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device);
+
         let vis_pass = VisibilityBufferPass::new(
             &ctx.device, ctx.config.width, ctx.config.height, &global_pool.layout,
         );
@@ -258,6 +266,8 @@ impl SomniumRenderer {
             &vis_pass.view,
             &shadow_resources.atlas_depth_view,
             &shadow_resources.comparison_sampler,
+            &ibl_pass.cube_view,
+            &ibl_pass.sampler,
         );
 
         let texture_pool = TexturePool::new(&ctx.device);
@@ -322,6 +332,7 @@ impl SomniumRenderer {
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
+            ibl_pass,
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
             culling_enabled: true,
@@ -675,6 +686,17 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
         view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3])); // _pad1
         ctx.queue.write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
+
+        // ── 0.5 Phase 19: refresh the environment cubemap ────────────────────
+        // No-ops unless the sun actually moved, so this is free in the common
+        // case. The sky is captured from the same procedural function the
+        // background uses, keeping reflections consistent with what is drawn.
+        self.ibl_pass.generate_if_needed(
+            &ctx.device,
+            &ctx.queue,
+            self.light_direction,
+            self.light_color,
+        );
 
         // ── 1. Compute cascades and upload light buffer ───────────────────────
         let cascades = compute_cascades(self.light_direction, inv_view_proj);

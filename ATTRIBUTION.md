@@ -753,6 +753,28 @@ blur pushes luma outside the neighbourhood range.
 
 **Files:** `somnium_renderer/src/pass/fxaa.rs`, `somnium_renderer/src/shaders/fxaa.wgsl`
 
+### 13.23 Image-Based Lighting — Karis split-sum (Phase 19)
+
+**References:**
+
+| Source | Topic |
+|---|---|
+| Brian Karis, *Real Shading in Unreal Engine 4* (SIGGRAPH 2013) | Split-sum approximation: prefiltered environment map (mip = roughness) × a BRDF integration term |
+| Dimitar Lazarov, *Physically Based Lighting in Call of Duty: Black Ops* (SIGGRAPH 2011) | Analytic fit to the environment BRDF term, used in place of a 2-D LUT |
+| Hammersley / Van der Corput sequence | Low-discrepancy sampling for the GGX prefilter |
+
+**Somnium adaptations:**
+
+| Reference | Somnium |
+|---|---|
+| Environment captured from an HDRI asset | Captured from the engine's **own procedural sky**, so reflections always match the drawn background, need no asset, and stay correct when the sun moves |
+| BRDF integration stored in a 2-D LUT texture | Lazarov's analytic approximation in `env_brdf_approx` — no LUT to generate, store, or bind |
+| Separate cosine-convolved irradiance cubemap for diffuse | The roughest prefiltered mip stands in for irradiance. Not a true cosine convolution; a visually close shortcut that avoids a second prefilter chain. Documented as a candidate for improvement |
+| Prefilter typically as a compute pass | Render pass per (face, mip). One submission per face because `queue.write_buffer` lands once per submission — 36 tiny submissions, and it only runs when the sun changes |
+
+**Files:** `somnium_renderer/src/pass/ibl.rs`, `somnium_renderer/src/shaders/ibl_gen.wgsl`,
+`somnium_renderer/src/shaders/shading.wgsl` (`evaluate_ibl`)
+
 ## 14. Pattern Index
 
 Cross-reference: which Somnium file implements which reference pattern.
@@ -830,6 +852,8 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/pass/light_gizmo.rs` | Bevy `bevy_light/src/gizmos.rs` — per-light-type gizmo shapes and cone sizing; batched LineList emission is original (Phase 13E) |
 | `somnium_renderer/src/pass/fxaa.rs` | FXAA 3.11 (Lottes/NVIDIA) — LDR intermediate target + resolve pass (Phase 15A2) |
 | `somnium_renderer/src/shaders/fxaa.wgsl` | FXAA 3.11 edge detect + directional blur, adapted to `textureSampleLevel` for WGSL uniformity (Phase 15A2) |
+| `somnium_renderer/src/pass/ibl.rs`, `shaders/ibl_gen.wgsl` | Karis split-sum prefiltered environment map; Hammersley/GGX importance sampling (Phase 19) |
+| `somnium_renderer/src/shaders/shading.wgsl` (`evaluate_ibl`) | Karis split-sum IBL + Lazarov analytic env-BRDF fit (Phase 19) |
 | `somnium_renderer/src/culling.rs` | Gribb–Hartmann frustum-plane extraction (near = `row2` for wgpu `z ∈ [0,1]`); UE5 `InstanceCullingDefinitions.h` flag-in-place shape (Phase 15B) |
 | `somnium_renderer/src/pass/cull.rs`, `shaders/cull.wgsl` | UE5 instance-culling pass — verdict written as each draw's `instance_count` (Phase 15B) |
 | `somnium_renderer/src/indirect.rs` | UE5 `InstanceCullingDefinitions.h` — GPU-resident draw args, `instance_count` as the cull flag (Phase 15A) |

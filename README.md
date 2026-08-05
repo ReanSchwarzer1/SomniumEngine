@@ -42,6 +42,7 @@ The engine is organized around three deliberate commitments:
 - Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
 - Cascaded Shadow Maps (4 cascades, PSS splits, PCF filtering)
 - Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode
+- **Image-based lighting** — the procedural sky is captured to a prefiltered environment cubemap, so metals reflect their surroundings (Karis split-sum)
 - Clustered forward lighting for point/spot lights (froxel binning)
 - HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
 - Water shader (FBM waves, dual-direction crossfade, Beer's-law depth)

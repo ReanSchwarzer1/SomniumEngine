@@ -13,6 +13,10 @@ pub struct ShadingPass {
     sampler: wgpu::Sampler,
     shadow_atlas_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
+    /// Phase 19: environment cubemap + its sampler, kept so the bind group can
+    /// be rebuilt on resize.
+    env_view: wgpu::TextureView,
+    env_sampler: wgpu::Sampler,
 }
 
 impl ShadingPass {
@@ -23,6 +27,8 @@ impl ShadingPass {
         visibility_view: &wgpu::TextureView,
         shadow_atlas_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
+        env_view: &wgpu::TextureView,
+        env_sampler: &wgpu::Sampler,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -64,6 +70,24 @@ impl ShadingPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
+                    // binding 4: prefiltered environment cubemap (Phase 19)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // binding 5: trilinear sampler for the environment map
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -82,6 +106,8 @@ impl ShadingPass {
             &sampler,
             shadow_atlas_view,
             shadow_sampler,
+            env_view,
+            env_sampler,
         );
 
         let shader_source = format!(
@@ -141,6 +167,8 @@ impl ShadingPass {
             sampler,
             shadow_atlas_view: shadow_atlas_view.clone(),
             shadow_sampler: shadow_sampler.clone(),
+            env_view: env_view.clone(),
+            env_sampler: env_sampler.clone(),
         }
     }
 
@@ -151,6 +179,8 @@ impl ShadingPass {
         sampler: &wgpu::Sampler,
         shadow_atlas_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
+        env_view: &wgpu::TextureView,
+        env_sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -172,6 +202,14 @@ impl ShadingPass {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(shadow_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(env_sampler),
+                },
             ],
         })
     }
@@ -184,6 +222,8 @@ impl ShadingPass {
             &self.sampler,
             &self.shadow_atlas_view,
             &self.shadow_sampler,
+            &self.env_view,
+            &self.env_sampler,
         );
     }
 }

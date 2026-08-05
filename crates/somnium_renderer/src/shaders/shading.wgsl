@@ -103,6 +103,48 @@ struct ClusterParams {
 @group(1) @binding(1) var default_sampler: sampler;
 @group(1) @binding(2) var shadow_atlas:    texture_depth_2d;
 @group(1) @binding(3) var shadow_sampler:  sampler_comparison;
+// Phase 19: prefiltered environment cubemap. Mip i holds radiance convolved
+// for roughness i / ENV_MAX_MIP.
+@group(1) @binding(4) var env_cube:    texture_cube<f32>;
+@group(1) @binding(5) var env_sampler: sampler;
+
+/// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
+const ENV_MAX_MIP: f32 = 5.0;
+
+/// Analytic fit to the split-sum BRDF integration term (Karis' mobile
+/// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
+/// is a smooth two-parameter function.
+fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+/// Image-based ambient: diffuse irradiance + split-sum specular.
+fn evaluate_ibl(surface: Surface) -> vec3<f32> {
+    let n = surface.normal;
+    let v = surface.view_dir;
+    let n_dot_v = max(dot(n, v), 1e-4);
+
+    // Diffuse: the roughest mip approximates a cosine-convolved irradiance
+    // map. Not a true convolution, but close enough visually and it saves a
+    // whole extra prefilter chain.
+    let irradiance = textureSampleLevel(env_cube, env_sampler, n, ENV_MAX_MIP).rgb;
+    let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
+    let diffuse = irradiance * surface.albedo * kd;
+
+    // Specular: prefiltered radiance along the reflection vector, weighted by
+    // the analytic BRDF term.
+    let r = reflect(-v, n);
+    let mip = surface.roughness * ENV_MAX_MIP;
+    let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
+    let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
+
+    return diffuse + specular;
+}
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
 
@@ -384,14 +426,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        // Minimal ambient
+        // Cel shading keeps a flat ambient on purpose: environment reflections
+        // would fight the deliberately flat, banded look.
         result += 0.03 * surface.albedo;
     } else {
         // ── PBR path (existing) ──────────────────────────────────────────────
         let light_dir   = normalize(light.direction);
         let light_color = light.color;
         let direct_light = evaluate_brdf(surface, light_dir) * light_color * shadow_factor;
-        let ambient = 0.03 * surface.albedo;
+        // Phase 19: real environment lighting instead of a flat 3% fudge —
+        // this is what lets metals reflect the sky.
+        let ambient = evaluate_ibl(surface);
 
         // Local lights (clustered)
         var local_light_contrib = vec3<f32>(0.0);

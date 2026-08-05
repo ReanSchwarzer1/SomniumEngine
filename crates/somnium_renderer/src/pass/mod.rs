@@ -2,6 +2,7 @@ pub mod cull;
 pub mod fxaa;
 pub mod gizmo;
 pub mod grid;
+pub mod ibl;
 pub mod light_gizmo;
 pub mod outline;
 pub mod particle;
