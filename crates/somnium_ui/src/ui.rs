@@ -598,13 +598,17 @@ impl UserInterface {
 
                 if matches!(state, ElementState::Pressed) {
                     let old = to_nh(self.focused_ih);
-                    if old != hit {
-                        if old.is_some() {
-                            self.send(UiMessage::new(old, MessageDirection::ToWidget, WidgetMessage::Unfocus));
-                        }
-                        self.focused_ih = to_ih(hit);
-                        self.send(UiMessage::new(hit, MessageDirection::ToWidget, WidgetMessage::Focus));
+                    if old != hit && old.is_some() {
+                        self.send(UiMessage::new(old, MessageDirection::ToWidget, WidgetMessage::Unfocus));
                     }
+                    self.focused_ih = to_ih(hit);
+                    // Focus is re-sent even when this widget already held it. A
+                    // numeric field that was drag-scrubbed drops its edit state
+                    // while staying the focused node, so skipping the message
+                    // here would leave it impossible to click back into typing.
+                    // Re-focusing an already-focused field also re-selects its
+                    // contents, which is what clicking one should do anyway.
+                    self.send(UiMessage::new(hit, MessageDirection::ToWidget, WidgetMessage::Focus));
                 }
 
                 // Press captures the mouse; release delivers to the capturing

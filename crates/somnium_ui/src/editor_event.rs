@@ -79,7 +79,10 @@ pub enum EditorEvent {
     SaveScene,
     NewScene,
     LoadScene(String),
-    SetInspectorValue { field: InspectorField, value: f32 },
+    /// `live` marks an in-progress drag-scrub: apply it to the scene, but do
+    /// not record an undo entry yet. The gesture ends with one non-live event
+    /// carrying the final value, and that is what becomes a single undo step.
+    SetInspectorValue { field: InspectorField, value: f32, live: bool },
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),

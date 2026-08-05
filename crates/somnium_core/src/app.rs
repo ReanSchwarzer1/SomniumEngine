@@ -107,6 +107,12 @@ pub struct Engine<G: GameApp> {
     viewport_size: (f32, f32),
     /// Active gizmo drag state (Some while LMB is held on a gizmo axis).
     gizmo_drag: Option<GizmoDragState>,
+
+    /// State at the start of an inspector drag-scrub, so the whole gesture
+    /// collapses into one undo entry instead of one per pixel of travel.
+    /// `(entity index, value before the drag)`.
+    scrub_transform: Option<(u32, Transform)>,
+    scrub_light: Option<(u32, LightComponent)>,
     /// Phase 11.5M: receiver for captured tracing events forwarded to the output log.
     log_rx: Option<std::sync::mpsc::Receiver<crate::log_capture::LogEntry>>,
     /// Tracks whether Ctrl is currently held (updated via ModifiersChanged).
@@ -172,6 +178,8 @@ impl<G: GameApp + 'static> Engine<G> {
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
+            scrub_transform: None,
+            scrub_light: None,
             log_rx: Some(log_rx),
             ctrl_held: false,
             default_material_id: None,
@@ -1373,7 +1381,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::SetInspectorValue { field, value } => {
+            EditorEvent::SetInspectorValue { field, value, live } => {
                 let Some(entity) = self.selected_entity else { return };
 
                 // Phase 15A1: post-processing fields edit PostProcessComponent.
@@ -1431,10 +1439,33 @@ impl<G: GameApp> Engine<G> {
                             IF::LightColorB => new_light.color.z = value.max(0.0),
                             _ => unreachable!(),
                         }
-                        if new_light != old_light {
-                            let cmd =
-                                Box::new(SetLightCmd::new(entity.index(), old_light, new_light));
-                            self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                        if live {
+                            // Mid-drag: remember where the gesture started, then
+                            // write straight through. No undo entry yet.
+                            if self.scrub_light.is_none() {
+                                self.scrub_light = Some((entity.index(), old_light));
+                            }
+                            if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
+                                *l = new_light;
+                            }
+                        } else {
+                            // End of a gesture (or a typed value). Undo has to
+                            // rewind to where the drag began, not to the last
+                            // pixel of it.
+                            let base = self
+                                .scrub_light
+                                .take()
+                                .filter(|(idx, _)| *idx == entity.index())
+                                .map(|(_, l)| l)
+                                .unwrap_or(old_light);
+                            if new_light != base {
+                                if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
+                                    *l = base;
+                                }
+                                let cmd =
+                                    Box::new(SetLightCmd::new(entity.index(), base, new_light));
+                                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                            }
                         }
                     }
                     return;
@@ -1455,8 +1486,26 @@ impl<G: GameApp> Engine<G> {
                         IF::ScaleZ => new_t.scale.z = value,
                         _ => unreachable!("light fields handled above"),
                     }
-                    let cmd = Box::new(SetTransformCmd::new(entity.index(), old_t, new_t));
-                    self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                    if live {
+                        if self.scrub_transform.is_none() {
+                            self.scrub_transform = Some((entity.index(), old_t));
+                        }
+                        if let Some(t) = self.world.get_mut::<Transform>(entity) {
+                            *t = new_t;
+                        }
+                    } else {
+                        let base = self
+                            .scrub_transform
+                            .take()
+                            .filter(|(idx, _)| *idx == entity.index())
+                            .map(|(_, t)| t)
+                            .unwrap_or(old_t);
+                        if let Some(t) = self.world.get_mut::<Transform>(entity) {
+                            *t = base;
+                        }
+                        let cmd = Box::new(SetTransformCmd::new(entity.index(), base, new_t));
+                        self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                    }
                     // The gizmo otherwise only re-syncs on selection or on its
                     // own drag, so typing a position left it stranded at the
                     // object's old location.

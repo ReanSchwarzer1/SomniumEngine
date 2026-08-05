@@ -599,10 +599,18 @@ impl UiManager {
             }
 
             // — NumericField value changes ————————
-            if let Some(NumericFieldMessage::ValueChanged(v)) = msg.data::<NumericFieldMessage>() {
-                let v = *v;
+            let numeric = match msg.data::<NumericFieldMessage>() {
+                Some(NumericFieldMessage::ValueChanged(v))  => Some((*v, false)),
+                Some(NumericFieldMessage::ValueChanging(v)) => Some((*v, true)),
+                _ => None,
+            };
+            if let Some((v, live)) = numeric {
                 if let Some(&(_, field)) = field_map.iter().find(|(fh, _)| *fh == msg.destination) {
-                    self.editor_events.push_back(EditorEvent::SetInspectorValue { field, value: v });
+                    self.editor_events.push_back(EditorEvent::SetInspectorValue {
+                        field,
+                        value: v,
+                        live,
+                    });
                 }
             }
         }
@@ -1066,7 +1074,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
                        label: &str,
                        label_w: f32,
                        font_id: u8,
-                       parent: NodeHandle| {
+                       parent: NodeHandle,
+                       drag_step: f32| {
         let row = StackPanelBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -1094,15 +1103,26 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         )
         .with_font_size(12.0)
         .with_font_id(font_id)
+        .with_drag_step(drag_step)
         .build();
         (row_h, ui.add_node(field, row_h))
     };
+    // 0.05 per pixel: a 100-pixel drag moves a position by 5 units, which is
+    // the right feel for metres and degrees alike.
     let make_row_w = |ui: &mut UserInterface,
                       label: &str,
                       label_w: f32,
                       font_id: u8,
                       parent: NodeHandle| {
-        make_row_rw(ui, label, label_w, font_id, parent).1
+        make_row_rw(ui, label, label_w, font_id, parent, 0.05).1
+    };
+    let make_row_step = |ui: &mut UserInterface,
+                         label: &str,
+                         label_w: f32,
+                         font_id: u8,
+                         parent: NodeHandle,
+                         step: f32| {
+        make_row_rw(ui, label, label_w, font_id, parent, step).1
     };
     let make_row = |ui: &mut UserInterface, label: &str, font_id: u8, parent: NodeHandle| {
         make_row_w(ui, label, 20.0, font_id, parent)
@@ -1151,12 +1171,13 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let light_intensity = make_row_w(ui, "Int",  34.0, font_id, light_section);
     // Colour before the point/spot-only fields, so the sun's two meaningful
     // controls — intensity and colour — sit together at the top.
-    let light_col_r     = make_row_w(ui, "Col R", 34.0, font_id, light_section);
-    let light_col_g     = make_row_w(ui, "Col G", 34.0, font_id, light_section);
-    let light_col_b     = make_row_w(ui, "Col B", 34.0, font_id, light_section);
-    let (light_range_row, light_range) = make_row_rw(ui, "Rng",  34.0, font_id, light_section);
-    let (light_inner_row, light_inner) = make_row_rw(ui, "In°",  34.0, font_id, light_section);
-    let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section);
+    // Colour channels sit in 0..1, so they need a much finer rate than a position.
+    let light_col_r     = make_row_step(ui, "Col R", 34.0, font_id, light_section, 0.005);
+    let light_col_g     = make_row_step(ui, "Col G", 34.0, font_id, light_section, 0.005);
+    let light_col_b     = make_row_step(ui, "Col B", 34.0, font_id, light_section, 0.005);
+    let (light_range_row, light_range) = make_row_rw(ui, "Rng",  34.0, font_id, light_section, 0.1);
+    let (light_inner_row, light_inner) = make_row_rw(ui, "In°",  34.0, font_id, light_section, 0.2);
+    let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
     ui.set_visibility(light_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -1170,16 +1191,16 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_section = ui.add_node(post_panel, parent);
 
     sec_label(ui, "Post FX", font_id, post_section);
-    let post_exposure = make_row_w(ui, "Exp", 34.0, font_id, post_section);
+    let post_exposure = make_row_step(ui, "Exp", 34.0, font_id, post_section, 0.01);
     // Indirect-light strength. Low values give contrasty shadows, high values a
     // flatter, brighter scene — see `PostProcessComponent::ibl_intensity`.
-    let post_ibl      = make_row_w(ui, "IBL", 34.0, font_id, post_section);
+    let post_ibl      = make_row_step(ui, "IBL", 34.0, font_id, post_section, 0.005);
     let (post_vig_toggle, post_vig_label) =
         make_toggle(ui, "Vignette", font_id, post_section);
-    let post_vig_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
+    let post_vig_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.01);
     let (post_ca_toggle, post_ca_label) =
         make_toggle(ui, "Chromatic Ab.", font_id, post_section);
-    let post_ca_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
+    let post_ca_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.0002);
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     ui.set_visibility(post_section, false);
 

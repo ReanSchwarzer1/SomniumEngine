@@ -1,5 +1,6 @@
 // NumericField: f32 display/edit widget for the inspector.
 // Click to focus, type to edit, Enter/Unfocus to commit.
+// Drag horizontally to scrub the value (right increases, left decreases).
 // Only accepts digits, '.', and '-'.
 
 use crate::{
@@ -17,6 +18,12 @@ pub enum NumericFieldMessage {
     SetValue(f32),
     /// Emitted FromWidget when the user commits a new value.
     ValueChanged(f32),
+    /// Emitted FromWidget on every step of a drag-scrub.
+    ///
+    /// Separate from `ValueChanged` so the receiver can apply it live without
+    /// recording an undo entry — a 200-pixel drag would otherwise leave 200 of
+    /// them. The gesture ends with a single `ValueChanged`.
+    ValueChanging(f32),
 }
 
 impl NumericFieldMessage {
@@ -26,6 +33,10 @@ impl NumericFieldMessage {
 
     pub fn value_changed(dest: NodeHandle, value: f32) -> UiMessage {
         UiMessage::new(dest, MessageDirection::FromWidget, Self::ValueChanged(value))
+    }
+
+    pub fn value_changing(dest: NodeHandle, value: f32) -> UiMessage {
+        UiMessage::new(dest, MessageDirection::FromWidget, Self::ValueChanging(value))
     }
 }
 
@@ -45,7 +56,22 @@ pub struct NumericField {
     /// does not respond at all. The first keystroke now clears the buffer, the
     /// same select-all-on-focus every other editor does.
     select_all:      bool,
+    /// Value change per pixel of horizontal drag. Fields differ by orders of
+    /// magnitude — chromatic aberration lives around 0.004 while a position is
+    /// in metres — so one global rate would make most of them unusable.
+    pub drag_step:   f32,
+    /// Cursor x and field value at the moment the drag began. Steps are applied
+    /// against this rather than accumulated, so the value cannot drift if
+    /// something else writes to the field mid-drag.
+    drag_origin:     Option<(f32, f32)>,
+    /// Set once the pointer has moved far enough for the gesture to count as a
+    /// scrub rather than a click.
+    scrubbing:       bool,
 }
+
+/// Pixels of travel before a press becomes a drag instead of a click. Without
+/// a threshold, the hand tremor in an ordinary click would nudge the value.
+const SCRUB_THRESHOLD: f32 = 3.0;
 
 impl NumericField {
     fn display_text(&self) -> String {
@@ -54,7 +80,10 @@ impl NumericField {
 }
 
 impl Control for NumericField {
-    fn is_text_input(&self) -> bool { true }
+    // Governs whether the UI swallows keyboard input. Tied to the live edit
+    // state rather than the widget type, so keys reach the game again once a
+    // scrub has ended the text-edit session.
+    fn is_text_input(&self) -> bool { self.focused }
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let text = self.display_text();
         let sz   = ctx.measure_text(&text, self.px, self.font_id);
@@ -106,6 +135,46 @@ impl Control for NumericField {
 
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {
+                WidgetMessage::MouseDown { pos, .. } => {
+                    self.drag_origin = Some((pos.x, self.value));
+                    self.scrubbing   = false;
+                    msg.handled      = true;
+                }
+                WidgetMessage::MouseMove { pos } => {
+                    if let Some((start_x, start_value)) = self.drag_origin {
+                        let dx = pos.x - start_x;
+                        if !self.scrubbing && dx.abs() >= SCRUB_THRESHOLD {
+                            self.scrubbing = true;
+                            // A scrub is not a text edit. Drop the focus state
+                            // the press handed us, or the field would show a
+                            // caret and a selection while being dragged.
+                            self.focused      = false;
+                            self.select_all   = false;
+                            self.editing_text = None;
+                        }
+                        if self.scrubbing {
+                            let v = start_value + dx * self.drag_step;
+                            if v != self.value {
+                                self.value = v;
+                                emit.push(NumericFieldMessage::value_changing(widget.handle, v));
+                                widget.invalidate_layout();
+                            }
+                        }
+                        msg.handled = true;
+                    }
+                }
+                WidgetMessage::MouseUp { .. } => {
+                    let was_scrubbing = self.scrubbing;
+                    self.drag_origin = None;
+                    self.scrubbing   = false;
+                    if was_scrubbing {
+                        // Closes the gesture: this is the one the receiver
+                        // turns into a single undo entry.
+                        emit.push(NumericFieldMessage::value_changed(widget.handle, self.value));
+                        widget.invalidate_layout();
+                        msg.handled = true;
+                    }
+                }
                 WidgetMessage::Focus => {
                     self.focused      = true;
                     self.editing_text = Some(format!("{:.3}", self.value));
@@ -207,6 +276,7 @@ pub struct NumericFieldBuilder {
     px:      f32,
     color:   [u8; 4],
     font_id: u8,
+    drag_step: f32,
 }
 
 impl NumericFieldBuilder {
@@ -217,12 +287,15 @@ impl NumericFieldBuilder {
             px:      12.0,
             color:   [200, 200, 200, 255],
             font_id: 0,
+            drag_step: 0.05,
         }
     }
 
     pub fn with_value(mut self, v: f32) -> Self { self.value = v; self }
     pub fn with_font_size(mut self, px: f32) -> Self { self.px = px; self }
     pub fn with_font_id(mut self, id: u8) -> Self { self.font_id = id; self }
+    /// Value change per pixel of horizontal drag-scrub.
+    pub fn with_drag_step(mut self, step: f32) -> Self { self.drag_step = step; self }
 
     pub fn build(self) -> UiNode {
         UiNode::new(self.widget.build(), Box::new(NumericField {
@@ -233,6 +306,9 @@ impl NumericFieldBuilder {
             font_id:      self.font_id,
             focused:      false,
             select_all:   false,
+            drag_step:    self.drag_step,
+            drag_origin:  None,
+            scrubbing:    false,
         }))
     }
 }
