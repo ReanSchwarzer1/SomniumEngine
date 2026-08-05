@@ -663,6 +663,14 @@ impl GameApp for HelloGame {
                             }
                         }
                     }
+                    // F10: A/B GPU frustum culling (Phase 15B). A correct cull
+                    // is invisible — if geometry pops, the cull is wrong.
+                    KeyCode::F10 if pressed => {
+                        if let Some(renderer) = &mut ctx.renderer {
+                            let on = renderer.toggle_culling();
+                            info!("GPU frustum culling: {}", if on { "ON" } else { "off" });
+                        }
+                    }
                     // L: toggle light gizmos (Phase 13E)
                     KeyCode::KeyL if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {

@@ -53,3 +53,20 @@ pub struct DrawCommand {
     /// The world transformation matrix.
     pub transform: Mat4,
 }
+
+// ─── Visibility-buffer packing limits (Phase 15C) ────────────────────────────
+
+/// Maximum number of draws in one frame.
+///
+/// The visibility buffer packs `(instance + 1, primitive)` into a single
+/// `R32Uint` as a 16/16 split, so the instance index must fit in 16 bits with
+/// room for the `+1` sky sentinel. Raised from 1022 (the old 10/22 split) in
+/// Phase 15C.
+pub const MAX_DRAWS_PER_FRAME: u32 = 65_535;
+
+/// Maximum triangles in a single draw.
+///
+/// The other half of the 16/16 split. A mesh larger than this must be split
+/// across draws — exceeding it wraps the primitive index and would shade the
+/// wrong triangle. Phase 15D's meshlets make this moot by construction.
+pub const MAX_TRIANGLES_PER_DRAW: u32 = 65_536;

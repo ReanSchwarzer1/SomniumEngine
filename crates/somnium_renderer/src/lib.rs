@@ -13,6 +13,7 @@
 pub mod bindless;
 pub mod cluster;
 pub mod command;
+pub mod culling;
 pub mod context;
 pub mod geometry;
 pub mod indirect;

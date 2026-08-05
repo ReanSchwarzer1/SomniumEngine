@@ -37,6 +37,14 @@ pub struct GeometryPool {
     next_vertex: u32,
     next_index: u32,
     free_blocks: Vec<FreeBlock>,
+
+    /// Local-space bounding box per mesh, keyed by `vertex_offset` (Phase 15B).
+    ///
+    /// GPU frustum culling needs each draw's bounds. Keying on the allocation's
+    /// vertex offset means existing `DrawCommand` call sites need no changes —
+    /// the renderer looks the box up when it builds the cull buffer, and a draw
+    /// with no entry is simply never culled.
+    aabbs: std::collections::HashMap<u32, ([f32; 3], [f32; 3])>,
 }
 
 impl GeometryPool {
@@ -61,6 +69,7 @@ impl GeometryPool {
             next_vertex: 0,
             next_index: 0,
             free_blocks: Vec::new(),
+            aabbs: std::collections::HashMap::new(),
         }
     }
 
@@ -139,7 +148,29 @@ impl GeometryPool {
         });
     }
 
-    fn write_mesh(&self, queue: &wgpu::Queue, alloc: &MeshAllocation, vertices: &[Vertex], indices: &[u32]) {
+    /// Local-space bounds of the mesh at `vertex_offset`, if it is known.
+    pub fn mesh_aabb(&self, vertex_offset: u32) -> Option<([f32; 3], [f32; 3])> {
+        self.aabbs.get(&vertex_offset).copied()
+    }
+
+    fn write_mesh(&mut self, queue: &wgpu::Queue, alloc: &MeshAllocation, vertices: &[Vertex], indices: &[u32]) {
+        // Record local bounds for GPU culling (Phase 15B). Both upload paths
+        // funnel through here, so every mesh gets one.
+        self.aabbs.insert(alloc.vertex_offset, compute_aabb(vertices));
+
+        // Phase 15C: the visibility buffer packs the primitive index into 16
+        // bits, so a larger mesh would wrap and shade the wrong triangle.
+        // Warn rather than fail — the mesh still renders, just not past the
+        // limit — so this is diagnosable instead of a silent corruption.
+        let triangles = indices.len() as u32 / 3;
+        if triangles > crate::command::MAX_TRIANGLES_PER_DRAW {
+            tracing::warn!(
+                triangles,
+                limit = crate::command::MAX_TRIANGLES_PER_DRAW,
+                "mesh exceeds the visibility buffer's per-draw triangle limit;                  primitive IDs past the limit will wrap. Split the mesh."
+            );
+        }
+
         queue.write_buffer(
             &self.vertex_buffer,
             alloc.vertex_offset as u64 * std::mem::size_of::<Vertex>() as u64,
@@ -150,5 +181,48 @@ impl GeometryPool {
             alloc.index_offset as u64 * std::mem::size_of::<u32>() as u64,
             bytemuck::cast_slice(indices),
         );
+    }
+}
+
+/// Local-space AABB of a vertex list.
+///
+/// An empty mesh yields an inverted box (min > max), which the culling test
+/// treats as "never visible" — correct, since there is nothing to draw.
+fn compute_aabb(vertices: &[Vertex]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in vertices {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(v.position[axis]);
+            max[axis] = max[axis].max(v.position[axis]);
+        }
+    }
+    (min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vert(p: [f32; 3]) -> Vertex {
+        Vertex { position: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] }
+    }
+
+    #[test]
+    fn aabb_wraps_every_vertex() {
+        let verts = [
+            vert([-1.0, 0.0, 2.0]),
+            vert([3.0, -4.0, 0.5]),
+            vert([0.0, 1.0, -6.0]),
+        ];
+        let (min, max) = compute_aabb(&verts);
+        assert_eq!(min, [-1.0, -4.0, -6.0]);
+        assert_eq!(max, [3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn empty_mesh_yields_an_inverted_box() {
+        let (min, max) = compute_aabb(&[]);
+        assert!(min[0] > max[0], "empty mesh must not produce a visible box");
     }
 }

@@ -89,6 +89,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
+- **F10** — A/B GPU frustum culling (a correct cull is invisible)
 - **Create menu** — spawn primitives, lights, particle emitter, heightmap terrain, or voxel terrain
 - Select a light to edit its intensity / range / cone angles in the inspector
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`

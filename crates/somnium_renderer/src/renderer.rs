@@ -164,6 +164,13 @@ pub struct SomniumRenderer {
     /// Whether the device supports it at all (gates the runtime toggle).
     supports_gpu_driven: bool,
 
+    /// Phase 15B: GPU frustum-culling compute pass.
+    cull_pass: crate::pass::cull::CullPass,
+    /// Per-draw local AABBs for culling, rebuilt each frame.
+    cull_aabbs: Vec<crate::culling::GpuCullAabb>,
+    /// When false the cull shader keeps every draw (useful for A/B checks).
+    pub culling_enabled: bool,
+
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
 }
@@ -315,6 +322,9 @@ impl SomniumRenderer {
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
+            cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
+            cull_aabbs: Vec::new(),
+            culling_enabled: true,
             gpu_driven: ctx.supports_gpu_driven(),
             supports_gpu_driven: ctx.supports_gpu_driven(),
             water_pass,
@@ -494,6 +504,16 @@ impl SomniumRenderer {
         }
         self.gpu_driven = !self.gpu_driven;
         self.gpu_driven
+    }
+
+    /// Toggle GPU frustum culling, returning the new state (Phase 15B).
+    ///
+    /// A correct cull is invisible, so this is the way to check it: flip it and
+    /// nothing on screen should change. Anything that pops in or out was being
+    /// culled wrongly.
+    pub fn toggle_culling(&mut self) -> bool {
+        self.culling_enabled = !self.culling_enabled;
+        self.culling_enabled
     }
 
     /// Whether the GPU-driven indirect path is currently in use.
@@ -700,6 +720,30 @@ impl SomniumRenderer {
         // Must come after the sort so argument `i` lines up with instance `i`.
         if self.gpu_driven {
             self.indirect.update(&ctx.device, &ctx.queue, &self.draw_queue);
+
+            // Phase 15B: parallel array of local bounds for the cull shader.
+            // A draw whose mesh has no recorded AABB gets an infinite box, so
+            // it is never culled — safer than guessing at its extent.
+            self.cull_aabbs.clear();
+            self.cull_aabbs.extend(self.draw_queue.iter().map(|cmd| {
+                match self.geometry.mesh_aabb(cmd.vertex_offset) {
+                    Some((min, max)) => crate::culling::GpuCullAabb {
+                        min: [min[0], min[1], min[2], 0.0],
+                        max: [max[0], max[1], max[2], 0.0],
+                    },
+                    None => crate::culling::GpuCullAabb {
+                        min: [f32::MIN, f32::MIN, f32::MIN, 0.0],
+                        max: [f32::MAX, f32::MAX, f32::MAX, 0.0],
+                    },
+                }
+            }));
+            self.cull_pass.update(
+                &ctx.device,
+                &ctx.queue,
+                &self.cull_aabbs,
+                self.view_proj,
+                !self.culling_enabled,
+            );
         }
 
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
@@ -724,6 +768,19 @@ impl SomniumRenderer {
             &self.global_pool.bind_group,
             &self.draw_queue,
         );
+
+        // ── 5.5 Phase 15B: GPU instance culling ──────────────────────────────
+        // Writes instance_count = 0 into the indirect args for off-screen
+        // draws, so the visibility pass skips them at no cost.
+        if self.gpu_driven && !self.indirect.is_empty() {
+            self.cull_pass.record(
+                &ctx.device,
+                &mut encoder,
+                &self.instances.buffer,
+                &self.indirect.buffer,
+                self.indirect.len(),
+            );
+        }
 
         // ── 6. Visibility Pass ───────────────────────────────────────────────
         {

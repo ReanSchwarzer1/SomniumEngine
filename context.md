@@ -325,12 +325,12 @@ Geometry and materials are **uploaded once** at init. Instances are rebuilt ever
   31       22 21                  0
   ┌──────────┬──────────────────────┐
   │ inst+1   │      prim_id         │
-  │ (10 bits)│     (22 bits)        │
+  │ (16 bits)│     (16 bits)        │
   └──────────┴──────────────────────┘
   
   0x00000000  = sky / background (clear value, never written by shader)
   0x00400000  = instance 0, primitive 0 (minimum mesh value)
-  0xFFFFFFFF  = instance 1023, primitive 4194303 (max; 1022 inst limit)
+  0xFFFFFFFF  = instance 65534, primitive 65535 (max; 65 535 draw limit)
 ```
 
 Instance index is stored as `inst_idx + 1` so that 0 is permanently reserved as the sky sentinel. The clear value of `0` is reliable on all GPU backends because `0.0f32` bit-casts to `0x00000000u32` (correct for both DX12's `ClearRenderTargetView` float path and Vulkan's uint path).
@@ -1152,7 +1152,9 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 15A | ✅ Complete | GPU-driven indirect draw: `indirect.rs` builds a `DrawIndirectArgs` buffer (`INDIRECT \| STORAGE \| COPY_DST`) from the sorted draw queue each frame, and the visibility pass submits the whole scene with one `multi_draw_indirect` instead of one `draw()` per object. `multi_draw_indirect` is core in wgpu 29; only `INDIRECT_FIRST_INSTANCE` is feature-gated (each draw's `first_instance` is its instance-buffer slot), so it's requested optionally and the renderer falls back to the per-draw CPU loop when absent. `F9` A/B-toggles the two paths — they must render identically. |
 | 15A1 | ✅ Complete | Post-processing moved into the scene: `PostProcessComponent` on a selectable **Post Processing** entity drives exposure, vignette, and a new chromatic-aberration effect. **The vignette no longer defaults on** — it darkened the viewport edges permanently with no way to disable it; all effects now start off and the renderer's defaults are 0. The inspector gains a Post FX section with checkbox-style toggles (a Button whose label carries `[x]`/`[ ]`, since the UI has no Checkbox widget) plus strength fields. CA splits R/B along the vector from screen centre, written branch-free so `strength = 0` is exactly the un-aberrated image. |
 | 15A2 | ✅ Complete | **FXAA anti-aliasing** (`pass/fxaa.rs` + `fxaa.wgsl`), ported from Timothy Lottes' FXAA 3.11 console preset. Runs on the tone-mapped LDR image: post-processing renders into an intermediate target, FXAA resolves it to the swapchain, and the editor overlays (gizmos, outline, particles, UI) draw *after* so text and thin lines stay pixel-sharp. Every tap uses `textureSampleLevel`, not `textureSample` — the contrast early-out is a data-dependent branch, and implicit-derivative sampling is illegal in non-uniform control flow in WGSL. Toggled from the Post Processing entity; defaults **on** (it's an image-quality feature, and the visibility-buffer pipeline has no MSAA). Disabled = pass skipped entirely, post-processing writes straight to the swapchain. |
-| 15B–15F | ⬜ Planned | GPU frustum culling → draw compaction (lifts the 1022-draw cap) → meshlet generation → Hi-Z occlusion culling → meshlet rendering. See §21. |
+| 15B | ✅ Complete | **GPU instance frustum culling.** `GeometryPool` records a local AABB per mesh at upload (keyed by `vertex_offset`, so no `DrawCommand` call site changed); a compute pass (`pass/cull.rs` + `cull.wgsl`) transforms each instance's AABB to world space and tests it against the six frustum planes, writing `instance_count = 0` into the Phase 15A indirect args for failures. Nothing is removed — indices stay stable and a culled draw costs nothing. Plane extraction (Gribb–Hartmann, near = `row2` for wgpu's `z ∈ [0,1]`) and the AABB test are mirrored in `culling.rs` with 13 unit tests; the shader is a transliteration. Conservative: boxes straddling a plane are kept. `F10` A/B-toggles it — a correct cull is invisible. Shadows are unaffected (the shadow pass draws directly), which is right: off-screen casters still shadow into view. |
+| 15C | ✅ Complete | **Instance cap raised 1022 → 65 535.** `vis_data` repacked from a 10/22 split to 16/16, so the scene is no longer capped at 1022 draws. The trade is 65 536 triangles per *draw*; `GeometryPool` warns at upload if a mesh exceeds it rather than silently wrapping the primitive index, and Phase 15D's meshlets make the limit moot. Draw compaction was dropped as unnecessary — with the cap lifted, its only remaining benefit was keeping instance IDs dense. |
+| 15D–15F | ⬜ Planned | Meshlet generation → Hi-Z occlusion culling → meshlet rendering. See §21. |
 | 16 | ⬜ Planned | Scripting (Rhai or Lua) |
 | 17 | ⬜ Planned | Terrain improvements: foliage scattering, terrain colliders, layer UI |
 
@@ -1217,7 +1219,7 @@ ReadyChunk { coord, lod, origin, Option<ChunkMeshData> }
 
 ### 19.3 Limits & future work
 
-- Instance budget: visibility buffer packs 10-bit instance IDs (max 1022 draws/frame). Radius 5 ⇒ ~160 chunk draws — fine; raising the radius needs Phase 15 GPU culling or chunk merging.
+- Instance budget: the visibility buffer packs 16-bit instance IDs (max 65 535 draws/frame since Phase 15C; was 1022). Radius 5 ⇒ ~160 chunk draws, and off-screen chunks are frustum-culled on the GPU (Phase 15B).
 - LOD transitions can show cracks at chunk borders between different LOD levels (known bevy_voxel_world artifact; alpha-fade blending is future work).
 - No ambient occlusion baked into chunk meshes (`Vertex` has no color channel).
 - Voxel physics colliders (Jolt heightfield/mesh shapes) are future work — terrain is render-only.
@@ -1327,13 +1329,27 @@ tests, and runs on its own, so the engine is never left half-converted.
 | **15A2** | ✅ Complete | **FXAA.** Post-process anti-aliasing in the Post Processing entity, before the editor overlays. |
 | **15A1** | ✅ Complete | **Post-processing volume.** Side quest: exposure/vignette/chromatic-aberration became a selectable scene entity, and the always-on vignette was defaulted off. |
 | **15A** | ✅ Complete | **Indirect draw plumbing.** `DrawIndirectArgs` buffer built from the draw queue; visibility pass uses one `multi_draw_indirect` call. Feature-gated on `INDIRECT_FIRST_INSTANCE` with a CPU fallback. `F9` A/B-toggles the paths. |
-| **15B** | ⬜ Next | **GPU frustum culling.** Track a per-mesh AABB in `GeometryPool` at upload; a compute shader transforms each instance's AABB, tests it against the 6 frustum planes, and writes `instance_count = 0` for failures. The indirect buffer already carries `STORAGE` usage for this. |
-| **15C** | ⬜ | **Draw compaction + instance-cap fix.** Compact survivors into a dense buffer with an atomic counter, and repack `vis_data` so the 10-bit instance ID no longer caps the scene at 1022 draws (today's hard limit, §6.3). |
+| **15B** | ✅ Complete | **GPU frustum culling.** Per-mesh AABBs at upload; compute pass writes `instance_count = 0` for off-screen draws. Maths unit-tested in `culling.rs`; `F10` toggles. |
+| **15C** | ✅ Complete | **Instance cap raised to 65 535.** `vis_data` repacked 10/22 → 16/16. Compaction dropped as unnecessary once the cap was lifted. |
 | **15D** | ⬜ | **Meshlet generation.** Split meshes into ~128-triangle clusters at upload with per-cluster bounds + normal cone (UE5 `NANITE_MAX_CLUSTER_TRIANGLES = 128`). |
 | **15E** | ⬜ | **Hi-Z occlusion culling.** Depth mip pyramid from the previous frame; two-phase cull so occluded clusters cost nothing. |
 | **15F** | ⬜ | **Meshlet rendering.** Draw surviving clusters indirectly through the visibility buffer. |
 
-### 15A notes for whoever picks up 15B
+### Notes for whoever picks up 15D
+
+- Culling verdicts live in `instance_count`; the argument array is never
+  compacted, so argument `i` is still instance `i`. Keep that invariant.
+- The per-draw AABB array (`cull_aabbs`) is built parallel to the indirect args
+  each frame. A mesh with no recorded AABB gets an infinite box and is never
+  culled — that fallback is deliberate, since guessing bounds would pop geometry.
+- 15C's 16/16 packing leaves **65 536 triangles per draw**. Meshlets (~128
+  triangles each) sit comfortably inside that; when 15D lands, the per-draw
+  triangle warning in `GeometryPool` should stop being reachable.
+- Culling is camera-frustum only. The shadow pass deliberately does *not* use it
+  — an off-screen caster still shadows into view. Per-cascade culling would need
+  its own planes.
+
+### 15A notes (kept for reference)
 
 - Argument `i` corresponds to instance `i` — the indirect buffer is built **after**
   the draw-queue sort so the two stay aligned. Keep that ordering.

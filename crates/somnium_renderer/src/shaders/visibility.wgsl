@@ -60,8 +60,12 @@ fn fs_main(
     @builtin(primitive_index) prim_idx: u32,
     @location(0) @interpolate(flat) instance_id: u32
 ) -> @location(0) u32 {
-    // Add 1 so 0 is reserved as the sky/background sentinel (clear value is 0).
-    // Supports up to 1022 simultaneous instances (inst 0..1022 → stored as 1..1023).
-    let packed_id = ((instance_id + 1u) << 22u) | (prim_idx & 0x3FFFFFu);
+    // Phase 15C: 16/16 split — 65 535 instances x 65 536 triangles per draw.
+    // Was 10/22, which capped the whole scene at 1022 draws; triangle counts
+    // that large belong in separate draws (and will become meshlets in 15D).
+    //
+    // Add 1 so 0 stays reserved as the sky/background sentinel (the vis buffer
+    // clears to 0). Instance 0 therefore encodes as 0x00010000, never 0.
+    let packed_id = ((instance_id + 1u) << 16u) | (prim_idx & 0xFFFFu);
     return packed_id;
 }

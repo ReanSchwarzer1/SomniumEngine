@@ -227,8 +227,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── PBR surface ─────────────────────────────────────────────────────────
-    let instance_id = (vis_data >> 22u) - 1u;
-    let prim_id     = vis_data & 0x3FFFFFu;
+    // Phase 15C: 16/16 split (see visibility.wgsl for the packing).
+    let instance_id = (vis_data >> 16u) - 1u;
+    let prim_id     = vis_data & 0xFFFFu;
 
     let instance = instances[instance_id];
     let material = materials[instance.material_id];
