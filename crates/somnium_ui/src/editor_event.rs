@@ -42,6 +42,18 @@ pub enum InspectorField {
     LightRange,
     LightInnerAngle,
     LightOuterAngle,
+    // Post-processing (Phase 15A1) — only for entities with a
+    // `PostProcessComponent`.
+    PostExposure,
+    PostVignetteStrength,
+    PostCaStrength,
+}
+
+/// Which post-processing effect a toggle click targets (Phase 15A1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostFxToggle {
+    Vignette,
+    ChromaticAberration,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -62,4 +74,6 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
+    /// Flip a post-processing effect on the selected Post Processing entity.
+    TogglePostFx(PostFxToggle),
 }

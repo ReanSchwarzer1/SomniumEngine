@@ -316,6 +316,57 @@ impl Default for VoxelTerrainComponent {
 }
 impl somnium_ecs::Component for VoxelTerrainComponent {}
 
+// ─── Phase 15A1: Post-processing volume ─────────────────────────────────────
+
+/// Scene-wide post-processing settings, exposed as a selectable entity.
+///
+/// Screen-space effects used to be hard-coded on in the renderer, which meant
+/// an always-on vignette with no way to switch it off. This component puts them
+/// in the scene (as a "Post Processing" entity in the outliner) so they can be
+/// inspected and toggled. Effects default to **off** — an editor viewport
+/// should show the raw image unless you ask for a look.
+///
+/// The engine pushes these to the renderer each frame; if no such entity
+/// exists, the renderer's own defaults (everything off) apply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PostProcessComponent {
+    /// Linear exposure multiplier applied before tone mapping.
+    pub exposure: f32,
+    /// Whether the radial vignette is applied.
+    pub vignette_enabled: bool,
+    /// Vignette strength when enabled.
+    pub vignette_strength: f32,
+    /// Whether chromatic aberration is applied.
+    pub ca_enabled: bool,
+    /// Chromatic-aberration offset (UV units at the screen edge) when enabled.
+    pub ca_strength: f32,
+}
+
+impl Default for PostProcessComponent {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            vignette_enabled: false,
+            vignette_strength: 1.0,
+            ca_enabled: false,
+            ca_strength: 0.004,
+        }
+    }
+}
+
+impl PostProcessComponent {
+    /// Vignette strength to send to the renderer (0 when disabled).
+    pub fn effective_vignette(&self) -> f32 {
+        if self.vignette_enabled { self.vignette_strength.max(0.0) } else { 0.0 }
+    }
+
+    /// Chromatic-aberration strength to send to the renderer (0 when disabled).
+    pub fn effective_ca(&self) -> f32 {
+        if self.ca_enabled { self.ca_strength.max(0.0) } else { 0.0 }
+    }
+}
+impl somnium_ecs::Component for PostProcessComponent {}
+
 // ─── Phase 11.5A: Scene Graph Components ──────────────────────────────────
 
 /// ECS component that marks an entity as a child of another entity.

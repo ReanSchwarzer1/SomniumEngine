@@ -4,10 +4,11 @@
 // Applied after the shading pass and grid overlay, before the UI overlay.
 
 struct PostParams {
-    exposure:         f32,
+    exposure:          f32,
     vignette_strength: f32,
-    _pad0:            f32,
-    _pad1:            f32,
+    /// Chromatic-aberration offset in UV units at the screen edge. 0 = off.
+    ca_strength:       f32,
+    _pad0:             f32,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -40,7 +41,18 @@ fn aces_film(x: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    var hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    // Chromatic aberration: split the RGB channels along the vector from the
+    // screen centre, so fringing grows toward the edges like a real lens.
+    // Written branch-free — at ca_strength = 0 all three taps land on the same
+    // texel, which is exactly the un-aberrated result. (A branch around
+    // textureSample would risk WGSL's uniform-control-flow rules.)
+    let ca_dir = in.uv - vec2(0.5);
+    let ca_off = ca_dir * pp.ca_strength;
+    var hdr = vec3(
+        textureSample(hdr_tex, hdr_samp, in.uv - ca_off).r,
+        textureSample(hdr_tex, hdr_samp, in.uv).g,
+        textureSample(hdr_tex, hdr_samp, in.uv + ca_off).b,
+    );
 
     // Exposure adjustment.
     hdr *= pp.exposure;

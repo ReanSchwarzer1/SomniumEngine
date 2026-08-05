@@ -596,6 +596,16 @@ impl GameApp for HelloGame {
             WorldTransform::identity(),
         ));
 
+        // Phase 15A1: scene-wide post-processing settings, selectable in the
+        // outliner. All effects start off — the viewport shows the raw image
+        // until a look is dialled in.
+        ctx.world.spawn((
+            Transform::from_translation(Vec3::ZERO),
+            Name::new("Post Processing"),
+            WorldTransform::identity(),
+            somnium_core::PostProcessComponent::default(),
+        ));
+
         ctx.physics.optimize_broad_phase();
 
         // Send initial content browser listing

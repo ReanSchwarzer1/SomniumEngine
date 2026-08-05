@@ -22,7 +22,7 @@ use crate::editor_commands::{
 use crate::error::EngineError;
 use crate::event::{translate_window_event, EngineEvent};
 use crate::time::TimeState;
-use crate::{LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, TerrainComponent, Transform, WorldTransform, simulate_particles};
+use crate::{LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, PostProcessComponent, TerrainComponent, Transform, WorldTransform, simulate_particles};
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
 
@@ -640,6 +640,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let selected_idx = self.selected_entity.map(|e| e.index());
             let sel_t = self.selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
+            // Phase 15A1: post-processing settings for the inspector.
+            let sel_post = self.selected_entity
+                .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
+                .map(|pp| (
+                    [pp.exposure, pp.vignette_strength, pp.ca_strength],
+                    pp.vignette_enabled,
+                    pp.ca_enabled,
+                ));
             // Phase 13E: light properties for the inspector (angles in degrees).
             let sel_light = self.selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
@@ -663,6 +671,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ui.update_inspector(None, None, None, None);
                 }
                 ui.update_light_inspector(sel_light);
+                ui.update_post_inspector(sel_post);
             }
         }
 
@@ -708,6 +717,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         self.submit_light_gizmos();
+
+        // ── Post-processing settings (Phase 15A1) ────────────────────────────
+        self.apply_post_process();
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -990,6 +1002,23 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Push the scene's post-processing settings to the renderer (Phase 15A1).
+    ///
+    /// Driven by the first entity carrying a `PostProcessComponent`. With no
+    /// such entity the renderer keeps its defaults, which are all-off — an
+    /// editor viewport shows the raw image unless a look is asked for.
+    fn apply_post_process(&mut self) {
+        let settings = self
+            .world
+            .entities()
+            .find_map(|e| self.world.get::<PostProcessComponent>(e).copied());
+        if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
+            r.exposure = pp.exposure.max(0.0);
+            r.vignette_strength = pp.effective_vignette();
+            r.chromatic_aberration = pp.effective_ca();
+        }
+    }
+
     /// Queue a light gizmo for every light entity (Phase 13E).
     ///
     /// The selected light draws at full brightness so it stands out while being
@@ -1250,6 +1279,22 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::SetInspectorValue { field, value } => {
                 let Some(entity) = self.selected_entity else { return };
 
+                // Phase 15A1: post-processing fields edit PostProcessComponent.
+                if matches!(
+                    field,
+                    IF::PostExposure | IF::PostVignetteStrength | IF::PostCaStrength
+                ) {
+                    if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
+                        match field {
+                            IF::PostExposure => pp.exposure = value.max(0.0),
+                            IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
+                            IF::PostCaStrength => pp.ca_strength = value.max(0.0),
+                            _ => unreachable!(),
+                        }
+                    }
+                    return;
+                }
+
                 // Phase 13E: light fields edit LightComponent, not Transform.
                 if matches!(
                     field,
@@ -1396,6 +1441,24 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);
+            }
+
+            EditorEvent::TogglePostFx(which) => {
+                use somnium_ui::PostFxToggle;
+                let Some(entity) = self.selected_entity else { return };
+                if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
+                    let on = match which {
+                        PostFxToggle::Vignette => {
+                            pp.vignette_enabled = !pp.vignette_enabled;
+                            pp.vignette_enabled
+                        }
+                        PostFxToggle::ChromaticAberration => {
+                            pp.ca_enabled = !pp.ca_enabled;
+                            pp.ca_enabled
+                        }
+                    };
+                    info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });
+                }
             }
         }
     }

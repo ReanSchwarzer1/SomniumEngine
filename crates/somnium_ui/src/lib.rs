@@ -11,11 +11,11 @@ pub mod ui;
 pub mod widget;
 pub mod widgets;
 
-pub use editor_event::{CreateKind, EditorEvent, InspectorField};
+pub use editor_event::{CreateKind, EditorEvent, InspectorField, PostFxToggle};
 
 use crate::{
     editor_event::InspectorField as IF,
-    message::{MessageDirection, NodeHandle, UiMessage},
+    message::{MessageDirection, NodeHandle, TextMessage, UiMessage},
     pass::UiPass,
     types::Thickness,
     ui::UserInterface,
@@ -51,6 +51,17 @@ struct InspectorHandles {
     light_range:     NodeHandle,
     light_inner:     NodeHandle,
     light_outer:     NodeHandle,
+    // Post-processing section (Phase 15A1) — hidden unless a Post Processing
+    // entity is selected.
+    post_section:    NodeHandle,
+    post_exposure:   NodeHandle,
+    post_vig_toggle: NodeHandle,
+    post_vig_str:    NodeHandle,
+    post_ca_toggle:  NodeHandle,
+    post_ca_str:     NodeHandle,
+    /// Text label inside each toggle button, so the tick can be redrawn.
+    post_vig_label:  NodeHandle,
+    post_ca_label:   NodeHandle,
 }
 
 /// Light values shown in the inspector: intensity, range, inner°, outer°.
@@ -348,6 +359,36 @@ impl UiManager {
         }
     }
 
+    /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
+    ///
+    /// `values` is `[exposure, vignette_strength, ca_strength]` plus the two
+    /// enable flags; pass `None` when the selection has no
+    /// `PostProcessComponent`.
+    pub fn update_post_inspector(&mut self, values: Option<([f32; 3], bool, bool)>) {
+        let h = &self.inspector_handles;
+        let (section, exposure, vig_str, ca_str) =
+            (h.post_section, h.post_exposure, h.post_vig_str, h.post_ca_str);
+        let (vig_label, ca_label) = (h.post_vig_label, h.post_ca_label);
+
+        match values {
+            Some(([exp, vig, ca], vig_on, ca_on)) => {
+                self.native_ui.set_visibility(section, true);
+                self.native_ui.send(NumericFieldMessage::set_value(exposure, exp));
+                self.native_ui.send(NumericFieldMessage::set_value(vig_str, vig));
+                self.native_ui.send(NumericFieldMessage::set_value(ca_str, ca));
+                // Redraw the tick in each toggle's label.
+                let tick = |on: bool| if on { "[x]" } else { "[ ]" };
+                self.native_ui.send(TextMessage::set_text(
+                    vig_label, format!("{} Vignette", tick(vig_on)),
+                ));
+                self.native_ui.send(TextMessage::set_text(
+                    ca_label, format!("{} Chromatic Ab.", tick(ca_on)),
+                ));
+            }
+            None => self.native_ui.set_visibility(section, false),
+        }
+    }
+
     /// Append a line to the output log panel (max 200 entries).
     pub fn append_log(&mut self, text: &str) {
         const MAX: usize = 200;
@@ -379,6 +420,9 @@ impl UiManager {
             (h.light_range,     IF::LightRange),
             (h.light_inner,     IF::LightInnerAngle),
             (h.light_outer,     IF::LightOuterAngle),
+            (h.post_exposure,   IF::PostExposure),
+            (h.post_vig_str,    IF::PostVignetteStrength),
+            (h.post_ca_str,     IF::PostCaStrength),
         ];
 
         for msg in msgs {
@@ -386,6 +430,16 @@ impl UiManager {
                 // Outliner row
                 if let Some(&(_, eidx)) = self.outliner_rows.iter().find(|(bh, _)| *bh == msg.destination) {
                     self.editor_events.push_back(EditorEvent::SelectEntity(Some(eidx)));
+                    continue;
+                }
+                // Post FX toggles (Phase 15A1)
+                if msg.destination == self.inspector_handles.post_vig_toggle {
+                    self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_ca_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::ChromaticAberration));
                     continue;
                 }
                 // Terrain tool button (Phase 14F)
@@ -886,10 +940,63 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let light_outer     = make_row_w(ui, "Out°", 34.0, font_id, light_section);
     ui.set_visibility(light_section, false);
 
+    // ── Post-processing section (Phase 15A1) ─────────────────────────────────
+    // The engine has no checkbox widget, so a Button whose label carries the
+    // tick doubles as one: clicking flips the state and the label is rewritten.
+    let post_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let post_section = ui.add_node(post_panel, parent);
+
+    sec_label(ui, "Post FX", font_id, post_section);
+    let post_exposure = make_row_w(ui, "Exp", 34.0, font_id, post_section);
+    let (post_vig_toggle, post_vig_label) =
+        make_toggle(ui, "Vignette", font_id, post_section);
+    let post_vig_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
+    let (post_ca_toggle, post_ca_label) =
+        make_toggle(ui, "Chromatic Ab.", font_id, post_section);
+    let post_ca_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
+    ui.set_visibility(post_section, false);
+
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
         light_section, light_intensity, light_range, light_inner, light_outer,
+        post_section, post_exposure, post_vig_toggle, post_vig_str,
+        post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
     }
+}
+
+/// Build a checkbox-style toggle row: a full-width button whose text label
+/// shows `[x]` / `[ ]`. Returns `(button, label)` — the label handle is kept so
+/// the tick can be rewritten when the value changes.
+fn make_toggle(
+    ui: &mut UserInterface,
+    text: &str,
+    font_id: u8,
+    parent: NodeHandle,
+) -> (NodeHandle, NodeHandle) {
+    let btn = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(22.0)
+            .with_margin(Thickness { left: 6.0, top: 2.0, right: 6.0, bottom: 0.0 })
+            .with_background(theme::BG_DARK),
+    )
+    .build();
+    let btn_h = ui.add_node(btn, parent);
+
+    let lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness { left: 6.0, top: 4.0, right: 0.0, bottom: 0.0 }),
+    )
+    .with_text(&format!("[ ] {text}"))
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let lbl_h = ui.add_node(lbl, btn_h);
+    (btn_h, lbl_h)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).

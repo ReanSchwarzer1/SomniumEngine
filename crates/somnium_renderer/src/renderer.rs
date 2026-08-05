@@ -107,7 +107,13 @@ pub struct SomniumRenderer {
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Radial vignette strength (0 = off, 1 = default, higher = stronger).
+    ///
+    /// Defaults to **off**: an always-on vignette darkens the viewport edges,
+    /// which reads as a dirty screen in an editor. Enable it per-scene through
+    /// the Post Processing entity (Phase 15A1).
     pub vignette_strength: f32,
+    /// Chromatic-aberration strength in UV units at the screen edge (0 = off).
+    pub chromatic_aberration: f32,
 
     /// Editor transform gizmo pass.
     gizmo_pass: GizmoPass,
@@ -287,7 +293,8 @@ impl SomniumRenderer {
             grid_enabled: false,
             postprocess_pass,
             exposure: 1.0,
-            vignette_strength: 1.0,
+            vignette_strength: 0.0,
+            chromatic_aberration: 0.0,
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
@@ -825,7 +832,12 @@ impl SomniumRenderer {
         }
 
         // ── 8. Post-process Pass: HDR → swapchain (ACES + vignette) ──────────
-        self.postprocess_pass.set_params(&ctx.queue, self.exposure, self.vignette_strength);
+        self.postprocess_pass.set_params(
+            &ctx.queue,
+            self.exposure,
+            self.vignette_strength,
+            self.chromatic_aberration,
+        );
         self.postprocess_pass.record(&mut encoder, &surface_view);
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────

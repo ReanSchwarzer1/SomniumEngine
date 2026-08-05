@@ -206,8 +206,18 @@ impl PostProcessPass {
     }
 
     /// Upload exposure and vignette strength to the GPU params buffer.
-    pub fn set_params(&self, queue: &wgpu::Queue, exposure: f32, vignette_strength: f32) {
-        let data: [f32; 4] = [exposure, vignette_strength, 0.0, 0.0];
+    /// Upload the post-process parameters.
+    ///
+    /// `ca_strength` is the chromatic-aberration offset in UV units at the
+    /// screen edge; `0.0` disables it (all three channels sample the same texel).
+    pub fn set_params(
+        &self,
+        queue: &wgpu::Queue,
+        exposure: f32,
+        vignette_strength: f32,
+        ca_strength: f32,
+    ) {
+        let data: [f32; 4] = [exposure, vignette_strength, ca_strength, 0.0];
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 
