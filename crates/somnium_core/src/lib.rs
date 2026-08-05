@@ -383,11 +383,20 @@ pub struct PostProcessComponent {
     /// quality feature, and the visibility-buffer pipeline has no MSAA, so
     /// edges are otherwise hard-aliased.
     pub fxaa_enabled: bool,
+    /// Scene-wide strength of image-based (indirect) light (Phase 22C).
+    ///
+    /// Phase 19 replaced a flat 3% ambient with full sky irradiance, but with
+    /// no ambient occlusion that light reaches shadowed surfaces unattenuated
+    /// and washes shadows out. This used to be a hardcoded `0.35` in three
+    /// shaders; it is a dial now so the trade-off between flat-and-bright and
+    /// contrasty-and-dark is the artist's to make until SSAO lands.
+    pub ibl_intensity: f32,
 }
 
 impl Default for PostProcessComponent {
     fn default() -> Self {
         Self {
+            ibl_intensity: 0.35,
             exposure: 1.0,
             vignette_enabled: false,
             vignette_strength: 1.0,

@@ -52,6 +52,16 @@ struct InspectorHandles {
     light_range:     NodeHandle,
     light_inner:     NodeHandle,
     light_outer:     NodeHandle,
+    /// Linear-RGB colour rows (Phase 22C).
+    light_col_r:     NodeHandle,
+    light_col_g:     NodeHandle,
+    light_col_b:     NodeHandle,
+    /// Row containers for the point/spot-only fields, so they can be hidden
+    /// wholesale (label included) when a directional light is selected — range
+    /// and cone angles mean nothing for a sun.
+    light_range_row: NodeHandle,
+    light_inner_row: NodeHandle,
+    light_outer_row: NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section:    NodeHandle,
@@ -60,6 +70,8 @@ struct InspectorHandles {
     post_vig_str:    NodeHandle,
     post_ca_toggle:  NodeHandle,
     post_ca_str:     NodeHandle,
+    /// Scene-wide indirect-light strength (Phase 22C).
+    post_ibl:        NodeHandle,
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label:  NodeHandle,
     post_ca_label:   NodeHandle,
@@ -67,8 +79,9 @@ struct InspectorHandles {
     post_fxaa_label:  NodeHandle,
 }
 
-/// Light values shown in the inspector: intensity, range, inner°, outer°.
-pub type LightInspectorValues = [f32; 4];
+/// Light values shown in the inspector: intensity, range, inner°, outer°,
+/// then linear-RGB colour.
+pub type LightInspectorValues = [f32; 7];
 
 // ── Layout build result ───────────────────────────────────────────────────────
 
@@ -377,19 +390,30 @@ impl UiManager {
     /// Show or hide the inspector's Light section and refresh its values
     /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
     ///
-    /// `values` is `[intensity, range, inner_deg, outer_deg]`.
-    pub fn update_light_inspector(&mut self, values: Option<LightInspectorValues>) {
+    /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b]`, paired
+    /// with whether the light is directional — a sun has no range or cone, so
+    /// those rows are hidden rather than shown holding meaningless zeroes.
+    pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool)>) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section, h.light_intensity, h.light_range, h.light_inner, h.light_outer,
         );
+        let (col_r, col_g, col_b) = (h.light_col_r, h.light_col_g, h.light_col_b);
+        let (range_row, inner_row, outer_row) =
+            (h.light_range_row, h.light_inner_row, h.light_outer_row);
         match values {
-            Some([i, r, ia, oa]) => {
+            Some(([i, r, ia, oa, cr, cg, cb], directional)) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(intensity, i));
                 self.native_ui.send(NumericFieldMessage::set_value(range, r));
                 self.native_ui.send(NumericFieldMessage::set_value(inner, ia));
                 self.native_ui.send(NumericFieldMessage::set_value(outer, oa));
+                self.native_ui.send(NumericFieldMessage::set_value(col_r, cr));
+                self.native_ui.send(NumericFieldMessage::set_value(col_g, cg));
+                self.native_ui.send(NumericFieldMessage::set_value(col_b, cb));
+                self.native_ui.set_visibility(range_row, !directional);
+                self.native_ui.set_visibility(inner_row, !directional);
+                self.native_ui.set_visibility(outer_row, !directional);
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -397,22 +421,23 @@ impl UiManager {
 
     /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
     ///
-    /// `values` is `[exposure, vignette_strength, ca_strength]` plus the two
-    /// enable flags; pass `None` when the selection has no
+    /// `values` is `[exposure, vignette_strength, ca_strength, ibl_intensity]`
+    /// plus the three enable flags; pass `None` when the selection has no
     /// `PostProcessComponent`.
-    pub fn update_post_inspector(&mut self, values: Option<([f32; 3], bool, bool, bool)>) {
+    pub fn update_post_inspector(&mut self, values: Option<([f32; 4], bool, bool, bool)>) {
         let h = &self.inspector_handles;
-        let (section, exposure, vig_str, ca_str) =
-            (h.post_section, h.post_exposure, h.post_vig_str, h.post_ca_str);
+        let (section, exposure, vig_str, ca_str, ibl) =
+            (h.post_section, h.post_exposure, h.post_vig_str, h.post_ca_str, h.post_ibl);
         let (vig_label, ca_label, fxaa_label) =
             (h.post_vig_label, h.post_ca_label, h.post_fxaa_label);
 
         match values {
-            Some(([exp, vig, ca], vig_on, ca_on, fxaa_on)) => {
+            Some(([exp, vig, ca, ibl_i], vig_on, ca_on, fxaa_on)) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(exposure, exp));
                 self.native_ui.send(NumericFieldMessage::set_value(vig_str, vig));
                 self.native_ui.send(NumericFieldMessage::set_value(ca_str, ca));
+                self.native_ui.send(NumericFieldMessage::set_value(ibl, ibl_i));
                 // Redraw the tick in each toggle's label.
                 let tick = |on: bool| if on { "[x]" } else { "[ ]" };
                 self.native_ui.send(TextMessage::set_text(
@@ -460,9 +485,13 @@ impl UiManager {
             (h.light_range,     IF::LightRange),
             (h.light_inner,     IF::LightInnerAngle),
             (h.light_outer,     IF::LightOuterAngle),
+            (h.light_col_r,     IF::LightColorR),
+            (h.light_col_g,     IF::LightColorG),
+            (h.light_col_b,     IF::LightColorB),
             (h.post_exposure,   IF::PostExposure),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
+            (h.post_ibl,        IF::PostIblIntensity),
         ];
 
         for msg in msgs {
@@ -1031,11 +1060,13 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
 /// Returns the inspector handle bundle.
 fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> InspectorHandles {
     // `label_w` widens the gutter for the light section's longer labels.
-    let make_row_w = |ui: &mut UserInterface,
-                      label: &str,
-                      label_w: f32,
-                      font_id: u8,
-                      parent: NodeHandle| {
+    // Returns `(row, field)`. The row handle is what a caller needs to hide a
+    // whole line, label included.
+    let make_row_rw = |ui: &mut UserInterface,
+                       label: &str,
+                       label_w: f32,
+                       font_id: u8,
+                       parent: NodeHandle| {
         let row = StackPanelBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -1064,7 +1095,14 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         .with_font_size(12.0)
         .with_font_id(font_id)
         .build();
-        ui.add_node(field, row_h)
+        (row_h, ui.add_node(field, row_h))
+    };
+    let make_row_w = |ui: &mut UserInterface,
+                      label: &str,
+                      label_w: f32,
+                      font_id: u8,
+                      parent: NodeHandle| {
+        make_row_rw(ui, label, label_w, font_id, parent).1
     };
     let make_row = |ui: &mut UserInterface, label: &str, font_id: u8, parent: NodeHandle| {
         make_row_w(ui, label, 20.0, font_id, parent)
@@ -1111,9 +1149,14 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
 
     sec_label(ui, "Light", font_id, light_section);
     let light_intensity = make_row_w(ui, "Int",  34.0, font_id, light_section);
-    let light_range     = make_row_w(ui, "Rng",  34.0, font_id, light_section);
-    let light_inner     = make_row_w(ui, "In°",  34.0, font_id, light_section);
-    let light_outer     = make_row_w(ui, "Out°", 34.0, font_id, light_section);
+    // Colour before the point/spot-only fields, so the sun's two meaningful
+    // controls — intensity and colour — sit together at the top.
+    let light_col_r     = make_row_w(ui, "Col R", 34.0, font_id, light_section);
+    let light_col_g     = make_row_w(ui, "Col G", 34.0, font_id, light_section);
+    let light_col_b     = make_row_w(ui, "Col B", 34.0, font_id, light_section);
+    let (light_range_row, light_range) = make_row_rw(ui, "Rng",  34.0, font_id, light_section);
+    let (light_inner_row, light_inner) = make_row_rw(ui, "In°",  34.0, font_id, light_section);
+    let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section);
     ui.set_visibility(light_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -1128,6 +1171,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
 
     sec_label(ui, "Post FX", font_id, post_section);
     let post_exposure = make_row_w(ui, "Exp", 34.0, font_id, post_section);
+    // Indirect-light strength. Low values give contrasty shadows, high values a
+    // flatter, brighter scene — see `PostProcessComponent::ibl_intensity`.
+    let post_ibl      = make_row_w(ui, "IBL", 34.0, font_id, post_section);
     let (post_vig_toggle, post_vig_label) =
         make_toggle(ui, "Vignette", font_id, post_section);
     let post_vig_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
@@ -1140,7 +1186,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
         light_section, light_intensity, light_range, light_inner, light_outer,
-        post_section, post_exposure, post_vig_toggle, post_vig_str,
+        light_col_r, light_col_g, light_col_b,
+        light_range_row, light_inner_row, light_outer_row,
+        post_section, post_exposure, post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
         post_fxaa_toggle, post_fxaa_label,
     }

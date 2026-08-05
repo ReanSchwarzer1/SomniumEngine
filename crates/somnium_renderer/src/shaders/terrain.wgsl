@@ -31,7 +31,7 @@ struct DirectionalLight {
     view_proj:       array<mat4x4<f32>, 4>,
     cascade_splits:  vec4<f32>,
     shadow_map_size: f32,
-    _pad2_x:         f32,
+    ibl_intensity:   f32,
     _pad2_y:         f32,
     _pad2_z:         f32,
 }

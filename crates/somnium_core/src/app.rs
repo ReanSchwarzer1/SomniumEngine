@@ -665,7 +665,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_post = self.selected_entity
                 .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
                 .map(|pp| (
-                    [pp.exposure, pp.vignette_strength, pp.ca_strength],
+                    [pp.exposure, pp.vignette_strength, pp.ca_strength, pp.ibl_intensity],
                     pp.vignette_enabled,
                     pp.ca_enabled,
                     pp.fxaa_enabled,
@@ -673,12 +673,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // Phase 13E: light properties for the inspector (angles in degrees).
             let sel_light = self.selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
-                .map(|lc| [
+                .map(|lc| ([
                     lc.intensity,
                     lc.range,
                     lc.inner_angle.to_degrees(),
                     lc.outer_angle.to_degrees(),
-                ]);
+                    lc.color.x,
+                    lc.color.y,
+                    lc.color.z,
+                ], lc.light_type == LightType::Directional));
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner(&entity_list, selected_idx);
                 if let Some(t) = sel_t {
@@ -1107,6 +1110,9 @@ impl<G: GameApp> Engine<G> {
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             r.fxaa_enabled = pp.fxaa_enabled;
+            // Phase 22C: rides along with the sun in the directional-light
+            // buffer, so every pass that lights anything picks it up.
+            r.set_ibl_intensity(pp.ibl_intensity);
         }
     }
 
@@ -1373,13 +1379,17 @@ impl<G: GameApp> Engine<G> {
                 // Phase 15A1: post-processing fields edit PostProcessComponent.
                 if matches!(
                     field,
-                    IF::PostExposure | IF::PostVignetteStrength | IF::PostCaStrength
+                    IF::PostExposure
+                        | IF::PostVignetteStrength
+                        | IF::PostCaStrength
+                        | IF::PostIblIntensity
                 ) {
                     if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                         match field {
                             IF::PostExposure => pp.exposure = value.max(0.0),
                             IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
                             IF::PostCaStrength => pp.ca_strength = value.max(0.0),
+                            IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
                             _ => unreachable!(),
                         }
                     }
@@ -1389,7 +1399,13 @@ impl<G: GameApp> Engine<G> {
                 // Phase 13E: light fields edit LightComponent, not Transform.
                 if matches!(
                     field,
-                    IF::LightIntensity | IF::LightRange | IF::LightInnerAngle | IF::LightOuterAngle
+                    IF::LightIntensity
+                        | IF::LightRange
+                        | IF::LightInnerAngle
+                        | IF::LightOuterAngle
+                        | IF::LightColorR
+                        | IF::LightColorG
+                        | IF::LightColorB
                 ) {
                     if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
                         let mut new_light = old_light;
@@ -1407,6 +1423,12 @@ impl<G: GameApp> Engine<G> {
                                     .to_radians()
                                     .clamp(new_light.inner_angle, std::f32::consts::FRAC_PI_2);
                             }
+                            // Colour is linear RGB and separate from intensity,
+                            // so it is not clamped to 1 — values above white are
+                            // how you get a tinted, over-bright key light.
+                            IF::LightColorR => new_light.color.x = value.max(0.0),
+                            IF::LightColorG => new_light.color.y = value.max(0.0),
+                            IF::LightColorB => new_light.color.z = value.max(0.0),
                             _ => unreachable!(),
                         }
                         if new_light != old_light {

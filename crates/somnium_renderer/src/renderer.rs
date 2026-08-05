@@ -83,6 +83,8 @@ pub struct SomniumRenderer {
 
     /// Directional light direction (toward the light, world space, normalized).
     pub light_direction: glam::Vec3,
+    /// Scene-wide indirect-light strength, driven by `PostProcessComponent`.
+    ibl_intensity: f32,
     /// Directional light color, pre-multiplied by intensity.
     pub light_color: glam::Vec3,
 
@@ -325,6 +327,7 @@ impl SomniumRenderer {
             camera_pos:  glam::Vec3::ZERO,
             time:        0.0,
             light_direction: default_dir,
+            ibl_intensity: 0.35,
             light_color: default_color,
             cascade_debug: false,
             shading_mode: 0,
@@ -504,6 +507,11 @@ impl SomniumRenderer {
         self.proj_matrix = proj;
         self.view_proj   = proj * view;
         self.camera_pos  = camera_pos;
+    }
+
+    /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
+    pub fn set_ibl_intensity(&mut self, intensity: f32) {
+        self.ibl_intensity = intensity.max(0.0);
     }
 
     /// Set the directional light parameters for this frame.
@@ -775,7 +783,8 @@ impl SomniumRenderer {
                 cascades[3].split_depth,
             ],
             shadow_map_size: ATLAS_SIZE as f32,
-            _pad2: [0.0; 3],
+            ibl_intensity: self.ibl_intensity,
+            _pad2: [0.0; 2],
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,
@@ -988,6 +997,17 @@ impl SomniumRenderer {
 
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         if !self.water_queue.is_empty() {
+            // Phase 22: water refracts what is behind it, so it needs the scene
+            // colour as a texture. A pass cannot sample its own render target,
+            // hence the copy — taken here so it holds opaque geometry, terrain
+            // and transparents, i.e. everything that can legitimately be seen
+            // through the surface.
+            encoder.copy_texture_to_texture(
+                self.postprocess_pass.hdr_texture.as_image_copy(),
+                self.postprocess_pass.scene_copy_texture.as_image_copy(),
+                self.postprocess_pass.hdr_texture.size(),
+            );
+
             self.water_pass.record(
                 &ctx.device,
                 &ctx.queue,
@@ -996,6 +1016,12 @@ impl SomniumRenderer {
                 &self.vis_pass.depth_view,
                 &self.global_pool.view_proj_buffer,
                 &self.vis_pass.depth_view,
+                &self.global_pool.light_buffer,
+                &self.shadow_resources.atlas_depth_view,
+                &self.shadow_resources.comparison_sampler,
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                &self.postprocess_pass.scene_copy_view,
                 &self.geometry.vertex_buffer,
                 &self.geometry.index_buffer,
                 self.water_textures_bind_group.as_ref(),

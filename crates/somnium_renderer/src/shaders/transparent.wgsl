@@ -53,7 +53,7 @@ struct DirectionalLight {
     view_proj:       array<mat4x4<f32>, 4>,
     cascade_splits:  vec4<f32>,
     shadow_map_size: f32,
-    _pad2_x:         f32,
+    ibl_intensity:   f32,
     _pad2_y:         f32,
     _pad2_z:         f32,
 }
@@ -71,9 +71,7 @@ struct DirectionalLight {
 @group(1) @binding(2) var env_sampler: sampler;
 
 const ENV_MAX_MIP: f32 = 5.0;
-/// Matches `IBL_INTENSITY` in shading.wgsl — see the note there about the
-/// missing ambient-occlusion term.
-const IBL_INTENSITY: f32 = 0.35;
+
 
 struct VOut {
     @builtin(position) clip:      vec4<f32>,
@@ -153,7 +151,7 @@ fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     let n_dot_v = max(dot(n, v), 0.0);
     let fresnel = 0.04 + 0.96 * pow(1.0 - n_dot_v, 5.0);
 
-    let color = direct + (env * IBL_INTENSITY) * (f0 + vec3<f32>(fresnel));
+    let color = direct + (env * light.ibl_intensity) * (f0 + vec3<f32>(fresnel));
     let out_alpha = clamp(alpha + fresnel * (1.0 - alpha), 0.0, 1.0);
     return vec4<f32>(color, out_alpha);
 }

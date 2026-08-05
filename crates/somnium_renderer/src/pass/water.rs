@@ -55,6 +55,61 @@ impl WaterPass {
                     },
                     count: None,
                 },
+                // Phase 22. Before this the water lit itself from a hardcoded
+                // light vector with no shadows, no environment and no scene
+                // colour, so it could never agree with the rest of the frame.
+                wgpu::BindGroupLayoutEntry { // directional light (real sun + cascades)
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // shadow atlas
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // shadow comparison sampler
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // environment cubemap
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // environment sampler
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // scene colour copy (refraction)
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -211,6 +266,12 @@ impl WaterPass {
         depth_view: &wgpu::TextureView,
         global_view_proj_buffer: &wgpu::Buffer,
         visibility_depth_texture_view: &wgpu::TextureView,
+        light_buffer: &wgpu::Buffer,
+        shadow_atlas_view: &wgpu::TextureView,
+        shadow_sampler: &wgpu::Sampler,
+        env_view: &wgpu::TextureView,
+        env_sampler: &wgpu::Sampler,
+        scene_copy_view: &wgpu::TextureView,
         geometry_vertex_buffer: &wgpu::Buffer,
         geometry_index_buffer: &wgpu::Buffer,
         water_textures_bind_group: Option<&wgpu::BindGroup>,
@@ -232,6 +293,27 @@ impl WaterPass {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(visibility_depth_texture_view),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: light_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(shadow_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(scene_copy_view),
                 },
             ],
         });

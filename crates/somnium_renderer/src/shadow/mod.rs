@@ -47,7 +47,8 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
 /// offset  32 :  view_proj     array<mat4x4, 4>   (256 bytes) one VP per cascade
 /// offset 288 :  cascade_splits vec4<f32>         (16 bytes)  view-space far Z per cascade
 /// offset 304 :  shadow_map_size f32              ( 4 bytes)  total atlas size in texels
-/// offset 308 :  _pad2         [f32; 3]           (12 bytes)
+/// offset 308 :  ibl_intensity f32                (4 bytes)
+/// offset 312 :  _pad2         [f32; 2]           (8 bytes)
 ///              total                             320 bytes
 /// ```
 #[repr(C)]
@@ -61,7 +62,12 @@ pub struct GpuDirectionalLight {
     pub view_proj: [[[f32; 4]; 4]; 4],
     pub cascade_splits: [f32; 4],
     pub shadow_map_size: f32,
-    pub _pad2: [f32; 3],
+    /// Scene-wide indirect-light strength (Phase 22C).
+    ///
+    /// Rides in this buffer's former padding because every pass that needs it
+    /// -- shading, transparent, terrain, water -- already binds the light.
+    pub ibl_intensity: f32,
+    pub _pad2: [f32; 2],
 }
 
 impl Default for GpuDirectionalLight {
@@ -80,7 +86,8 @@ impl Default for GpuDirectionalLight {
             view_proj: [identity; 4],
             cascade_splits: [5.0, 20.0, 50.0, 100.0],
             shadow_map_size: ATLAS_SIZE as f32,
-            _pad2: [0.0; 3],
+            ibl_intensity: 0.35,
+            _pad2: [0.0; 2],
         }
     }
 }

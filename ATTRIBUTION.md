@@ -753,6 +753,28 @@ blur pushes luma outside the neighbourhood range.
 
 **Files:** `somnium_renderer/src/pass/fxaa.rs`, `somnium_renderer/src/shaders/fxaa.wgsl`
 
+### 13.24 Water surface — Fresnel reflection + Beer-Lambert absorption (Phase 22)
+
+**References:**
+
+| Source | Topic |
+|---|---|
+| Christophe Schlick, *An Inexpensive BRDF Model for Physically-based Rendering* (1994) | Fresnel approximation, used twice: half-vector for the sun lobe, view-vector for the environment reflection |
+| Bruce Walter et al., *Microfacet Models for Refraction through Rough Surfaces* (EGSR 2007) | GGX normal distribution and the Smith geometry term |
+| Beer-Lambert law | Per-channel absorption through the water column |
+| Tessendorf, *Simulating Ocean Water* (SIGGRAPH course notes) | Deep water reads as reflected sky plus subsurface scattering, not as a surface albedo |
+
+**Somnium adaptations:**
+
+| Reference | Somnium |
+|---|---|
+| Planar-reflection or SSR pass for the reflected term | Reuses the Phase 19 prefiltered environment cubemap — no extra pass, and roughness maps straight onto the mip chain |
+| Absorption applied as a single scalar | Per-channel `exp(-d * clarity * ABSORPTION)` with red absorbed ~10x faster than blue, which is what produces the blue-green cast rather than a painted-on blue |
+| Refraction of an offscreen "under-water" render | Samples a copy of the HDR target taken immediately before the water pass, offset by the surface normal's horizontal component |
+| Infinite ocean assumed | The depth buffer clears to 1.0, so a far-plane reading is treated explicitly as "no backdrop": zero transmission, all scattering. Without that test the sky leaks through the blue channel and open ocean reads as a swimming pool |
+
+**Files:** `somnium_renderer/src/shaders/water.wgsl`, `somnium_renderer/src/pass/water.rs`
+
 ### 13.23 Image-Based Lighting — Karis split-sum (Phase 19)
 
 **References:**

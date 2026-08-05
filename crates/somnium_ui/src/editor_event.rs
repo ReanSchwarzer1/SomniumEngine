@@ -42,11 +42,19 @@ pub enum InspectorField {
     LightRange,
     LightInnerAngle,
     LightOuterAngle,
+    // Light colour (Phase 22C). Linear RGB, edited per channel — the sun's
+    // colour is the main lever on the mood of a scene and was not reachable
+    // from the editor at all.
+    LightColorR,
+    LightColorG,
+    LightColorB,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     PostExposure,
     PostVignetteStrength,
     PostCaStrength,
+    /// Scene-wide indirect-light strength (Phase 22C).
+    PostIblIntensity,
 }
 
 /// Which post-processing effect a toggle click targets (Phase 15A1).

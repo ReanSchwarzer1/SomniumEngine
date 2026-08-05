@@ -15,6 +15,10 @@ pub struct PostProcessPass {
     pub bind_group: wgpu::BindGroup,
     pub hdr_texture: wgpu::Texture,
     pub hdr_view: wgpu::TextureView,
+    /// Pre-water snapshot of `hdr_texture`, sampled by the water pass for
+    /// refraction (Phase 22).
+    pub scene_copy_texture: wgpu::Texture,
+    pub scene_copy_view: wgpu::TextureView,
     params_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
 }
@@ -87,6 +91,8 @@ impl PostProcessPass {
         };
 
         let (hdr_texture, hdr_view) = Self::make_hdr_texture(device, width, height);
+        let (scene_copy_texture, scene_copy_view) =
+            Self::make_scene_copy_texture(device, width, height);
         let bind_group = Self::make_bind_group(
             device, &bind_group_layout, &hdr_view, &sampler, &params_buffer,
         );
@@ -140,6 +146,8 @@ impl PostProcessPass {
             bind_group,
             hdr_texture,
             hdr_view,
+            scene_copy_texture,
+            scene_copy_view,
             params_buffer,
             sampler,
         }
@@ -157,7 +165,35 @@ impl PostProcessPass {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                // Phase 22: the water pass refracts what is behind the surface,
+                // which means sampling the scene colour. A pass cannot sample
+                // the target it renders into, so the HDR texture is copied into
+                // `scene_copy_texture` first.
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// Snapshot of the HDR target taken before the water pass, so water can
+    /// sample the scene behind it for refraction. Same size and format as the
+    /// HDR texture, so a straight texture-to-texture copy is enough.
+    fn make_scene_copy_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Scene Colour Copy"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -196,6 +232,10 @@ impl PostProcessPass {
         let (hdr_texture, hdr_view) = Self::make_hdr_texture(device, width, height);
         self.hdr_texture = hdr_texture;
         self.hdr_view = hdr_view;
+        let (scene_copy_texture, scene_copy_view) =
+            Self::make_scene_copy_texture(device, width, height);
+        self.scene_copy_texture = scene_copy_texture;
+        self.scene_copy_view = scene_copy_view;
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,

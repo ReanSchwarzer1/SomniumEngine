@@ -51,7 +51,7 @@ struct DirectionalLight {
     view_proj:       array<mat4x4<f32>, 4>,   // offset  32  (256 bytes)
     cascade_splits:  vec4<f32>,               // offset 288  view-space far Z per cascade
     shadow_map_size: f32,                     // offset 304  total atlas texels (4096)
-    _pad2_x:         f32,                     // offset 308
+    ibl_intensity:   f32,                     // offset 308  Phase 22C: editable indirect strength
     _pad2_y:         f32,                     // offset 312
     _pad2_z:         f32,                     // offset 316
 }
@@ -118,7 +118,7 @@ const ENV_MAX_MIP: f32 = 5.0;
 /// creases and anything sitting in the sun's shadow. At full strength that
 /// washes shadows out badly. Until SSAO (or a glTF occlusion map) lands, the
 /// indirect term is scaled back so shadow contrast survives.
-const IBL_INTENSITY: f32 = 0.35;
+
 
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
 /// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
@@ -152,7 +152,7 @@ fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
     let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
 
-    return (diffuse + specular) * IBL_INTENSITY;
+    return (diffuse + specular) * light.ibl_intensity;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
