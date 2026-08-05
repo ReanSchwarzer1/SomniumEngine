@@ -647,6 +647,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     [pp.exposure, pp.vignette_strength, pp.ca_strength],
                     pp.vignette_enabled,
                     pp.ca_enabled,
+                    pp.fxaa_enabled,
                 ));
             // Phase 13E: light properties for the inspector (angles in degrees).
             let sel_light = self.selected_entity
@@ -1016,6 +1017,7 @@ impl<G: GameApp> Engine<G> {
             r.exposure = pp.exposure.max(0.0);
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
+            r.fxaa_enabled = pp.fxaa_enabled;
         }
     }
 
@@ -1455,6 +1457,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::ChromaticAberration => {
                             pp.ca_enabled = !pp.ca_enabled;
                             pp.ca_enabled
+                        }
+                        PostFxToggle::Fxaa => {
+                            pp.fxaa_enabled = !pp.fxaa_enabled;
+                            pp.fxaa_enabled
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

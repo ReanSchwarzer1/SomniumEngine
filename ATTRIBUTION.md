@@ -445,7 +445,8 @@ Key patterns studied:
 
 **Reference:** `example_repo/fyrox/Fyrox-master/fyrox-ui/src/popup.rs` — Fyrox creates popups at root canvas level (not as children of the menu button) and sends `WidgetMessage::Topmost` on open to escape parent clip bounds.
 
-**Somnium adaptation:** Fyrox's approach is not directly applicable to wry WebViews because each panel is a native HWND with a fixed clip rectangle. The analogous fix is to dynamically resize the toolbar HWND when a dropdown opens:
+
+**Somnium adaptation:** Fyrox's approach is not directly applicable to wry WebViews because each panel is a native HWND with a fixed clip rectangle. The analogous fix is to dynamically resize the toolbar HWND when a dropdown opens:
 - JS sends `menu_opened { height }` IPC when a dropdown opens (`toggleMenu()`).
 - `UiManager::expand_toolbar(height)` calls `WebView::set_bounds()` to grow the toolbar HWND.
 - JS sends `menu_closed {}` IPC when menus close (`closeAllMenus()`).
@@ -729,6 +730,29 @@ is static and placed by a uniform).
 `somnium_renderer/src/shaders/light_gizmo.wgsl`,
 `somnium_core/src/app.rs` (`submit_light_gizmos`).
 
+### 13.22 FXAA — Timothy Lottes / NVIDIA (Phase 15A2)
+
+**Reference:** Timothy Lottes, *FXAA 3.11* (NVIDIA, 2011) — the widely published
+`Fxaa3_11.h` console-quality preset. Studied from the published algorithm; no
+source was copied.
+
+**Algorithm used:** luma (Rec. 601) at the centre pixel plus the four diagonal
+neighbours → local min/max contrast test to skip flat areas → edge direction
+from the diagonal luma differences → a 2-tap inner average and a 4-tap wider
+average along that direction, falling back to the inner average when the wider
+blur pushes luma outside the neighbourhood range.
+
+**Somnium adaptations:**
+
+| Reference behaviour | Somnium |
+|---|---|
+| `FxaaTex` sampling with implicit derivatives | `textureSampleLevel(..., 0.0)`. The contrast early-out is a data-dependent branch, and WGSL forbids implicit-derivative sampling in non-uniform control flow. The source has no mips, so explicit LOD 0 is equivalent. |
+| Tuning via preprocessor `FXAA_QUALITY__*` presets | `EDGE_THRESHOLD` / `EDGE_THRESHOLD_MIN` constants at the reference defaults (0.125 / 0.0312), with `inv_size` supplied per-frame in a uniform. |
+| Typically the last pass before present | Runs before the gizmo / outline / particle / UI passes, so editor overlays and text are not smeared. |
+| Operates on gamma-space luma | Runs on an sRGB target, so sampling returns linear values and luma is computed in linear space. Slightly less perceptually tuned, but edge detection is unaffected in practice. |
+
+**Files:** `somnium_renderer/src/pass/fxaa.rs`, `somnium_renderer/src/shaders/fxaa.wgsl`
+
 ## 14. Pattern Index
 
 Cross-reference: which Somnium file implements which reference pattern.
@@ -804,6 +828,9 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_core/src/editor_commands.rs` (TerrainEditCmd) | Fyrox editor brush-stroke undo concept → region snapshot + restore-op queue (Phase 14 SSS) |
 | `somnium_core/src/app.rs` (terrain editing) | Fyrox `editor/src/interaction/terrain.rs` interaction model — mode toggle, cursor raycast, stroke lifecycle (Phase 14 SSS) |
 | `somnium_renderer/src/pass/light_gizmo.rs` | Bevy `bevy_light/src/gizmos.rs` — per-light-type gizmo shapes and cone sizing; batched LineList emission is original (Phase 13E) |
+| `somnium_renderer/src/pass/fxaa.rs` | FXAA 3.11 (Lottes/NVIDIA) — LDR intermediate target + resolve pass (Phase 15A2) |
+| `somnium_renderer/src/shaders/fxaa.wgsl` | FXAA 3.11 edge detect + directional blur, adapted to `textureSampleLevel` for WGSL uniformity (Phase 15A2) |
+| `somnium_renderer/src/indirect.rs` | UE5 `InstanceCullingDefinitions.h` — GPU-resident draw args, `instance_count` as the cull flag (Phase 15A) |
 | `somnium_renderer/src/shaders/light_gizmo.wgsl` | Original — world-space unlit line shader (no model matrix), mirrors `gizmo.wgsl` (Phase 13E) |
 
 ---

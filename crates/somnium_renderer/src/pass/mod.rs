@@ -1,3 +1,4 @@
+pub mod fxaa;
 pub mod gizmo;
 pub mod grid;
 pub mod light_gizmo;

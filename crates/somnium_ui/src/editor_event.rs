@@ -54,6 +54,7 @@ pub enum InspectorField {
 pub enum PostFxToggle {
     Vignette,
     ChromaticAberration,
+    Fxaa,
 }
 
 /// High-level editor commands produced by the native UI layer.

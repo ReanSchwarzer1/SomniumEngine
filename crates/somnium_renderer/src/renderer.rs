@@ -114,6 +114,11 @@ pub struct SomniumRenderer {
     pub vignette_strength: f32,
     /// Chromatic-aberration strength in UV units at the screen edge (0 = off).
     pub chromatic_aberration: f32,
+    /// Phase 15A2: FXAA anti-aliasing pass (runs before editor overlays).
+    fxaa_pass: crate::pass::fxaa::FxaaPass,
+    /// Whether FXAA is applied. When off, post-processing writes straight to
+    /// the swapchain and the pass costs nothing.
+    pub fxaa_enabled: bool,
 
     /// Editor transform gizmo pass.
     gizmo_pass: GizmoPass,
@@ -295,6 +300,10 @@ impl SomniumRenderer {
             exposure: 1.0,
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
+            fxaa_pass: crate::pass::fxaa::FxaaPass::new(
+                &ctx.device, ctx.config.format, ctx.config.width, ctx.config.height,
+            ),
+            fxaa_enabled: true,
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
@@ -561,6 +570,7 @@ impl SomniumRenderer {
             self.vis_pass.resize(&ctx.device, width, height, &self.global_pool.layout);
             self.shading_pass.resize(&ctx.device, &self.vis_pass.view);
             self.postprocess_pass.resize(&ctx.device, width, height);
+            self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
         }
     }
@@ -838,7 +848,16 @@ impl SomniumRenderer {
             self.vignette_strength,
             self.chromatic_aberration,
         );
-        self.postprocess_pass.record(&mut encoder, &surface_view);
+        // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
+        // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
+        // gizmos and UI text stay pixel-sharp.
+        if self.fxaa_enabled {
+            self.fxaa_pass.update(&ctx.queue, ctx.config.width, ctx.config.height);
+            self.postprocess_pass.record(&mut encoder, &self.fxaa_pass.ldr_view);
+            self.fxaa_pass.record(&mut encoder, &surface_view);
+        } else {
+            self.postprocess_pass.record(&mut encoder, &surface_view);
+        }
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
         if let Some(gizmo_pos) = self.gizmo_world_pos {

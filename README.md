@@ -43,7 +43,7 @@ The engine is organized around three deliberate commitments:
 - Cascaded Shadow Maps (4 cascades, PSS splits, PCF filtering)
 - Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode
 - Clustered forward lighting for point/spot lights (froxel binning)
-- HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, vignette
+- HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
 - Water shader (FBM waves, dual-direction crossfade, Beer's-law depth)
 
 **World & content**

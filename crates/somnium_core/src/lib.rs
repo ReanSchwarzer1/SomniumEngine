@@ -340,6 +340,12 @@ pub struct PostProcessComponent {
     pub ca_enabled: bool,
     /// Chromatic-aberration offset (UV units at the screen edge) when enabled.
     pub ca_strength: f32,
+    /// Whether FXAA anti-aliasing is applied (Phase 15A2).
+    ///
+    /// Unlike the stylistic effects above this defaults **on** — it is an image
+    /// quality feature, and the visibility-buffer pipeline has no MSAA, so
+    /// edges are otherwise hard-aliased.
+    pub fxaa_enabled: bool,
 }
 
 impl Default for PostProcessComponent {
@@ -350,6 +356,7 @@ impl Default for PostProcessComponent {
             vignette_strength: 1.0,
             ca_enabled: false,
             ca_strength: 0.004,
+            fxaa_enabled: true,
         }
     }
 }

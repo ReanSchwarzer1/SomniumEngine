@@ -62,6 +62,8 @@ struct InspectorHandles {
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label:  NodeHandle,
     post_ca_label:   NodeHandle,
+    post_fxaa_toggle: NodeHandle,
+    post_fxaa_label:  NodeHandle,
 }
 
 /// Light values shown in the inspector: intensity, range, inner°, outer°.
@@ -364,14 +366,15 @@ impl UiManager {
     /// `values` is `[exposure, vignette_strength, ca_strength]` plus the two
     /// enable flags; pass `None` when the selection has no
     /// `PostProcessComponent`.
-    pub fn update_post_inspector(&mut self, values: Option<([f32; 3], bool, bool)>) {
+    pub fn update_post_inspector(&mut self, values: Option<([f32; 3], bool, bool, bool)>) {
         let h = &self.inspector_handles;
         let (section, exposure, vig_str, ca_str) =
             (h.post_section, h.post_exposure, h.post_vig_str, h.post_ca_str);
-        let (vig_label, ca_label) = (h.post_vig_label, h.post_ca_label);
+        let (vig_label, ca_label, fxaa_label) =
+            (h.post_vig_label, h.post_ca_label, h.post_fxaa_label);
 
         match values {
-            Some(([exp, vig, ca], vig_on, ca_on)) => {
+            Some(([exp, vig, ca], vig_on, ca_on, fxaa_on)) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(exposure, exp));
                 self.native_ui.send(NumericFieldMessage::set_value(vig_str, vig));
@@ -383,6 +386,9 @@ impl UiManager {
                 ));
                 self.native_ui.send(TextMessage::set_text(
                     ca_label, format!("{} Chromatic Ab.", tick(ca_on)),
+                ));
+                self.native_ui.send(TextMessage::set_text(
+                    fxaa_label, format!("{} FXAA", tick(fxaa_on)),
                 ));
             }
             None => self.native_ui.set_visibility(section, false),
@@ -435,6 +441,10 @@ impl UiManager {
                 // Post FX toggles (Phase 15A1)
                 if msg.destination == self.inspector_handles.post_vig_toggle {
                     self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_fxaa_toggle {
+                    self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Fxaa));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_ca_toggle {
@@ -958,6 +968,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_ca_toggle, post_ca_label) =
         make_toggle(ui, "Chromatic Ab.", font_id, post_section);
     let post_ca_str = make_row_w(ui, "Amt", 34.0, font_id, post_section);
+    let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     ui.set_visibility(post_section, false);
 
     InspectorHandles {
@@ -965,6 +976,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_section, light_intensity, light_range, light_inner, light_outer,
         post_section, post_exposure, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
+        post_fxaa_toggle, post_fxaa_label,
     }
 }
 
