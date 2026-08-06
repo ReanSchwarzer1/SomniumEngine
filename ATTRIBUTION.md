@@ -928,3 +928,40 @@ Cross-reference: which Somnium file implements which reference pattern.
 4. **No binaries, shader bytecode, or compiled artifacts** from any reference project are included in any Somnium build output.
 
 5. **The `example_repo/` directory must never be added to the Cargo workspace** — not even as a `[patch]` or local dependency. Its presence is documentation only.
+
+---
+
+### 13.26 Advanced lighting references (Phase 24, planned)
+
+Phase 24 is planned against published papers rather than any engine's source. Listed
+here up front so the implementation cites the technique it actually follows:
+
+| Technique | Reference |
+|---|---|
+| Sky / atmosphere | Hillaire, *A Scalable and Production Ready Sky and Atmosphere Rendering Technique* (EGSR 2020) |
+| Tonemapping | Troy Sobotka, AgX; Narkowicz / Hill, ACES filmic approximations |
+| Physical camera & exposure | Lagarde & de Rousiers, *Moving Frostbite to PBR* (SIGGRAPH 2014) |
+| Ambient occlusion | Jimenez et al., *Practical Real-Time Strategies for Accurate Indirect Occlusion* (GTAO, SIGGRAPH 2016) |
+| Specular occlusion | Lagarde & de Rousiers, as above — already used in Phase 17I |
+| Soft shadows | Fernando, *Percentage-Closer Soft Shadows* (NVIDIA, 2005) |
+| Specular anti-aliasing | Toksvig normal-variance; Kaplanyan et al., *Filtering Distributions of Normals* |
+| Temporal AA | Karis, *High Quality Temporal Supersampling* (SIGGRAPH 2014) |
+| Distance-field tracing | Wright et al., *Dynamic Occlusion with Signed Distance Fields* (SIGGRAPH 2015) |
+| Volumetric fog | Hillaire, *Physically Based and Unified Volumetric Rendering in Frostbite* (SIGGRAPH 2015) |
+| Split-sum IBL | Karis, *Real Shading in Unreal Engine 4* — already used in Phase 19 |
+
+#### On studying the Unreal Engine 5 source
+
+Lumen's architecture was studied by reading the shader sources in a local UE 5.6
+install (`Engine/Shaders/Private/Lumen`, 50 `.usf` files) to understand how the stages
+fit together: scene representation → surface cache → screen probes → world radiance
+cache → reflections, and the trace/filter/temporal split repeated at each stage. That
+structural understanding informs the ordering of Phase 24 sub-phases in `context.md` §22.
+
+**No Unreal Engine code is copied, adapted, or translated into Somnium.** The UE source
+is licensed under the Unreal Engine EULA, which is incompatible with this repository's
+licence, and it is not vendored here — it lives only in the Epic Games install outside
+the repo. Where UE files are named in `context.md`, they are named as *reading
+references for the reader*, in the same spirit as the `example_repo/` rules below. Every
+technique Somnium actually implements is written from the published paper in the table
+above.

@@ -1170,6 +1170,23 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 15E2 | ✅ Complete | **Two-phase occlusion culling.** The frame graph is now cull(1) → visibility(clear) → Hi-Z → cull(2) → visibility(load) → Hi-Z. Phase one tests frustum then occlusion against the *previous* frame's pyramid; phase two re-tests only what phase one rejected **on occlusion** against the pyramid just rebuilt from phase one's depth, which is what catches geometry that became visible this frame. Reprojecting the previous frame alone would drop geometry the moment the camera moves — the second phase is what makes that safe, since anything wrongly rejected gets a look at fresh depth within the same frame. Two details are easy to get wrong and are handled explicitly: frustum rejects are **not** recorded in the phase-two set (they are still off-screen, and resurrecting them would draw outside the view), and phase two **zeroes** the instance count of everything it is not re-testing, or phase one's draws would be submitted twice. `cull.wgsl` gained a transliteration of the `culling.rs` occlusion math, and `CullPass` gained a per-draw flag buffer, a Hi-Z binding, and one params uniform per phase — both dispatches are encoded before either runs, so a single uniform could not carry two `phase` values. Occlusion is held off until a pyramid exists (`hiz_ready`), because wgpu zero-fills a new texture and zero is the near plane, which would read as "everything is occluded"; a resize resets the flag for the same reason. A layout test pins `GpuCullParams` to 192 bytes with per-field offsets, since a Rust/WGSL uniform mismatch does not fail validation — the shader just reads the wrong words and culls the wrong things. |
 | 15E-verify | ✅ Complete | **Occlusion culling measured on a real scene.** The demo has one opaque mesh, so it can neither exercise nor benefit from occlusion culling; the imported `car_scene` (47 nodes, heavily self-occluding) can. Three diagnostics made this measurable: `SOMNIUM_CULL_STATS=1` copies the indirect args back after each cull phase and logs how many draws survived (`instance_count` doubles as the verdict, so counting non-zero entries *is* the submitted-draw count); `SOMNIUM_NO_OCCLUSION=1` keeps frustum culling but skips the Hi-Z half, so the two can be told apart; and `SOMNIUM_IMPORT=<path>` imports a model at startup, since the File → Import dialog cannot be scripted. **Result**, camera against the car body: frustum alone drew 24 of 35, frustum + occlusion drew **17 of 35** — 7 more draws removed, **29% fewer** than frustum alone — and the two screenshots are pixel-identical, which is the correctness half: everything occlusion removed was genuinely invisible. `phase2_drawn` was non-zero on some frames during camera motion, confirming the second phase does catch real disocclusions rather than being dead weight. A useful incidental check: `total=35` rather than 48 because 13 of the car's meshes are `alphaMode: BLEND` and route to the transparent queue, which is not indirect-drawn. |
 | 23 | ⬜ Planned | **GPU culling for the transparent pass.** Alpha-blended draws bypass culling entirely — they go to the Phase 21 forward queue, which is CPU-submitted per object with no indirect args and so no frustum or occlusion test. On the imported `car_scene` that is 13 of 47 meshes, roughly a quarter of the model. Give the transparent queue its own indirect args and cull dispatch, keeping the back-to-front sort (sort first, then build args, so argument `i` still lines up with instance `i` — the same ordering trap that produced the shard artifact). Occlusion has to stay conservative here: blended geometry can be hidden by opaque occluders, but must never occlude itself. |
+| 24A | ⬜ Planned | **Physical light units and exposure.** Nothing in the engine has a real-world scale: sun “intensity” is an arbitrary multiplier, so no value of it means noon and no value means night. Move to photometric units — sun in **lux** (~100 000 clear noon, ~1 000 overcast, ~0.3 full moon), local lights in **lumens**, and drive the camera with **EV100** from aperture/shutter/ISO. Add a luminance-histogram compute pass for auto-exposure with separate adaptation rates for light-to-dark and dark-to-light. This is the prerequisite for every other item: without a physical scale, “turn the sun down” has nothing to turn down *to*. |
+| 24B | ⬜ Planned | **Filmic tonemapping (AgX).** The current curve washes colour out and blows the sun to a flat white disc. AgX handles very high dynamic range without the hue-twisting ACES shows on bright saturated light, which matters once the sun carries a real 100 000 lux and the night sky carries 0.001. Keep ACES selectable for comparison, and put the choice in the Post Processing inspector. |
+| 24C | ⬜ Planned | **Atmospheric sky (Hillaire LUTs).** `shaders/ibl_gen.wgsl:65-67` hardcodes `horizon_color`, `zenith_color` and `ground_color` as constants; only the sun *disc* reads `sun_color`. That is exactly why turning the sun down does not produce night — the sky dome stays fully bright, the IBL cubemap is baked from that dome, and every surface keeps full ambient regardless of the sun. Replace it with Hillaire's precomputed scattering: a transmittance LUT, a multiple-scattering LUT and a sky-view LUT, evaluated from sun direction and intensity. Sky colour, ambient, and aerial perspective then all fall out of one physical model, and sunset/night come for free. |
+| 24D | ⬜ Planned | **Night sky and sun-driven IBL refresh.** With 24C the sky darkens correctly, but a real night is not simply black: add a moon disc (phase, direction, ~0.5°), a star field, and airglow so night is *dark but readable*. The environment cubemap must regenerate whenever the sun moves or changes intensity, and the existing `ibl_intensity` slider becomes a **scale on** the physical value rather than a replacement for it. |
+| 24E | ⬜ Planned | **Sun as a physical disc.** Give the sun its real angular diameter (0.53°), which drives both the specular highlight shape and the shadow penumbra width in 24G, plus a **colour temperature in Kelvin** in the inspector instead of raw linear RGB. Warm low sun and cool overcast then come from one intuitive control. |
+| 24F | ⬜ Planned | **Temporal AA and specular anti-aliasing** (absorbs the old Phase 18). The foliage screenshots show heavy white speckling: thin sub-pixel geometry with a bright specular lobe aliases badly, and every lighting change fights that noise. Needs jittered projection, a velocity buffer, neighbourhood-clamped history, plus normal-variance→roughness (Toksvig / LEAN) so a mip that averages many normals widens its lobe instead of sparkling. **Must land before the GI work** — stochastic GI is unreadable without a temporal filter to build on. |
+| 24G | ⬜ Planned | **Shadow quality.** Today's CSM has hard 3×3 PCF and visible cascade seams. Add cascade blending across the split, **normal-offset bias** (which removes peter-panning far better than constant depth bias), **PCSS** contact-hardening driven by the sun's 24E angular size, and a short screen-space **contact shadow** ray march for the small-scale contact that no shadow-map resolution can capture — exactly where tree trunks meet terrain. |
+| 24H | ⬜ Planned | **GTAO and screen-space bent normals.** Phase 17I wired *baked* occlusion only, so anything without an AO map (all procedural geometry, all terrain) still receives unattenuated sky. Ground-truth ambient occlusion adds the screen-space term, and the **bent normal** it produces is reused as the cone direction for the 24K gather rather than being thrown away. |
+| 24I | ⬜ Planned | **Mesh SDF bake and global distance-field clipmap.** Groundwork for GI. Bake a signed distance field per mesh at upload, then composite them into a camera-centred clipmap of the whole scene. This is what Lumen software-traces against (`LumenMeshSDFCulling.usf`, `LumenSoftwareRayTracing.ush`). Somnium already has the pieces this needs — real per-mesh AABBs from 15E, a bindless resource pool, and an upload path that already does meshlet building. |
+| 24J | ⬜ Planned | **Surface cache (Lumen's “cards”).** Rays are only affordable if hitting a surface is cheap, so capture each mesh's albedo/normal/emissive into an atlas from a handful of orthographic directions, and light that atlas once per frame. A ray then reads lit radiance with one texture fetch instead of re-running the material. Reference: `LumenScene.usf`, `LumenCardCommon.ush` (`LUMEN_CARD_DATA_STRIDE 10`), `LumenSceneLighting.usf`. |
+| 24K | ⬜ Planned | **Screen probe gather — the GI core.** Place probes on a coarse screen grid with adaptive placement at depth discontinuities, trace rays per probe (screen-space first, then 24I distance fields, then the 24L cache for anything far), store the result as SH3 or an octahedral map, filter spatially and temporally, then integrate per pixel against the bent normal from 24H. This is the single feature that makes indirect light look like Lumen rather than like a constant ambient term. Reference: `LumenScreenProbeGather.usf`, `LumenScreenProbeTracing.usf`, `LumenScreenProbeFiltering.usf`, `LumenScreenProbeGatherTemporal.usf`. |
+| 24L | ⬜ Planned | **World-space radiance cache.** A clipmap of world-space probes holding converged radiance, so screen probes can terminate short rays into it instead of marching to infinity, and so light bounces more than once across frames. Reference: `LumenRadianceCache.usf`, `LumenRadianceCacheUpdate.usf` and their clipmap indirection scheme. |
+| 24M | ⬜ Planned | **Ray-traced reflections with a denoiser.** Layered fallback — screen-space trace first, distance-field trace where the screen has no answer, radiance cache beyond that. Needs a proper spatial + temporal denoiser, since one bounce per pixel is far too noisy raw. Reference: `LumenReflectionTracing.usf`, `LumenReflectionResolve.usf`, `LumenReflectionDenoiserTemporal.usf`. This also finally gives the water something better than a single planar reflection. |
+| 24N | ⬜ Planned | **Hardware ray tracing (gated, optional).** wgpu 29 does ship `Features::EXPERIMENTAL_RAY_QUERY` with acceleration structures (`wgpu-types-29.0.3/src/ray_tracing.rs`), so this is real rather than hypothetical — but it is explicitly experimental, effectively Vulkan-only, and unavailable on much hardware. Treat it as an **alternate tracing backend behind a runtime feature check**, with the 24I software path as the one that must always work. UE5 makes the same split (`Lumen*HardwareRayTracing.usf` vs `LumenSceneDirectLightingSoftwareRayTracing.usf`) and that structure is worth copying. |
+| 24O | ⬜ Planned | **Volumetric fog, aerial perspective and light shafts.** A froxel volume (view-space 3D texture) accumulating in-scattering per depth slice, fed by the 24C atmosphere so distant hills desaturate correctly and the sun throws real shafts through the tree canopy. Among the highest ratio of perceived realism to implementation cost in the whole phase. |
+| 24P | ⬜ Planned | **Emissive materials as light sources, and physical bloom.** Emissive currently contributes nothing to the scene; with 24J's surface cache it can feed GI directly. Bloom becomes a physical lens response driven by scene luminance rather than a fixed threshold, so a 100 000 lux sun blooms and a lit window does not. |
+| 24Q | ⬜ Planned | **Local lights in physical units, with IES profiles.** Point and spot lights move to lumens/candela with correct inverse-square falloff and radius-based soft shadows, and gain optional IES profile support so real fixtures can be matched. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
 | skipped-frame-fix | ✅ Complete | **Double submission after a dropped frame.** Found while reading cull statistics: exactly one frame in 3 914 reported twice the expected draw count. The surface-acquisition failure path returned early without emptying the per-frame queues, so the next frame appended to them and submitted everything twice. Invisible for opaque geometry — same pixels, same depth — which is why it went unnoticed, but it double-blends the transparent pass and wastes a whole frame of work. Queue clearing moved into `clear_frame_queues`, called on every path out of `render`. |
@@ -1392,3 +1409,88 @@ tests, and runs on its own, so the engine is never left half-converted.
 - Verify culling actually happened by reading back the arg buffer (`COPY_SRC`) in
   a test, or by counting non-zero `instance_count` values — not by eyeballing the
   image, since a correct cull is invisible.
+
+## 22. Phase 24 — Advanced Lighting (plan)
+
+The goal is photorealism, and the honest summary of where the engine stands is that
+its *materials* are physically based while its *lighting* is not. Shading runs a
+correct GGX BRDF, but it is fed by an arbitrary sun multiplier, a hardcoded sky
+gradient, a constant ambient term, and a tonemapper that crushes the result. Every
+item below exists to close that gap.
+
+### 22.1 Why night does not work today
+
+`shaders/ibl_gen.wgsl` builds the environment cubemap from three constants:
+
+```wgsl
+let horizon_color = vec3<f32>(0.5, 0.7, 0.9);
+let zenith_color  = vec3<f32>(0.05, 0.1, 0.3);
+let ground_color  = vec3<f32>(0.05, 0.04, 0.03);
+```
+
+Only the sun disc and its glow read `params.sun_color`. So the sky dome's brightness
+is completely independent of the sun, the IBL is prefiltered from that dome, and
+`evaluate_ibl` therefore delivers full daylight ambient no matter how far the sun's
+intensity is turned down. Lowering the sun removes direct light and leaves everything
+sitting in bright blue ambient — which reads as "overcast", never as "night".
+
+This is not a tuning problem and cannot be fixed with a multiplier. The sky has to
+become a *function of the sun* (24C), which is also what makes sunset, golden hour
+and aerial perspective possible.
+
+### 22.2 Ordering, and why
+
+1. **24A–24B first (units, exposure, tonemapping).** Everything downstream is judged
+   by eye, and right now the eye is looking through a broken curve. Fixing the
+   measurement before the thing being measured avoids tuning twice.
+2. **24C–24E next (sky, night, sun).** Highest single visual leverage, and the direct
+   fix for the night complaint. Expect this to change the look of *everything*,
+   including water and the foliage tuning from 17H/17I.
+3. **24F before any GI.** Screen-probe GI is stochastic; without temporal
+   accumulation and specular AA the result is unreadable noise, and the existing
+   foliage sparkle proves the aliasing is already past tolerable.
+4. **24G–24H** are classic, self-contained quality wins that do not depend on GI.
+5. **24I–24M** are the Lumen-style arc and should be taken strictly in order — each
+   stage is the input to the next.
+6. **24N–24Q** are polish and breadth once the core is in.
+
+### 22.3 What was learned from the UE5 source
+
+Studied from the local UE 5.6 install at
+`C:\Program Files\Epic Games\UE_5.6\Engine\Shaders\Private\Lumen` (50 `.usf`
+files). Lumen is not one algorithm but a pipeline of five cooperating caches, and
+the ordering above mirrors its dependency chain:
+
+| Lumen stage | Files | Somnium equivalent |
+|---|---|---|
+| Scene representation | `LumenScene.usf`, `LumenMeshSDFCulling.usf` | 24I mesh SDFs + clipmap |
+| Surface cache (cards) | `LumenCardCommon.ush`, `LumenSceneLighting.usf` | 24J card atlas |
+| Screen probes | `LumenScreenProbeGather/Tracing/Filtering.usf` | 24K |
+| World radiance cache | `LumenRadianceCache.usf` | 24L |
+| Reflections + denoise | `LumenReflection*.usf` | 24M |
+
+Two structural lessons worth carrying over. First, Lumen keeps **software and
+hardware tracing as interchangeable backends** behind a common interface
+(`LumenSoftwareRayTracing.ush` vs `LumenHardwareRayTracingCommon.ush`) rather than
+committing to either — which is exactly the right shape given how experimental
+wgpu's ray-tracing support still is. Second, almost every stage is **split into
+trace → filter → temporal accumulate** as separate passes; the denoising is not an
+afterthought bolted on at the end, it is half the architecture.
+
+> **Licensing note.** The UE5 source is under the Unreal Engine EULA and is *not*
+> compatible with this repository's licence. It is being read to understand the
+> architecture — pass structure, cache topology, the order of operations. No UE code
+> is copied, adapted, or translated into Somnium. Where a technique has a published
+> paper (Hillaire's atmosphere, Jimenez's GTAO, Karis' split-sum), that paper is the
+> implementation reference and the citation, not the engine source.
+
+### 22.4 Definition of done
+
+The phase is finished when, with no code changes between the two:
+
+- Dragging the sun's intensity from noon to zero produces a believable day → dusk →
+  night transition, with the sky, the ambient light and the exposure all responding.
+- A dark interior lit only by a doorway shows coloured bounce light from the wall
+  the sun hits, not a flat ambient fill.
+- Distant terrain desaturates into the sky rather than staying fully saturated.
+- Foliage stops sparkling when the camera moves.

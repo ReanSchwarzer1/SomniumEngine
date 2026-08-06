@@ -46,6 +46,10 @@ The engine is organized around three deliberate commitments:
 - Clustered forward lighting for point/spot lights (froxel binning)
 - HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
 - Water shader (FBM waves, dual-direction crossfade, Beer's-law depth)
+- GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters,
+  and a Hi-Z depth pyramid driving two-phase occlusion culling
+- Cutout foliage support: sidecar alpha masks, alpha-weighted mip generation, and
+  coverage-preserving alpha so vegetation neither darkens nor erodes with distance
 
 **World & content**
 - glTF 2.0 asset loading (meshes, PBR materials, textures), importable at runtime from **File > Import Model**
@@ -54,6 +58,8 @@ The engine is organized around three deliberate commitments:
 - **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching,
   splatmap PBR with triplanar cliffs, real-time sculpting + texture painting,
   editor terrain mode ([`context.md` §20](context.md))
+- **Foliage painting** — UE5-style brush over terrain with density, size and
+  single-instance placement, plus a CC0 high-poly grass/tree palette
 
 **Editor & runtime**
 - Archetype ECS with parent/child hierarchy and world-transform propagation
@@ -62,6 +68,19 @@ The engine is organized around three deliberate commitments:
 - Native UI widget library (Grid, StackPanel, ScrollViewer, TextBox, NumericField, …)
 - Jolt physics integration; Kira audio scaffolding
 - CPU particle system with GPU billboard instancing
+
+### In progress — Phase 24: Advanced Lighting
+
+The materials are physically based; the *lighting* is not yet. The sun is an arbitrary
+multiplier, the sky is a hardcoded gradient that does not respond to it (so turning the
+sun down cannot produce night), and indirect light is a constant ambient term. Phase 24
+addresses that end to end: photometric light units and auto-exposure, AgX tonemapping, a
+Hillaire atmosphere driving both sky and IBL, TAA plus specular anti-aliasing, PCSS and
+contact shadows, GTAO, and a Lumen-style dynamic GI path built on mesh distance fields,
+a surface cache, screen probes and a world radiance cache — with hardware ray tracing as
+an optional backend behind wgpu's experimental ray-query feature.
+
+Full plan and ordering: [`context.md` §22](context.md).
 
 For the complete, continuously updated architecture reference, read
 [`context.md`](context.md).
