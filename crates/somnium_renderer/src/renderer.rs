@@ -205,6 +205,12 @@ pub struct SomniumRenderer {
     /// Per-material flag: true when the material is alpha-blended. Lets
     /// `submit` route draws without any call site needing to know.
     material_blend: Vec<bool>,
+    /// Phase 17D: per-material double-sided flag, used to split the visibility
+    /// draws between the back-face-culled and two-sided pipelines.
+    material_double_sided: Vec<bool>,
+    /// Number of leading indirect arguments that belong to single-sided
+    /// materials. Everything after it is drawn with culling off.
+    single_sided_args: usize,
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
@@ -381,6 +387,8 @@ impl SomniumRenderer {
             transparent_pass,
             transparent_queue: Vec::new(),
             material_blend: Vec::new(),
+            material_double_sided: Vec::new(),
+            single_sided_args: 0,
             ibl_pass,
             hiz_pass,
             hiz_ready: false,
@@ -496,8 +504,23 @@ impl SomniumRenderer {
                 albedo_map:             resolve_tex(mat.albedo_map),
                 normal_map:             resolve_tex(mat.normal_map),
                 metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
-                _padding:               [0; 3],
+                // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
+                // and BLEND goes to the forward pass, so a cutoff on either
+                // would punch holes in geometry that should be solid.
+                alpha_cutoff: crate::material::pool::cutout_threshold(
+                    mat.alpha_mode,
+                    mat.alpha_cutoff,
+                ),
+                flags: if mat.double_sided {
+                    crate::material::pool::MATERIAL_FLAG_DOUBLE_SIDED
+                } else {
+                    0
+                },
+                _padding: 0,
             });
+            // Phase 17D: remember double-sidedness so the visibility pass can
+            // draw those instances with back-face culling switched off.
+            self.set_material_double_sided(id, mat.double_sided);
             // Phase 21: remember which materials are blended so `submit` can
             // route their draws to the forward transparent pass.
             self.set_material_blend(
@@ -773,14 +796,28 @@ impl SomniumRenderer {
             occlusion_query_set: None,
         });
 
-        rpass.set_pipeline(&self.vis_pass.pipeline);
         rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
+        rpass.set_bind_group(1, &self.vis_pass.cutout_bind_group, &[]);
 
         if self.gpu_driven && !self.indirect.is_empty() {
-            // Phase 15A: the whole scene in one call. Culled draws simply carry
-            // instance_count = 0 and cost nothing.
-            rpass.multi_draw_indirect(&self.indirect.buffer, 0, self.indirect.len() as u32);
+            // Phase 15A: the whole scene in one call per cull mode. Culled draws
+            // simply carry instance_count = 0 and cost nothing.
+            let total = self.indirect.len();
+            let split = self.single_sided_args.min(total);
+            if split > 0 {
+                rpass.set_pipeline(&self.vis_pass.pipeline);
+                rpass.multi_draw_indirect(&self.indirect.buffer, 0, split as u32);
+            }
+            if total > split {
+                rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
+                rpass.multi_draw_indirect(
+                    &self.indirect.buffer,
+                    (split as u64) * crate::indirect::ARGS_SIZE,
+                    (total - split) as u32,
+                );
+            }
         } else if clear {
+            rpass.set_pipeline(&self.vis_pass.pipeline);
             // Fallback for devices without multi-draw indirect. There are no
             // indirect args to cull, so everything is drawn in phase one and
             // phase two has nothing to add.
@@ -825,6 +862,23 @@ impl SomniumRenderer {
 
     /// Record whether a material is alpha-blended, so `submit` can route it.
     /// Materials default to opaque when never registered.
+    /// Record that `material_id` renders from both sides (Phase 17D).
+    pub fn set_material_double_sided(&mut self, material_id: u32, double_sided: bool) {
+        let idx = material_id as usize;
+        if self.material_double_sided.len() <= idx {
+            self.material_double_sided.resize(idx + 1, false);
+        }
+        self.material_double_sided[idx] = double_sided;
+    }
+
+    /// Whether `material_id` renders from both sides.
+    fn is_double_sided(&self, material_id: u32) -> bool {
+        self.material_double_sided
+            .get(material_id as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub fn set_material_blend(&mut self, material_id: u32, blended: bool) {
         let idx = material_id as usize;
         if self.material_blend.len() <= idx {
@@ -996,22 +1050,35 @@ impl SomniumRenderer {
             // clusters (voxel chunks) or with no recorded AABB falls back to a
             // single whole-mesh argument that is never culled — safer than
             // guessing at its extent.
+            // Phase 17D: single-sided draws first, then double-sided, with the
+            // boundary recorded. The visibility pass issues one indirect call
+            // per range so each gets the right cull mode. Argument order does
+            // not have to match the draw queue — `first_instance` carries the
+            // instance explicitly, and the cull shader reads it from there.
             self.cluster_args.clear();
             self.cull_aabbs.clear();
-            for (i, cmd) in self.draw_queue.iter().enumerate() {
-                let meshlets = if self.meshlet_draws {
-                    self.geometry.mesh_meshlets(cmd.vertex_offset)
-                } else {
-                    None
-                };
-                crate::indirect::push_cluster_args(
-                    i as u32,
-                    cmd.index_count,
-                    meshlets,
-                    self.geometry.mesh_aabb(cmd.vertex_offset),
-                    &mut self.cluster_args,
-                    &mut self.cull_aabbs,
-                );
+            for pass_two_sided in [false, true] {
+                if pass_two_sided {
+                    self.single_sided_args = self.cluster_args.len();
+                }
+                for (i, cmd) in self.draw_queue.iter().enumerate() {
+                    if self.is_double_sided(cmd.material_id) != pass_two_sided {
+                        continue;
+                    }
+                    let meshlets = if self.meshlet_draws {
+                        self.geometry.mesh_meshlets(cmd.vertex_offset)
+                    } else {
+                        None
+                    };
+                    crate::indirect::push_cluster_args(
+                        i as u32,
+                        cmd.index_count,
+                        meshlets,
+                        self.geometry.mesh_aabb(cmd.vertex_offset),
+                        &mut self.cluster_args,
+                        &mut self.cull_aabbs,
+                    );
+                }
             }
             self.indirect.upload(&ctx.device, &ctx.queue, &self.cluster_args);
             self.cull_pass.update(

@@ -262,7 +262,9 @@ impl VoxelTerrain {
                 base_color: [1.0, 1.0, 1.0, 1.0],
                 roughness: 0.9, metallic: 0.0,
                 albedo_map: palette_tex as i32,
-                normal_map: -1, metallic_roughness_map: -1, _padding: [0; 3],
+                normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
             },
         );
 
@@ -862,7 +864,9 @@ impl GameApp for HelloGame {
                     somnium_renderer::material::pool::GpuMaterial {
                         base_color: [0.8, 0.8, 0.8, 1.0],
                         roughness: 0.5, metallic: 0.0,
-                        albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, _padding: [0; 3],
+                        albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
                     },
                 );
 
@@ -1132,7 +1136,9 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
         somnium_renderer::material::pool::GpuMaterial {
             base_color: [0.1, 0.1, 0.15, 1.0],
             roughness: 0.8, metallic: 0.0,
-            albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, _padding: [0; 3],
+            albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -1140,7 +1146,9 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
         somnium_renderer::material::pool::GpuMaterial {
             base_color: [0.8, 0.1, 0.1, 1.0],
             roughness: 0.2, metallic: 0.8,
-            albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, _padding: [0; 3],
+            albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
         },
     );
 
@@ -1192,7 +1200,9 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
             somnium_renderer::material::pool::GpuMaterial {
                 base_color: [1.0, 1.0, 1.0, 1.0],
                 roughness: 0.1, metallic: 0.9,
-                albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, _padding: [0; 3],
+                albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
             },
         )
     };

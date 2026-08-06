@@ -19,6 +19,11 @@ pub struct VisibilityBufferPass {
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
     pub pipeline: wgpu::RenderPipeline,
+    /// Phase 17D: same pipeline with back-face culling off, for glTF
+    /// `doubleSided` materials.
+    pub pipeline_two_sided: wgpu::RenderPipeline,
+    /// Sampler used by the alpha-cutout test.
+    pub cutout_bind_group: wgpu::BindGroup,
 }
 
 impl VisibilityBufferPass {
@@ -59,9 +64,39 @@ impl VisibilityBufferPass {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/visibility.wgsl").into()),
         });
 
+        // Phase 17D: alpha cutout samples the albedo map here, which needs a
+        // sampler the visibility pass never had.
+        let cutout_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Visibility Cutout BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            }],
+        });
+        let cutout_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Visibility Cutout Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let cutout_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Visibility Cutout BG"),
+            layout: &cutout_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Sampler(&cutout_sampler),
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Visibility Pipeline Layout"),
-            bind_group_layouts: &[Some(global_bind_group_layout)],
+            bind_group_layouts: &[Some(global_bind_group_layout), Some(&cutout_layout)],
             immediate_size: 0,
         });
 
@@ -109,7 +144,60 @@ impl VisibilityBufferPass {
             cache: None,
         });
 
-        Self { texture, view, depth_texture, depth_view, pipeline }
+        // Phase 17D: the same pipeline with culling off, for glTF
+        // `doubleSided` materials. A leaf card is a single flat quad — with
+        // back-face culling it disappears entirely from one side.
+        let mut two_sided_desc = wgpu::RenderPipelineDescriptor {
+            label: Some("Visibility Pipeline (two-sided)"),
+            layout: Some(&pipeline_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            cache: None,
+        };
+        two_sided_desc.label = Some("Visibility Pipeline (two-sided)");
+        let pipeline_two_sided = device.create_render_pipeline(&two_sided_desc);
+
+        Self {
+            texture,
+            view,
+            depth_texture,
+            depth_view,
+            pipeline,
+            pipeline_two_sided,
+            cutout_bind_group,
+        }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32, global_bind_group_layout: &wgpu::BindGroupLayout) {

@@ -25,10 +25,30 @@ struct View {
     _padding: f32,
 }
 
+struct Material {
+    base_color: vec4<f32>,
+    roughness: f32,
+    metallic: f32,
+    albedo_map: i32,
+    normal_map: i32,
+    metallic_roughness_map: i32,
+    alpha_cutoff: f32,
+    flags: u32,
+    _padding: u32,
+}
+
 @group(0) @binding(0) var<storage, read> vertices: array<Vertex>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read> instances: array<Instance>;
 @group(0) @binding(3) var<storage, read> view: View;
+// Phase 17D: alpha cutout needs the albedo texture here, not just in shading.
+// The visibility buffer decides what exists at each pixel, so a leaf's cut-away
+// corners have to be discarded now — resolving them later would be too late,
+// the depth buffer would already show a solid quad.
+@group(0) @binding(4) var textures: binding_array<texture_2d<f32>>;
+@group(0) @binding(5) var<storage, read> materials: array<Material>;
+
+@group(1) @binding(0) var cutout_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -48,6 +68,8 @@ struct VertexOutput {
     // 3k, 3k+1 and 3k+2, so integer division gives k for each of them and the
     // flat interpolation is well defined.
     @location(1) @interpolate(flat) prim_id: u32,
+    @location(2) uv: vec2<f32>,
+    @location(3) @interpolate(flat) material_id: u32,
 }
 
 @vertex
@@ -62,6 +84,8 @@ fn vs_main(
     let vertex = vertices[instance.vertex_offset + index];
     
     let pos = vec3<f32>(vertex.pos_x, vertex.pos_y, vertex.pos_z);
+    out.uv = vec2<f32>(vertex.u, vertex.v);
+    out.material_id = instance.material_id;
     out.clip_pos = view.view_proj * instance.model * vec4<f32>(pos, 1.0);
     out.instance_id = inst_idx;
     out.prim_id = v_idx / 3u;
@@ -72,8 +96,29 @@ fn vs_main(
 @fragment
 fn fs_main(
     @location(0) @interpolate(flat) instance_id: u32,
-    @location(1) @interpolate(flat) prim_idx: u32
+    @location(1) @interpolate(flat) prim_idx: u32,
+    @location(2) uv: vec2<f32>,
+    @location(3) @interpolate(flat) material_id: u32
 ) -> @location(0) u32 {
+    // Derivatives are taken at top level, where control flow is uniform, and
+    // fed to textureSampleGrad below. Sampling inside the branch directly would
+    // break WGSL's uniformity rule, and dropping to LOD 0 instead would make
+    // distant foliage crawl with aliasing.
+    let ddx_uv = dpdx(uv);
+    let ddy_uv = dpdy(uv);
+
+    let material = materials[material_id];
+    // Cutoff is 0 for OPAQUE and BLEND, so this costs one compare for
+    // everything that is not alpha-tested.
+    if material.alpha_cutoff > 0.0 && material.albedo_map >= 0 {
+        let alpha = textureSampleGrad(
+            textures[material.albedo_map], cutout_sampler, uv, ddx_uv, ddy_uv,
+        ).a;
+        if alpha < material.alpha_cutoff {
+            discard;
+        }
+    }
+
     // Phase 15C: 16/16 split — 65 535 instances x 65 536 triangles per draw.
     // Was 10/22, which capped the whole scene at 1022 draws; triangle counts
     // that large belong in separate draws (and will become meshlets in 15D).

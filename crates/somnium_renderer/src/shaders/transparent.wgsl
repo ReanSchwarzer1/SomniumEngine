@@ -32,9 +32,9 @@ struct Material {
     albedo_map: i32,
     normal_map: i32,
     metallic_roughness_map: i32,
-    _pad0: i32,
-    _pad1: i32,
-    _pad2: i32,
+    alpha_cutoff: f32,
+    flags: u32,
+    _pad: u32,
 }
 
 struct View {

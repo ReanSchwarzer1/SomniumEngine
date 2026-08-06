@@ -24,9 +24,9 @@ struct Material {
     albedo_map: i32,
     normal_map: i32,
     metallic_roughness_map: i32,
-    _pad0: i32,
-    _pad1: i32,
-    _pad2: i32,
+    alpha_cutoff: f32,
+    flags: u32,
+    _pad: u32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).
@@ -323,9 +323,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         vec3<f32>(v1.norm_x, v1.norm_y, v1.norm_z) * bary.y +
         vec3<f32>(v2.norm_x, v2.norm_y, v2.norm_z) * bary.z
     );
-    let geo_normal = normalize((instance.model * vec4<f32>(normal_interp, 0.0)).xyz);
+    var geo_normal = normalize((instance.model * vec4<f32>(normal_interp, 0.0)).xyz);
 
     let hit_point = p0 * bary.x + p1 * bary.y + p2 * bary.z;
+
+    // Phase 17D: a double-sided surface can be seen from behind, where its
+    // authored normal points away and every lighting term comes out dark. Flip
+    // it toward the viewer. Only for materials flagged double-sided — doing it
+    // unconditionally would light the inside of closed geometry.
+    if (material.flags & 1u) != 0u {
+        let to_eye = view.camera_pos - hit_point;
+        if dot(geo_normal, to_eye) < 0.0 {
+            geo_normal = -geo_normal;
+        }
+    }
 
     // TBN matrix (derived from edge vectors + UV deltas, no vertex tangents)
     let edge0 = p1 - p0;

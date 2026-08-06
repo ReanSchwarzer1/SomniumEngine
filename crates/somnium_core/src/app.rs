@@ -1351,7 +1351,9 @@ impl<G: GameApp> Engine<G> {
                 albedo_map: -1,
                 normal_map: -1,
                 metallic_roughness_map: -1,
-                _padding: [0; 3],
+                alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
             },
         );
         let alloc = renderer.geometry.upload_mesh(&ctx.queue, &verts, &idxs, mat);
@@ -1592,7 +1594,9 @@ impl<G: GameApp> Engine<G> {
                                     albedo_map: -1,
                                     normal_map: -1,
                                     metallic_roughness_map: -1,
-                                    _padding: [0; 3],
+                                    alpha_cutoff: 0.0,
+                flags: 0,
+                _padding: 0,
                                 },
                             );
                             self.default_material_id = Some(id);
