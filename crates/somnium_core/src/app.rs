@@ -22,7 +22,7 @@ use crate::editor_commands::{
 use crate::error::EngineError;
 use crate::event::{translate_window_event, EngineEvent};
 use crate::time::TimeState;
-use crate::{LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, PostProcessComponent, TerrainComponent, Transform, WorldTransform, simulate_particles};
+use crate::{FoliageComponent, LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, PostProcessComponent, TerrainComponent, Transform, WorldTransform, simulate_particles};
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
 
@@ -85,6 +85,15 @@ enum LifecycleState {
     ShuttingDown,
 }
 
+/// One terrain's scattered foliage plus what it was generated from (Phase 17A).
+struct FoliageCacheEntry {
+    settings: FoliageComponent,
+    /// Terrain edit counter the scatter was built against.
+    revision: u64,
+    material_id: u32,
+    instances: Vec<somnium_renderer::terrain::foliage::FoliageInstance>,
+}
+
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
 pub struct Engine<G: GameApp> {
     game: Box<G>,
@@ -111,6 +120,15 @@ pub struct Engine<G: GameApp> {
     /// State at the start of an inspector drag-scrub, so the whole gesture
     /// collapses into one undo entry instead of one per pixel of travel.
     /// `(entity index, value before the drag)`.
+    /// Phase 17A: scattered foliage per terrain, plus the settings and terrain
+    /// revision it was generated from. Rebuilt only when one of those changes —
+    /// re-scattering every frame would burn a full pass over the terrain.
+    foliage_cache: std::collections::HashMap<u32, FoliageCacheEntry>,
+    /// Geometry pool allocation for the shared tuft mesh, uploaded on first use.
+    foliage_mesh: Option<(u32, u32, u32)>,
+    /// Material shared by every foliage instance.
+    foliage_material: Option<u32>,
+
     scrub_transform: Option<(u32, Transform)>,
     scrub_light: Option<(u32, LightComponent)>,
     /// Phase 11.5M: receiver for captured tracing events forwarded to the output log.
@@ -178,6 +196,9 @@ impl<G: GameApp + 'static> Engine<G> {
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
+            foliage_cache: std::collections::HashMap::new(),
+            foliage_mesh: None,
+            foliage_material: None,
             scrub_transform: None,
             scrub_light: None,
             log_rx: Some(log_rx),
@@ -412,6 +433,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                 );
                             } else {
                                 info!("Select a terrain entity before pressing F6");
+                            }
+                        }
+                        WKC::F8 => {
+                            // Phase 17A: toggle scattered foliage on the
+                            // selected terrain. Inspector controls come with
+                            // the layer UI; until then this is how it is
+                            // switched on.
+                            if let Some(entity) = self.selected_entity {
+                                if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
+                                    f.enabled = !f.enabled;
+                                    let on = f.enabled;
+                                    info!("Foliage: {}", if on { "ON" } else { "off" });
+                                } else {
+                                    info!("Select a terrain entity before pressing F8");
+                                }
+                            } else {
+                                info!("Select a terrain entity before pressing F8");
                             }
                         }
                         WKC::BracketLeft if self.terrain_edit_active => {
@@ -748,6 +786,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.apply_terrain_restores();
         self.update_terrain_editing(dt);
         self.submit_terrains();
+        self.submit_foliage();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         self.submit_light_gizmos();
@@ -1031,6 +1070,7 @@ impl<G: GameApp> Engine<G> {
                             .copy_from_slice(&texels[i * w..(i + 1) * w]);
                     }
                     terrain.splatmap.mark_dirty(x0, z0, x1, z1);
+                    terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
                 }
             }
         }
@@ -1122,6 +1162,133 @@ impl<G: GameApp> Engine<G> {
             // buffer, so every pass that lights anything picks it up.
             r.set_ibl_intensity(pp.ibl_intensity);
         }
+    }
+
+    /// Scatter and submit foliage for every terrain that has it enabled
+    /// (Phase 17A).
+    ///
+    /// Instances go out as ordinary draw commands, so they pick up the Phase 15
+    /// pipeline — indirect draws, frustum and Hi-Z culling, per-cluster
+    /// rejection — without foliage needing to know any of it exists.
+    fn submit_foliage(&mut self) {
+        let terrains: Vec<(u32, FoliageComponent, glam::Mat4)> = self
+            .world
+            .entities()
+            .filter_map(|e| {
+                let tc = self.world.get::<TerrainComponent>(e)?;
+                let fc = self.world.get::<FoliageComponent>(e)?;
+                if !fc.enabled || fc.density <= 0.0 {
+                    return None;
+                }
+                let model = self
+                    .world
+                    .get::<Transform>(e)
+                    .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+                Some((tc.terrain_id, *fc, model))
+            })
+            .collect();
+        if terrains.is_empty() {
+            return;
+        }
+
+        self.ensure_foliage_mesh();
+        let Some((vertex_offset, index_offset, index_count)) = self.foliage_mesh else {
+            return;
+        };
+
+        for (terrain_id, fc, model) in terrains {
+            self.refresh_foliage(terrain_id, fc);
+            let Some(entry) = self.foliage_cache.get(&terrain_id) else { continue };
+
+            if let Some(r) = self.renderer.as_mut() {
+                for inst in &entry.instances {
+                    // Terrain-local placement composed with the terrain's own
+                    // transform, so moving the terrain carries its foliage.
+                    let local = glam::Mat4::from_scale_rotation_translation(
+                        glam::Vec3::splat(inst.scale),
+                        glam::Quat::from_rotation_y(inst.yaw),
+                        inst.position,
+                    );
+                    r.submit(somnium_renderer::command::DrawCommand {
+                        sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
+                        vertex_offset,
+                        index_offset,
+                        index_count,
+                        material_id: entry.material_id,
+                        transform: model * local,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Upload the shared tuft mesh and its material once.
+    fn ensure_foliage_mesh(&mut self) {
+        if self.foliage_mesh.is_some() {
+            return;
+        }
+        let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
+            return;
+        };
+        let (verts, idxs) = somnium_asset::generate_foliage_tuft(7, 1);
+        let mat = renderer.materials_pool.add_material(
+            &ctx.queue,
+            somnium_renderer::material::pool::GpuMaterial {
+                // Deliberately dark. The sun is intensity 5, so an albedo in
+                // the usual 0.2-0.4 range multiplies past 1 and tone-maps
+                // toward white — the grass came out pale rather than green.
+                base_color: [0.055, 0.115, 0.035, 1.0],
+                roughness: 0.95,
+                metallic: 0.0,
+                albedo_map: -1,
+                normal_map: -1,
+                metallic_roughness_map: -1,
+                _padding: [0; 3],
+            },
+        );
+        let alloc = renderer.geometry.upload_mesh(&ctx.queue, &verts, &idxs, mat);
+        self.foliage_material = Some(mat);
+        self.foliage_mesh = Some((alloc.vertex_offset, alloc.index_offset, alloc.index_count));
+    }
+
+    /// Re-scatter `terrain_id` if its settings or its heightmap have changed.
+    fn refresh_foliage(&mut self, terrain_id: u32, fc: FoliageComponent) {
+        let revision = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.terrain(terrain_id))
+            .map_or(0, |t| t.edit_revision);
+
+        if let Some(entry) = self.foliage_cache.get(&terrain_id) {
+            if entry.settings == fc && entry.revision == revision {
+                return;
+            }
+        }
+
+        let Some(material_id) = self.foliage_material else { return };
+        let Some(renderer) = self.renderer.as_ref() else { return };
+        let Some(terrain) = renderer.terrain(terrain_id) else { return };
+
+        let params = somnium_renderer::terrain::foliage::FoliageParams {
+            density: fc.density,
+            seed: fc.seed,
+            max_slope_deg: fc.max_slope_deg,
+            layer: fc.layer,
+            min_layer_weight: fc.min_layer_weight,
+            scale_min: fc.scale_min,
+            scale_max: fc.scale_max,
+            ground_offset: 0.0,
+            max_instances: fc.max_instances as usize,
+        };
+        let instances = terrain.scatter_foliage(&params);
+        info!(
+            "Foliage: scattered {} instances over terrain {terrain_id}",
+            instances.len(),
+        );
+        self.foliage_cache.insert(
+            terrain_id,
+            FoliageCacheEntry { settings: fc, revision, material_id, instances },
+        );
     }
 
     /// Queue a light gizmo for every light entity (Phase 13E).
@@ -1221,6 +1388,7 @@ impl<G: GameApp> Engine<G> {
                     is_particle_emitter: false,
                     terrain: None,
                     voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
+                    foliage: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -1260,6 +1428,9 @@ impl<G: GameApp> Engine<G> {
                         cell_size: desc.cell_size,
                         height_scale: desc.height_scale,
                     }),
+                    // Phase 17A: present but disabled, so a new terrain is bare
+                    // until foliage is deliberately switched on.
+                    foliage: Some(crate::FoliageComponent::default()),
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -1351,6 +1522,7 @@ impl<G: GameApp> Engine<G> {
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
                     voxel_terrain: None,
+                    foliage: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -1595,6 +1767,7 @@ impl<G: GameApp> Engine<G> {
                         // one terrain_id would draw the same terrain twice.
                         terrain: None,
                         voxel_terrain: None,
+                        foliage: None,
                     };
                     let cmd = Box::new(CreateEntityCmd::new(snapshot));
                     self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);

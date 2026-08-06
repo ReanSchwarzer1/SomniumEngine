@@ -465,3 +465,132 @@ fn generate_flat_normals(vertices: &mut [Vertex], indices: &[u32]) {
         vertices[i2].normal = n;
     }
 }
+
+/// A grass/shrub tuft: `blades` tapered three-sided spikes fanning out from a
+/// common base (Phase 17A).
+///
+/// Solid geometry rather than the usual alpha-tested crossed billboards,
+/// because the visibility pass culls back faces — a flat quad would vanish from
+/// one side — and the engine imports `alphaMode: MASK` without cutting it out
+/// in the shader yet. A three-sided prism reads as a blade from every angle and
+/// needs no alpha at all.
+///
+/// Unit-sized: roughly 1 unit tall and 0.6 wide, so instance scale is the only
+/// size control.
+pub fn generate_foliage_tuft(blades: u32, seed: u32) -> (Vec<Vertex>, Vec<u32>) {
+    let blades = blades.clamp(1, 32);
+    let mut vertices = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    // Cheap deterministic jitter so the blades of one tuft differ from each
+    // other; the caller varies `seed` only if it wants a second tuft variant.
+    let rand = |n: u32| {
+        let mut h = n.wrapping_mul(0x9E37_79B9) ^ seed.wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2545_F491);
+        h ^= h >> 13;
+        (h >> 8) as f32 / 16_777_216.0
+    };
+
+    for b in 0..blades {
+        // Fan the blades evenly, then jitter so they do not look combed.
+        let angle = (b as f32 / blades as f32 + rand(b * 7) * 0.15) * std::f32::consts::TAU;
+        let lean = 0.18 + rand(b * 13) * 0.30;
+        let height = 0.65 + rand(b * 17) * 0.45;
+        let half_w = 0.045 + rand(b * 23) * 0.025;
+
+        let dir = [angle.cos(), angle.sin()];
+        // Perpendicular in XZ, so the blade has width across its lean.
+        let side = [-dir[1], dir[0]];
+
+        let tip = [dir[0] * lean * height, height, dir[1] * lean * height];
+        let base = vertices.len() as u32;
+
+        // Three base corners around the origin, one tip: a tapered spike.
+        for k in 0..3 {
+            let a = k as f32 / 3.0 * std::f32::consts::TAU;
+            // Unit outward direction for this corner, in world XZ.
+            let ox = side[0] * a.cos() + dir[0] * a.sin();
+            let oz = side[1] * a.cos() + dir[1] * a.sin();
+            // Lean the normal outward rather than nearly straight up. With an
+            // almost vertical normal every blade catches identical sunlight and
+            // the tuft reads as a flat pale smudge; tilting it out gives each
+            // face its own shading and the clump some depth.
+            let n = [ox, 0.55, oz];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+            vertices.push(Vertex {
+                position: [ox * half_w, 0.0, oz * half_w],
+                normal: [n[0] / len, n[1] / len, n[2] / len],
+                uv: [k as f32 / 3.0, 1.0],
+            });
+        }
+        vertices.push(Vertex {
+            position: tip,
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.0],
+        });
+
+        // Three side faces, wound counter-clockwise seen from outside so the
+        // back-face cull keeps them.
+        for k in 0..3u32 {
+            let a = base + k;
+            let c = base + (k + 1) % 3;
+            indices.extend_from_slice(&[a, c, base + 3]);
+        }
+    }
+
+    (vertices, indices)
+}
+
+#[cfg(test)]
+mod foliage_tuft_tests {
+    use super::*;
+
+    #[test]
+    fn a_tuft_has_one_spike_per_blade() {
+        let (v, i) = generate_foliage_tuft(5, 1);
+        assert_eq!(v.len(), 5 * 4, "3 base corners + 1 tip per blade");
+        assert_eq!(i.len(), 5 * 3 * 3, "3 triangles per blade");
+    }
+
+    #[test]
+    fn every_index_addresses_a_real_vertex() {
+        let (v, i) = generate_foliage_tuft(7, 3);
+        assert!(i.iter().all(|&x| (x as usize) < v.len()));
+    }
+
+    #[test]
+    fn the_tuft_sits_on_the_origin_and_grows_upward() {
+        // The scatter places instances at ground height, so a tuft whose base
+        // was not at y = 0 would float or sink.
+        let (v, _) = generate_foliage_tuft(6, 2);
+        let min_y = v.iter().fold(f32::MAX, |m, x| m.min(x.position[1]));
+        let max_y = v.iter().fold(f32::MIN, |m, x| m.max(x.position[1]));
+        assert!(min_y.abs() < 1e-6, "base at {min_y}");
+        assert!((0.6..1.6).contains(&max_y), "height {max_y}");
+    }
+
+    #[test]
+    fn normals_are_unit_length() {
+        let (v, _) = generate_foliage_tuft(6, 2);
+        for x in &v {
+            let n = x.normal;
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-4, "normal length {len}");
+        }
+    }
+
+    #[test]
+    fn the_blade_count_is_clamped_rather_than_producing_nothing() {
+        assert_eq!(generate_foliage_tuft(0, 1).0.len(), 4);
+        assert_eq!(generate_foliage_tuft(1000, 1).0.len(), 32 * 4);
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_tuft() {
+        assert_eq!(generate_foliage_tuft(6, 9).0.len(), generate_foliage_tuft(6, 9).0.len());
+        let a = generate_foliage_tuft(6, 9).0;
+        let b = generate_foliage_tuft(6, 9).0;
+        assert!(a.iter().zip(&b).all(|(x, y)| x.position == y.position));
+    }
+}

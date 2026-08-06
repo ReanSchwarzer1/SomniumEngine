@@ -15,6 +15,7 @@
 //! directly into the HDR target (same integration point as the water pass).
 
 pub mod brush;
+pub mod foliage;
 pub mod mesh;
 pub mod textures;
 
@@ -134,6 +135,13 @@ pub struct TerrainData {
     pub model: glam::Mat4,
     /// Brush cursor uniform state (set by the editor each frame).
     pub brush_cursor: [f32; 4],
+    /// Counter bumped on every sculpt or paint edit (Phase 17A).
+    ///
+    /// Foliage placement depends on the heightmap and the splatmap, so it has
+    /// to re-scatter when either changes — but re-scattering every frame would
+    /// mean a full pass over the terrain per frame. Comparing a counter is the
+    /// cheap way to tell "nothing has changed" from "everything has".
+    pub edit_revision: u64,
 }
 
 impl TerrainData {
@@ -243,6 +251,7 @@ impl TerrainData {
             bind_group,
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
+            edit_revision: 0,
         }
     }
 
@@ -268,6 +277,7 @@ impl TerrainData {
     /// Mark all chunks intersecting the inclusive vertex region as dirty.
     /// Normals reach one vertex past the region, so the region is expanded.
     pub fn mark_region_dirty(&mut self, x0: u32, z0: u32, x1: u32, z1: u32) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
         let cells = self.desc.chunk_cells;
         let x0 = x0.saturating_sub(1) / cells;
         let z0 = z0.saturating_sub(1) / cells;
@@ -299,6 +309,54 @@ impl TerrainData {
             + h01 * (1.0 - tx) * tz
             + h11 * tx * tz;
         h * self.desc.height_scale
+    }
+
+    /// Sample height, slope and paint-layer weight at a terrain-local point
+    /// (Phase 17A). This is what foliage scattering places against.
+    pub fn surface_sample(&self, local_x: f32, local_z: f32, layer: u8) -> foliage::SurfaceSample {
+        let height = self.world_height_at(local_x, local_z);
+
+        // Central difference over one cell. The gradient is in world units on
+        // both axes because `world_height_at` already applies `height_scale`,
+        // so the normal comes straight out of it.
+        let d = self.desc.cell_size;
+        let hx = self.world_height_at(local_x + d, local_z) - self.world_height_at(local_x - d, local_z);
+        let hz = self.world_height_at(local_x, local_z + d) - self.world_height_at(local_x, local_z - d);
+        let normal = glam::Vec3::new(-hx, 2.0 * d, -hz).normalize_or_zero();
+        // Y of the unit normal IS the cosine of the slope from vertical.
+        let slope_cos = if normal == glam::Vec3::ZERO { 1.0 } else { normal.y.abs() };
+
+        let layer_weight = self.layer_weight_at(local_x, local_z, layer);
+        foliage::SurfaceSample { height, slope_cos, layer_weight }
+    }
+
+    /// Splatmap weight of `layer` at a terrain-local point, `0..=1`.
+    ///
+    /// Nearest-texel rather than bilinear: the splatmap is far coarser than the
+    /// scatter grid, and a hard edge is what a painted boundary should look
+    /// like — foliage stopping exactly where the paint stops.
+    pub fn layer_weight_at(&self, local_x: f32, local_z: f32, layer: u8) -> f32 {
+        let [wx, wz] = self.desc.world_size();
+        if wx <= 0.0 || wz <= 0.0 || layer as usize >= 4 {
+            return 0.0;
+        }
+        let sm = &self.splatmap;
+        let u = (local_x / wx).clamp(0.0, 1.0);
+        let v = (local_z / wz).clamp(0.0, 1.0);
+        let tx = ((u * sm.width as f32) as u32).min(sm.width.saturating_sub(1));
+        let tz = ((v * sm.height as f32) as u32).min(sm.height.saturating_sub(1));
+        let idx = (tz * sm.width + tx) as usize;
+        match sm.data.get(idx) {
+            Some(texel) => texel[layer as usize] as f32 / 255.0,
+            None => 0.0,
+        }
+    }
+
+    /// Scatter foliage over this terrain (Phase 17A).
+    pub fn scatter_foliage(&self, params: &foliage::FoliageParams) -> Vec<foliage::FoliageInstance> {
+        foliage::scatter(params, self.desc.world_size(), |x, z| {
+            self.surface_sample(x, z, params.layer)
+        })
     }
 
     // ── Per-frame update ─────────────────────────────────────────────────────

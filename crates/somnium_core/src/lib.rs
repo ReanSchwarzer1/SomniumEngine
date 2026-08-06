@@ -300,6 +300,57 @@ pub struct TerrainComponent {
 }
 impl somnium_ecs::Component for TerrainComponent {}
 
+/// Phase 17A: scatters foliage over the terrain on the same entity.
+///
+/// Mirrors `somnium_renderer::terrain::foliage::FoliageParams` rather than
+/// holding it, so `somnium_core` does not depend on renderer types for a
+/// component the editor has to be able to serialise and diff.
+///
+/// The instances themselves are deliberately **not** ECS entities. A terrain
+/// scatters thousands of them and they are regenerated on every sculpt stroke,
+/// which would flood the outliner and the undo stack — the same reason voxel
+/// chunks stay out of the world. They are submitted as draw commands instead,
+/// which also means they inherit the Phase 15 culling pipeline for free.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoliageComponent {
+    /// Off by default: an empty terrain is the neutral thing to create, and
+    /// scattering is a deliberate act.
+    pub enabled: bool,
+    /// Candidates per square metre, before slope and layer rejection.
+    pub density: f32,
+    /// Placement seed. Changing it reshuffles the layout.
+    pub seed: u32,
+    /// Ground steeper than this grows nothing (degrees).
+    pub max_slope_deg: f32,
+    /// Splat layer this foliage grows on, and the weight it needs there.
+    pub layer: u8,
+    /// Minimum weight of `layer` under a candidate for it to be kept.
+    pub min_layer_weight: f32,
+    /// Lower bound of the random uniform scale.
+    pub scale_min: f32,
+    /// Upper bound of the random uniform scale.
+    pub scale_max: f32,
+    /// Ceiling on instances, enforced by coarsening the scatter grid.
+    pub max_instances: u32,
+}
+
+impl Default for FoliageComponent {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            density: 0.4,
+            seed: 1,
+            max_slope_deg: 35.0,
+            layer: 0,
+            min_layer_weight: 0.35,
+            scale_min: 0.6,
+            scale_max: 1.5,
+            max_instances: 12_000,
+        }
+    }
+}
+impl somnium_ecs::Component for FoliageComponent {}
+
 /// Marks an entity as a voxel-terrain world (Phase 14 / 13E follow-up).
 ///
 /// Like [`TerrainComponent`] this is only a handle: the voxel chunks, their GPU

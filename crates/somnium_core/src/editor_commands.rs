@@ -116,6 +116,7 @@ pub struct EntitySnapshot {
     pub is_particle_emitter: bool,
     pub terrain: Option<TerrainComponent>,
     pub voxel_terrain: Option<VoxelTerrainComponent>,
+    pub foliage: Option<crate::FoliageComponent>,
 }
 
 impl EntitySnapshot {
@@ -132,6 +133,7 @@ impl EntitySnapshot {
             is_particle_emitter: world.get::<crate::ParticleEmitter>(entity).is_some(),
             terrain: world.get::<TerrainComponent>(entity).copied(),
             voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
+            foliage: world.get::<crate::FoliageComponent>(entity).copied(),
         }
     }
 
@@ -147,8 +149,13 @@ impl EntitySnapshot {
 
         // Terrain entities only carry the component — the renderer-side
         // TerrainData survives deletion, so respawning reattaches to it.
+        // Foliage rides along when present: the archetype ECS takes every
+        // component at spawn time, so it cannot be attached afterwards.
         if let Some(terrain) = self.terrain {
-            return world.spawn((transform, name, wt, terrain));
+            return match self.foliage {
+                Some(f) => world.spawn((transform, name, wt, terrain, f)),
+                None => world.spawn((transform, name, wt, terrain)),
+            };
         }
 
         // Voxel terrain: the game-layer driver is rebuilt from this component,

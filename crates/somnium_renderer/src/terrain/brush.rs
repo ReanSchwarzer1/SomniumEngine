@@ -226,6 +226,8 @@ pub fn apply_paint(
         return None;
     }
     terrain.splatmap.mark_dirty(x0, z0, x1, z1);
+    // Painting moves the layer weights foliage is scattered against.
+    terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
     Some((x0, z0, x1, z1))
 }
 
