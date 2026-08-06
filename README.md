@@ -74,11 +74,13 @@ The engine is organized around three deliberate commitments:
 The materials are physically based; the *lighting* is not yet. The sun is an arbitrary
 multiplier, the sky is a hardcoded gradient that does not respond to it (so turning the
 sun down cannot produce night), and indirect light is a constant ambient term. Phase 24
-addresses that end to end: photometric light units and auto-exposure, AgX tonemapping, a
-Hillaire atmosphere driving both sky and IBL, TAA plus specular anti-aliasing, PCSS and
-contact shadows, GTAO, and a Lumen-style dynamic GI path built on mesh distance fields,
-a surface cache, screen probes and a world radiance cache — with hardware ray tracing as
-an optional backend behind wgpu's experimental ray-query feature.
+addresses that end to end across 22 sub-phases: photometric light units and
+auto-exposure, AgX tonemapping, a Hillaire atmosphere driving both sky and IBL, TAA plus
+specular anti-aliasing, PCSS and contact shadows, GTAO, then ray-traced direct and
+indirect lighting (ReSTIR DI/GI with a world radiance cache) on wgpu's acceleration
+structures — with a reference path tracer to check the real-time result against, mesh
+distance fields and baked probes as fallback tiers for hardware without ray query, and
+area lights, transmission/SSS and volumetric fog to finish.
 
 Full plan and ordering: [`context.md` §22](context.md).
 

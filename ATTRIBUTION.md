@@ -965,3 +965,48 @@ the repo. Where UE files are named in `context.md`, they are named as *reading
 references for the reader*, in the same spirit as the `example_repo/` rules below. Every
 technique Somnium actually implements is written from the published paper in the table
 above.
+
+---
+
+### 13.27 Bevy — the primary Phase 24 reference (MIT / Apache-2.0)
+
+`example_repo/bevy/bevy-main/` is the most directly useful reference in the tree,
+because it is the same stack Somnium is built on: Rust, wgpu, WGSL. Bevy is dual
+licensed **MIT / Apache-2.0**, which is compatible with this repository — so unlike the
+Unreal sources it may be read, learned from, and **adapted with attribution**.
+
+Modules that Phase 24 draws on:
+
+| Somnium sub-phase | Bevy source |
+|---|---|
+| 24A physical light units | `bevy_light/src/{directional_light,point_light,rect_light}.rs` |
+| 24C Hillaire atmosphere | `bevy_pbr/src/atmosphere/` (`bruneton_functions.wgsl`, `sky_view_lut.wgsl`, `aerial_view_lut.wgsl`) |
+| 24F temporal AA | `bevy_anti_alias/src/taa/` |
+| 24G blue noise | `bevy_pbr/src/bluenoise/` |
+| 24H contact shadows | `bevy_pbr/src/contact_shadows.rs` |
+| 24I GTAO | `bevy_pbr/src/ssao/` |
+| 24J acceleration structures | `bevy_solari/src/scene/{blas.rs,binder.rs}` |
+| 24K ReSTIR DI | `bevy_solari/src/realtime/{restir_di.wgsl,presample_light_tiles.wgsl}` |
+| 24L ReSTIR GI | `bevy_solari/src/realtime/restir_gi.wgsl` |
+| 24M world radiance cache | `bevy_solari/src/realtime/world_cache_*.wgsl` |
+| 24N specular GI / SSR | `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/` |
+| 24O reference path tracer | `bevy_solari/src/pathtracer/` |
+| 24Q light probes | `bevy_pbr/src/light_probe/` |
+| 24R area lights (LTC) | `bevy_pbr/src/ltc/` |
+| 24S transmission / SSS | `bevy_pbr/src/transmission/`, `medium.rs` |
+| 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
+
+Rules for using it, consistent with the `example_repo/` policy at the end of this file:
+
+1. Any WGSL or Rust **derived** from Bevy carries a comment naming the source file and
+   Bevy's licence at the point of use — not merely a line in this table.
+2. Where a published paper exists (Hillaire's atmosphere, Jimenez's GTAO, Bitterli's
+   ReSTIR, Heitz's LTC), that paper is the primary reference and Bevy is read as a
+   worked example of applying it on wgpu. The citation goes to the paper.
+3. Bevy is **not** added to the Cargo workspace, and no Bevy crate becomes a dependency.
+   Somnium stays a from-scratch engine; this is a reading reference.
+
+Bevy having shipped ReSTIR GI and a Hillaire atmosphere on wgpu is also the strongest
+available evidence that Phase 24 is achievable on this API rather than requiring raw
+Vulkan or D3D12 — which is why the plan targets hardware ray tracing first rather than
+treating it as a stretch goal.
