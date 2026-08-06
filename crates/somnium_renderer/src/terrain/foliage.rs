@@ -50,6 +50,19 @@ pub struct FoliageParams {
     /// Lifts the instance so a mesh whose origin sits at its base is not
     /// half-buried. Applied after the height lookup.
     pub ground_offset: f32,
+    /// Centre of the scattered region, in terrain-local X/Z.
+    ///
+    /// Grass is only worth drawing near the viewer, so the scatter follows the
+    /// camera rather than blanketing the terrain. Covering a square kilometre
+    /// at any believable density is millions of instances; a disc around the
+    /// camera buys dense grass for a bounded count.
+    ///
+    /// Cell indices stay absolute, so a candidate's hash — and therefore its
+    /// position, yaw and scale — does not depend on where the disc is. Grass
+    /// does not reshuffle as you walk toward it.
+    pub center: [f32; 2],
+    /// Radius of the scattered region in world units. `0` covers the terrain.
+    pub radius: f32,
     /// Hard ceiling on the instance count.
     ///
     /// Reached by **coarsening the grid**, not by stopping partway through it.
@@ -69,6 +82,8 @@ impl Default for FoliageParams {
             scale_min: 0.7,
             scale_max: 1.4,
             ground_offset: 0.0,
+            center: [0.0, 0.0],
+            radius: 0.0,
             max_instances: 20_000,
         }
     }
@@ -108,27 +123,53 @@ pub fn scatter(
     // The closed form gets close in one step; the loop then trims the overshoot
     // from rounding each axis up, which alone can cost a whole extra row and
     // column (a 500-instance budget otherwise lands on 23x23 = 529 cells).
-    let area = world_size[0] * world_size[1];
-    let cap_cell = (area / params.max_instances as f32).sqrt();
+    // The budget applies to the region actually scattered. Sizing it against
+    // the whole terrain would coarsen a small disc into near-emptiness.
+    let region_area = if params.radius > 0.0 {
+        std::f32::consts::PI * params.radius * params.radius
+    } else {
+        world_size[0] * world_size[1]
+    };
+    let cap_cell = (region_area / params.max_instances as f32).sqrt();
     if cap_cell > cell {
         cell = cap_cell;
     }
     let (cells_x, cells_z) = loop {
         let cx = (world_size[0] / cell).ceil().max(1.0) as u64;
         let cz = (world_size[1] / cell).ceil().max(1.0) as u64;
-        if cx.saturating_mul(cz) <= params.max_instances as u64 {
+        let covered = if params.radius > 0.0 {
+            (region_area / (cell * cell)) as u64
+        } else {
+            cx.saturating_mul(cz)
+        };
+        if covered <= params.max_instances as u64 {
             break (cx as u32, cz as u32);
         }
         cell *= 1.05;
     };
+
+    // Walk only the cells the disc touches, keeping their absolute indices.
+    let (bx0, bx1, bz0, bz1) = if params.radius > 0.0 {
+        let lo = |v: f32| (v / cell).floor().max(0.0) as u32;
+        let hi = |v: f32| (v / cell).ceil().max(0.0) as u32;
+        (
+            lo(params.center[0] - params.radius),
+            hi(params.center[0] + params.radius).min(cells_x),
+            lo(params.center[1] - params.radius),
+            hi(params.center[1] + params.radius).min(cells_z),
+        )
+    } else {
+        (0, cells_x, 0, cells_z)
+    };
+    let radius_sq = params.radius * params.radius;
 
     let slope_limit = params.max_slope_deg.clamp(0.0, 90.0).to_radians().cos();
     let scale_lo = params.scale_min.min(params.scale_max);
     let scale_hi = params.scale_min.max(params.scale_max);
 
     let mut out = Vec::new();
-    for cz in 0..cells_z {
-        for cx in 0..cells_x {
+    for cz in bz0..bz1 {
+        for cx in bx0..bx1 {
             // Four independent values from one cell, by salting the hash.
             let h = hash3(cx, cz, params.seed);
             let jx = unit_from(h);
@@ -142,6 +183,16 @@ pub fn scatter(
             // the world size is not a whole number of cells.
             if x > world_size[0] || z > world_size[1] {
                 continue;
+            }
+
+            // Trim the square cell window down to the disc, so the boundary is
+            // round rather than a visible square edge of grass.
+            if params.radius > 0.0 {
+                let dx = x - params.center[0];
+                let dz = z - params.center[1];
+                if dx * dx + dz * dz > radius_sq {
+                    continue;
+                }
             }
 
             let s = sample(x, z);
@@ -314,6 +365,67 @@ mod tests {
         // the far quadrant is populated too.
         let far = out.iter().filter(|i| i.position.x > 50.0 && i.position.z > 50.0).count();
         assert!(far > out.len() / 8, "far quadrant nearly empty: {far} of {}", out.len());
+    }
+
+    #[test]
+    fn a_radius_confines_the_scatter_to_a_disc() {
+        let p = FoliageParams {
+            density: 1.0,
+            center: [20.0, 20.0],
+            radius: 8.0,
+            ..params()
+        };
+        let out = scatter(&p, [100.0, 100.0], open_ground);
+        assert!(!out.is_empty());
+        for i in &out {
+            let d = ((i.position.x - 20.0).powi(2) + (i.position.z - 20.0).powi(2)).sqrt();
+            assert!(d <= 8.0 + 1e-3, "instance {d} from centre, radius 8");
+        }
+    }
+
+    #[test]
+    fn moving_the_centre_does_not_reshuffle_the_overlap() {
+        // Cells keep absolute indices, so instances common to both discs must
+        // be identical — otherwise grass would visibly crawl as you walk.
+        let base = FoliageParams { density: 1.0, radius: 20.0, ..params() };
+        let a = scatter(&FoliageParams { center: [40.0, 40.0], ..base }, [200.0, 200.0], open_ground);
+        let b = scatter(&FoliageParams { center: [50.0, 40.0], ..base }, [200.0, 200.0], open_ground);
+
+        let key = |i: &FoliageInstance| (i.position.x.to_bits(), i.position.z.to_bits());
+        let set_b: std::collections::HashMap<_, _> =
+            b.iter().map(|i| (key(i), *i)).collect();
+        let mut shared = 0;
+        for i in &a {
+            if let Some(m) = set_b.get(&key(i)) {
+                shared += 1;
+                assert_eq!(i.yaw, m.yaw, "yaw changed for a shared instance");
+                assert_eq!(i.scale, m.scale, "scale changed for a shared instance");
+            }
+        }
+        assert!(shared > 50, "discs should overlap heavily, shared = {shared}");
+    }
+
+    #[test]
+    fn the_budget_is_spent_on_the_disc_not_the_terrain() {
+        // A 20 m disc on a 2 km terrain: sizing the cap against the terrain
+        // would coarsen the grid until the disc held almost nothing.
+        let p = FoliageParams {
+            density: 4.0,
+            center: [1000.0, 1000.0],
+            radius: 20.0,
+            max_instances: 5_000,
+            ..params()
+        };
+        let out = scatter(&p, [2000.0, 2000.0], open_ground);
+        assert!(out.len() > 1_000, "disc only got {} instances", out.len());
+        assert!(out.len() <= 5_000, "cap exceeded: {}", out.len());
+    }
+
+    #[test]
+    fn a_zero_radius_still_covers_the_whole_terrain() {
+        let p = FoliageParams { density: 1.0, radius: 0.0, ..params() };
+        let out = scatter(&p, [40.0, 40.0], open_ground);
+        assert!(out.len() > 1_000, "full coverage gave {}", out.len());
     }
 
     #[test]

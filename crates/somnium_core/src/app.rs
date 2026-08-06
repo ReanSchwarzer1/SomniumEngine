@@ -87,14 +87,28 @@ enum LifecycleState {
     ShuttingDown,
 }
 
+/// Scanned grass model used for scattered foliage when present (Phase 17E).
+/// CC0 from Poly Haven — see ATTRIBUTION.md.
+const FOLIAGE_GRASS_ASSET: &str = "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf";
+
 /// One terrain's scattered foliage plus what it was generated from (Phase 17A).
 struct FoliageCacheEntry {
     settings: FoliageComponent,
     /// Terrain edit counter the scatter was built against.
     revision: u64,
+    /// Terrain-local camera position the disc was centred on.
+    center: [f32; 2],
     material_id: u32,
     instances: Vec<somnium_renderer::terrain::foliage::FoliageInstance>,
 }
+
+/// How far the camera may drift before the scatter disc is rebuilt.
+///
+/// Re-scattering every frame would be a full pass over the region; never
+/// re-scattering would leave grass behind as you walk out of it. A fraction of
+/// the radius keeps the disc comfortably ahead of the viewer, and because cell
+/// indices are absolute the instances that survive the move do not shift.
+const FOLIAGE_RECENTRE_DISTANCE: f32 = 12.0;
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
 pub struct Engine<G: GameApp> {
@@ -1304,8 +1318,12 @@ impl<G: GameApp> Engine<G> {
             return;
         };
 
+        // The disc follows the camera in terrain-local space.
+        let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
+
         for (terrain_id, fc, model) in terrains {
-            self.refresh_foliage(terrain_id, fc);
+            let local = model.inverse().transform_point3(camera_ws);
+            self.refresh_foliage(terrain_id, fc, [local.x, local.z]);
             let Some(entry) = self.foliage_cache.get(&terrain_id) else { continue };
 
             if let Some(r) = self.renderer.as_mut() {
@@ -1335,9 +1353,20 @@ impl<G: GameApp> Engine<G> {
         if self.foliage_mesh.is_some() {
             return;
         }
+
+        // Phase 17E: prefer the real scanned grass model when it is on disk.
+        // It is a photoscan with an alpha-tested, double-sided material, which
+        // is exactly what Phase 17D added support for. Falling back to the
+        // procedural tuft keeps the engine usable for anyone who has not
+        // fetched the assets, rather than silently scattering nothing.
+        if self.try_load_foliage_asset(FOLIAGE_GRASS_ASSET) {
+            return;
+        }
+
         let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
             return;
         };
+        info!("Foliage: {FOLIAGE_GRASS_ASSET} not found, using the procedural tuft");
         let (verts, idxs) = somnium_asset::generate_foliage_tuft(7, 1);
         let mat = renderer.materials_pool.add_material(
             &ctx.queue,
@@ -1361,8 +1390,67 @@ impl<G: GameApp> Engine<G> {
         self.foliage_mesh = Some((alloc.vertex_offset, alloc.index_offset, alloc.index_count));
     }
 
+    /// Load a scattered-foliage mesh from a glTF on disk.
+    ///
+    /// Only the largest mesh in the file is used: these models are authored as
+    /// a clump of separate blades, and scattering every one of them separately
+    /// would multiply the instance count by twenty for no visual gain.
+    fn try_load_foliage_asset(&mut self, path: &str) -> bool {
+        if !std::path::Path::new(path).exists() {
+            return false;
+        }
+        let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
+            return false;
+        };
+        let mut scene = match somnium_asset::load_gltf(path) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Foliage: could not load {path}: {e}");
+                return false;
+            }
+        };
+
+        // Vegetation is almost always exported as BLEND — Poly Haven's grass
+        // and leaves are. Left that way it goes through the sorted forward
+        // pass: thousands of per-object-sorted draws with no depth write, so
+        // blades sort wrongly against each other, cast no shadows, and skip GPU
+        // culling entirely.
+        //
+        // Re-tagging as MASK moves them to the visibility buffer where they
+        // belong. Note these particular models are modelled blades with JPEG
+        // textures, so they carry no alpha at all and the cutout never fires —
+        // the win here is the opaque path, not the clipping. Assets that DO
+        // ship alpha-carded leaves get the cutout for free.
+        let mut retagged = 0;
+        for m in &mut scene.materials {
+            if m.alpha_mode == somnium_asset::AlphaMode::Blend {
+                m.alpha_mode = somnium_asset::AlphaMode::Mask;
+                if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
+                    m.alpha_cutoff = 0.5;
+                }
+                retagged += 1;
+            }
+        }
+        if retagged > 0 {
+            info!("Foliage: re-tagged {retagged} blended material(s) as alpha-cutout");
+        }
+
+        let uploaded = renderer.upload_scene(ctx, &scene);
+        let Some(node) = uploaded.iter().max_by_key(|n| n.index_count) else {
+            return false;
+        };
+        info!(
+            "Foliage: using {path} ({} nodes, largest has {} triangles)",
+            uploaded.len(),
+            node.index_count / 3,
+        );
+        self.foliage_material = Some(node.material_id);
+        self.foliage_mesh = Some((node.vertex_offset, node.index_offset, node.index_count));
+        true
+    }
+
     /// Re-scatter `terrain_id` if its settings or its heightmap have changed.
-    fn refresh_foliage(&mut self, terrain_id: u32, fc: FoliageComponent) {
+    fn refresh_foliage(&mut self, terrain_id: u32, fc: FoliageComponent, center: [f32; 2]) {
         let revision = self
             .renderer
             .as_ref()
@@ -1370,7 +1458,13 @@ impl<G: GameApp> Engine<G> {
             .map_or(0, |t| t.edit_revision);
 
         if let Some(entry) = self.foliage_cache.get(&terrain_id) {
-            if entry.settings == fc && entry.revision == revision {
+            let drift = ((entry.center[0] - center[0]).powi(2)
+                + (entry.center[1] - center[1]).powi(2))
+            .sqrt();
+            if entry.settings == fc
+                && entry.revision == revision
+                && drift < FOLIAGE_RECENTRE_DISTANCE
+            {
                 return;
             }
         }
@@ -1388,16 +1482,21 @@ impl<G: GameApp> Engine<G> {
             scale_min: fc.scale_min,
             scale_max: fc.scale_max,
             ground_offset: 0.0,
+            center,
+            radius: fc.radius,
             max_instances: fc.max_instances as usize,
         };
         let instances = terrain.scatter_foliage(&params);
         info!(
-            "Foliage: scattered {} instances over terrain {terrain_id}",
+            "Foliage: scattered {} instances over terrain {terrain_id}              (disc r={:.0} m at {:.0},{:.0})",
             instances.len(),
+            fc.radius,
+            center[0],
+            center[1],
         );
         self.foliage_cache.insert(
             terrain_id,
-            FoliageCacheEntry { settings: fc, revision, material_id, instances },
+            FoliageCacheEntry { settings: fc, revision, center, material_id, instances },
         );
     }
 

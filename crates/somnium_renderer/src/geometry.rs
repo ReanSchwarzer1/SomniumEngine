@@ -27,6 +27,22 @@ struct FreeBlock {
     index_capacity: u32,
 }
 
+/// Vertex pool size we ask for.
+///
+/// Raised from 64 MB in Phase 17E: a single photoscanned tree runs to millions
+/// of triangles, and the previous budget could not hold one alongside the rest
+/// of a scene. 256 MB covers roughly 8 million vertices.
+///
+/// Clamped at construction to the device's `max_storage_buffer_binding_size` —
+/// these are bound as storage buffers for programmable vertex pulling, and
+/// wgpu's default ceiling is 128 MB. Binding one larger than the limit is a
+/// validation error at bind-group creation, not at buffer creation, so it
+/// surfaces as a crash on the first frame rather than a clean failure.
+const VERTEX_POOL_BYTES: u64 = 1024 * 1024 * 256;
+
+/// Index pool size we ask for — 128 MB, about 32 million indices.
+const INDEX_POOL_BYTES: u64 = 1024 * 1024 * 128;
+
 /// Manages large GPU buffers for all scene geometry.
 pub struct GeometryPool {
     pub vertex_buffer: wgpu::Buffer,
@@ -53,20 +69,34 @@ pub struct GeometryPool {
     /// every remesh would cost more than the culling saves, and a chunk is
     /// already small enough to cull as a unit.
     meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
+
+    /// Actual pool sizes after clamping to the device limit.
+    vertex_bytes: u64,
+    index_bytes: u64,
 }
 
 impl GeometryPool {
     pub fn new(device: &wgpu::Device) -> Self {
+        let max_binding = u64::from(device.limits().max_storage_buffer_binding_size);
+        let vertex_bytes = VERTEX_POOL_BYTES.min(max_binding);
+        let index_bytes = INDEX_POOL_BYTES.min(max_binding);
+        tracing::info!(
+            "Geometry pool: {:.0} MB vertex / {:.0} MB index (device limit {:.0} MB)",
+            vertex_bytes as f64 / 1048576.0,
+            index_bytes as f64 / 1048576.0,
+            max_binding as f64 / 1048576.0,
+        );
+
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Vertex Buffer"),
-            size: 1024 * 1024 * 64, // 64MB
+            size: vertex_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
 
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Index Buffer"),
-            size: 1024 * 1024 * 32, // 32MB
+            size: index_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::INDEX,
             mapped_at_creation: false,
         });
@@ -79,12 +109,17 @@ impl GeometryPool {
             free_blocks: Vec::new(),
             aabbs: std::collections::HashMap::new(),
             meshlets: std::collections::HashMap::new(),
+            vertex_bytes,
+            index_bytes,
         }
     }
 
     /// Upload mesh data to the GPU and return its allocation info.
     pub fn upload_mesh(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
         debug_assert_indices_in_range(vertices.len(), indices);
+        if let Some(empty) = self.reject_if_full(vertices.len(), indices.len(), material_id) {
+            return empty;
+        }
 
         // Phase 15D: cluster the mesh and upload the permuted index buffer, so
         // each meshlet is a contiguous range that 15F can draw directly.
@@ -177,6 +212,46 @@ impl GeometryPool {
             index_offset: alloc.index_offset,
             index_capacity: alloc.index_capacity,
         });
+    }
+
+    /// Refuse an upload that would not fit, returning an empty allocation.
+    ///
+    /// The pool is a bump allocator writing at `offset * stride`, so an
+    /// oversized mesh would run off the end of the buffer. wgpu rejects the
+    /// write, but the allocation counters have already moved — every later mesh
+    /// then reads from the wrong place, which shows up as geometry stretched
+    /// between unrelated parts of the scene rather than as an error.
+    ///
+    /// An empty allocation draws nothing, so one mesh goes missing instead of
+    /// the rest of the scene being corrupted.
+    fn reject_if_full(
+        &self,
+        vertex_count: usize,
+        index_count: usize,
+        material_id: u32,
+    ) -> Option<MeshAllocation> {
+        let v_end = (self.next_vertex as u64 + vertex_count as u64)
+            * std::mem::size_of::<Vertex>() as u64;
+        let i_end = (self.next_index as u64 + index_count as u64) * 4;
+        if v_end <= self.vertex_bytes && i_end <= self.index_bytes {
+            return None;
+        }
+        tracing::error!(
+            "geometry pool full: mesh of {vertex_count} vertices / {index_count} indices              needs {:.1} MB vertex and {:.1} MB index, pool holds {:.0}/{:.0} MB.              Mesh skipped.",
+            v_end as f64 / 1048576.0,
+            i_end as f64 / 1048576.0,
+            self.vertex_bytes as f64 / 1048576.0,
+            self.index_bytes as f64 / 1048576.0,
+        );
+        Some(MeshAllocation {
+            vertex_offset: 0,
+            vertex_count: 0,
+            index_offset: 0,
+            index_count: 0,
+            material_id,
+            vertex_capacity: 0,
+            index_capacity: 0,
+        })
     }
 
     /// Local-space bounds of the mesh at `vertex_offset`, if it is known.

@@ -118,6 +118,14 @@ impl RenderContext {
         let mut limits = wgpu::Limits::default();
         limits.max_binding_array_elements_per_shader_stage = 1024;
         limits.max_storage_buffers_per_shader_stage = 16;
+        // Phase 17E: the geometry pool is a storage buffer, and wgpu's default
+        // ceiling of 128 MB is small for a scene holding a photoscanned model.
+        // Ask for whatever this adapter actually supports and let the pool size
+        // itself to the result — requesting more than the adapter allows fails
+        // device creation outright.
+        let adapter_limits = adapter.limits();
+        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        limits.max_buffer_size = adapter_limits.max_buffer_size;
 
         // Request the device and queue.
         let (device, queue) = adapter

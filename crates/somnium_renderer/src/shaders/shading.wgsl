@@ -331,11 +331,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // authored normal points away and every lighting term comes out dark. Flip
     // it toward the viewer. Only for materials flagged double-sided — doing it
     // unconditionally would light the inside of closed geometry.
-    if (material.flags & 1u) != 0u {
-        let to_eye = view.camera_pos - hit_point;
-        if dot(geo_normal, to_eye) < 0.0 {
-            geo_normal = -geo_normal;
-        }
+    // Phase 17E: face the normal toward the *sun*, not the viewer.
+    //
+    // Facing the viewer looks right until you stand between the sun and the
+    // surface: the flipped normal then points away from the light, N.L goes
+    // negative, and back-lit foliage renders black. Real leaves are thin and
+    // translucent, so both faces receive light — flipping toward the sun is the
+    // cheap stand-in for that, and it is what made a field of grass stop
+    // looking like a field of ash.
+    if (material.flags & 1u) != 0u && dot(geo_normal, normalize(light.direction)) < 0.0 {
+        geo_normal = -geo_normal;
     }
 
     // TBN matrix (derived from edge vectors + UV deltas, no vertex tangents)

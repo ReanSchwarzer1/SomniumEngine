@@ -22,6 +22,8 @@ pub struct ShadowPass {
     pub cascade_bind_group_layout: wgpu::BindGroupLayout,
     /// One bind group per cascade (each holds a constant index buffer 0..3).
     pub cascade_bind_groups: [wgpu::BindGroup; NUM_CASCADES],
+    /// Sampler used by the alpha-cutout test (Phase 17E).
+    pub cutout_bind_group: wgpu::BindGroup,
     // Kept alive so the bind groups remain valid.
     _cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES],
 }
@@ -84,9 +86,43 @@ impl ShadowPass {
             ),
         });
 
+        // Phase 17E: sampler for the alpha-cutout test, so foliage casts a
+        // cut-out shadow instead of the shadow of its whole quad.
+        let cutout_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow Cutout BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            }],
+        });
+        let cutout_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Cutout Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let cutout_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Cutout BG"),
+            layout: &cutout_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Sampler(&cutout_sampler),
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[Some(global_bind_group_layout), Some(&cascade_bind_group_layout)],
+            bind_group_layouts: &[
+                Some(global_bind_group_layout),
+                Some(&cascade_bind_group_layout),
+                Some(&cutout_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -101,7 +137,14 @@ impl ShadowPass {
                 compilation_options: Default::default(),
             },
             // No fragment stage — depth writes happen automatically.
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                // No colour targets: the fragment stage exists only so
+                // alpha-tested geometry can `discard` out of the depth buffer.
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
@@ -131,6 +174,7 @@ impl ShadowPass {
             cascade_bind_group_layout,
             cascade_bind_groups,
             _cascade_index_buffers: cascade_index_buffers,
+            cutout_bind_group,
         }
     }
 
@@ -167,6 +211,7 @@ impl ShadowPass {
             let (vx, vy, vw, vh) = CASCADE_VIEWPORTS[cascade];
             rpass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[]);
+            rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
             for (inst_id, cmd) in draw_queue.iter().enumerate() {
                 rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));

@@ -330,6 +330,9 @@ pub struct FoliageComponent {
     pub scale_min: f32,
     /// Upper bound of the random uniform scale.
     pub scale_max: f32,
+    /// Radius of the scattered disc around the camera, in metres. `0` covers
+    /// the whole terrain, which only makes sense for small ones.
+    pub radius: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -338,14 +341,18 @@ impl Default for FoliageComponent {
     fn default() -> Self {
         Self {
             enabled: false,
-            density: 0.4,
+            // Dense enough to read as ground cover. Affordable only because
+            // the scatter is a disc around the camera rather than the whole
+            // terrain — see `radius`.
+            density: 3.0,
             seed: 1,
             max_slope_deg: 35.0,
             layer: 0,
             min_layer_weight: 0.35,
             scale_min: 0.6,
             scale_max: 1.5,
-            max_instances: 12_000,
+            radius: 45.0,
+            max_instances: 18_000,
         }
     }
 }

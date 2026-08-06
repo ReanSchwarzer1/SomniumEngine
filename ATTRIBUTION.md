@@ -753,6 +753,36 @@ blur pushes luma outside the neighbourhood range.
 
 **Files:** `somnium_renderer/src/pass/fxaa.rs`, `somnium_renderer/src/shaders/fxaa.wgsl`
 
+### 13.25 Bundled foliage assets — Poly Haven (Phase 17E)
+
+**These are third-party art assets shipped in the repository**, unlike every
+other entry here, which records a technique the code was informed by.
+
+| Asset | Path | Authors |
+|---|---|---|
+| Grass Medium 01 | `assets/foliage/grass_medium_01/` | Rob Tuytel (photography), Rico Cilliers (modeling) |
+| Grass Bermuda 01 | `assets/foliage/grass_bermuda_01/` | Rico Cilliers |
+| Fir Sapling | `assets/foliage/fir_sapling/` | Rob Tuytel (photography), Rico Cilliers (modeling) |
+| Island Tree 02 | `assets/foliage/island_tree_02/` | Rob Tuytel (scanning), Rico Cilliers (cleanup) |
+
+**License: CC0 1.0** (public domain dedication), from <https://polyhaven.com>.
+Poly Haven's license page states the assets may be redistributed, used
+commercially, and included in products that are sold, and that **attribution is
+not required**. It is given here anyway, because the work deserves it.
+
+**Why these four:** the 2k texture variants, chosen against the alternatives on
+measured size and triangle count rather than by eye. `fir_tree_01` is 486 MB and
+7 million triangles and `pine_tree_01` is 937 MB and 17 million — unreasonable
+in a git repository, and larger than the engine's entire geometry pool was
+before Phase 17E raised it. The four shipped here total about 101 MB and
+1.53 million triangles, with no single file above 39 MB.
+
+**Re-fetching:** every file comes from the Poly Haven file API
+(`https://api.polyhaven.com/files/<asset>`), which lists each format and
+resolution with an `include` map of relative-path to URL. The textures do not
+sit beside the glTF and the `.bin` is shared from the 8k tree, so that map has
+to be followed rather than the directory layout guessed at.
+
 ### 13.24 Water surface — Fresnel reflection + Beer-Lambert absorption (Phase 22)
 
 **References:**
