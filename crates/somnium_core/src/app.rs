@@ -1035,6 +1035,25 @@ impl<G: GameApp> Engine<G> {
 
     /// Apply the active stroke each frame and update the brush cursor uniform.
     fn update_terrain_editing(&mut self, dt: f32) {
+        // Phase 17F: the foliage brush gets the same ring. Painting blind was
+        // the single worst thing about the first cut of it — you could not see
+        // where a stroke would land until after it landed.
+        if self.foliage_paint_active {
+            let Some(tc) = self.selected_terrain() else { return };
+            let Some(model) = self.selected_terrain_model() else { return };
+            let ray = self.cursor_ray();
+            let radius = self.foliage_brush.radius;
+            let Some(renderer) = self.renderer.as_mut() else { return };
+            renderer.clear_gizmo();
+            let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return };
+            terrain.model = model;
+            match ray.and_then(|(o, d)| terrain.raycast(o, d)) {
+                Some(hit) => terrain.brush_cursor = [hit.x, hit.z, radius, 3.0],
+                None => terrain.brush_cursor = [0.0; 4],
+            }
+            return;
+        }
+
         if !self.terrain_edit_active {
             // Make sure no stale cursor ring stays visible.
             if let (Some(tc), Some(r)) = (self.selected_terrain(), self.renderer.as_mut()) {
@@ -1478,7 +1497,14 @@ impl<G: GameApp> Engine<G> {
         let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return false };
         terrain.model = model; // keep the raycast in sync with the entity
         let Some(hit) = terrain.raycast(origin, dir) else { return false };
-        let center = [hit.x, hit.z];
+        // `raycast` marches in terrain-local space but transforms the result
+        // back to world before returning. Painted instances are stored local,
+        // because `submit_foliage` composes them with the terrain's transform —
+        // so the hit has to come back down. Skipping this applied the terrain
+        // offset twice and dropped every stroke a terrain-width away from the
+        // cursor.
+        let local_hit = model.inverse().transform_point3(hit);
+        let center = [local_hit.x, local_hit.z];
 
         if erase {
             let removed = somnium_renderer::terrain::foliage_paint::erase(
@@ -2115,6 +2141,14 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::ToggleFoliageSingle => {
                 self.foliage_brush.single = !self.foliage_brush.single;
+            }
+            EditorEvent::SelectFoliageKind(kind) => {
+                self.foliage_brush.kind = (kind as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                let (name, _) = FOLIAGE_PALETTE[self.foliage_brush.kind as usize];
+                // Trees want one-per-click; ground cover wants a spread. Setting
+                // the obvious default saves a second click almost every time.
+                self.foliage_brush.single = self.foliage_brush.kind >= 2;
+                info!("Foliage brush: {name}");
             }
 
             EditorEvent::TogglePostFx(which) => {

@@ -310,14 +310,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     result += 0.03 * surface.albedo; // ambient
 
     // 6. Brush cursor ring (Phase 14D-3): drawn in-shader so it follows the
-    // terrain contour exactly. brush.w: 0 = off, 1 = sculpt (green), 2 = paint (blue).
+    // terrain contour exactly.
+    // brush.w: 0 = off, 1 = sculpt (green), 2 = layer paint (blue),
+    //          3 = foliage brush (amber).
     if params.brush.w > 0.5 {
         let d = distance(in.world_pos.xz, params.brush.xy);
         let ring_width = max(params.brush.z * 0.04, 0.15);
         let ring = 1.0 - smoothstep(0.0, ring_width, abs(d - params.brush.z));
         let fill = (1.0 - smoothstep(params.brush.z * 0.85, params.brush.z, d)) * 0.08;
         var cursor_color = vec3<f32>(0.2, 1.0, 0.3);
-        if params.brush.w > 1.5 {
+        if params.brush.w > 2.5 {
+            cursor_color = vec3<f32>(1.0, 0.65, 0.15);
+        } else if params.brush.w > 1.5 {
             cursor_color = vec3<f32>(0.25, 0.55, 1.0);
         }
         result = mix(result, cursor_color * 2.0, clamp(ring * 0.8 + fill, 0.0, 1.0));

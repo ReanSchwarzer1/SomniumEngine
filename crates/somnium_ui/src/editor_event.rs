@@ -109,6 +109,8 @@ pub enum EditorEvent {
     ToggleFoliageErase,
     /// Place one instance per click instead of a spread — how trees go down.
     ToggleFoliageSingle,
+    /// Pick which palette entry the foliage brush paints (Phase 17F).
+    SelectFoliageKind(u8),
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
