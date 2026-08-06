@@ -35,6 +35,14 @@ use crate::{
 use somnium_ui::UiManager;
 use winit::window::Window;
 
+/// Above this many copies of the same mesh in one frame, cluster expansion is
+/// abandoned for that mesh and each draw becomes a single whole-mesh argument.
+///
+/// Chosen low because the trade flips fast: the argument count is
+/// `instances x clusters`, so anything genuinely instanced blows past what
+/// per-cluster culling can ever recover.
+const MAX_INSTANCES_FOR_CLUSTERING: u32 = 8;
+
 /// Everything the ECS layer needs to spawn one entity from an uploaded scene node.
 #[derive(Debug, Clone)]
 pub struct UploadedNode {
@@ -191,6 +199,9 @@ pub struct SomniumRenderer {
     cull_aabbs: Vec<crate::culling::GpuCullAabb>,
     /// Phase 15F: this frame's indirect arguments, one per cluster.
     cluster_args: Vec<crate::indirect::DrawIndirectArgs>,
+    /// How many times each mesh appears in this frame's draw queue, used to
+    /// decide whether cluster expansion is worth it (Phase 17G).
+    instanced_counts: std::collections::HashMap<u32, u32>,
     /// When true, a draw is expanded into one indirect argument per cluster so
     /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
     /// forces the whole-mesh path, for A/B measurement.
@@ -398,6 +409,7 @@ impl SomniumRenderer {
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
             cluster_args: Vec::new(),
+            instanced_counts: std::collections::HashMap::new(),
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             gpu_driven: ctx.supports_gpu_driven(),
@@ -1055,6 +1067,18 @@ impl SomniumRenderer {
             // per range so each gets the right cull mode. Argument order does
             // not have to match the draw queue — `first_instance` carries the
             // instance explicitly, and the cull shader reads it from there.
+            // Phase 17G: clustering pays for a big mesh drawn once — parts of
+            // it are meaningfully cullable. It is backwards for a small mesh
+            // drawn thousands of times: a 6 400-triangle grass tuft expands to
+            // 51 arguments, so a painted field costs 100 000 draws a frame to
+            // cull sub-parts of things a few pixels across. Count how often
+            // each mesh appears and fall back to one whole-mesh argument once
+            // it is clearly being instanced.
+            self.instanced_counts.clear();
+            for cmd in &self.draw_queue {
+                *self.instanced_counts.entry(cmd.vertex_offset).or_insert(0u32) += 1;
+            }
+
             self.cluster_args.clear();
             self.cull_aabbs.clear();
             for pass_two_sided in [false, true] {
@@ -1065,7 +1089,11 @@ impl SomniumRenderer {
                     if self.is_double_sided(cmd.material_id) != pass_two_sided {
                         continue;
                     }
-                    let meshlets = if self.meshlet_draws {
+                    let heavily_instanced = self
+                        .instanced_counts
+                        .get(&cmd.vertex_offset)
+                        .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
+                    let meshlets = if self.meshlet_draws && !heavily_instanced {
                         self.geometry.mesh_meshlets(cmd.vertex_offset)
                     } else {
                         None

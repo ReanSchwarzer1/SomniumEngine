@@ -146,6 +146,9 @@ pub struct Engine<G: GameApp> {
     pub foliage_paint_active: bool,
     /// Erase instead of add.
     pub foliage_erase: bool,
+    /// Scratch list for this frame's visible foliage, reused so a field of
+    /// instances does not allocate a fresh vector every frame.
+    foliage_batch: Vec<(FoliageMesh, glam::Mat4)>,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -226,6 +229,7 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
             foliage_paint_active: false,
             foliage_erase: false,
+            foliage_batch: Vec::new(),
             foliage_stroke_seed: 0,
             foliage_painting: false,
             terrain_colliders: std::collections::HashMap::new(),
@@ -1357,7 +1361,8 @@ impl<G: GameApp> Engine<G> {
     /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
-        let terrains: Vec<(u32, glam::Mat4)> = self
+        let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
+        let terrains: Vec<(u32, glam::Mat4, f32)> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -1370,11 +1375,11 @@ impl<G: GameApp> Engine<G> {
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model))
+                Some((tc.terrain_id, model, fc.cull_distance))
             })
             .collect();
 
-        for (terrain_id, model) in terrains {
+        for (terrain_id, model, cull_distance) in terrains {
             // Which palette entries this terrain actually uses, so nothing is
             // loaded for a kind that has never been painted.
             let kinds: Vec<u8> = {
@@ -1393,10 +1398,20 @@ impl<G: GameApp> Engine<G> {
             let Some(t) = self.renderer.as_ref().and_then(|r| r.terrain(terrain_id)) else {
                 continue;
             };
-            let batch: Vec<(FoliageMesh, glam::Mat4)> = t
+            // Phase 17G: reject distant instances before they become draws.
+            let camera_local = model.inverse().transform_point3(camera_ws);
+            let cull_sq = if cull_distance > 0.0 { cull_distance * cull_distance } else { f32::MAX };
+            self.foliage_batch.clear();
+            self.foliage_batch.extend(t
                 .painted_foliage
                 .iter()
                 .filter_map(|inst| {
+                    let d = inst.position - camera_local;
+                    // Horizontal distance: flying up should not make ground
+                    // cover vanish out from under you.
+                    if d.x * d.x + d.z * d.z > cull_sq {
+                        return None;
+                    }
                     let mesh = (*self.foliage_meshes.get(inst.kind as usize)?)?;
                     // Terrain-local placement composed with the terrain's own
                     // transform, so moving the terrain carries its foliage.
@@ -1406,11 +1421,10 @@ impl<G: GameApp> Engine<G> {
                         inst.position,
                     );
                     Some((mesh, model * local))
-                })
-                .collect();
+                }));
 
             if let Some(r) = self.renderer.as_mut() {
-                for (mesh, transform) in batch {
+                for (mesh, transform) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
                         vertex_offset: mesh.vertex_offset,

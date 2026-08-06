@@ -333,6 +333,15 @@ pub struct FoliageComponent {
     /// Radius of the scattered disc around the camera, in metres. `0` covers
     /// the whole terrain, which only makes sense for small ones.
     pub radius: f32,
+    /// Phase 17G: painted instances beyond this distance from the camera are
+    /// not submitted at all.
+    ///
+    /// Ground cover is invisible long before it is far away — a tuft a few
+    /// centimetres across is sub-pixel at a hundred metres — so drawing it is
+    /// pure cost. Culling on the CPU keeps it out of the instance buffer and
+    /// the indirect arguments entirely, which the GPU cull cannot do since the
+    /// draw has to exist before it can be rejected.
+    pub cull_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -352,6 +361,7 @@ impl Default for FoliageComponent {
             scale_min: 0.6,
             scale_max: 1.5,
             radius: 45.0,
+            cull_distance: 120.0,
             max_instances: 18_000,
         }
     }

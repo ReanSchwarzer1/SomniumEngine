@@ -124,8 +124,6 @@ struct EditorLayout {
     create_button:      NodeHandle,
     create_popup:       NodeHandle,
     create_popup_items: Vec<(NodeHandle, CreateKind)>,
-    foliage_popup:       NodeHandle,
-    foliage_popup_items: Vec<(NodeHandle, u8)>,
     file_button:        NodeHandle,
     file_popup:         NodeHandle,
     file_import_item:   NodeHandle,
@@ -162,9 +160,9 @@ pub struct UiManager {
     create_popup:        NodeHandle,
     create_popup_open:   bool,
     create_popup_items:  Vec<(NodeHandle, CreateKind)>,
-    foliage_popup:       NodeHandle,
-    foliage_popup_open:  bool,
-    foliage_popup_items: Vec<(NodeHandle, u8)>,
+    /// Palette entry currently shown on the picker button, so a click can
+    /// advance to the next one.
+    foliage_kind_shown:  u8,
     // File menu (Phase 19B): Import
     file_button:         NodeHandle,
     file_popup:          NodeHandle,
@@ -241,9 +239,7 @@ impl UiManager {
             create_popup:       layout.create_popup,
             create_popup_open:  false,
             create_popup_items: layout.create_popup_items,
-            foliage_popup:       layout.foliage_popup,
-            foliage_popup_open:  false,
-            foliage_popup_items: layout.foliage_popup_items,
+            foliage_kind_shown:  0,
             file_button:        layout.file_button,
             file_popup:         layout.file_popup,
             file_popup_open:    false,
@@ -543,9 +539,10 @@ impl UiManager {
                 }
                 // v[3] is the palette index; show its name on the picker button.
                 let kind = (v[3].round().max(0.0) as usize).min(FOLIAGE_KIND_NAMES.len() - 1);
+                self.foliage_kind_shown = kind as u8;
                 self.native_ui.send(TextMessage::set_text(
                     h.foliage_kind_label,
-                    format!("< {} >", FOLIAGE_KIND_NAMES[kind]),
+                    format!("Type: {}  >", FOLIAGE_KIND_NAMES[kind]),
                 ));
             }
             None => self.native_ui.set_visibility(section, false),
@@ -644,19 +641,10 @@ impl UiManager {
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_kind_button {
-                    self.foliage_popup_open = !self.foliage_popup_open;
-                    let open = self.foliage_popup_open;
-                    self.native_ui.set_visibility(self.foliage_popup, open);
-                    self.native_ui.invalidate_ancestors(self.foliage_popup);
-                    continue;
-                }
-                if let Some(&(_, kind)) =
-                    self.foliage_popup_items.iter().find(|(bh, _)| *bh == msg.destination)
-                {
-                    self.editor_events.push_back(EditorEvent::SelectFoliageKind(kind));
-                    self.foliage_popup_open = false;
-                    self.native_ui.set_visibility(self.foliage_popup, false);
-                    self.native_ui.invalidate_ancestors(self.foliage_popup);
+                    // Advance to the next palette entry. The label shows the
+                    // current one, so the control reads as a cycler.
+                    let next = (self.foliage_kind_shown + 1) % FOLIAGE_KIND_NAMES.len() as u8;
+                    self.editor_events.push_back(EditorEvent::SelectFoliageKind(next));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_fxaa_toggle {
@@ -1178,7 +1166,6 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
 
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
-    let (foliage_popup, foliage_popup_items) = build_foliage_popup(ui, root, font_id);
     let (file_popup, file_import_item) = build_file_popup(ui, root, font_id);
 
     EditorLayout {
@@ -1188,8 +1175,6 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         log_stack,
         create_button,
         create_popup,
-        foliage_popup,
-        foliage_popup_items,
         create_popup_items,
         file_button,
         file_popup,
@@ -1348,25 +1333,6 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     ui.set_visibility(post_section, false);
 
-    // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
-    let terrain_panel = StackPanelBuilder::new(
-        WidgetBuilder::new().with_background(theme::TRANSPARENT),
-    )
-    .with_orientation(Orientation::Vertical)
-    .build();
-    let terrain_section = ui.add_node(terrain_panel, parent);
-    sec_label(ui, "Terrain", font_id, terrain_section);
-    // Whole steps: the paint layer is an index, and a fractional drag would be
-    // meaningless.
-    let terrain_layer = make_row_step(ui, "Paint", 34.0, font_id, terrain_section, 0.02);
-    let terrain_tile = [
-        make_row_step(ui, "Tile 0", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 1", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
-    ];
-    ui.set_visibility(terrain_section, false);
-
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
     let foliage_panel = StackPanelBuilder::new(
         WidgetBuilder::new().with_background(theme::TRANSPARENT),
@@ -1388,7 +1354,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // have to remember that "2" means Fir Sapling. It sits directly under the
     // mode toggles because choosing what to paint comes before tuning how.
     let (foliage_kind_button, foliage_kind_label) =
-        make_toggle(ui, "< Grass Medium >", font_id, foliage_section);
+        make_toggle(ui, "Type: Grass Medium  >", font_id, foliage_section);
     // Density is per square metre and lives well under 1, so it needs a far
     // finer drag rate than a position.
     let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.02);
@@ -1403,6 +1369,26 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let foliage_smin    = make_row_step(ui, "Sc Mn", 34.0, font_id, foliage_section, 0.01);
     let foliage_smax    = make_row_step(ui, "Sc Mx", 34.0, font_id, foliage_section, 0.01);
     ui.set_visibility(foliage_section, false);
+
+    // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
+    let terrain_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let terrain_section = ui.add_node(terrain_panel, parent);
+    sec_label(ui, "Terrain", font_id, terrain_section);
+    // Whole steps: the paint layer is an index, and a fractional drag would be
+    // meaningless.
+    let terrain_layer = make_row_step(ui, "Paint", 34.0, font_id, terrain_section, 0.02);
+    let terrain_tile = [
+        make_row_step(ui, "Tile 0", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 1", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
+    ];
+    ui.set_visibility(terrain_section, false);
+
 
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
@@ -1502,64 +1488,6 @@ fn build_file_popup(
     ui.add_node(lbl, import_item);
 
     (popup_h, import_item)
-}
-
-/// Build the foliage-kind picker popup (Phase 17F).
-///
-/// Anchored under the inspector rather than the menu bar, because that is where
-/// the brush settings are and a picker that opens across the screen from its
-/// button reads as a different control entirely.
-fn build_foliage_popup(
-    ui:      &mut UserInterface,
-    root:    NodeHandle,
-    font_id: u8,
-) -> (NodeHandle, Vec<(NodeHandle, u8)>) {
-    let popup_backdrop = PopupBuilder::new(
-        WidgetBuilder::new().with_background(theme::TRANSPARENT),
-    ).build();
-    let popup_h = ui.add_node(popup_backdrop, root);
-
-    let popup_border = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_desired_position(Vec2::new(1420.0, 470.0))
-            .with_width(170.0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
-    )
-    .with_stroke_thickness(Thickness::uniform(1.0))
-    .build();
-    let popup_border_h = ui.add_node(popup_border, popup_h);
-
-    let popup_stack = StackPanelBuilder::new(
-        WidgetBuilder::new().with_background(theme::TRANSPARENT),
-    )
-    .with_orientation(Orientation::Vertical)
-    .build();
-    let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
-
-    let mut items = Vec::with_capacity(FOLIAGE_KIND_NAMES.len());
-    for (i, name) in FOLIAGE_KIND_NAMES.iter().copied().enumerate() {
-        let btn = ButtonBuilder::new(
-            WidgetBuilder::new()
-                .with_height(22.0)
-                .with_background(theme::TRANSPARENT),
-        ).build();
-        let btn_h = ui.add_node(btn, popup_stack_h);
-        let lbl = TextBuilder::new(
-            WidgetBuilder::new()
-                .with_margin(Thickness { left: 8.0, top: 4.0, right: 0.0, bottom: 0.0 }),
-        )
-        .with_text(name)
-        .with_font_size(12.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
-        ui.add_node(lbl, btn_h);
-        items.push((btn_h, i as u8));
-    }
-
-    ui.set_visibility(popup_h, false);
-    (popup_h, items)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).
