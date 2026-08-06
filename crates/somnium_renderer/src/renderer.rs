@@ -189,6 +189,12 @@ pub struct SomniumRenderer {
     cull_pass: crate::pass::cull::CullPass,
     /// Per-draw local AABBs for culling, rebuilt each frame.
     cull_aabbs: Vec<crate::culling::GpuCullAabb>,
+    /// Phase 15F: this frame's indirect arguments, one per cluster.
+    cluster_args: Vec<crate::indirect::DrawIndirectArgs>,
+    /// When true, a draw is expanded into one indirect argument per cluster so
+    /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
+    /// forces the whole-mesh path, for A/B measurement.
+    pub meshlet_draws: bool,
     /// When false the cull shader keeps every draw (useful for A/B checks).
     pub culling_enabled: bool,
 
@@ -383,6 +389,8 @@ impl SomniumRenderer {
             occlusion_off: std::env::var("SOMNIUM_NO_OCCLUSION").is_ok_and(|v| v == "1"),
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
             cull_aabbs: Vec::new(),
+            cluster_args: Vec::new(),
+            meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             gpu_driven: ctx.supports_gpu_driven(),
             supports_gpu_driven: ctx.supports_gpu_driven(),
@@ -701,6 +709,10 @@ impl SomniumRenderer {
         let Some(buffers) = &self.cull_stats_buffers else { return };
         let bytes = (draw_count * 16) as u64;
         let mut alive = [0usize; 2];
+        // Draw counts alone cannot be compared between the whole-mesh and
+        // cluster paths — a mesh and a 128-triangle cluster are not the same
+        // unit of work. Summing the indices actually submitted is.
+        let mut indices = [0u64; 2];
 
         for (phase, buf) in buffers.iter().enumerate() {
             let slice = buf.slice(0..bytes);
@@ -710,19 +722,23 @@ impl SomniumRenderer {
                 let data = slice.get_mapped_range();
                 // DrawIndirectArgs: vertex_count, instance_count, first_vertex,
                 // first_instance — instance_count is the second u32.
-                alive[phase] = data
-                    .chunks_exact(16)
-                    .filter(|a| u32::from_le_bytes([a[4], a[5], a[6], a[7]]) != 0)
-                    .count();
+                for a in data.chunks_exact(16) {
+                    if u32::from_le_bytes([a[4], a[5], a[6], a[7]]) != 0 {
+                        alive[phase] += 1;
+                        indices[phase] +=
+                            u32::from_le_bytes([a[0], a[1], a[2], a[3]]) as u64;
+                    }
+                }
             }
             buf.unmap();
         }
 
         tracing::info!(
-            "CULLSTATS total={draw_count} phase1_drawn={} phase2_drawn={} culled={}",
+            "CULLSTATS total={draw_count} phase1_drawn={} phase2_drawn={} culled={} tris_drawn={}",
             alive[0],
             alive[1],
             draw_count - alive[0] - alive[1],
+            (indices[0] + indices[1]) / 3,
         );
     }
 
@@ -975,24 +991,29 @@ impl SomniumRenderer {
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
         // Argument `i` lines up with instance `i`, which the sort above keeps true.
         if self.gpu_driven {
-            self.indirect.update(&ctx.device, &ctx.queue, &self.draw_queue);
-
-            // Phase 15B: parallel array of local bounds for the cull shader.
-            // A draw whose mesh has no recorded AABB gets an infinite box, so
-            // it is never culled — safer than guessing at its extent.
+            // Phase 15F: each draw expands into one argument per cluster, with
+            // a parallel array of bounds for the cull shader. A mesh with no
+            // clusters (voxel chunks) or with no recorded AABB falls back to a
+            // single whole-mesh argument that is never culled — safer than
+            // guessing at its extent.
+            self.cluster_args.clear();
             self.cull_aabbs.clear();
-            self.cull_aabbs.extend(self.draw_queue.iter().map(|cmd| {
-                match self.geometry.mesh_aabb(cmd.vertex_offset) {
-                    Some((min, max)) => crate::culling::GpuCullAabb {
-                        min: [min[0], min[1], min[2], 0.0],
-                        max: [max[0], max[1], max[2], 0.0],
-                    },
-                    None => crate::culling::GpuCullAabb {
-                        min: [f32::MIN, f32::MIN, f32::MIN, 0.0],
-                        max: [f32::MAX, f32::MAX, f32::MAX, 0.0],
-                    },
-                }
-            }));
+            for (i, cmd) in self.draw_queue.iter().enumerate() {
+                let meshlets = if self.meshlet_draws {
+                    self.geometry.mesh_meshlets(cmd.vertex_offset)
+                } else {
+                    None
+                };
+                crate::indirect::push_cluster_args(
+                    i as u32,
+                    cmd.index_count,
+                    meshlets,
+                    self.geometry.mesh_aabb(cmd.vertex_offset),
+                    &mut self.cluster_args,
+                    &mut self.cull_aabbs,
+                );
+            }
+            self.indirect.upload(&ctx.device, &ctx.queue, &self.cluster_args);
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
@@ -1002,6 +1023,7 @@ impl SomniumRenderer {
                 self.hiz_pass.size(),
                 self.hiz_pass.mip_count(),
                 self.hiz_ready && !self.occlusion_off,
+                self.camera_pos,
             );
         }
 
@@ -1011,6 +1033,12 @@ impl SomniumRenderer {
             wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             _ => {
                 tracing::warn!("Failed to acquire surface texture");
+                // The per-frame queues still have to be emptied. Returning
+                // without clearing leaves this frame's submissions in place and
+                // the next frame appends to them, so everything is drawn twice
+                // — invisible for opaque geometry, but it double-blends the
+                // transparent pass and wastes a whole frame of work.
+                self.clear_frame_queues();
                 return;
             }
         };
@@ -1275,6 +1303,14 @@ impl SomniumRenderer {
         }
         output.present();
 
+        self.clear_frame_queues();
+    }
+
+    /// Empty every per-frame submission queue.
+    ///
+    /// Must run on *every* path out of `render`, including the ones that bail
+    /// before drawing.
+    fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();

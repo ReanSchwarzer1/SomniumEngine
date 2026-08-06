@@ -47,6 +47,13 @@ pub struct Meshlet {
     pub center: [f32; 3],
     /// Bounding sphere radius.
     pub radius: f32,
+    /// Local-space AABB. Kept alongside the sphere because culling wants the
+    /// tighter of the two: the sphere's own AABB is up to sqrt(3) larger per
+    /// axis, enough that boundary clusters survive a frustum test their parent
+    /// mesh fails — which measured as the cluster path submitting *more*
+    /// geometry than whole-mesh draws at some viewpoints.
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
     /// Average triangle normal, normalized. Zero when the cluster has no
     /// consistent facing.
     pub cone_axis: [f32; 3],
@@ -64,6 +71,30 @@ impl Meshlet {
     /// Number of indices this cluster covers.
     pub fn index_count(&self) -> u32 {
         self.triangle_count * 3
+    }
+
+    /// Threshold for rejecting the whole cluster as backfacing (Phase 15F).
+    ///
+    /// `cone_cutoff` stores the tightest cosine between any triangle normal and
+    /// the cone axis — it describes the cone, not the test. A cluster is
+    /// invisible only when the view direction faces away from *every* normal in
+    /// it, and the worst case is the normal tilted furthest toward the camera,
+    /// which works out to `dot(view_dir, axis) >= sin(half_angle)`.
+    ///
+    /// So a perfectly flat cluster (`cone_cutoff` 1) yields 0: it is hidden the
+    /// moment you are behind it. A cluster spanning a full hemisphere yields 1
+    /// and is essentially never rejected. Using `cone_cutoff` directly here
+    /// would invert that and cull flat clusters almost never while culling
+    /// wide ones aggressively — the exact opposite of what is wanted.
+    ///
+    /// Returns `2.0` when the cluster spans more than a hemisphere: a dot
+    /// product can never reach it, so the test simply never fires and no branch
+    /// is needed in the shader.
+    pub fn backface_cutoff(&self) -> f32 {
+        if self.cone_cutoff <= 0.0 {
+            return 2.0;
+        }
+        (1.0 - self.cone_cutoff * self.cone_cutoff).max(0.0).sqrt()
     }
 }
 
@@ -227,6 +258,8 @@ fn build_one(
             triangle_count,
             center,
             radius,
+            aabb_min: min,
+            aabb_max: max,
             cone_axis: [0.0, 0.0, 0.0],
             cone_cutoff: -1.0,
         };
@@ -253,6 +286,8 @@ fn build_one(
         triangle_count,
         center,
         radius,
+        aabb_min: min,
+        aabb_max: max,
         cone_axis: axis,
         // Spread beyond a hemisphere cannot be culled by a cone at all.
         cone_cutoff: if min_dot <= 0.0 { -1.0 } else { min_dot },
@@ -495,6 +530,71 @@ mod tests {
         ];
         let b = build_meshlets(&verts, &[0, 1, 2]);
         assert!(b.meshlets.is_empty());
+    }
+
+    #[test]
+    fn the_aabb_is_tighter_than_the_bounding_sphere() {
+        // The sphere is derived from the AABB, so its own AABB is always at
+        // least as large. Culling uses the box for exactly this reason.
+        let (verts, idx) = grid(60);
+        for m in build_meshlets(&verts, &idx).meshlets {
+            for a in 0..3 {
+                assert!(m.aabb_min[a] >= m.center[a] - m.radius - 1e-4);
+                assert!(m.aabb_max[a] <= m.center[a] + m.radius + 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn the_aabb_contains_every_vertex_it_covers() {
+        let (verts, idx) = grid(300);
+        let b = build_meshlets(&verts, &idx);
+        for m in &b.meshlets {
+            let lo = m.index_offset() as usize;
+            let hi = lo + m.index_count() as usize;
+            for &i in &b.indices[lo..hi] {
+                let p = verts[i as usize].position;
+                for a in 0..3 {
+                    assert!(p[a] >= m.aabb_min[a] - 1e-4 && p[a] <= m.aabb_max[a] + 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_cluster_is_hidden_as_soon_as_you_are_behind_it() {
+        let (verts, idx) = grid(20);
+        let m = build_meshlets(&verts, &idx).meshlets[0];
+        // cone_cutoff ~1 (all normals identical) -> cutoff ~0, so any view
+        // direction with a positive dot against the axis rejects it.
+        assert!(m.backface_cutoff() < 1e-3, "cutoff {}", m.backface_cutoff());
+    }
+
+    #[test]
+    fn a_cluster_spanning_a_hemisphere_is_never_rejected() {
+        let m = Meshlet {
+            triangle_offset: 0, triangle_count: 1,
+            center: [0.0; 3], radius: 1.0,
+            aabb_min: [-1.0; 3], aabb_max: [1.0; 3],
+            cone_axis: [0.0, 1.0, 0.0], cone_cutoff: -1.0,
+        };
+        // 2.0 is unreachable by a dot product, so the test never fires.
+        assert_eq!(m.backface_cutoff(), 2.0);
+    }
+
+    #[test]
+    fn a_wider_cone_is_harder_to_reject() {
+        let mk = |c: f32| Meshlet {
+            triangle_offset: 0, triangle_count: 1,
+            center: [0.0; 3], radius: 1.0,
+            aabb_min: [-1.0; 3], aabb_max: [1.0; 3],
+            cone_axis: [0.0, 1.0, 0.0], cone_cutoff: c,
+        };
+        // Tighter cone (cutoff nearer 1) -> smaller threshold -> culls sooner.
+        assert!(mk(0.99).backface_cutoff() < mk(0.5).backface_cutoff());
+        assert!(mk(0.5).backface_cutoff() < mk(0.1).backface_cutoff());
+        // sin(60 degrees) for a cone half-angle of 60 degrees.
+        assert!((mk(0.5).backface_cutoff() - 0.8660254).abs() < 1e-5);
     }
 
     #[test]

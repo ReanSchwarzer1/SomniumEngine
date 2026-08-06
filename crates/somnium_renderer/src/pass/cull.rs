@@ -170,6 +170,7 @@ impl CullPass {
     ///
     /// `aabbs` must be parallel to the indirect argument array — entry `i`
     /// bounds draw `i`.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -180,6 +181,7 @@ impl CullPass {
         hiz_size: (u32, u32),
         hiz_mip_count: u32,
         occlusion_enabled: bool,
+        camera_pos: glam::Vec3,
     ) {
         self.staging.clear();
         self.staging.extend_from_slice(aabbs);
@@ -208,6 +210,7 @@ impl CullPass {
             hiz_size: [hiz_size.0 as f32, hiz_size.1 as f32],
             hiz_mip_count,
             _pad: 0,
+            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
         };
         queue.write_buffer(&self.params_buffers[0], 0, bytemuck::bytes_of(&params));
         params.phase = 1;

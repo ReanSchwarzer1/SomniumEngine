@@ -28,6 +28,31 @@ pub struct GpuCullAabb {
     pub min: [f32; 4],
     /// Local-space maximum corner (`w` unused).
     pub max: [f32; 4],
+    /// Phase 15F normal cone: local-space axis in `xyz`, backface threshold in
+    /// `w`. `w = 2.0` disables the test, which is what whole-mesh draws use.
+    pub cone: [f32; 4],
+}
+
+impl GpuCullAabb {
+    /// Bounds that never cull: an infinite box with the cone test disabled.
+    /// Used for meshes with no recorded AABB, where guessing at the extent
+    /// risks deleting geometry.
+    pub fn never_culled() -> Self {
+        Self {
+            min: [f32::MIN, f32::MIN, f32::MIN, 0.0],
+            max: [f32::MAX, f32::MAX, f32::MAX, 0.0],
+            cone: [0.0, 0.0, 0.0, 2.0],
+        }
+    }
+
+    /// Bounds from a local-space AABB, with cone culling disabled.
+    pub fn from_aabb(min: [f32; 3], max: [f32; 3]) -> Self {
+        Self {
+            min: [min[0], min[1], min[2], 0.0],
+            max: [max[0], max[1], max[2], 0.0],
+            cone: [0.0, 0.0, 0.0, 2.0],
+        }
+    }
 }
 
 /// Culling parameters uniform: the six frustum planes plus the draw count.
@@ -57,6 +82,9 @@ pub struct GpuCullParams {
     /// Levels in the pyramid, so the shader can clamp its mip choice.
     pub hiz_mip_count: u32,
     pub _pad: u32,
+    /// World-space camera position, for the Phase 15F normal-cone test
+    /// (`w` unused).
+    pub camera_pos: [f32; 4],
 }
 
 /// Extract the six frustum planes from a view-projection matrix.
@@ -467,12 +495,13 @@ mod layout_tests {
         //   hiz_size          vec2<f32>             offset 176
         //   hiz_mip_count     u32                   offset 184
         //   _pad              u32                   offset 188
-        //                                           total  192
+        //   camera_pos        vec4<f32>             offset 192, size 16
+        //                                           total  208
         //
         // A mismatch here does not fail to compile or validate — the shader
         // simply reads the wrong words and culls the wrong things, which shows
         // up as geometry flickering out rather than as an error.
-        assert_eq!(std::mem::size_of::<GpuCullParams>(), 192);
+        assert_eq!(std::mem::size_of::<GpuCullParams>(), 208);
         assert_eq!(std::mem::align_of::<GpuCullParams>(), 4);
 
         let p = GpuCullParams {
@@ -485,6 +514,7 @@ mod layout_tests {
             hiz_size: [0.0; 2],
             hiz_mip_count: 0,
             _pad: 0,
+            camera_pos: [0.0; 4],
         };
         let base = &p as *const _ as usize;
         let off = |field: *const _| field as usize - base;
@@ -493,5 +523,6 @@ mod layout_tests {
         assert_eq!(off(&p.view_proj as *const _ as *const u8), 112);
         assert_eq!(off(&p.hiz_size as *const _ as *const u8), 176);
         assert_eq!(off(&p.hiz_mip_count as *const _ as *const u8), 184);
+        assert_eq!(off(&p.camera_pos as *const _ as *const u8), 192);
     }
 }

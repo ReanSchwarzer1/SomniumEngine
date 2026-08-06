@@ -1,5 +1,3 @@
-enable primitive_index;
-
 // Visibility Buffer - Rasterization Pass
 
 struct Vertex {
@@ -35,6 +33,21 @@ struct View {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) @interpolate(flat) instance_id: u32,
+    // Triangle index relative to the MESH, not to the draw.
+    //
+    // This used to come from `@builtin(primitive_index)`, which restarts at 0
+    // for every draw call. That was fine while a draw was a whole mesh, but
+    // Phase 15F splits a mesh across one draw per cluster, and the shading pass
+    // uses this id to fetch the triangle out of the geometry pool — a
+    // per-draw id would send it to the wrong triangle in every cluster after
+    // the first.
+    //
+    // `vertex_index` includes `first_vertex`, which for a cluster draw is that
+    // cluster's index offset within the mesh, so dividing by three recovers the
+    // mesh-relative triangle. All three vertices of triangle k have indices
+    // 3k, 3k+1 and 3k+2, so integer division gives k for each of them and the
+    // flat interpolation is well defined.
+    @location(1) @interpolate(flat) prim_id: u32,
 }
 
 @vertex
@@ -51,14 +64,15 @@ fn vs_main(
     let pos = vec3<f32>(vertex.pos_x, vertex.pos_y, vertex.pos_z);
     out.clip_pos = view.view_proj * instance.model * vec4<f32>(pos, 1.0);
     out.instance_id = inst_idx;
+    out.prim_id = v_idx / 3u;
     
     return out;
 }
 
 @fragment
 fn fs_main(
-    @builtin(primitive_index) prim_idx: u32,
-    @location(0) @interpolate(flat) instance_id: u32
+    @location(0) @interpolate(flat) instance_id: u32,
+    @location(1) @interpolate(flat) prim_idx: u32
 ) -> @location(0) u32 {
     // Phase 15C: 16/16 split — 65 535 instances x 65 536 triangles per draw.
     // Was 10/22, which capped the whole scene at 1022 draws; triangle counts

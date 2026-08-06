@@ -24,6 +24,9 @@ struct Instance {
 struct CullAabb {
     min: vec4<f32>,
     max: vec4<f32>,
+    // Phase 15F normal cone: local-space axis in xyz, backface threshold in w.
+    // w = 2.0 disables the test, which whole-mesh draws use.
+    cone: vec4<f32>,
 }
 
 /// Must match `indirect::DrawIndirectArgs` byte-for-byte.
@@ -46,6 +49,7 @@ struct CullParams {
     hiz_size: vec2<f32>,
     hiz_mip_count: u32,
     _pad: u32,
+    camera_pos: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read>       instances: array<Instance>;
@@ -163,7 +167,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Local AABB -> world AABB via centre/extent: the transformed extent is the
     // absolute-valued 3x3 basis applied to the local extent. Cheaper than
     // transforming all eight corners, and gives the same axis-aligned bound.
-    let model = instances[i].model;
+    // Phase 15F: a draw is now one CLUSTER, so the draw index is no longer the
+    // instance index — several draws share an instance. The instance to shade
+    // with is already in the indirect argument, which is also what the vertex
+    // shader reads through `@builtin(instance_index)`.
+    let model = instances[draws[i].first_instance].model;
     let centre = (local_min + local_max) * 0.5;
     let extent = (local_max - local_min) * 0.5;
 
@@ -199,6 +207,32 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             occluded_flags[i] = 0u;
         }
         return;
+    }
+
+    // Phase 15F: reject the whole cluster when every triangle in it faces away.
+    // Valid only because the visibility pass culls back faces; if it ever draws
+    // them, this has to go. `cone.w = 2.0` is unreachable by a dot product, so
+    // whole-mesh draws fall through without a branch.
+    if aabbs[i].cone.w <= 1.0 {
+        // A mirroring transform (negative determinant) flips which side is
+        // front, so the stored axis would point the wrong way. Cheaper to skip
+        // the test than to get it backwards and delete visible geometry.
+        let det = dot(model[0].xyz, cross(model[1].xyz, model[2].xyz));
+        if det > 0.0 {
+            let axis_ws = normalize((model * vec4<f32>(aabbs[i].cone.xyz, 0.0)).xyz);
+            let to_centre = world_centre - params.camera_pos.xyz;
+            let dist = length(to_centre);
+            // Widened by the bounding radius so a cluster is only rejected when
+            // it is backfacing from every point the camera could be seeing it.
+            let radius = length(world_extent);
+            if dot(to_centre, axis_ws) >= aabbs[i].cone.w * dist + radius {
+                draws[i].instance_count = 0u;
+                if params.phase == 0u {
+                    occluded_flags[i] = 0u;
+                }
+                return;
+            }
+        }
     }
 
     var hidden = false;
