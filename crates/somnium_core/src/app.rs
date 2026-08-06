@@ -10,6 +10,8 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use somnium_renderer::{GizmoAxis, GizmoMode, SomniumRenderer, RenderContext, gizmo_hit_test};
 use somnium_physics::{world::PhysicsWorld, config::PhysicsConfig};
+use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
+use somnium_physics::shape::ColliderShape;
 use somnium_audio::engine::AudioEngine;
 use somnium_ui::{EditorEvent, UiManager};
 
@@ -126,6 +128,9 @@ pub struct Engine<G: GameApp> {
     foliage_cache: std::collections::HashMap<u32, FoliageCacheEntry>,
     /// Geometry pool allocation for the shared tuft mesh, uploaded on first use.
     foliage_mesh: Option<(u32, u32, u32)>,
+    /// Phase 17B: static heightfield body per terrain, with the terrain
+    /// revision it was built from so it is only rebuilt after a real edit.
+    terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
     /// Material shared by every foliage instance.
     foliage_material: Option<u32>,
 
@@ -198,6 +203,7 @@ impl<G: GameApp + 'static> Engine<G> {
             gizmo_drag: None,
             foliage_cache: std::collections::HashMap::new(),
             foliage_mesh: None,
+            terrain_colliders: std::collections::HashMap::new(),
             foliage_material: None,
             scrub_transform: None,
             scrub_light: None,
@@ -716,6 +722,32 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     pp.ca_enabled,
                     pp.fxaa_enabled,
                 ));
+            // Phase 17C: terrain layer + foliage settings for the inspector.
+            let sel_terrain = self.selected_entity.and_then(|e| {
+                let tc = self.world.get::<TerrainComponent>(e)?;
+                let r = self.renderer.as_ref()?;
+                let t = r.terrain(tc.terrain_id)?;
+                let tile = |i: usize| t.layers.get(i).map_or(1.0, |l| l.tiling);
+                Some([
+                    self.terrain_brush.paint_layer as f32,
+                    tile(0), tile(1), tile(2), tile(3),
+                ])
+            });
+            let sel_foliage = self
+                .selected_entity
+                .and_then(|e| self.world.get::<FoliageComponent>(e).copied())
+                .map(|f| (
+                    [
+                        f.density,
+                        f.seed as f32,
+                        f.max_slope_deg,
+                        f32::from(f.layer),
+                        f.scale_min,
+                        f.scale_max,
+                    ],
+                    f.enabled,
+                ));
+
             // Phase 13E: light properties for the inspector (angles in degrees).
             let sel_light = self.selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
@@ -743,6 +775,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 }
                 ui.update_light_inspector(sel_light);
                 ui.update_post_inspector(sel_post);
+                ui.update_terrain_inspector(sel_terrain);
+                ui.update_foliage_inspector(sel_foliage);
             }
         }
 
@@ -787,6 +821,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.update_terrain_editing(dt);
         self.submit_terrains();
         self.submit_foliage();
+        self.sync_terrain_colliders();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         self.submit_light_gizmos();
@@ -1161,6 +1196,79 @@ impl<G: GameApp> Engine<G> {
             // Phase 22C: rides along with the sun in the directional-light
             // buffer, so every pass that lights anything picks it up.
             r.set_ibl_intensity(pp.ibl_intensity);
+        }
+    }
+
+    /// Keep a static heightfield collider in step with every terrain
+    /// (Phase 17B).
+    ///
+    /// Rebuilding the shape means rebuilding Jolt's acceleration tree over a
+    /// quarter of a million samples, so it is gated on the terrain's edit
+    /// revision. Sculpting rebuilds it once the stroke lands, not per frame.
+    fn sync_terrain_colliders(&mut self) {
+        let terrains: Vec<(u32, glam::Vec3)> = self
+            .world
+            .entities()
+            .filter_map(|e| {
+                let tc = self.world.get::<TerrainComponent>(e)?;
+                let pos = self
+                    .world
+                    .get::<Transform>(e)
+                    .map_or(glam::Vec3::ZERO, |t| t.translation);
+                Some((tc.terrain_id, pos))
+            })
+            .collect();
+
+        // A terrain that has gone away should not leave a collider behind.
+        let live: std::collections::HashSet<u32> = terrains.iter().map(|(id, _)| *id).collect();
+        let stale: Vec<u32> = self
+            .terrain_colliders
+            .keys()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect();
+        for id in stale {
+            if let Some((_, body)) = self.terrain_colliders.remove(&id) {
+                if let Some(p) = self.physics.as_mut() {
+                    p.remove_body(body);
+                }
+            }
+        }
+
+        for (terrain_id, position) in terrains {
+            let revision = self
+                .renderer
+                .as_ref()
+                .and_then(|r| r.terrain(terrain_id))
+                .map_or(0, |t| t.edit_revision);
+            if self.terrain_colliders.get(&terrain_id).is_some_and(|(rev, _)| *rev == revision) {
+                continue;
+            }
+
+            let Some(renderer) = self.renderer.as_ref() else { continue };
+            let Some(terrain) = renderer.terrain(terrain_id) else { continue };
+            let (samples, sample_count, scale) = terrain.heightfield();
+
+            // Drop the old body first: two overlapping static surfaces would
+            // fight over every contact.
+            if let Some((_, old)) = self.terrain_colliders.remove(&terrain_id) {
+                if let Some(p) = self.physics.as_mut() {
+                    p.remove_body(old);
+                }
+            }
+
+            let Some(physics) = self.physics.as_mut() else { continue };
+            let body = physics.create_body(RigidBodyDescriptor {
+                shape: ColliderShape::HeightField { samples, sample_count, scale },
+                position,
+                motion_type: MotionType::Static,
+                object_layer: somnium_physics::layer::LAYER_NON_MOVING,
+                ..Default::default()
+            });
+            self.terrain_colliders.insert(terrain_id, (revision, body));
+            info!(
+                "Terrain {terrain_id}: collider rebuilt ({sample_count}x{sample_count} samples)",
+            );
         }
     }
 
@@ -1576,6 +1684,72 @@ impl<G: GameApp> Engine<G> {
                     return;
                 }
 
+                // Phase 17C: terrain layer fields reach into renderer-side
+                // TerrainData, which lives outside the ECS, so they bypass the
+                // undo stack the same way sculpting already does.
+                if matches!(
+                    field,
+                    IF::TerrainPaintLayer
+                        | IF::TerrainTile0
+                        | IF::TerrainTile1
+                        | IF::TerrainTile2
+                        | IF::TerrainTile3
+                ) {
+                    if field == IF::TerrainPaintLayer {
+                        self.terrain_brush.paint_layer =
+                            (value.round().max(0.0) as usize).min(3);
+                        return;
+                    }
+                    let slot = match field {
+                        IF::TerrainTile0 => 0,
+                        IF::TerrainTile1 => 1,
+                        IF::TerrainTile2 => 2,
+                        _ => 3,
+                    };
+                    let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
+                        return;
+                    };
+                    if let Some(t) = self
+                        .renderer
+                        .as_mut()
+                        .and_then(|r| r.terrain_mut(tc.terrain_id))
+                    {
+                        if let Some(layer) = t.layers.get_mut(slot) {
+                            // A tiling of zero collapses the texture to one
+                            // texel stretched over the whole terrain.
+                            layer.tiling = value.max(0.01);
+                        }
+                    }
+                    return;
+                }
+
+                // Phase 17C: foliage settings. Re-scattering is driven by the
+                // cache noticing the component changed, so nothing else to do.
+                if matches!(
+                    field,
+                    IF::FoliageDensity
+                        | IF::FoliageSeed
+                        | IF::FoliageSlope
+                        | IF::FoliageLayer
+                        | IF::FoliageScaleMin
+                        | IF::FoliageScaleMax
+                ) {
+                    if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
+                        match field {
+                            // Clamped low: a density of a few per square metre
+                            // over a square kilometre is millions of candidates.
+                            IF::FoliageDensity => f.density = value.clamp(0.0, 4.0),
+                            IF::FoliageSeed => f.seed = value.max(0.0) as u32,
+                            IF::FoliageSlope => f.max_slope_deg = value.clamp(0.0, 90.0),
+                            IF::FoliageLayer => f.layer = (value.round().max(0.0) as u8).min(3),
+                            IF::FoliageScaleMin => f.scale_min = value.max(0.01),
+                            IF::FoliageScaleMax => f.scale_max = value.max(0.01),
+                            _ => unreachable!(),
+                        }
+                    }
+                    return;
+                }
+
                 // Phase 13E: light fields edit LightComponent, not Transform.
                 if matches!(
                     field,
@@ -1794,6 +1968,14 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::ImportModel => {
                 self.import_model();
+            }
+
+            EditorEvent::ToggleFoliage => {
+                if let Some(entity) = self.selected_entity {
+                    if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
+                        f.enabled = !f.enabled;
+                    }
+                }
             }
 
             EditorEvent::TogglePostFx(which) => {

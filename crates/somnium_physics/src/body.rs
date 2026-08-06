@@ -7,6 +7,22 @@ use glam::{Quat, Vec3};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BodyId(pub(crate) u32);
 
+impl BodyId {
+    /// Returned when a body could not be created — most often because its
+    /// shape failed to build. Matches Jolt's own invalid body id.
+    pub const INVALID: Self = Self(u32::MAX);
+
+    /// Whether this id refers to a real body.
+    pub fn is_valid(self) -> bool {
+        self != Self::INVALID
+    }
+
+    /// Raw Jolt body index.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
 /// Motion type for rigid bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MotionType {

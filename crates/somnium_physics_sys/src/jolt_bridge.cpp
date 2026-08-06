@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 
@@ -168,6 +169,35 @@ void* jph_sphere_shape_create(float radius) {
 
 void* jph_capsule_shape_create(float half_height, float radius) {
     CapsuleShapeSettings settings(half_height, radius);
+    ShapeSettings::ShapeResult result = settings.Create();
+    if (result.HasError()) return nullptr;
+    ShapeRefC shape = result.Get();
+    shape->AddRef();
+    return const_cast<Shape*>(shape.GetPtr());
+}
+
+// Phase 17B: terrain collider.
+//
+// `samples` is a row-major sample_count x sample_count grid of heights in world
+// units, X varying fastest. Jolt maps sample (x, z) to
+// offset + scale * (x, height, z), so the caller passes the sample spacing as
+// scale.x/scale.z and leaves scale.y at 1.
+//
+// Jolt requires sample_count to be a power of two of at least 2; the caller
+// picks it with `terrain::collider::sample_count_for`. Anything else is
+// rejected here rather than tripping an assert deep inside the shape build.
+void* jph_heightfield_shape_create(const float* samples, uint32_t sample_count,
+                                   float offset_x, float offset_y, float offset_z,
+                                   float scale_x, float scale_y, float scale_z) {
+    if (samples == nullptr) return nullptr;
+    if (sample_count < 2) return nullptr;
+    if ((sample_count & (sample_count - 1)) != 0) return nullptr;
+
+    HeightFieldShapeSettings settings(
+        samples,
+        Vec3(offset_x, offset_y, offset_z),
+        Vec3(scale_x, scale_y, scale_z),
+        sample_count);
     ShapeSettings::ShapeResult result = settings.Create();
     if (result.HasError()) return nullptr;
     ShapeRefC shape = result.Get();

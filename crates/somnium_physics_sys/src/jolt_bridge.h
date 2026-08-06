@@ -23,6 +23,9 @@ void  jph_physics_system_optimize_broad_phase(void* system);
 void* jph_box_shape_create(float hx, float hy, float hz);
 void* jph_sphere_shape_create(float radius);
 void* jph_capsule_shape_create(float half_height, float radius);
+void* jph_heightfield_shape_create(const float* samples, uint32_t sample_count,
+                                   float offset_x, float offset_y, float offset_z,
+                                   float scale_x, float scale_y, float scale_z);
 void  jph_shape_destroy(void* shape);
 
 // BodyCreationSettings

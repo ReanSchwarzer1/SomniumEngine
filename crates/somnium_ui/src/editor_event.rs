@@ -55,6 +55,21 @@ pub enum InspectorField {
     PostCaStrength,
     /// Scene-wide indirect-light strength (Phase 22C).
     PostIblIntensity,
+    // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
+    /// Which splat layer the sculpt brush paints, 0..=3.
+    TerrainPaintLayer,
+    /// World-space tiling of each splat layer's texture.
+    TerrainTile0,
+    TerrainTile1,
+    TerrainTile2,
+    TerrainTile3,
+    // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
+    FoliageDensity,
+    FoliageSeed,
+    FoliageSlope,
+    FoliageLayer,
+    FoliageScaleMin,
+    FoliageScaleMax,
 }
 
 /// Which post-processing effect a toggle click targets (Phase 15A1).
@@ -86,6 +101,8 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
+    /// Toggle scattered foliage on the selected terrain (Phase 17C).
+    ToggleFoliage,
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`

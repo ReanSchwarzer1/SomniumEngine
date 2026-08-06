@@ -72,6 +72,19 @@ struct InspectorHandles {
     post_ca_str:     NodeHandle,
     /// Scene-wide indirect-light strength (Phase 22C).
     post_ibl:        NodeHandle,
+    // Terrain + foliage sections (Phase 17C), hidden unless a terrain is picked.
+    terrain_section: NodeHandle,
+    terrain_layer:   NodeHandle,
+    terrain_tile:    [NodeHandle; 4],
+    foliage_section: NodeHandle,
+    foliage_toggle:  NodeHandle,
+    foliage_label:   NodeHandle,
+    foliage_density: NodeHandle,
+    foliage_seed:    NodeHandle,
+    foliage_slope:   NodeHandle,
+    foliage_layer:   NodeHandle,
+    foliage_smin:    NodeHandle,
+    foliage_smax:    NodeHandle,
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label:  NodeHandle,
     post_ca_label:   NodeHandle,
@@ -454,6 +467,50 @@ impl UiManager {
         }
     }
 
+    /// Show or hide the Terrain section and refresh it (Phase 17C).
+    ///
+    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3]`.
+    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 5]>) {
+        let h = &self.inspector_handles;
+        let (section, layer, tiles) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
+        match values {
+            Some(v) => {
+                self.native_ui.set_visibility(section, true);
+                self.native_ui.send(NumericFieldMessage::set_value(layer, v[0]));
+                for (i, t) in tiles.iter().enumerate() {
+                    self.native_ui.send(NumericFieldMessage::set_value(*t, v[i + 1]));
+                }
+            }
+            None => self.native_ui.set_visibility(section, false),
+        }
+    }
+
+    /// Show or hide the Foliage section and refresh it (Phase 17C).
+    ///
+    /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
+    /// plus the enable flag.
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 6], bool)>) {
+        let h = &self.inspector_handles;
+        let section = h.foliage_section;
+        let fields = [
+            h.foliage_density, h.foliage_seed, h.foliage_slope,
+            h.foliage_layer, h.foliage_smin, h.foliage_smax,
+        ];
+        match values {
+            Some((v, enabled)) => {
+                self.native_ui.set_visibility(section, true);
+                for (f, val) in fields.iter().zip(v.iter()) {
+                    self.native_ui.send(NumericFieldMessage::set_value(*f, *val));
+                }
+                self.native_ui.send(TextMessage::set_text(
+                    h.foliage_label,
+                    format!("{} Enabled", if enabled { "[x]" } else { "[ ]" }),
+                ));
+            }
+            None => self.native_ui.set_visibility(section, false),
+        }
+    }
+
     /// Append a line to the output log panel (max 200 entries).
     pub fn append_log(&mut self, text: &str) {
         const MAX: usize = 200;
@@ -492,6 +549,17 @@ impl UiManager {
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
+            (h.terrain_layer,   IF::TerrainPaintLayer),
+            (h.terrain_tile[0], IF::TerrainTile0),
+            (h.terrain_tile[1], IF::TerrainTile1),
+            (h.terrain_tile[2], IF::TerrainTile2),
+            (h.terrain_tile[3], IF::TerrainTile3),
+            (h.foliage_density, IF::FoliageDensity),
+            (h.foliage_seed,    IF::FoliageSeed),
+            (h.foliage_slope,   IF::FoliageSlope),
+            (h.foliage_layer,   IF::FoliageLayer),
+            (h.foliage_smin,    IF::FoliageScaleMin),
+            (h.foliage_smax,    IF::FoliageScaleMax),
         ];
 
         for msg in msgs {
@@ -516,6 +584,10 @@ impl UiManager {
                 // Post FX toggles (Phase 15A1)
                 if msg.destination == self.inspector_handles.post_vig_toggle {
                     self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliage);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_fxaa_toggle {
@@ -1204,11 +1276,52 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     ui.set_visibility(post_section, false);
 
+    // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
+    let terrain_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let terrain_section = ui.add_node(terrain_panel, parent);
+    sec_label(ui, "Terrain", font_id, terrain_section);
+    // Whole steps: the paint layer is an index, and a fractional drag would be
+    // meaningless.
+    let terrain_layer = make_row_step(ui, "Paint", 34.0, font_id, terrain_section, 0.02);
+    let terrain_tile = [
+        make_row_step(ui, "Tile 0", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 1", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
+        make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
+    ];
+    ui.set_visibility(terrain_section, false);
+
+    // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
+    let foliage_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let foliage_section = ui.add_node(foliage_panel, parent);
+    sec_label(ui, "Foliage", font_id, foliage_section);
+    let (foliage_toggle, foliage_label) = make_toggle(ui, "Enabled", font_id, foliage_section);
+    // Density is per square metre and lives well under 1, so it needs a far
+    // finer drag rate than a position.
+    let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.002);
+    let foliage_seed    = make_row_step(ui, "Seed", 34.0, font_id, foliage_section, 0.05);
+    let foliage_slope   = make_row_step(ui, "Slp\u{b0}", 34.0, font_id, foliage_section, 0.2);
+    let foliage_layer   = make_row_step(ui, "Layer", 34.0, font_id, foliage_section, 0.02);
+    let foliage_smin    = make_row_step(ui, "Sc Mn", 34.0, font_id, foliage_section, 0.01);
+    let foliage_smax    = make_row_step(ui, "Sc Mx", 34.0, font_id, foliage_section, 0.01);
+    ui.set_visibility(foliage_section, false);
+
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
         light_section, light_intensity, light_range, light_inner, light_outer,
         light_col_r, light_col_g, light_col_b,
         light_range_row, light_inner_row, light_outer_row,
+        terrain_section, terrain_layer, terrain_tile,
+        foliage_section, foliage_toggle, foliage_label, foliage_density,
+        foliage_seed, foliage_slope, foliage_layer, foliage_smin, foliage_smax,
         post_section, post_exposure, post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
         post_fxaa_toggle, post_fxaa_label,

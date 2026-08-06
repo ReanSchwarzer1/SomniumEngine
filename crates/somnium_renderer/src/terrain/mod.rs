@@ -15,6 +15,7 @@
 //! directly into the HDR target (same integration point as the water pass).
 
 pub mod brush;
+pub mod collider;
 pub mod foliage;
 pub mod mesh;
 pub mod textures;
@@ -350,6 +351,16 @@ impl TerrainData {
             Some(texel) => texel[layer as usize] as f32 / 255.0,
             None => 0.0,
         }
+    }
+
+    /// Resample this terrain into a Jolt heightfield (Phase 17B).
+    ///
+    /// Returns the samples and the world spacing between them.
+    pub fn heightfield(&self) -> (Vec<f32>, u32, glam::Vec3) {
+        let n = collider::sample_count_for(self.desc.total_vertices_x().min(self.desc.total_vertices_z()));
+        let world = self.desc.world_size();
+        let samples = collider::resample(n, world, |x, z| self.world_height_at(x, z));
+        (samples, n, collider::heightfield_scale(world, n))
     }
 
     /// Scatter foliage over this terrain (Phase 17A).

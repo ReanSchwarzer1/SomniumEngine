@@ -34,6 +34,18 @@ unsafe extern "C" {
     pub fn jph_box_shape_create(hx: f32, hy: f32, hz: f32) -> *mut c_void;
     pub fn jph_sphere_shape_create(radius: f32) -> *mut c_void;
     pub fn jph_capsule_shape_create(half_height: f32, radius: f32) -> *mut c_void;
+    /// Phase 17B terrain collider. Returns null when `sample_count` is not a
+    /// power of two of at least 2, or when Jolt rejects the shape.
+    pub fn jph_heightfield_shape_create(
+        samples: *const f32,
+        sample_count: u32,
+        offset_x: f32,
+        offset_y: f32,
+        offset_z: f32,
+        scale_x: f32,
+        scale_y: f32,
+        scale_z: f32,
+    ) -> *mut c_void;
     pub fn jph_shape_destroy(shape: *mut c_void);
 
     pub fn jph_body_interface_create_and_add_body(system: *mut c_void, settings: *const JphBodyCreationSettings, activation: std::os::raw::c_int) -> u32;

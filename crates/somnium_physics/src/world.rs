@@ -37,6 +37,16 @@ impl PhysicsWorld {
     pub fn create_body(&mut self, desc: RigidBodyDescriptor) -> BodyId {
         unsafe {
             let jolt_settings = desc.clone().into_jolt();
+
+            // A shape that failed to build comes back null. Handing that to
+            // Jolt trips an assert inside the body interface, so a bad
+            // descriptor would take the whole simulation down instead of
+            // failing locally.
+            if jolt_settings.shape.is_null() {
+                tracing::warn!("create_body: shape failed to build; no body created");
+                return BodyId::INVALID;
+            }
+
             let id = jph_body_interface_create_and_add_body(self.system, &jolt_settings, 1);
             
             // Release the shape reference since Jolt took ownership internally
