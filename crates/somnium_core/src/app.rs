@@ -87,28 +87,28 @@ enum LifecycleState {
     ShuttingDown,
 }
 
-/// Scanned grass model used for scattered foliage when present (Phase 17E).
-/// CC0 from Poly Haven — see ATTRIBUTION.md.
-const FOLIAGE_GRASS_ASSET: &str = "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf";
-
-/// One terrain's scattered foliage plus what it was generated from (Phase 17A).
-struct FoliageCacheEntry {
-    settings: FoliageComponent,
-    /// Terrain edit counter the scatter was built against.
-    revision: u64,
-    /// Terrain-local camera position the disc was centred on.
-    center: [f32; 2],
-    material_id: u32,
-    instances: Vec<somnium_renderer::terrain::foliage::FoliageInstance>,
-}
-
-/// How far the camera may drift before the scatter disc is rebuilt.
+/// The foliage palette: what the brush can paint (Phase 17F).
 ///
-/// Re-scattering every frame would be a full pass over the region; never
-/// re-scattering would leave grass behind as you walk out of it. A fraction of
-/// the radius keeps the disc comfortably ahead of the viewer, and because cell
-/// indices are absolute the instances that survive the move do not shift.
-const FOLIAGE_RECENTRE_DISTANCE: f32 = 12.0;
+/// Fixed for now. Once there is a content drawer this becomes whatever the
+/// project has imported, which is why the brush stores a palette *index* rather
+/// than anything about the mesh itself.
+///
+/// All four are CC0 from Poly Haven — see ATTRIBUTION.md.
+pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
+    ("Grass Medium",  "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf"),
+    ("Grass Bermuda", "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf"),
+    ("Fir Sapling",   "assets/foliage/fir_sapling/fir_sapling_2k.gltf"),
+    ("Island Tree",   "assets/foliage/island_tree_02/island_tree_02_2k.gltf"),
+];
+
+/// A palette entry's geometry once it has been uploaded.
+#[derive(Clone, Copy)]
+struct FoliageMesh {
+    vertex_offset: u32,
+    index_offset: u32,
+    index_count: u32,
+    material_id: u32,
+}
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
 pub struct Engine<G: GameApp> {
@@ -136,17 +136,24 @@ pub struct Engine<G: GameApp> {
     /// State at the start of an inspector drag-scrub, so the whole gesture
     /// collapses into one undo entry instead of one per pixel of travel.
     /// `(entity index, value before the drag)`.
-    /// Phase 17A: scattered foliage per terrain, plus the settings and terrain
-    /// revision it was generated from. Rebuilt only when one of those changes —
-    /// re-scattering every frame would burn a full pass over the terrain.
-    foliage_cache: std::collections::HashMap<u32, FoliageCacheEntry>,
-    /// Geometry pool allocation for the shared tuft mesh, uploaded on first use.
-    foliage_mesh: Option<(u32, u32, u32)>,
+    /// Uploaded geometry per palette entry, filled in the first time each one
+    /// is painted — loading four scanned models up front would add seconds to
+    /// startup for meshes the user may never place.
+    foliage_meshes: [Option<FoliageMesh>; FOLIAGE_PALETTE.len()],
+    /// Phase 17F: the foliage brush.
+    foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush,
+    /// When true, dragging in the viewport paints foliage instead of sculpting.
+    pub foliage_paint_active: bool,
+    /// Erase instead of add.
+    pub foliage_erase: bool,
+    /// Advances per dab so a held brush keeps generating fresh candidates
+    /// rather than retrying the same rejected points.
+    foliage_stroke_seed: u32,
+    /// True while the left button is held during a foliage stroke.
+    foliage_painting: bool,
     /// Phase 17B: static heightfield body per terrain, with the terrain
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
-    /// Material shared by every foliage instance.
-    foliage_material: Option<u32>,
 
     scrub_transform: Option<(u32, Transform)>,
     scrub_light: Option<(u32, LightComponent)>,
@@ -215,10 +222,13 @@ impl<G: GameApp + 'static> Engine<G> {
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
-            foliage_cache: std::collections::HashMap::new(),
-            foliage_mesh: None,
+            foliage_meshes: [None; FOLIAGE_PALETTE.len()],
+            foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
+            foliage_paint_active: false,
+            foliage_erase: false,
+            foliage_stroke_seed: 0,
+            foliage_painting: false,
             terrain_colliders: std::collections::HashMap::new(),
-            foliage_material: None,
             scrub_transform: None,
             scrub_light: None,
             log_rx: Some(log_rx),
@@ -530,6 +540,38 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         };
         if ui_consumed { return; }
 
+        // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
+        if self.foliage_paint_active {
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Left, ..
+            } = &event
+            {
+                self.foliage_painting = self.paint_foliage_dab();
+                if self.foliage_painting {
+                    return;
+                }
+            }
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Released,
+                button: winit::event::MouseButton::Left, ..
+            } = &event
+            {
+                if self.foliage_painting {
+                    self.foliage_painting = false;
+                    return;
+                }
+            }
+            // Dragging keeps dabbing, which is what makes it a brush rather
+            // than a stamp.
+            if self.foliage_painting {
+                if let WindowEvent::CursorMoved { .. } = &event {
+                    self.paint_foliage_dab();
+                    return;
+                }
+            }
+        }
+
         // ── 3.5 Terrain brush stroke (Phase 14D) — takes priority over gizmo ──
         if self.terrain_edit_active {
             if let WindowEvent::MouseInput {
@@ -747,19 +789,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     tile(0), tile(1), tile(2), tile(3),
                 ])
             });
+            let brush = self.foliage_brush;
+            let paint_on = self.foliage_paint_active;
+            let erase_on = self.foliage_erase;
+            let single_on = brush.single;
             let sel_foliage = self
                 .selected_entity
                 .and_then(|e| self.world.get::<FoliageComponent>(e).copied())
                 .map(|f| (
                     [
-                        f.density,
-                        f.seed as f32,
-                        f.max_slope_deg,
-                        f32::from(f.layer),
-                        f.scale_min,
-                        f.scale_max,
+                        brush.density,
+                        brush.radius,
+                        brush.max_slope_deg,
+                        f32::from(brush.kind),
+                        brush.scale_min,
+                        brush.scale_max,
                     ],
-                    f.enabled,
+                    [f.enabled, paint_on, erase_on, single_on],
                 ));
 
             // Phase 13E: light properties for the inspector (angles in degrees).
@@ -1286,48 +1332,53 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    /// Scatter and submit foliage for every terrain that has it enabled
-    /// (Phase 17A).
+    /// Submit every painted foliage instance (Phase 17F).
     ///
-    /// Instances go out as ordinary draw commands, so they pick up the Phase 15
-    /// pipeline — indirect draws, frustum and Hi-Z culling, per-cluster
-    /// rejection — without foliage needing to know any of it exists.
+    /// Instances are ordinary draw commands, so they inherit the Phase 15
+    /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
+    /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
-        let terrains: Vec<(u32, FoliageComponent, glam::Mat4)> = self
+        let terrains: Vec<(u32, glam::Mat4)> = self
             .world
             .entities()
             .filter_map(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
                 let fc = self.world.get::<FoliageComponent>(e)?;
-                if !fc.enabled || fc.density <= 0.0 {
+                if !fc.enabled {
                     return None;
                 }
                 let model = self
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, *fc, model))
+                Some((tc.terrain_id, model))
             })
             .collect();
-        if terrains.is_empty() {
-            return;
-        }
 
-        self.ensure_foliage_mesh();
-        let Some((vertex_offset, index_offset, index_count)) = self.foliage_mesh else {
-            return;
-        };
+        for (terrain_id, model) in terrains {
+            // Which palette entries this terrain actually uses, so nothing is
+            // loaded for a kind that has never been painted.
+            let kinds: Vec<u8> = {
+                let Some(t) = self.renderer.as_ref().and_then(|r| r.terrain(terrain_id)) else {
+                    continue;
+                };
+                let mut k: Vec<u8> = t.painted_foliage.iter().map(|p| p.kind).collect();
+                k.sort_unstable();
+                k.dedup();
+                k
+            };
+            for kind in &kinds {
+                self.ensure_palette_mesh(*kind);
+            }
 
-        // The disc follows the camera in terrain-local space.
-        let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-
-        for (terrain_id, fc, model) in terrains {
-            let local = model.inverse().transform_point3(camera_ws);
-            self.refresh_foliage(terrain_id, fc, [local.x, local.z]);
-            let Some(entry) = self.foliage_cache.get(&terrain_id) else { continue };
-
-            if let Some(r) = self.renderer.as_mut() {
-                for inst in &entry.instances {
+            let Some(t) = self.renderer.as_ref().and_then(|r| r.terrain(terrain_id)) else {
+                continue;
+            };
+            let batch: Vec<(FoliageMesh, glam::Mat4)> = t
+                .painted_foliage
+                .iter()
+                .filter_map(|inst| {
+                    let mesh = (*self.foliage_meshes.get(inst.kind as usize)?)?;
                     // Terrain-local placement composed with the terrain's own
                     // transform, so moving the terrain carries its foliage.
                     let local = glam::Mat4::from_scale_rotation_translation(
@@ -1335,169 +1386,133 @@ impl<G: GameApp> Engine<G> {
                         glam::Quat::from_rotation_y(inst.yaw),
                         inst.position,
                     );
+                    Some((mesh, model * local))
+                })
+                .collect();
+
+            if let Some(r) = self.renderer.as_mut() {
+                for (mesh, transform) in batch {
                     r.submit(somnium_renderer::command::DrawCommand {
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
-                        vertex_offset,
-                        index_offset,
-                        index_count,
-                        material_id: entry.material_id,
-                        transform: model * local,
+                        vertex_offset: mesh.vertex_offset,
+                        index_offset: mesh.index_offset,
+                        index_count: mesh.index_count,
+                        material_id: mesh.material_id,
+                        transform,
                     });
                 }
             }
         }
     }
 
-    /// Upload the shared tuft mesh and its material once.
-    fn ensure_foliage_mesh(&mut self) {
-        if self.foliage_mesh.is_some() {
+    /// Load and upload one palette entry, the first time it is painted.
+    fn ensure_palette_mesh(&mut self, kind: u8) {
+        let idx = kind as usize;
+        if idx >= FOLIAGE_PALETTE.len() || self.foliage_meshes[idx].is_some() {
             return;
         }
-
-        // Phase 17E: prefer the real scanned grass model when it is on disk.
-        // It is a photoscan with an alpha-tested, double-sided material, which
-        // is exactly what Phase 17D added support for. Falling back to the
-        // procedural tuft keeps the engine usable for anyone who has not
-        // fetched the assets, rather than silently scattering nothing.
-        if self.try_load_foliage_asset(FOLIAGE_GRASS_ASSET) {
-            return;
-        }
-
-        let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
-            return;
-        };
-        info!("Foliage: {FOLIAGE_GRASS_ASSET} not found, using the procedural tuft");
-        let (verts, idxs) = somnium_asset::generate_foliage_tuft(7, 1);
-        let mat = renderer.materials_pool.add_material(
-            &ctx.queue,
-            somnium_renderer::material::pool::GpuMaterial {
-                // Deliberately dark. The sun is intensity 5, so an albedo in
-                // the usual 0.2-0.4 range multiplies past 1 and tone-maps
-                // toward white — the grass came out pale rather than green.
-                base_color: [0.055, 0.115, 0.035, 1.0],
-                roughness: 0.95,
-                metallic: 0.0,
-                albedo_map: -1,
-                normal_map: -1,
-                metallic_roughness_map: -1,
-                alpha_cutoff: 0.0,
-                flags: 0,
-                _padding: 0,
-            },
-        );
-        let alloc = renderer.geometry.upload_mesh(&ctx.queue, &verts, &idxs, mat);
-        self.foliage_material = Some(mat);
-        self.foliage_mesh = Some((alloc.vertex_offset, alloc.index_offset, alloc.index_count));
-    }
-
-    /// Load a scattered-foliage mesh from a glTF on disk.
-    ///
-    /// Only the largest mesh in the file is used: these models are authored as
-    /// a clump of separate blades, and scattering every one of them separately
-    /// would multiply the instance count by twenty for no visual gain.
-    fn try_load_foliage_asset(&mut self, path: &str) -> bool {
+        let (name, path) = FOLIAGE_PALETTE[idx];
         if !std::path::Path::new(path).exists() {
-            return false;
+            warn!("Foliage: {name} is not installed at {path}");
+            return;
         }
         let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
-            return false;
+            return;
         };
         let mut scene = match somnium_asset::load_gltf(path) {
             Ok(s) => s,
             Err(e) => {
                 warn!("Foliage: could not load {path}: {e}");
-                return false;
+                return;
             }
         };
 
         // Vegetation is almost always exported as BLEND — Poly Haven's grass
         // and leaves are. Left that way it goes through the sorted forward
-        // pass: thousands of per-object-sorted draws with no depth write, so
-        // blades sort wrongly against each other, cast no shadows, and skip GPU
-        // culling entirely.
-        //
+        // pass: per-object-sorted draws with no depth write, so blades sort
+        // wrongly against each other, cast no shadows, and skip GPU culling.
         // Re-tagging as MASK moves them to the visibility buffer where they
-        // belong. Note these particular models are modelled blades with JPEG
-        // textures, so they carry no alpha at all and the cutout never fires —
-        // the win here is the opaque path, not the clipping. Assets that DO
-        // ship alpha-carded leaves get the cutout for free.
-        let mut retagged = 0;
+        // belong. These particular models are modelled blades with JPEG
+        // textures and carry no alpha, so the cutout never fires — the win is
+        // the opaque path. Alpha-carded assets get the clipping for free.
         for m in &mut scene.materials {
             if m.alpha_mode == somnium_asset::AlphaMode::Blend {
                 m.alpha_mode = somnium_asset::AlphaMode::Mask;
                 if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
                     m.alpha_cutoff = 0.5;
                 }
-                retagged += 1;
             }
-        }
-        if retagged > 0 {
-            info!("Foliage: re-tagged {retagged} blended material(s) as alpha-cutout");
         }
 
         let uploaded = renderer.upload_scene(ctx, &scene);
+        // These models are a clump of separate parts; the largest is the one
+        // worth instancing. Scattering every part separately would multiply the
+        // instance count for no visual gain.
         let Some(node) = uploaded.iter().max_by_key(|n| n.index_count) else {
-            return false;
+            return;
         };
-        info!(
-            "Foliage: using {path} ({} nodes, largest has {} triangles)",
-            uploaded.len(),
-            node.index_count / 3,
-        );
-        self.foliage_material = Some(node.material_id);
-        self.foliage_mesh = Some((node.vertex_offset, node.index_offset, node.index_count));
-        true
+        info!("Foliage: loaded {name} ({} triangles)", node.index_count / 3);
+        self.foliage_meshes[idx] = Some(FoliageMesh {
+            vertex_offset: node.vertex_offset,
+            index_offset: node.index_offset,
+            index_count: node.index_count,
+            material_id: node.material_id,
+        });
     }
 
-    /// Re-scatter `terrain_id` if its settings or its heightmap have changed.
-    fn refresh_foliage(&mut self, terrain_id: u32, fc: FoliageComponent, center: [f32; 2]) {
-        let revision = self
-            .renderer
-            .as_ref()
-            .and_then(|r| r.terrain(terrain_id))
-            .map_or(0, |t| t.edit_revision);
+    /// Apply one dab of the foliage brush under the cursor (Phase 17F).
+    ///
+    /// Returns true when a terrain was hit, so the caller knows the click was
+    /// consumed by painting rather than falling through to selection.
+    fn paint_foliage_dab(&mut self) -> bool {
+        let Some(tc) = self.selected_terrain() else { return false };
+        let Some(model) = self.selected_terrain_model() else { return false };
+        let Some((origin, dir)) = self.cursor_ray() else { return false };
 
-        if let Some(entry) = self.foliage_cache.get(&terrain_id) {
-            let drift = ((entry.center[0] - center[0]).powi(2)
-                + (entry.center[1] - center[1]).powi(2))
-            .sqrt();
-            if entry.settings == fc
-                && entry.revision == revision
-                && drift < FOLIAGE_RECENTRE_DISTANCE
-            {
-                return;
+        let brush = self.foliage_brush;
+        let erase = self.foliage_erase;
+        let seed = self.foliage_stroke_seed;
+        self.foliage_stroke_seed = seed.wrapping_add(1);
+
+        let Some(renderer) = self.renderer.as_mut() else { return false };
+        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return false };
+        terrain.model = model; // keep the raycast in sync with the entity
+        let Some(hit) = terrain.raycast(origin, dir) else { return false };
+        let center = [hit.x, hit.z];
+
+        if erase {
+            let removed = somnium_renderer::terrain::foliage_paint::erase(
+                &mut terrain.painted_foliage,
+                center,
+                brush.radius,
+                Some(brush.kind),
+            );
+            if removed > 0 {
+                info!("Foliage: erased {removed}");
             }
+            return true;
         }
 
-        let Some(material_id) = self.foliage_material else { return };
-        let Some(renderer) = self.renderer.as_ref() else { return };
-        let Some(terrain) = renderer.terrain(terrain_id) else { return };
-
-        let params = somnium_renderer::terrain::foliage::FoliageParams {
-            density: fc.density,
-            seed: fc.seed,
-            max_slope_deg: fc.max_slope_deg,
-            layer: fc.layer,
-            min_layer_weight: fc.min_layer_weight,
-            scale_min: fc.scale_min,
-            scale_max: fc.scale_max,
-            ground_offset: 0.0,
+        // The brush needs to read ground heights while writing the instance
+        // list, and both live on the terrain. Moving the list out for the
+        // duration keeps the borrows disjoint without copying the heightmap.
+        let mut painted = std::mem::take(&mut terrain.painted_foliage);
+        let added = somnium_renderer::terrain::foliage_paint::paint(
+            &mut painted,
+            &brush,
             center,
-            radius: fc.radius,
-            max_instances: fc.max_instances as usize,
-        };
-        let instances = terrain.scatter_foliage(&params);
-        info!(
-            "Foliage: scattered {} instances over terrain {terrain_id}              (disc r={:.0} m at {:.0},{:.0})",
-            instances.len(),
-            fc.radius,
-            center[0],
-            center[1],
+            seed,
+            |x, z| terrain.ground_sample(x, z),
         );
-        self.foliage_cache.insert(
-            terrain_id,
-            FoliageCacheEntry { settings: fc, revision, center, material_id, instances },
-        );
+        terrain.painted_foliage = painted;
+        if added > 0 {
+            info!(
+                "Foliage: painted {added} of {} (total {})",
+                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].0,
+                terrain.painted_foliage.len(),
+            );
+        }
+        true
     }
 
     /// Queue a light gizmo for every light entity (Phase 13E).
@@ -1837,18 +1852,21 @@ impl<G: GameApp> Engine<G> {
                         | IF::FoliageScaleMin
                         | IF::FoliageScaleMax
                 ) {
-                    if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
-                        match field {
-                            // Clamped low: a density of a few per square metre
-                            // over a square kilometre is millions of candidates.
-                            IF::FoliageDensity => f.density = value.clamp(0.0, 4.0),
-                            IF::FoliageSeed => f.seed = value.max(0.0) as u32,
-                            IF::FoliageSlope => f.max_slope_deg = value.clamp(0.0, 90.0),
-                            IF::FoliageLayer => f.layer = (value.round().max(0.0) as u8).min(3),
-                            IF::FoliageScaleMin => f.scale_min = value.max(0.01),
-                            IF::FoliageScaleMax => f.scale_max = value.max(0.01),
-                            _ => unreachable!(),
+                    // Phase 17F: these edit the brush, not a scatter. Foliage
+                    // is painted now, so the settings that matter are the ones
+                    // the next stroke will use.
+                    let b = &mut self.foliage_brush;
+                    match field {
+                        IF::FoliageDensity => b.density = value.clamp(0.0, 40.0),
+                        IF::FoliageSeed => b.radius = value.clamp(0.25, 200.0),
+                        IF::FoliageSlope => b.max_slope_deg = value.clamp(0.0, 90.0),
+                        IF::FoliageLayer => {
+                            b.kind = (value.round().max(0.0) as usize)
+                                .min(FOLIAGE_PALETTE.len() - 1) as u8;
                         }
+                        IF::FoliageScaleMin => b.scale_min = value.max(0.01),
+                        IF::FoliageScaleMax => b.scale_max = value.max(0.01),
+                        _ => unreachable!(),
                     }
                     return;
                 }
@@ -2079,6 +2097,24 @@ impl<G: GameApp> Engine<G> {
                         f.enabled = !f.enabled;
                     }
                 }
+            }
+
+            EditorEvent::ToggleFoliagePaint => {
+                self.foliage_paint_active = !self.foliage_paint_active;
+                // Sculpting and foliage painting both claim the left button.
+                if self.foliage_paint_active {
+                    self.terrain_edit_active = false;
+                }
+                info!(
+                    "Foliage paint: {}",
+                    if self.foliage_paint_active { "ON" } else { "off" }
+                );
+            }
+            EditorEvent::ToggleFoliageErase => {
+                self.foliage_erase = !self.foliage_erase;
+            }
+            EditorEvent::ToggleFoliageSingle => {
+                self.foliage_brush.single = !self.foliage_brush.single;
             }
 
             EditorEvent::TogglePostFx(which) => {

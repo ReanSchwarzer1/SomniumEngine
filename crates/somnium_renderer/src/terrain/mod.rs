@@ -17,6 +17,7 @@
 pub mod brush;
 pub mod collider;
 pub mod foliage;
+pub mod foliage_paint;
 pub mod mesh;
 pub mod textures;
 
@@ -136,6 +137,14 @@ pub struct TerrainData {
     pub model: glam::Mat4,
     /// Brush cursor uniform state (set by the editor each frame).
     pub brush_cursor: [f32; 4],
+    /// Phase 17F: foliage painted onto this terrain by hand.
+    ///
+    /// Lives with the terrain rather than in the ECS for the same reason the
+    /// heightmap does: there are thousands of instances, they are edited by
+    /// brush strokes, and every one of them appearing in the outliner would
+    /// make the editor unusable.
+    pub painted_foliage: Vec<foliage_paint::PaintedFoliage>,
+
     /// Counter bumped on every sculpt or paint edit (Phase 17A).
     ///
     /// Foliage placement depends on the heightmap and the splatmap, so it has
@@ -252,6 +261,7 @@ impl TerrainData {
             bind_group,
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
+            painted_foliage: Vec::new(),
             edit_revision: 0,
         }
     }
@@ -310,6 +320,12 @@ impl TerrainData {
             + h01 * (1.0 - tx) * tz
             + h11 * tx * tz;
         h * self.desc.height_scale
+    }
+
+    /// Ground query for the foliage brush (Phase 17F).
+    pub fn ground_sample(&self, local_x: f32, local_z: f32) -> foliage_paint::GroundSample {
+        let s = self.surface_sample(local_x, local_z, 0);
+        foliage_paint::GroundSample { height: s.height, slope_cos: s.slope_cos }
     }
 
     /// Sample height, slope and paint-layer weight at a terrain-local point

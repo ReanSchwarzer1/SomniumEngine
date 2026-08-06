@@ -79,6 +79,12 @@ struct InspectorHandles {
     foliage_section: NodeHandle,
     foliage_toggle:  NodeHandle,
     foliage_label:   NodeHandle,
+    foliage_paint_toggle: NodeHandle,
+    foliage_paint_label:  NodeHandle,
+    foliage_erase_toggle: NodeHandle,
+    foliage_erase_label:  NodeHandle,
+    foliage_single_toggle: NodeHandle,
+    foliage_single_label:  NodeHandle,
     foliage_density: NodeHandle,
     foliage_seed:    NodeHandle,
     foliage_slope:   NodeHandle,
@@ -489,7 +495,7 @@ impl UiManager {
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
     /// plus the enable flag.
-    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 6], bool)>) {
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 6], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
         let fields = [
@@ -497,15 +503,24 @@ impl UiManager {
             h.foliage_layer, h.foliage_smin, h.foliage_smax,
         ];
         match values {
-            Some((v, enabled)) => {
+            Some((v, flags)) => {
                 self.native_ui.set_visibility(section, true);
                 for (f, val) in fields.iter().zip(v.iter()) {
                     self.native_ui.send(NumericFieldMessage::set_value(*f, *val));
                 }
-                self.native_ui.send(TextMessage::set_text(
-                    h.foliage_label,
-                    format!("{} Enabled", if enabled { "[x]" } else { "[ ]" }),
-                ));
+                let tick = |on: bool| if on { "[x]" } else { "[ ]" };
+                let labels = [
+                    (h.foliage_label, "Enabled"),
+                    (h.foliage_paint_label, "Paint Mode"),
+                    (h.foliage_erase_label, "Erase"),
+                    (h.foliage_single_label, "Single"),
+                ];
+                for ((handle, text), on) in labels.iter().zip(flags.iter()) {
+                    self.native_ui.send(TextMessage::set_text(
+                        *handle,
+                        format!("{} {text}", tick(*on)),
+                    ));
+                }
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -588,6 +603,18 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.foliage_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleFoliage);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_paint_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliagePaint);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_erase_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliageErase);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_single_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliageSingle);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_fxaa_toggle {
@@ -1304,12 +1331,20 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let foliage_section = ui.add_node(foliage_panel, parent);
     sec_label(ui, "Foliage", font_id, foliage_section);
     let (foliage_toggle, foliage_label) = make_toggle(ui, "Enabled", font_id, foliage_section);
+    // Phase 17F: the brush. Paint arms it, Erase flips the stroke, Single
+    // places one instance at the cursor — which is how trees get placed.
+    let (foliage_paint_toggle, foliage_paint_label) =
+        make_toggle(ui, "Paint Mode", font_id, foliage_section);
+    let (foliage_erase_toggle, foliage_erase_label) =
+        make_toggle(ui, "Erase", font_id, foliage_section);
+    let (foliage_single_toggle, foliage_single_label) =
+        make_toggle(ui, "Single", font_id, foliage_section);
     // Density is per square metre and lives well under 1, so it needs a far
     // finer drag rate than a position.
-    let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.002);
-    let foliage_seed    = make_row_step(ui, "Seed", 34.0, font_id, foliage_section, 0.05);
+    let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.02);
+    let foliage_seed    = make_row_step(ui, "Size", 34.0, font_id, foliage_section, 0.05);
     let foliage_slope   = make_row_step(ui, "Slp\u{b0}", 34.0, font_id, foliage_section, 0.2);
-    let foliage_layer   = make_row_step(ui, "Layer", 34.0, font_id, foliage_section, 0.02);
+    let foliage_layer   = make_row_step(ui, "Type", 34.0, font_id, foliage_section, 0.02);
     let foliage_smin    = make_row_step(ui, "Sc Mn", 34.0, font_id, foliage_section, 0.01);
     let foliage_smax    = make_row_step(ui, "Sc Mx", 34.0, font_id, foliage_section, 0.01);
     ui.set_visibility(foliage_section, false);
@@ -1320,7 +1355,11 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_col_r, light_col_g, light_col_b,
         light_range_row, light_inner_row, light_outer_row,
         terrain_section, terrain_layer, terrain_tile,
-        foliage_section, foliage_toggle, foliage_label, foliage_density,
+        foliage_section, foliage_toggle, foliage_label,
+        foliage_paint_toggle, foliage_paint_label,
+        foliage_erase_toggle, foliage_erase_label,
+        foliage_single_toggle, foliage_single_label,
+        foliage_density,
         foliage_seed, foliage_slope, foliage_layer, foliage_smin, foliage_smax,
         post_section, post_exposure, post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,

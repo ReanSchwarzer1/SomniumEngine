@@ -101,8 +101,14 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
-    /// Toggle scattered foliage on the selected terrain (Phase 17C).
+    /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
+    /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).
+    ToggleFoliagePaint,
+    /// Flip the brush between adding and erasing.
+    ToggleFoliageErase,
+    /// Place one instance per click instead of a spread — how trees go down.
+    ToggleFoliageSingle,
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
