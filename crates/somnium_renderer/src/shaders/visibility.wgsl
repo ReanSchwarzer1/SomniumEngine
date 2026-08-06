@@ -34,7 +34,7 @@ struct Material {
     metallic_roughness_map: i32,
     alpha_cutoff: f32,
     flags: u32,
-    _padding: u32,
+    occlusion_map: i32,
 }
 
 @group(0) @binding(0) var<storage, read> vertices: array<Vertex>;

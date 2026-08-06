@@ -12,6 +12,8 @@ struct Surface {
     normal: vec3<f32>,
     view_dir: vec3<f32>,
     f0: vec3<f32>,
+    /// Baked ambient occlusion (glTF/ARM red channel). 1.0 = fully open sky.
+    occlusion: f32,
 };
 
 struct AngularInfo {

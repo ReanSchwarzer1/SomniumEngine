@@ -34,7 +34,7 @@ struct Material {
     metallic_roughness_map: i32,
     alpha_cutoff: f32,
     flags: u32,
-    _pad: u32,
+    occlusion_map: i32,
 }
 
 struct View {

@@ -19,7 +19,9 @@ pub struct GpuMaterial {
     /// Bit 0: double-sided (glTF `doubleSided`). Kept as a bitfield rather than
     /// a bool so later flags cost no extra space.
     pub flags: u32,
-    pub _padding: u32,
+    /// Bindless index of the glTF occlusion texture, or -1. Occupies what was
+    /// padding, so the struct's size and alignment are unchanged.
+    pub occlusion_map: i32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.

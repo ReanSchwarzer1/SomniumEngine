@@ -1801,7 +1801,7 @@ impl<G: GameApp> Engine<G> {
                                     metallic_roughness_map: -1,
                                     alpha_cutoff: 0.0,
                 flags: 0,
-                _padding: 0,
+                occlusion_map: -1,
                                 },
                             );
                             self.default_material_id = Some(id);

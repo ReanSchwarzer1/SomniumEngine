@@ -26,7 +26,7 @@ struct Material {
     metallic_roughness_map: i32,
     alpha_cutoff: f32,
     flags: u32,
-    _pad: u32,
+    occlusion_map: i32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).
@@ -132,6 +132,20 @@ fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
     return f0 * ab.x + ab.y;
 }
 
+/// Specular occlusion from baked AO (Lagarde & de Rousiers).
+///
+/// Ambient occlusion describes hemispherical visibility, so applying it
+/// unchanged to a mirror-like reflection is wrong. This narrows it by view
+/// angle and roughness: grazing, rough surfaces in a crevice lose most of
+/// their reflection, while a smooth surface facing you keeps its highlight.
+///
+/// This is what was making foliage read blue-grey. Grass albedo is a dark
+/// olive, so the 4% Fresnel sheen of an unoccluded sky reflection was a large
+/// fraction of the blade's final colour, and the sky is blue.
+fn specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
+    return saturate(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
+}
+
 /// Image-based ambient: diffuse irradiance + split-sum specular.
 fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     let n = surface.normal;
@@ -151,8 +165,11 @@ fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     let mip = surface.roughness * ENV_MAX_MIP;
     let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
     let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
+    let spec_ao  = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
 
-    return (diffuse + specular) * light.ibl_intensity;
+    // Occlusion applies to indirect light only. The sun already has shadow
+    // maps, and multiplying it by AO as well double-darkens lit surfaces.
+    return (diffuse * surface.occlusion + specular * spec_ao) * light.ibl_intensity;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
@@ -366,12 +383,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
     }
 
+    surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
     surface.metallic  = material.metallic;
     if material.metallic_roughness_map >= 0 {
         let mr = textureSample(textures[material.metallic_roughness_map], default_sampler, uv);
         surface.roughness = max(mr.g, 0.05);
         surface.metallic  = mr.b;
+    }
+    // Occlusion comes from its own texture, never from the metallic-roughness
+    // map: glTF leaves that map's red channel undefined, and models that store
+    // AO separately (the damaged helmet among them) leave it at zero, which
+    // read as occlusion renders pitch black.
+    //
+    // Foliage leans on this heavily — a grass tuft's interior sits in its own
+    // shade, and without it every blade receives full open sky.
+    if material.occlusion_map >= 0 {
+        surface.occlusion = textureSample(
+            textures[material.occlusion_map], default_sampler, uv).r;
     }
 
     surface.normal = geo_normal;

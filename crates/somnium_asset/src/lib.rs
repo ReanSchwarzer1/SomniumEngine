@@ -54,6 +54,10 @@ pub struct LoadedMaterial {
     pub roughness:             f32,
     pub metallic:              f32,
     pub albedo_map:            Option<usize>,
+    /// glTF `occlusionTexture` (red channel). Distinct from the
+    /// metallic-roughness texture: the spec leaves *its* red channel
+    /// undefined, so AO must never be read from it.
+    pub occlusion_map:         Option<usize>,
     pub normal_map:            Option<usize>,
     pub metallic_roughness_map: Option<usize>,
     /// glTF `alphaMode`. Dropping this was why blended glass rendered as
@@ -112,6 +116,16 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let masked = attach_sidecar_alpha(&document, base_dir, &mut scene.textures);
 
+    // Images whose filename marks them as ARM-packed (AO / Roughness / Metallic).
+    let arm_packed: std::collections::HashSet<usize> = document
+        .images()
+        .filter(|img| match img.source() {
+            gltf::image::Source::Uri { uri, .. } => uri.contains("_arm"),
+            _ => false,
+        })
+        .map(|img| img.index())
+        .collect();
+
     // 2. Materials -------------------------------------------------------
     for mat in document.materials() {
         let pbr = mat.pbr_metallic_roughness();
@@ -127,11 +141,26 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             alpha_cutoff:          mat.alpha_cutoff().unwrap_or(0.5),
             double_sided:          mat.double_sided(),
             albedo_map:            pbr.base_color_texture().map(|t| t.texture().source().index()),
+            occlusion_map:         mat.occlusion_texture().map(|t| t.texture().source().index()),
             normal_map:            mat.normal_texture().map(|t| t.texture().source().index()),
             metallic_roughness_map: pbr.metallic_roughness_texture()
                                        .map(|t| t.texture().source().index()),
         });
     }
+    // ARM-packed textures carry occlusion in red, but glTF has no way to say
+    // so: exporters that pack this way (Poly Haven's among them) simply leave
+    // `occlusionTexture` unset and the AO channel goes unused. The `_arm`
+    // filename is the convention that states the packing, so honour it — and
+    // only it, because the spec leaves a plain metallic-roughness map's red
+    // channel undefined and reading that would darken models to black.
+    for m in &mut scene.materials {
+        if m.occlusion_map.is_none()
+            && m.metallic_roughness_map.is_some_and(|i| arm_packed.contains(&i))
+        {
+            m.occlusion_map = m.metallic_roughness_map;
+        }
+    }
+
     // A sidecar mask means the albedo is a cutout atlas, so the material has
     // to be alpha-tested even though the glTF called it opaque.
     for m in &mut scene.materials {
@@ -153,6 +182,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             roughness:             0.5,
             metallic:              0.0,
             albedo_map:            None,
+            occlusion_map:         None,
             normal_map:            None,
             metallic_roughness_map: None,
             alpha_mode:            AlphaMode::Opaque,

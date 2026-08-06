@@ -516,6 +516,7 @@ impl SomniumRenderer {
                 albedo_map:             resolve_tex(mat.albedo_map),
                 normal_map:             resolve_tex(mat.normal_map),
                 metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
+                occlusion_map: resolve_tex(mat.occlusion_map),
                 // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                 // and BLEND goes to the forward pass, so a cutoff on either
                 // would punch holes in geometry that should be solid.
@@ -528,7 +529,6 @@ impl SomniumRenderer {
                 } else {
                     0
                 },
-                _padding: 0,
             });
             // Phase 17D: remember double-sidedness so the visibility pass can
             // draw those instances with back-face culling switched off.
