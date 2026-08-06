@@ -101,13 +101,18 @@ pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
     ("Island Tree",   "assets/foliage/island_tree_02/island_tree_02_2k.gltf"),
 ];
 
-/// A palette entry's geometry once it has been uploaded.
+/// One drawable piece of a palette entry.
+///
+/// A single foliage model is rarely one primitive: a sapling is a trunk plus a
+/// separate twig mesh, a tree is trunk, branches and leaves. `local` is the
+/// piece's transform within the model, composed under the instance transform.
 #[derive(Clone, Copy)]
-struct FoliageMesh {
+struct FoliagePart {
     vertex_offset: u32,
     index_offset: u32,
     index_count: u32,
     material_id: u32,
+    local: glam::Mat4,
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
@@ -139,7 +144,9 @@ pub struct Engine<G: GameApp> {
     /// Uploaded geometry per palette entry, filled in the first time each one
     /// is painted — loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
-    foliage_meshes: [Option<FoliageMesh>; FOLIAGE_PALETTE.len()],
+    foliage_meshes: [Option<Vec<FoliagePart>>; FOLIAGE_PALETTE.len()],
+    /// Palette entries whose import failed, so we stop retrying them.
+    foliage_failed: [bool; FOLIAGE_PALETTE.len()],
     /// Phase 17F: the foliage brush.
     foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush,
     /// When true, dragging in the viewport paints foliage instead of sculpting.
@@ -148,7 +155,7 @@ pub struct Engine<G: GameApp> {
     pub foliage_erase: bool,
     /// Scratch list for this frame's visible foliage, reused so a field of
     /// instances does not allocate a fresh vector every frame.
-    foliage_batch: Vec<(FoliageMesh, glam::Mat4)>,
+    foliage_batch: Vec<(FoliagePart, glam::Mat4)>,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -225,7 +232,8 @@ impl<G: GameApp + 'static> Engine<G> {
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
-            foliage_meshes: [None; FOLIAGE_PALETTE.len()],
+            foliage_meshes: std::array::from_fn(|_| None),
+            foliage_failed: [false; FOLIAGE_PALETTE.len()],
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
             foliage_paint_active: false,
             foliage_erase: false,
@@ -1402,35 +1410,36 @@ impl<G: GameApp> Engine<G> {
             let camera_local = model.inverse().transform_point3(camera_ws);
             let cull_sq = if cull_distance > 0.0 { cull_distance * cull_distance } else { f32::MAX };
             self.foliage_batch.clear();
-            self.foliage_batch.extend(t
-                .painted_foliage
-                .iter()
-                .filter_map(|inst| {
-                    let d = inst.position - camera_local;
-                    // Horizontal distance: flying up should not make ground
-                    // cover vanish out from under you.
-                    if d.x * d.x + d.z * d.z > cull_sq {
-                        return None;
-                    }
-                    let mesh = (*self.foliage_meshes.get(inst.kind as usize)?)?;
-                    // Terrain-local placement composed with the terrain's own
-                    // transform, so moving the terrain carries its foliage.
-                    let local = glam::Mat4::from_scale_rotation_translation(
-                        glam::Vec3::splat(inst.scale),
-                        glam::Quat::from_rotation_y(inst.yaw),
-                        inst.position,
-                    );
-                    Some((mesh, model * local))
-                }));
+            for inst in &t.painted_foliage {
+                let d = inst.position - camera_local;
+                // Horizontal distance: flying up should not make ground cover
+                // vanish out from under you.
+                if d.x * d.x + d.z * d.z > cull_sq {
+                    continue;
+                }
+                let Some(Some(parts)) = self.foliage_meshes.get(inst.kind as usize) else {
+                    continue;
+                };
+                // Terrain-local placement composed with the terrain's own
+                // transform, so moving the terrain carries its foliage.
+                let placement = glam::Mat4::from_scale_rotation_translation(
+                    glam::Vec3::splat(inst.scale),
+                    glam::Quat::from_rotation_y(inst.yaw),
+                    inst.position,
+                );
+                for part in parts {
+                    self.foliage_batch.push((*part, model * placement * part.local));
+                }
+            }
 
             if let Some(r) = self.renderer.as_mut() {
-                for (mesh, transform) in self.foliage_batch.drain(..) {
+                for (part, transform) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
-                        vertex_offset: mesh.vertex_offset,
-                        index_offset: mesh.index_offset,
-                        index_count: mesh.index_count,
-                        material_id: mesh.material_id,
+                        vertex_offset: part.vertex_offset,
+                        index_offset: part.index_offset,
+                        index_count: part.index_count,
+                        material_id: part.material_id,
                         transform,
                     });
                 }
@@ -1441,7 +1450,10 @@ impl<G: GameApp> Engine<G> {
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
         let idx = kind as usize;
-        if idx >= FOLIAGE_PALETTE.len() || self.foliage_meshes[idx].is_some() {
+        if idx >= FOLIAGE_PALETTE.len()
+            || self.foliage_meshes[idx].is_some()
+            || self.foliage_failed[idx]
+        {
             return;
         }
         let (name, path) = FOLIAGE_PALETTE[idx];
@@ -1456,6 +1468,10 @@ impl<G: GameApp> Engine<G> {
             Ok(s) => s,
             Err(e) => {
                 warn!("Foliage: could not load {path}: {e}");
+                // Remember the failure. Without this every brush dab retries
+                // the import, and a model that cannot load turns each stroke
+                // into a stall plus a wall of identical warnings.
+                self.foliage_failed[idx] = true;
                 return;
             }
         };
@@ -1478,19 +1494,54 @@ impl<G: GameApp> Engine<G> {
         }
 
         let uploaded = renderer.upload_scene(ctx, &scene);
-        // These models are a clump of separate parts; the largest is the one
-        // worth instancing. Scattering every part separately would multiply the
-        // instance count for no visual gain.
-        let Some(node) = uploaded.iter().max_by_key(|n| n.index_count) else {
+        if uploaded.is_empty() {
+            return;
+        }
+
+        // `upload_scene` returns one entry per *primitive*. A glTF node is
+        // often several: a sapling is `branches` plus `twigs`, a tree is trunk,
+        // branches and leaves. Taking only the biggest primitive planted trees
+        // with no trunk, and for the island tree picked a 714k-triangle leaf
+        // mesh that renders as nothing.
+        //
+        // Meanwhile these models are also *collections* — the grass files hold
+        // seventeen separate tufts, and instancing all of them would multiply
+        // every dab by seventeen. So: group primitives by node, take the one
+        // node with the most geometry, and keep all of its primitives.
+        //
+        // Primitives of one node share that node's transform exactly, which is
+        // what the grouping keys on.
+        let mut groups: Vec<(glam::Mat4, Vec<&somnium_renderer::renderer::UploadedNode>)> =
+            Vec::new();
+        for n in &uploaded {
+            match groups.iter_mut().find(|(m, _)| *m == n.transform) {
+                Some((_, v)) => v.push(n),
+                None => groups.push((n.transform, vec![n])),
+            }
+        }
+        let Some((node_xform, parts)) = groups
+            .into_iter()
+            .max_by_key(|(_, v)| v.iter().map(|n| u64::from(n.index_count)).sum::<u64>())
+        else {
             return;
         };
-        info!("Foliage: loaded {name} ({} triangles)", node.index_count / 3);
-        self.foliage_meshes[idx] = Some(FoliageMesh {
-            vertex_offset: node.vertex_offset,
-            index_offset: node.index_offset,
-            index_count: node.index_count,
-            material_id: node.material_id,
-        });
+
+        // The node's own transform is factored out and reapplied per part, so a
+        // model authored away from its origin still plants where you click.
+        let inv_node = node_xform.inverse();
+        let built: Vec<FoliagePart> = parts
+            .iter()
+            .map(|n| FoliagePart {
+                vertex_offset: n.vertex_offset,
+                index_offset: n.index_offset,
+                index_count: n.index_count,
+                material_id: n.material_id,
+                local: inv_node * n.transform,
+            })
+            .collect();
+        let tris: u32 = built.iter().map(|p| p.index_count / 3).sum();
+        info!("Foliage: loaded {name} ({} parts, {tris} triangles)", built.len());
+        self.foliage_meshes[idx] = Some(built);
     }
 
     /// Apply one dab of the foliage brush under the cursor (Phase 17F).

@@ -3274,6 +3274,7 @@ dependencies = [
  "bytemuck",
  "glam 0.29.3",
  "gltf",
+ "image",
  "tracing",
 ]
 

@@ -1420,6 +1420,20 @@ impl SomniumRenderer {
 /// Done on the CPU because the imported data is already in system memory and
 /// this runs once per texture at import; a GPU blit chain would be faster but
 /// needs a render pass per level.
+///
+/// Colour is averaged **weighted by alpha**. A plain box filter is wrong for
+/// cutout atlases: foliage diffuse maps carry blade colour only where the mask
+/// is opaque and leave the rest black, so an unweighted average drags that
+/// black into the blades and grass turns darker — and bluer, once ambient sky
+/// is the brightest thing left — the further away it gets. Weighting by alpha
+/// makes the transparent background contribute nothing, which is what the
+/// artist's authored colour means. For a fully opaque texture every weight is
+/// equal and this reduces exactly to the plain box filter.
+///
+/// Alpha itself is then rescaled per level to preserve *coverage* — the
+/// fraction of texels that survive alpha testing. Averaging a binary mask
+/// pushes alpha toward its mean, so a fixed 0.5 cutoff eats thin geometry as
+/// it recedes and foliage visibly thins out with distance.
 fn build_mip_chain(data: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u8>)> {
     let mut levels = vec![(width, height, data.to_vec())];
     let (mut w, mut h) = (width, height);
@@ -1441,11 +1455,25 @@ fn build_mip_chain(data: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u
                 let texel = |tx: u32, ty: u32, c: usize| -> u32 {
                     prev[((ty * pw + tx) * 4) as usize + c] as u32
                 };
-                for c in 0..4 {
-                    let sum = texel(x0, y0, c) + texel(x1, y0, c)
-                            + texel(x0, y1, c) + texel(x1, y1, c);
-                    next[((y * nw + x) * 4) as usize + c] = (sum / 4) as u8;
+                let block = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
+
+                let alpha_sum: u32 = block.iter().map(|&(tx, ty)| texel(tx, ty, 3)).sum();
+                let out = ((y * nw + x) * 4) as usize;
+                for c in 0..3 {
+                    // Fully transparent block: no authored colour to preserve,
+                    // so fall back to the unweighted mean rather than emitting
+                    // black, which would still bleed once alpha is rescaled.
+                    next[out + c] = if alpha_sum == 0 {
+                        (block.iter().map(|&(tx, ty)| texel(tx, ty, c)).sum::<u32>() / 4) as u8
+                    } else {
+                        let weighted: u32 = block
+                            .iter()
+                            .map(|&(tx, ty)| texel(tx, ty, c) * texel(tx, ty, 3))
+                            .sum();
+                        (weighted / alpha_sum) as u8
+                    };
                 }
+                next[out + 3] = (alpha_sum / 4) as u8;
             }
         }
 
@@ -1453,12 +1481,149 @@ fn build_mip_chain(data: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u
         w = nw;
         h = nh;
     }
+
+    preserve_alpha_coverage(&mut levels);
     levels
+}
+
+/// Alpha cutoff that [`preserve_alpha_coverage`] matches coverage against.
+///
+/// Mirrors the glTF default `alphaCutoff` and the value the loader assigns to
+/// sidecar-masked materials.
+const ALPHA_TEST_CUTOFF: u8 = 128;
+
+/// Rescale each mip's alpha so the same fraction of texels passes alpha testing
+/// as at mip 0 (Castaño's alpha-test mipmap scaling).
+///
+/// Left alone, downsampling a binary mask averages it toward grey, so fewer and
+/// fewer texels clear the cutoff and masked geometry erodes with distance —
+/// grass thins to nothing, tree canopies go patchy and then bald.
+///
+/// A no-op for textures that are opaque everywhere: coverage is already 1.0 at
+/// every level, so the search settles on a scale of 1 and nothing moves.
+fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
+    /// Fraction of texels at or above the cutoff once alpha is scaled.
+    fn coverage(data: &[u8], scale: f32) -> f32 {
+        let passing = data
+            .chunks_exact(4)
+            .filter(|t| (f32::from(t[3]) * scale) >= f32::from(ALPHA_TEST_CUTOFF))
+            .count();
+        passing as f32 / (data.len() / 4) as f32
+    }
+
+    let Some((_, _, base)) = levels.first() else {
+        return;
+    };
+    let target = coverage(base, 1.0);
+    // Nothing masked out (or nothing left): no coverage to defend.
+    if target >= 1.0 || target <= 0.0 {
+        return;
+    }
+
+    for (_, _, data) in levels.iter_mut().skip(1) {
+        // Bisect on the scale factor. Coverage is monotonic in scale but a step
+        // function, so solve numerically rather than in closed form; a handful
+        // of iterations lands well inside one 8-bit quantisation step.
+        let (mut lo, mut hi) = (0.0f32, 4.0f32);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if coverage(data, mid) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let scale = 0.5 * (lo + hi);
+        for texel in data.chunks_exact_mut(4) {
+            texel[3] = (f32::from(texel[3]) * scale).round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 #[cfg(test)]
 mod mip_tests {
-    use super::build_mip_chain;
+    use super::{build_mip_chain, ALPHA_TEST_CUTOFF};
+
+    /// A 2x2 cutout block: one opaque green texel, three transparent black.
+    /// Unweighted averaging would give a quarter-strength muddy green; weighting
+    /// by alpha has to hand back the authored green untouched.
+    #[test]
+    fn transparent_black_does_not_darken_the_visible_colour() {
+        let mut data = vec![0u8; 2 * 2 * 4];
+        data[0..4].copy_from_slice(&[80, 120, 40, 255]);
+        let levels = build_mip_chain(&data, 2, 2);
+        let (_, _, mip1) = &levels[1];
+        assert_eq!(
+            &mip1[0..3],
+            &[80, 120, 40],
+            "alpha-weighted average let the transparent background bleed in",
+        );
+    }
+
+    /// Downsampling a binary mask averages alpha toward grey, which without
+    /// rescaling drops texels below the cutoff and erodes the shape. The
+    /// property that matters is that coverage never *shrinks*.
+    ///
+    /// It can overshoot, and at the smallest levels it must: once a mip is
+    /// uniform, every texel passes or none do, so there is no scale that lands
+    /// on a fraction. Rounding up keeps distant grass visible; rounding down
+    /// would make it disappear, which is the failure this rescaling exists to
+    /// prevent.
+    #[test]
+    fn coverage_never_erodes_down_the_chain() {
+        // 4x4 checkerboard: half the texels opaque, half fully transparent.
+        let mut data = vec![0u8; 4 * 4 * 4];
+        for (i, texel) in data.chunks_exact_mut(4).enumerate() {
+            texel[0..3].copy_from_slice(&[200, 200, 200]);
+            texel[3] = if i % 2 == 0 { 255 } else { 0 };
+        }
+        let base_cov = 0.5;
+        for (w, h, level) in build_mip_chain(&data, 4, 4) {
+            let passing = level
+                .chunks_exact(4)
+                .filter(|t| t[3] >= ALPHA_TEST_CUTOFF)
+                .count() as f32;
+            let cov = passing / (w * h) as f32;
+            assert!(
+                cov >= base_cov,
+                "mip {w}x{h} coverage {cov} eroded below {base_cov}",
+            );
+        }
+    }
+
+    /// Without rescaling the same checkerboard would vanish: the 2x2 level
+    /// averages to 127, one step under the cutoff, and nothing survives.
+    /// This pins the regression that rescaling exists to prevent.
+    #[test]
+    fn an_unrescaled_mask_would_have_vanished() {
+        let mut data = vec![0u8; 4 * 4 * 4];
+        for (i, texel) in data.chunks_exact_mut(4).enumerate() {
+            texel[3] = if i % 2 == 0 { 255 } else { 0 };
+        }
+        let levels = build_mip_chain(&data, 4, 4);
+        let (_, _, mip1) = &levels[1];
+        assert!(
+            mip1.chunks_exact(4).all(|t| t[3] >= ALPHA_TEST_CUTOFF),
+            "half-covered mask fell under the cutoff after downsampling",
+        );
+    }
+
+    /// The opaque case must be untouched: no alpha weighting artefacts, no
+    /// coverage rescaling, identical to the plain box filter it replaced.
+    #[test]
+    fn fully_opaque_textures_keep_full_alpha() {
+        let mut data = vec![0u8; 8 * 8 * 4];
+        for (i, texel) in data.chunks_exact_mut(4).enumerate() {
+            texel[0] = i as u8;
+            texel[3] = 255;
+        }
+        for (_, _, level) in build_mip_chain(&data, 8, 8) {
+            assert!(
+                level.chunks_exact(4).all(|t| t[3] == 255),
+                "coverage rescaling touched an opaque texture",
+            );
+        }
+    }
 
     #[test]
     fn chain_halves_down_to_one_by_one() {

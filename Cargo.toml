@@ -83,7 +83,7 @@ serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # -- Asset loading -----------------------------------------------------------
-gltf = { version = "1", features = ["names", "utils", "image"] }
+gltf = { version = "1", features = ["names", "utils", "image", "KHR_texture_transform"] }
 image = "0.25"
 
 # -- Font rasterization (Phase 12A-4) ----------------------------------------

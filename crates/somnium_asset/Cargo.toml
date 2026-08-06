@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 gltf      = { workspace = true }
+image     = { workspace = true }
 bytemuck  = { workspace = true }
 glam      = { workspace = true }
 tracing   = { workspace = true }

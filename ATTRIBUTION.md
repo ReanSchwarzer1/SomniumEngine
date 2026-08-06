@@ -783,6 +783,10 @@ resolution with an `include` map of relative-path to URL. The textures do not
 sit beside the glTF and the `.bin` is shared from the 8k tree, so that map has
 to be followed rather than the directory layout guessed at.
 
+The `*_alpha_*.png` cutout masks alongside each model's textures come from the same
+Poly Haven asset pages and are covered by the same CC0 dedication. They are fetched
+separately because Poly Haven's glTF exports do not reference them.
+
 ### 13.24 Water surface — Fresnel reflection + Beer-Lambert absorption (Phase 22)
 
 **References:**

@@ -108,6 +108,10 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
         scene.textures.push(decode_to_rgba8(img));
     }
 
+    // 1b. Sidecar alpha masks -------------------------------------------
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let masked = attach_sidecar_alpha(&document, base_dir, &mut scene.textures);
+
     // 2. Materials -------------------------------------------------------
     for mat in document.materials() {
         let pbr = mat.pbr_metallic_roughness();
@@ -128,6 +132,20 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                                        .map(|t| t.texture().source().index()),
         });
     }
+    // A sidecar mask means the albedo is a cutout atlas, so the material has
+    // to be alpha-tested even though the glTF called it opaque.
+    for m in &mut scene.materials {
+        if m.albedo_map.is_some_and(|i| masked.contains(&i))
+            && m.alpha_mode == AlphaMode::Opaque
+        {
+            m.alpha_mode = AlphaMode::Mask;
+            // Foliage masks are near-binary; cutting at the midpoint keeps
+            // blade edges crisp without eroding thin tips.
+            m.alpha_cutoff = 0.5;
+            m.double_sided = true;
+        }
+    }
+
     // Ensure there is always at least a default material at index 0.
     if scene.materials.is_empty() {
         scene.materials.push(LoadedMaterial {
@@ -252,6 +270,81 @@ fn collect_nodes(
     for child in node.children() {
         collect_nodes(&child, world, prim_to_loaded, out);
     }
+}
+
+/// Fold sibling `*_alpha_*` masks into their albedo texture's alpha channel.
+///
+/// Poly Haven (and most scanned-foliage libraries) ship vegetation as cutout
+/// cards: the diffuse atlas holds blade or leaf shapes on a black background,
+/// and the shape itself lives in a *separate* alpha map. Their glTF export
+/// references only diffuse/normal/ARM, so a loader that trusts the glTF renders
+/// the black background as if it were the plant — which reads as dark, blue-ish
+/// blobs once ambient light is the only thing left to reflect.
+///
+/// The pairing is by filename: `X_diff_2k.jpg` takes its mask from
+/// `X_alpha_2k.png`. That is a convention rather than a standard, so a missing
+/// or unreadable sidecar is not an error — the texture is simply left alone.
+///
+/// Returns the set of texture indices that gained a mask, so callers can switch
+/// the corresponding materials to alpha testing.
+fn attach_sidecar_alpha(
+    document: &gltf::Document,
+    base_dir: &Path,
+    textures: &mut [LoadedTexture],
+) -> std::collections::HashSet<usize> {
+    let mut masked = std::collections::HashSet::new();
+
+    for image in document.images() {
+        let gltf::image::Source::Uri { uri, .. } = image.source() else {
+            continue; // embedded texture: no sidecar to find
+        };
+        let Some(mask_path) = sidecar_alpha_path(base_dir, uri) else {
+            continue;
+        };
+        let Some(tex) = textures.get_mut(image.index()) else {
+            continue;
+        };
+
+        let mask = match image::open(&mask_path) {
+            Ok(m) => m.into_luma8(),
+            Err(e) => {
+                warn!("Alpha sidecar {mask_path:?} failed to decode: {e}");
+                continue;
+            }
+        };
+        if mask.width() != tex.width || mask.height() != tex.height {
+            warn!(
+                "Alpha sidecar {:?} is {}x{} but its albedo is {}x{}; skipping",
+                mask_path, mask.width(), mask.height(), tex.width, tex.height,
+            );
+            continue;
+        }
+
+        for (texel, m) in tex.data.chunks_exact_mut(4).zip(mask.pixels()) {
+            texel[3] = m.0[0];
+        }
+        masked.insert(image.index());
+        info!("Applied alpha sidecar {:?}", mask_path.file_name().unwrap_or_default());
+    }
+
+    masked
+}
+
+/// Resolve `<dir>/<stem-with-_diff_-swapped-for-_alpha_>.png`, if it exists.
+///
+/// Split on `_diff` rather than the whole `_diff_2k` so the same rule survives
+/// other resolutions (`_diff_4k`, `_diff_1k`) and suffixed variants.
+fn sidecar_alpha_path(base_dir: &Path, uri: &str) -> Option<std::path::PathBuf> {
+    // glTF URIs are percent-encoded and always use forward slashes.
+    let uri = uri.replace("%20", " ");
+    let (dir, file) = match uri.rsplit_once('/') {
+        Some((d, f)) => (base_dir.join(d), f.to_string()),
+        None => (base_dir.to_path_buf(), uri.clone()),
+    };
+    let (before, after) = file.split_once("_diff")?;
+    let after = after.rsplit_once('.').map_or("", |(stem, _)| stem);
+    let candidate = dir.join(format!("{before}_alpha{after}.png"));
+    candidate.exists().then_some(candidate)
 }
 
 /// Convert any gltf image format to tightly-packed RGBA8.
