@@ -45,3 +45,11 @@ somnium_phase*.md
 # fresh clone cannot build the physics crate.
 example_repo/*
 !example_repo/JoltPhysics-master/
+
+# Transient capture logs from runtime verification scripts
+st_*.log
+st_*.err
+rt_*.log
+rt_*.err
+sel.log
+sel.err
