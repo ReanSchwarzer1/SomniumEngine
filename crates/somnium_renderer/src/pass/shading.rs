@@ -118,8 +118,10 @@ impl ShadingPass {
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("../shaders/brdf.wgsl"),
+            // Phase 24G: Vogel disk and gradient noise, used by PCSS.
+            include_str!("../shaders/sampling.wgsl"),
             // Phase 24C: the background samples the atmosphere-generated
             // cubemap and adds sharp sky detail analytically.
             include_str!("../shaders/atmosphere.wgsl"),

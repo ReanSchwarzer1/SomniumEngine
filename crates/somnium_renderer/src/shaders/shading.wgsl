@@ -210,36 +210,144 @@ fn atlas_uv(cascade: u32, uv: vec2<f32>) -> vec2<f32> {
     return uv * 0.5 + offsets[cascade];
 }
 
-// 3×3 PCF shadow factor in [0,1]; 1.0 = fully lit, 0.0 = fully in shadow.
-fn sample_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
-    // Select cascade from view-space depth (positive = in front of camera).
-    let cascade      = get_cascade_index(view_depth);
-    let light_clip   = light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
-    let ndc          = light_clip.xyz / light_clip.w;
+// ── Shadows (Phase 24H) ─────────────────────────────────────────────────────
+//
+// Replaces a fixed 3x3 PCF kernel. Three problems with that: the penumbra was
+// always the same width regardless of how far the caster was from the receiver,
+// which is the single clearest tell that a shadow is not real; cascade
+// boundaries showed as hard lines where filter width changed; and constant
+// depth bias traded acne for peter-panning with no setting that avoided both.
 
-    // NDC → UV. Flip Y because wgpu's texture V-axis is top-down.
-    let uv           = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    let atlas_coord  = atlas_uv(cascade, uv);
-    let compare_depth = ndc.z; // orthographic: w=1, so ndc.z is already in [0,1]
+/// Sample count for the blocker search and for the filter itself.
+///
+/// The search can afford to be coarser: it only needs an average depth, while
+/// the filter's samples are visible as noise if too few.
+const SHADOW_BLOCKER_SAMPLES: i32 = 16;
+const SHADOW_FILTER_SAMPLES: i32 = 24;
 
-    // Early-out: position outside the shadow frustum → fully lit.
-    if any(atlas_coord < vec2(0.0)) || any(atlas_coord > vec2(1.0)) || compare_depth > 1.0 {
+/// Average depth of occluders above this point, or -1 if there are none.
+///
+/// The first half of PCSS: how far away the blocker is determines how wide its
+/// penumbra should be, which is why a contact point is sharp and the same
+/// object's shadow is soft metres away.
+fn blocker_search(
+    atlas_coord: vec2<f32>,
+    cascade: u32,
+    compare_depth: f32,
+    search_radius: f32,
+    rotation: f32,
+) -> f32 {
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+
+    for (var i = 0; i < SHADOW_BLOCKER_SAMPLES; i = i + 1) {
+        let offset = vogel_disk_sample(u32(i), u32(SHADOW_BLOCKER_SAMPLES), rotation)
+            * search_radius;
+        let uv = atlas_coord + offset;
+        // Clamp into this cascade's quadrant: straying outside samples a
+        // neighbouring cascade's depths, which are unrelated.
+        let quadrant_min = atlas_uv(cascade, vec2<f32>(0.0));
+        let quadrant_max = atlas_uv(cascade, vec2<f32>(1.0));
+        let clamped = clamp(uv, quadrant_min, quadrant_max);
+
+        // textureLoad rather than a sampled fetch: the blocker search wants the
+        // raw stored depth, and the only sampler bound to the atlas is a
+        // comparison sampler, which returns a pass/fail result instead.
+        let texel = vec2<i32>(clamped * light.shadow_map_size);
+        let depth = textureLoad(shadow_atlas, texel, 0);
+        if depth < compare_depth {
+            blocker_sum += depth;
+            blocker_count += 1.0;
+        }
+    }
+
+    if blocker_count < 0.5 {
+        return -1.0;
+    }
+    return blocker_sum / blocker_count;
+}
+
+/// Percentage-closer soft shadows for one cascade.
+fn sample_shadow_cascade(
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    cascade: u32,
+    pixel: vec2<f32>,
+) -> f32 {
+    // Normal-offset bias: push the sample along the surface normal rather than
+    // along depth. Depth bias has to grow with slope to stop acne, and by the
+    // time it is large enough on a grazing surface it has detached the shadow
+    // from its caster. Offsetting in the plane of the surface sidesteps both.
+    let texel_world = 2.0 / light.shadow_map_size * f32(1u << cascade) * 4.0;
+    let offset_pos = world_pos + normal * texel_world;
+
+    let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    let atlas_coord = atlas_uv(cascade, uv);
+    let compare_depth = ndc.z;
+
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
     }
 
-    // 3×3 PCF kernel. texel_size in atlas UV space = 1/4096 (one shadow texel).
     let texel_size = 1.0 / light.shadow_map_size;
-    var shadow = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            shadow += textureSampleCompare(
-                shadow_atlas, shadow_sampler,
-                atlas_coord + offset, compare_depth,
-            );
-        }
+    let rotation = interleaved_gradient_noise(pixel, u32(light.shadow_map_size) % 64u)
+        * 6.28318530;
+
+    // Search radius scales with the sun's angular size: a larger source casts
+    // wider penumbrae, so it has to look further for blockers.
+    let search_radius = max(light.sun_angular_radius * 40.0, 2.0) * texel_size;
+    let blocker_depth = blocker_search(
+        atlas_coord, cascade, compare_depth, search_radius, rotation);
+
+    // No blocker found: fully lit, and no filtering needed.
+    if blocker_depth < 0.0 {
+        return 1.0;
     }
-    return shadow / 9.0;
+
+    // Penumbra width from the similar-triangles relation: the further the
+    // blocker is above the receiver, the wider its shadow's soft edge.
+    let penumbra = (compare_depth - blocker_depth) / max(blocker_depth, 1e-4);
+    let filter_radius = clamp(
+        penumbra * light.sun_angular_radius * 400.0,
+        1.0,
+        16.0,
+    ) * texel_size;
+
+    var shadow = 0.0;
+    let quadrant_min = atlas_uv(cascade, vec2<f32>(0.0));
+    let quadrant_max = atlas_uv(cascade, vec2<f32>(1.0));
+    for (var i = 0; i < SHADOW_FILTER_SAMPLES; i = i + 1) {
+        let offset = vogel_disk_sample(u32(i), u32(SHADOW_FILTER_SAMPLES), rotation)
+            * filter_radius;
+        let clamped = clamp(atlas_coord + offset, quadrant_min, quadrant_max);
+        shadow += textureSampleCompare(
+            shadow_atlas, shadow_sampler, clamped, compare_depth);
+    }
+    return shadow / f32(SHADOW_FILTER_SAMPLES);
+}
+
+/// Shadow factor in [0,1]; 1.0 = fully lit.
+///
+/// Blends across the cascade boundary rather than switching at it. An abrupt
+/// switch shows as a line across the ground where filter width and resolution
+/// change together, and it is far more obvious in motion than in a still.
+fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel: vec2<f32>) -> f32 {
+    let cascade = get_cascade_index(view_depth);
+    let near = select(light.cascade_splits[cascade - 1u], 0.0, cascade == 0u);
+    let far = light.cascade_splits[cascade];
+
+    let shadow = sample_shadow_cascade(world_pos, normal, cascade, pixel);
+
+    // Blend over the last 10% of the cascade's range.
+    let band = (far - near) * 0.1;
+    let into_band = (view_depth - (far - band)) / max(band, 1e-4);
+    if into_band > 0.0 && cascade < 3u {
+        let next = sample_shadow_cascade(world_pos, normal, cascade + 1u, pixel);
+        return mix(shadow, next, saturate(into_band));
+    }
+    return shadow;
 }
 
 // ─── Clustered lighting helpers ──────────────────────────────────────────────
@@ -440,7 +548,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_pos   = view.view * vec4<f32>(hit_point, 1.0);
     let view_depth = -view_pos.z; // right-handed: Z is negative in front of camera
 
-    let shadow_factor = sample_shadow(hit_point, view_depth);
+    let shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
 
     // ── Shading ───────────────────────────────────────────────────────────────
     var result: vec3<f32>;
