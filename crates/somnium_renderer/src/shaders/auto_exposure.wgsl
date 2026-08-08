@@ -30,6 +30,12 @@ struct ExposureParams {
     min_ev100:       f32,
     /// Clamp on the metered EV100, high end.
     max_ev100:       f32,
+    /// Luminance where highlight suppression begins, cd/m².
+    highlight_start_nits: f32,
+    /// Luminance where a sample's weight bottoms out.
+    highlight_end_nits:   f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var          hdr_tex:   texture_2d<f32>;
@@ -71,7 +77,26 @@ fn build_histogram(
     let dims = textureDimensions(hdr_tex);
     if gid.x < dims.x && gid.y < dims.y {
         let color = textureLoad(hdr_tex, vec2<i32>(gid.xy), 0).rgb;
-        atomicAdd(&local_bins[luminance_to_bin(luminance(color))], 1u);
+        let lum = luminance(color);
+
+        // Weighted metering, after Spartan's `auto_exposure.hlsl`. A flat
+        // whole-frame average is what made a shiny object in a mostly dark
+        // scene blow out: the dark majority pulled exposure up until the one
+        // bright thing clipped.
+        //
+        // Two corrections. Centre weighting, because what the camera is aimed
+        // at is what should be correctly exposed — the same reason real meters
+        // are centre-weighted. And highlight suppression, so a specular
+        // glint or a sun disc cannot drag the meter far off the subject.
+        let uv = vec2<f32>(gid.xy) / vec2<f32>(dims) * 2.0 - 1.0;
+        let centre_weight = mix(0.15, 1.0, exp(-dot(uv, uv) * 1.5));
+        let highlight = 1.0 - smoothstep(
+            params.highlight_start_nits, params.highlight_end_nits, lum);
+        let weight = centre_weight * mix(0.25, 1.0, highlight);
+
+        // The histogram counts in integers, so the weight is quantised. 256
+        // steps is far finer than the 256 luminance bins it feeds.
+        atomicAdd(&local_bins[luminance_to_bin(lum)], u32(weight * 256.0));
     }
 
     workgroupBarrier();
@@ -82,39 +107,43 @@ fn build_histogram(
 }
 
 var<workgroup> bin_totals: array<u32, 256>;
+var<workgroup> bin_weights: array<u32, 256>;
 
 @compute @workgroup_size(256, 1, 1)
 fn resolve_exposure(@builtin(local_invocation_index) lid: u32) {
     let count = atomicLoad(&histogram[lid]);
 
-    // Weight each bin by its own index, so the sum reduces to a weighted mean
-    // of log luminance rather than of luminance itself.
-    bin_totals[lid] = count * lid;
+    // Two reductions in lockstep: the bin index weighted by its own total,
+    // which gives a weighted mean of *log* luminance, and the plain total,
+    // which is the denominator that mean needs.
+    bin_totals[lid]  = count * lid;
+    bin_weights[lid] = count;
     workgroupBarrier();
 
-    // Parallel reduction over the 256 bins.
     for (var cutoff = 128u; cutoff > 0u; cutoff >>= 1u) {
         if lid < cutoff {
-            bin_totals[lid] += bin_totals[lid + cutoff];
+            bin_totals[lid]  += bin_totals[lid + cutoff];
+            bin_weights[lid] += bin_weights[lid + cutoff];
         }
         workgroupBarrier();
     }
 
+    // Clearing has to wait until every thread has finished reading. Doing it
+    // inside the early-return above raced the reduction: threads wiped their
+    // bins while thread 0 was still summing them.
+    atomicStore(&histogram[lid], 0u);
     if lid != 0u {
-        // Clear for the next frame while thread 0 finishes.
-        atomicStore(&histogram[lid], 0u);
         return;
     }
 
-    // Bin 0 held the near-black pixels and is deliberately excluded, so the
-    // denominator is the number of pixels that carried usable signal.
-    let black_pixels = f32(count);
+    // Bins hold summed *weights* now, not pixel counts. Bin 0 is the near-black
+    // bucket and is excluded, so subtract it back out of the denominator; it
+    // contributes nothing to the numerator either way, being index zero.
     let weighted_sum = f32(bin_totals[0]);
-    let dims = textureDimensions(hdr_tex);
-    let lit_pixels = max(f32(dims.x * dims.y) - black_pixels, 1.0);
+    let total_weight = max(f32(bin_weights[0]) - f32(count), 1.0);
 
     // Undo the bin mapping to recover average log2 luminance.
-    let mean_bin = weighted_sum / lit_pixels;
+    let mean_bin = weighted_sum / total_weight;
     let avg_log_lum = (mean_bin - 1.0) / 254.0 / params.inv_log_range + params.min_log_lum;
     let avg_luminance = exp2(avg_log_lum);
 
@@ -136,6 +165,4 @@ fn resolve_exposure(@builtin(local_invocation_index) lid: u32) {
     exposure[1] = adapted;
     // The multiplier the post-process pass actually reads: 1 / (1.2 · 2^EV).
     exposure[0] = 1.0 / (1.2 * exp2(adapted));
-
-    atomicStore(&histogram[0], 0u);
 }

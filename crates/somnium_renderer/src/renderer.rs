@@ -122,6 +122,8 @@ pub struct SomniumRenderer {
     pub auto_exposure: bool,
     /// Seconds since the previous frame, for exposure adaptation.
     pub frame_delta_time: f32,
+    /// Stops applied on top of the metered exposure. Negative darkens.
+    pub exposure_compensation: f32,
     /// Tone-mapping curve index; matches `Tonemapper::as_index`.
     pub tonemapper: u32,
     /// Radial vignette strength (0 = off, 1 = default, higher = stronger).
@@ -406,6 +408,7 @@ impl SomniumRenderer {
             exposure: 1.0 / (1.2 * 32768.0),
             auto_exposure: true,
             frame_delta_time: 1.0 / 60.0,
+            exposure_compensation: 0.0,
             tonemapper: 0,
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
@@ -1394,7 +1397,7 @@ impl SomniumRenderer {
                 ctx.config.width,
                 ctx.config.height,
                 self.frame_delta_time,
-                0.0,
+                self.exposure_compensation,
             );
         }
 

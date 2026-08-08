@@ -66,6 +66,11 @@ struct InspectorHandles {
     // entity is selected.
     post_section:    NodeHandle,
     post_exposure:   NodeHandle,
+    post_exp_comp:   NodeHandle,
+    post_auto_exp_toggle: NodeHandle,
+    post_auto_exp_label:  NodeHandle,
+    post_tonemap_button:  NodeHandle,
+    post_tonemap_label:   NodeHandle,
     post_vig_toggle: NodeHandle,
     post_vig_str:    NodeHandle,
     post_ca_toggle:  NodeHandle,
@@ -584,6 +589,7 @@ impl UiManager {
             (h.light_col_g,     IF::LightColorG),
             (h.light_col_b,     IF::LightColorB),
             (h.post_exposure,   IF::PostExposure),
+            (h.post_exp_comp,   IF::PostExposureCompensation),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -622,6 +628,16 @@ impl UiManager {
                 // Post FX toggles (Phase 15A1)
                 if msg.destination == self.inspector_handles.post_vig_toggle {
                     self.editor_events.push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                    continue;
+                }
+                // Phase 24A/24B exposure controls.
+                if msg.destination == self.inspector_handles.post_auto_exp_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_tonemap_button {
+                    self.editor_events.push_back(EditorEvent::CycleTonemapper);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_toggle {
@@ -1320,7 +1336,15 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_section = ui.add_node(post_panel, parent);
 
     sec_label(ui, "Post FX", font_id, post_section);
-    let post_exposure = make_row_step(ui, "Exp", 34.0, font_id, post_section, 0.01);
+    // Phase 24A/24B exposure controls. "EV" is the manual exposure value;
+    // "EC" is compensation in stops, which is what you reach for when the meter
+    // is right but the shot wants to be a stop darker.
+    let (post_auto_exp_toggle, post_auto_exp_label) =
+        make_toggle(ui, "Auto Exposure", font_id, post_section);
+    let post_exposure = make_row_step(ui, "EV", 34.0, font_id, post_section, 0.05);
+    let post_exp_comp = make_row_step(ui, "EC", 34.0, font_id, post_section, 0.05);
+    let (post_tonemap_button, post_tonemap_label) =
+        make_toggle(ui, "Tonemap: AgX", font_id, post_section);
     // Indirect-light strength. Low values give contrasty shadows, high values a
     // flatter, brighter scene — see `PostProcessComponent::ibl_intensity`.
     let post_ibl      = make_row_step(ui, "IBL", 34.0, font_id, post_section, 0.005);
@@ -1403,7 +1427,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         foliage_kind_button, foliage_kind_label,
         foliage_density,
         foliage_seed, foliage_slope, foliage_layer, foliage_smin, foliage_smax,
-        post_section, post_exposure, post_ibl, post_vig_toggle, post_vig_str,
+        post_section, post_exposure, post_exp_comp, post_auto_exp_toggle,
+        post_auto_exp_label, post_tonemap_button, post_tonemap_label,
+        post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
         post_fxaa_toggle, post_fxaa_label,
     }

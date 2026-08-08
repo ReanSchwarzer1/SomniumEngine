@@ -30,6 +30,10 @@ struct ExposureParams {
     exposure_compensation: f32,
     min_ev100: f32,
     max_ev100: f32,
+    highlight_start_nits: f32,
+    highlight_end_nits: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 /// Histogram build + resolve, plus the two-float exposure result buffer.
@@ -192,6 +196,12 @@ impl AutoExposurePass {
                 exposure_compensation,
                 min_ev100: -8.0,
                 max_ev100: 18.0,
+                // Above roughly a sunlit white surface, samples start losing
+                // their vote — a glint should not decide the exposure.
+                highlight_start_nits: 8_000.0,
+                highlight_end_nits: 40_000.0,
+                _pad0: 0.0,
+                _pad1: 0.0,
             }),
         );
 

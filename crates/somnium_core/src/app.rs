@@ -1290,6 +1290,7 @@ impl<G: GameApp> Engine<G> {
             // eye adjusts at a rate that depends on frame rate.
             r.frame_delta_time = self.time.delta_time().as_secs_f32();
             r.tonemapper = pp.tonemapper.as_index();
+            r.exposure_compensation = pp.exposure_compensation;
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             r.fxaa_enabled = pp.fxaa_enabled;
@@ -1901,6 +1902,7 @@ impl<G: GameApp> Engine<G> {
                     if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                         match field {
                             IF::PostExposure => pp.ev100 = value,
+                            IF::PostExposureCompensation => pp.exposure_compensation = value,
                             IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
                             IF::PostCaStrength => pp.ca_strength = value.max(0.0),
                             IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
@@ -2233,6 +2235,13 @@ impl<G: GameApp> Engine<G> {
                 info!("Foliage brush: {name}");
             }
 
+            EditorEvent::CycleTonemapper => {
+                let Some(entity) = self.selected_entity else { return };
+                if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
+                    pp.tonemapper = pp.tonemapper.next();
+                    info!("Tonemapper: {}", pp.tonemapper.label());
+                }
+            }
             EditorEvent::TogglePostFx(which) => {
                 use somnium_ui::PostFxToggle;
                 let Some(entity) = self.selected_entity else { return };
@@ -2249,6 +2258,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::Fxaa => {
                             pp.fxaa_enabled = !pp.fxaa_enabled;
                             pp.fxaa_enabled
+                        }
+                        PostFxToggle::AutoExposure => {
+                            pp.auto_exposure = !pp.auto_exposure;
+                            pp.auto_exposure
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

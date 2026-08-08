@@ -50,7 +50,12 @@ pub enum InspectorField {
     LightColorB,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
+    /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
+    /// exposure is off.
     PostExposure,
+    /// Stops added on top of the metered exposure. Negative darkens — this is
+    /// the control for "auto-exposure is right but I want it a stop down".
+    PostExposureCompensation,
     PostVignetteStrength,
     PostCaStrength,
     /// Scene-wide indirect-light strength (Phase 22C).
@@ -78,6 +83,8 @@ pub enum PostFxToggle {
     Vignette,
     ChromaticAberration,
     Fxaa,
+    /// Meter the scene each frame instead of using a fixed EV100.
+    AutoExposure,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -113,6 +120,8 @@ pub enum EditorEvent {
     SelectFoliageKind(u8),
     /// Flip a post-processing effect on the selected Post Processing entity.
     TogglePostFx(PostFxToggle),
+    /// Cycle the tone-mapping curve (AgX → ACES → Reinhard).
+    CycleTonemapper,
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
     /// (the engine maps it exponentially to a world speed).
     SetCameraSpeed(f32),
