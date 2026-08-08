@@ -208,7 +208,7 @@ impl RestirPass {
             // off — see `clear_if_inactive`.
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         self.vis_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -297,8 +297,26 @@ impl RestirPass {
         if self.active() || !self.vis_dirty {
             return;
         }
-        if let Some(tex) = self.vis_tex.as_ref() {
-            encoder.clear_texture(tex, &wgpu::ImageSubresourceRange::default());
+        if let Some(view) = self.vis_view.as_ref() {
+            // A load-op clear, not `clear_texture`: that needs the optional
+            // CLEAR_TEXTURE feature, which this device never requests, so it
+            // panicked the instant the toggle was switched off.
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ReSTIR visibility clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             self.vis_dirty = false;
             // History indexes a different lighting state now; keeping it would
             // reintroduce the stale result the moment the pass came back.

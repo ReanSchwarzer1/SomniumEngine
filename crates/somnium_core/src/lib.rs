@@ -608,12 +608,15 @@ impl Default for PostProcessComponent {
             // toggle agree. The component is the single source of truth and is
             // copied into the pass every frame, so a pass-side default would be
             // overwritten before it ever took effect.
-            // On by default, as requested. Safe to do now that the two bugs
-            // that made it destructive are fixed: it no longer leaves a stale
-            // all-lit visibility pinned over the shadow map when switched off,
-            // and occluded samples are no longer resurrected by temporal reuse.
-            // SOMNIUM_RESTIR=0 forces it off.
-            restir_enabled: std::env::var("SOMNIUM_RESTIR").as_deref() != Ok("0"),
+            // Off by default, reversing the previous commit. Shading prefers
+            // the traced result over the shadow map for everything in the
+            // visibility buffer, and the traced result is still coming back
+            // lit — so switching it on removes shadows from every mesh and
+            // primitive, while terrain and water (which shade in their own
+            // passes and never read restir_vis) keep theirs. That asymmetry is
+            // exactly the reported symptom. It goes back on when 24K actually
+            // produces a correct shadow. SOMNIUM_RESTIR=1 to experiment.
+            restir_enabled: std::env::var("SOMNIUM_RESTIR").as_deref() == Ok("1"),
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,

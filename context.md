@@ -1302,6 +1302,23 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ## 18. Known Issues & Active Bugs
 
+**Visibility-buffer geometry does not receive shadows (open, highest priority).**
+Casting is fine — the helmet and a cube both appear in the shadow atlas, and
+both cast correctly onto terrain and onto water. Receiving is broken, and only
+in `shading.wgsl`: primitives and meshes drawn through the visibility buffer
+show no shadow at all, while terrain and water do. The asymmetry points
+straight at the difference between them — `terrain.wgsl` and `water.wgsl` use a
+plain 3x3 PCF, `shading.wgsl` uses the PCSS path added in 24H. Ruled out by
+measurement: the shadow atlas (casters land in it), the cascade matrices
+(shared with terrain), and the normal-offset bias magnitude (softened, no
+change). **Next step: instrument `blocker_search` — output `blocker_count` and
+the raw `textureLoad` depth to screen.** Reading it has now failed three times;
+measuring found every previous shadow bug on the first try.
+
+**Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
+Not yet investigated.
+
+
 **24K cannot be visually verified until Phase 25A/25B.** The pass dispatches and
 shading consumes it, but no surface in the demo view can show the result: the only
 visibility-buffer geometry is the helmet, and the ground filling the frame is the

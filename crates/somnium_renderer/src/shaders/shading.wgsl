@@ -355,11 +355,13 @@ fn sample_shadow_cascade(
     let cascade_extent = 2.0 / max(length(light.view_proj[cascade][0].xyz), 1e-6);
     let cascade_res = light.shadow_map_size * 0.5;   // 2x2 quadrants in the atlas
     let texel_world = cascade_extent / cascade_res;
-    // sqrt(2) covers the diagonal, and the grazing-angle term is where acne
-    // actually lives: at normal incidence almost no offset is needed.
-    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
-    let slope = clamp(1.0 - n_dot_l, 0.15, 1.0);
-    let offset_pos = world_pos + normal * texel_world * 1.41421 * (1.0 + 2.0 * slope);
+    // Kept deliberately small. An earlier attempt scaled this by sqrt(2) and a
+    // grazing-angle term up to 3x, which on the wider cascades pushed the
+    // sample far enough off the surface to leave the shadow altogether — the
+    // shadow factor went nearly uniform and casters stopped darkening anything
+    // at all. Over-biasing removes shadows just as thoroughly as under-biasing
+    // fills them with acne, and it is the harder of the two to recognise.
+    let offset_pos = world_pos + normal * texel_world * 1.5;
 
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
