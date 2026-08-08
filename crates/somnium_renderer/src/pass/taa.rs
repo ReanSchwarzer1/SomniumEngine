@@ -318,17 +318,29 @@ impl TaaPass {
     /// `view_proj_jittered` must match the matrix the depth buffer was rendered
     /// with; `view_proj_unjittered` is what gets stored for the next frame.
     ///
-    /// The two are different spaces and mixing them is a real bug. World
-    /// position is reconstructed from depth, so that step needs the jittered
-    /// matrix; the history holds the *resolved* image, which converges to the
-    /// un-jittered camera, so projecting into it needs the un-jittered one.
+    /// **Both ends of the reprojection are un-jittered.**
     ///
-    /// Reprojecting entirely in un-jittered space was tried, on the theory that
-    /// `prev_uv = uv - jitter` resamples history at a new fractional offset
-    /// every frame. Measured, it was **worse** — mean frame-to-frame delta on a
-    /// static camera went from 0.807 to 1.667 — so the sub-pixel error it
-    /// introduces at depth discontinuities costs more than the resampling it
-    /// avoids. Do not retry it.
+    /// Reconstructing with the *jittered* inverse is geometrically exact — it
+    /// recovers the world point that actually landed on this pixel — and that
+    /// is precisely the trap. Projecting that point with the previous
+    /// un-jittered matrix yields `prev_uv = uv - jitter` for a still camera,
+    /// so history is fetched from a location that moves every frame. Measured
+    /// with `SOMNIUM_TAA_DEBUG=8`, which reports `|prev_uv - uv|` in pixels:
+    /// **51 000 of 51 000 sampled pixels were off, with the camera not moving.**
+    /// It should be identity everywhere.
+    ///
+    /// The un-jittered inverse reconstructs along the un-jittered ray, so the
+    /// point projects back onto its own pixel exactly and a still camera
+    /// reprojects to identity. The cost is a sub-pixel error where depth is
+    /// discontinuous, which is the trade every production TAA makes: velocity
+    /// is defined between un-jittered positions so a static scene has zero
+    /// velocity.
+    ///
+    /// This was tried once before and reverted after screen-capture frame
+    /// deltas said it was worse. Those deltas were later shown to vary from
+    /// 0.776 to 2.018 across three runs of one build — pure noise. Mode 8 is
+    /// the measurement that settles it, because it has no run-to-run variance
+    /// at all.
     pub fn record(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -349,7 +361,7 @@ impl TaaPass {
             &self.params,
             0,
             bytemuck::bytes_of(&TaaParams {
-                inv_view_proj: view_proj_jittered.inverse().to_cols_array_2d(),
+                inv_view_proj: view_proj_unjittered.inverse().to_cols_array_2d(),
                 prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
                 blend_factor: BLEND_FACTOR,

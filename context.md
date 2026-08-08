@@ -1347,24 +1347,27 @@ Two dead ends recorded so they are not retried: a floor on the variance clip box
 current 250.9 either way), and the `tonemap_for_blend` round trip (its inverse
 is exact, and the Catmull-Rom weights sum to 1, so neither loses energy).
 
-**Meshes still vibrate with TAA on (open).** Shadows are fixed; the geometry
-itself still shimmers, and stops when TAA is switched off.
+**Meshes vibrate with TAA on (partly fixed, still open).**
 
-The mechanism to look for is the same as the cascade bug: something other than
-sampling that the jitter reaches. GPU culling was one — `cull_pass.update` took
-the jittered `view_proj`, so the frustum planes and the Hi-Z occlusion test moved
-every frame and any cluster on the threshold was culled on some frames and drawn
-on others. Now fitted from `view_proj_unjittered`. **Unverified**: whether that
-is what the user sees.
+`SOMNIUM_TAA_DEBUG=8` reports `|prev_uv - uv|` in pixels. With a still camera
+this must be zero everywhere, and it is the first metric here with no run-to-run
+variance — unlike screen-capture frame deltas, which measured 0.776 to 2.018
+across three runs of one identical build and invalidated every comparison drawn
+from them.
 
-Two changes were tried and reverted after measuring worse, but the measurement
-was later found to be noise, so neither is actually ruled out: reprojecting TAA
-entirely in un-jittered space, and a floor on the variance clip box.
+Reconstructing world position with the *jittered* inverse is geometrically exact
+but yields `prev_uv = uv - jitter` for a still camera, so history is fetched
+from a location that moves every frame. Measured: **51 000 of 51 000 pixels
+off**. Switching to the un-jittered inverse (both ends of the reprojection then
+live in the same space, which is what production TAA does) took that to
+**22 443 exact**.
 
-**A usable metric is the blocker here.** Screen-capture frame deltas are useless
-— 0.776 to 2.018 across three runs of the same build. Anything conclusive needs
-an in-engine measurement: accumulate per-pixel variance over N frames on the GPU
-with a fixed camera, and read back one number.
+**Still open:** the residual is on geometry, not sky — 21 345 of 22 200 ground
+pixels remain off, while the sky is now mostly exact. Mathematically,
+unproject-then-project with the same un-jittered matrix should be identity for
+*any* depth, so a systematic ground-only residual means something else is
+differing between the two matrices or the reconstruction. That is where to pick
+this up, and mode 8 makes it a one-run check.
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.
