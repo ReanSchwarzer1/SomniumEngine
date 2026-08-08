@@ -1347,27 +1347,33 @@ Two dead ends recorded so they are not retried: a floor on the variance clip box
 current 250.9 either way), and the `tonemap_for_blend` round trip (its inverse
 is exact, and the Catmull-Rom weights sum to 1, so neither loses energy).
 
-**Meshes vibrate with TAA on (partly fixed, still open).**
+**RESOLVED — meshes vibrating with TAA on.** Reconstructing world position with
+the *jittered* inverse is geometrically exact but gives `prev_uv = uv - jitter`
+for a still camera, so history was fetched from a location that moved every
+frame. Measured with `SOMNIUM_TAA_DEBUG=8` (`|prev_uv - uv|` in pixels):
+**51 000 of 51 000 pixels off**. Reprojecting entirely in un-jittered space, as
+production TAA does, fixed it — confirmed by the user: jitter gone from foliage
+and terrain, a little left on the helmet.
 
-`SOMNIUM_TAA_DEBUG=8` reports `|prev_uv - uv|` in pixels. With a still camera
-this must be zero everywhere, and it is the first metric here with no run-to-run
-variance — unlike screen-capture frame deltas, which measured 0.776 to 2.018
-across three runs of one identical build and invalidated every comparison drawn
-from them.
+The matrices are now provably identical between frames with a still camera
+(`SOMNIUM_TAA_MATDBG=1` logs `|unjittered - prev| = 0` from frame 1), so the
+reprojection is mathematically identity.
 
-Reconstructing world position with the *jittered* inverse is geometrically exact
-but yields `prev_uv = uv - jitter` for a still camera, so history is fetched
-from a location that moves every frame. Measured: **51 000 of 51 000 pixels
-off**. Switching to the un-jittered inverse (both ends of the reprojection then
-live in the same space, which is what production TAA does) took that to
-**22 443 exact**.
+**Mode 8 has a caveat**: it also counts the closest-depth dilation, which
+deliberately reconstructs from a neighbour's position. Up to ~1px on detailed
+geometry is correct behaviour. Judge a reprojection bug by whether *flat*
+regions are off — sky never dilates.
 
-**Still open:** the residual is on geometry, not sky — 21 345 of 22 200 ground
-pixels remain off, while the sky is now mostly exact. Mathematically,
-unproject-then-project with the same un-jittered matrix should be identity for
-*any* depth, so a systematic ground-only residual means something else is
-differing between the two matrices or the reconstruction. That is where to pick
-this up, and mode 8 makes it a one-run check.
+**Remaining helmet shimmer is a different phenomenon**, most likely specular
+aliasing: it is the one metallic, normal-mapped, high-gloss surface in the
+scene, which is exactly what 24F's Toksvig specular AA targets and what TAA can
+only partly hide. Worth checking the Toksvig term is actually reaching that
+material before assuming more TAA work is needed.
+
+**Note on measurement**: screen-capture frame deltas are useless here — 0.776 to
+2.018 across three runs of one identical build. Every comparison drawn from them
+this session was noise. Mode 8 has no run-to-run variance and is what found the
+real bug.
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.

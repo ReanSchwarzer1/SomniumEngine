@@ -355,6 +355,15 @@ impl TaaPass {
             self.history_valid = false;
             return None;
         }
+        if std::env::var("SOMNIUM_TAA_MATDBG").is_ok() && self.frame_index < 4 {
+            let d: f32 = view_proj_unjittered
+                .to_cols_array()
+                .iter()
+                .zip(self.prev_view_proj.to_cols_array().iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum();
+            tracing::info!("taa frame {}: |unjittered - prev| = {:e}", self.frame_index, d);
+        }
         let bind_groups = self.bind_groups.as_ref()?;
 
         queue.write_buffer(

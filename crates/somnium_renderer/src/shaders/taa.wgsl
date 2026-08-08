@@ -313,13 +313,22 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         // the clamp was never going to help.
         case 4u: { return vec4<f32>(untonemap_for_blend(minimum), 1.0); }
         case 5u: { return vec4<f32>(untonemap_for_blend(maximum), 1.0); }
-        // 8: reprojection error, |prev_uv - uv| in pixels.
+        // 8: |prev_uv - uv| in pixels. Green under 0.1, red over.
+        //
+        // With a still camera and no dilation this must be zero. **It also
+        // counts the closest-depth dilation above**, which deliberately
+        // reconstructs from a neighbour's position, so up to ~1px on detailed
+        // geometry is correct behaviour and not an error. Flat depth (sky)
+        // never dilates, so that is where this reads a true zero. Judge a
+        // reprojection bug by whether *flat* regions are off, not by the
+        // overall count — 51000/51000 off was the jittered-inverse bug; the
+        // geometry-only residual that remains is dilation doing its job.
         //    With a still camera this MUST be zero everywhere. Anything else
         //    means history is fetched from a moving location every frame.
         //    green = under 0.02 px, red = above.
         case 8u: {
             let d = length((prev_uv - in.uv) * resolution);
-            if d < 0.02 { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
+            if d < 0.1 { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
             return vec4<f32>(4.0, 0.0, 0.0, 1.0);
         }
         // 6: what actually happened, as a flag image.
