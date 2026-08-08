@@ -66,8 +66,14 @@ pub struct GpuLocalLight {
     pub spot_cos_outer: f32,
     /// `cos(inner cone angle)` for spot lights.
     pub spot_cos_inner: f32,
+    /// Radius of the emitting surface, metres (Phase 24V).
+    ///
+    /// Real fixtures are not points. A bulb is a few centimetres across, and
+    /// that size is what gives its highlight area and its shadow a penumbra.
+    /// Rides in what was padding, so the struct stays 64 bytes.
+    pub radius: f32,
     /// Padding to 64 bytes.
-    pub _pad: [f32; 3],
+    pub _pad: [f32; 2],
 }
 
 /// Cluster grid parameters uploaded as a uniform / storage buffer.
@@ -474,7 +480,8 @@ mod tests {
             direction_ws: [0.0, -1.0, 0.0],
             spot_cos_outer: 0.7,
             spot_cos_inner: 0.9,
-            _pad: [0.0; 3],
+            radius: 0.0,
+            _pad: [0.0; 2],
         }
     }
 

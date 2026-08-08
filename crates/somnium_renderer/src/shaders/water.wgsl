@@ -358,13 +358,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // base-colour texture modulates it by luminance, so the artwork still adds
     // detail without fighting the water's hue.
     let detail  = 0.75 + 0.5 * dot(base_color, vec3<f32>(0.3333));
+    // 1/PI is the Lambert normalisation; the sky term is radiance from the
+    // cubemap, and irradiance over a hemisphere is PI times that, so the two
+    // cancel. The previous 0.25 and 0.5 were hand-tuned against a sun that no
+    // longer exists.
     let scatter = material.deep_color.rgb * detail
-        * (light.color * ndotl * shadow * 0.25 + sky_irradiance * 0.5);
+        * (light.color * ndotl * shadow / PI + sky_irradiance);
 
     var transmitted = mix(scatter, refracted * material.shallow_color.rgb, absorption);
 
     // Shoreline foam where the water meets geometry.
-    let foam = material.edge_color.rgb * (light.color * shadow * 0.25 + sky_irradiance * 0.5);
+    let foam = material.edge_color.rgb
+        * (light.color * shadow / PI + sky_irradiance);
     transmitted = mix(foam, transmitted, smoothstep(0.0, max(material.edge_scale, 1e-3), raw_depth_diff));
 
     // -- Reflected: sky and sun off the surface --------------------------------
@@ -372,9 +377,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let a  = roughness * roughness;
     let a2 = a * a;
 
+    // Phase 24W: the sun is a disc, not a point. On a near-mirror surface a
+    // point source drives GGX toward a singularity — an unbounded spike on a
+    // few pixels, which is what made sunlit water blow out. Widening the lobe
+    // by the sun's angular radius spreads that spike over the area the source
+    // actually covers, turning it into a glitter path rather than a hole in the
+    // image, and the energy term keeps the total reflected light unchanged.
+    let a_sun   = clamp(a + light.sun_angular_radius * 0.5, a, 1.0);
+    let a2_sun  = a_sun * a_sun;
+    let sun_energy = a2 / max(a2_sun, 1e-8);
+
     // GGX normal distribution.
-    let d_denom  = ndoth * ndoth * (a2 - 1.0) + 1.0;
-    let dist_ggx = a2 / (PI * d_denom * d_denom);
+    let d_denom  = ndoth * ndoth * (a2_sun - 1.0) + 1.0;
+    let dist_ggx = a2_sun / (PI * d_denom * d_denom);
 
     // Smith geometry term. This was missing, so the specular had no shadowing or
     // masking and the trailing `* 2.0` was compensating for it.
@@ -395,13 +410,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let env = textureSampleLevel(env_cube, env_sampler, r, roughness * ENV_MAX_MIP).rgb
         * light.ibl_intensity;
 
-    // Sun glint. Clamped because a near-mirror surface produces enormous values
-    // on a handful of pixels, which read as fireflies once bloom gets hold of them.
-    let sun_spec = min(
-        (dist_ggx * geom * f_spec) / max(4.0 * ndotv * ndotl, 1e-4) * light.color * ndotl * shadow,
-        vec3<f32>(40.0),
-    );
+    // Sun glint. The old clamp at 40 was written when the sun was an arbitrary
+    // multiplier of about 5; against a sky that now measures thousands of cd/m²
+    // it crushed the glint to nothing. The disc widening above bounds the peak
+    // on physical grounds instead of by an arbitrary ceiling.
+    let sun_spec = (dist_ggx * geom * f_spec)
+        / max(4.0 * ndotv * ndotl, 1e-4)
+        * light.color * ndotl * shadow * sun_energy;
 
     let final_color = mix(transmitted, env, f_env) + sun_spec;
-    return vec4<f32>(final_color, 1.0);
+
+    // Keep the result inside Rgba16Float's finite range. Water is the most
+    // mirror-like surface in the scene, so it is the most likely to overshoot,
+    // and an Inf here would propagate into TAA's blend as NaN.
+    return vec4<f32>(min(final_color, vec3<f32>(60000.0)), 1.0);
 }

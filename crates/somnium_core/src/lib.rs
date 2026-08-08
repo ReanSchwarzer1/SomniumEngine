@@ -193,6 +193,12 @@ pub struct LightComponent {
     /// [`light_units::kelvin`]. Zero keeps whatever `color` holds, so lights
     /// authored before this existed still behave.
     pub color_temperature_k: f32,
+    /// Radius of the emitting surface in metres (Phase 24V).
+    ///
+    /// Distinct from `range`, which is how far the light reaches. This is how
+    /// big the source itself is, and it governs highlight size and shadow
+    /// softness. A bare bulb is roughly 0.03, a softbox 0.5.
+    pub source_radius: f32,
     /// Attenuation radius for point/spot lights. Ignored for directional.
     pub range: f32,
     /// Spot inner cone half-angle (radians). Fully-lit region.
@@ -235,6 +241,7 @@ impl LightComponent {
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
+            source_radius: 0.03,
             range: 0.0,
             inner_angle: 0.0,
             outer_angle: 0.0,
@@ -248,6 +255,7 @@ impl LightComponent {
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
+            source_radius: 0.03,
             range,
             inner_angle: 0.0,
             outer_angle: 0.0,
@@ -261,6 +269,7 @@ impl LightComponent {
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
+            source_radius: 0.03,
             range,
             inner_angle,
             outer_angle,

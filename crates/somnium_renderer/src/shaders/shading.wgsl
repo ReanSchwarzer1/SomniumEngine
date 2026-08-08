@@ -68,7 +68,7 @@ struct GpuLocalLight {
     direction_ws: vec3<f32>,
     spot_cos_outer: f32,
     spot_cos_inner: f32,
-    _pad0: f32,
+    radius: f32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -805,7 +805,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     atten_val *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, cos_angle);
                 }
 
-                local_light_contrib += evaluate_brdf(surface, L) * ll.color * atten_val;
+                // Phase 24V: the light's angular radius as seen from here.
+                // A 5 cm bulb one metre away subtends far more than a point,
+                // and that is what stops its highlight being a single pixel on
+                // anything polished.
+                let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
+                local_light_contrib +=
+                    evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
             }
         }
 

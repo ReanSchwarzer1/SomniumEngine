@@ -839,7 +839,8 @@ impl GameApp for HelloGame {
                                     direction_ws: forward.to_array(),
                                     spot_cos_outer: light.outer_angle.cos(),
                                     spot_cos_inner: light.inner_angle.cos(),
-                                    _pad: [0.0; 3],
+                                    radius: light.source_radius,
+                                    _pad: [0.0; 2],
                                 });
                             }
                         }
