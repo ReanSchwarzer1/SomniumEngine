@@ -35,7 +35,11 @@ struct TaaParams {
     /// choice every frame. `SOMNIUM_TAA_DILATE_EPS=0` restores the old
     /// behaviour for A/B comparison.
     dilation_epsilon: f32,
-    _pad: [u32; 3],
+    // 152 bytes of fields; WGSL rounds the struct up to its 16-byte alignment
+    // (from the mat4x4s), so this must reach 176 rather than the 164 that
+    // `[u32; 3]` gave — wgpu rejected the bind group outright, which is the
+    // good outcome for a mismatch this easy to introduce.
+    _pad: [u32; 6],
 }
 
 pub struct TaaPass {
@@ -390,7 +394,7 @@ impl TaaPass {
                 blend_factor: BLEND_FACTOR,
                 history_valid: f32::from(u8::from(self.history_valid)),
                 debug_mode: self.debug_mode,
-                _pad: [0; 3],
+                _pad: [0; 6],
             }),
         );
 
