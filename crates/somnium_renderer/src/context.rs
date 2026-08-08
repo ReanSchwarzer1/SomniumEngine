@@ -47,6 +47,18 @@ pub struct RenderContext {
 /// the renderer falls back to the per-draw CPU loop instead.
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 
+/// Feature needed to build and trace acceleration structures (Phase 24J).
+///
+/// In wgpu 29 `EXPERIMENTAL_RAY_QUERY` covers both building acceleration
+/// structures and querying them; there is no separate flag for the former.
+///
+/// The gap to hardware ray tracing is genuinely just ray query: the binding
+/// arrays and non-uniform indexing that Bevy's Solari also requires are already
+/// mandatory here for the bindless resource pool. Still experimental in wgpu
+/// and effectively Vulkan-only, so it is detected rather than required — a GPU
+/// without it must still start.
+pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
     ///
@@ -115,6 +127,19 @@ impl RenderContext {
             required_features
         };
 
+        // Phase 24J: same pattern — detect, do not demand.
+        let ray_tracing = available_features.contains(RAY_TRACING_FEATURES);
+        if ray_tracing {
+            info!("Hardware ray tracing available (acceleration structures + ray query)");
+        } else {
+            info!("Hardware ray tracing unavailable — the GI path will need the software fallback");
+        }
+        let required_features = if ray_tracing {
+            required_features | RAY_TRACING_FEATURES
+        } else {
+            required_features
+        };
+
         let mut limits = wgpu::Limits::default();
         limits.max_binding_array_elements_per_shader_stage = 1024;
         limits.max_storage_buffers_per_shader_stage = 16;
@@ -127,6 +152,20 @@ impl RenderContext {
         limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
         limits.max_buffer_size = adapter_limits.max_buffer_size;
 
+        // Phase 24J: acceleration-structure limits default to zero, so a TLAS
+        // of any size is rejected until they are asked for explicitly. Only
+        // requested when ray tracing was detected — a device that cannot ray
+        // trace reports zero for these, and asking for more than the adapter
+        // allows fails device creation outright.
+        if ray_tracing {
+            limits.max_blas_primitive_count = adapter_limits.max_blas_primitive_count;
+            limits.max_blas_geometry_count = adapter_limits.max_blas_geometry_count;
+            limits.max_tlas_instance_count = adapter_limits.max_tlas_instance_count;
+            // Binding one is also a limit, and also defaults to zero.
+            limits.max_acceleration_structures_per_shader_stage =
+                adapter_limits.max_acceleration_structures_per_shader_stage;
+        }
+
         // Request the device and queue.
         let (device, queue) = adapter
             .request_device(
@@ -134,6 +173,24 @@ impl RenderContext {
                     label: Some("somnium_device"),
                     required_features,
                     required_limits: limits,
+                    // Ray query is gated behind an explicit acknowledgement
+                    // token, not just a feature bit. wgpu is asking the caller
+                    // to accept that its experimental APIs may contain
+                    // soundness bugs reachable from otherwise-safe code — the
+                    // token is `unsafe` precisely so that acceptance is
+                    // deliberate rather than incidental.
+                    //
+                    // Taken only when ray tracing was actually detected, so a
+                    // machine that cannot ray trace never opts into the risk.
+                    //
+                    // SAFETY: no safety obligation can be discharged here; this
+                    // is an acknowledgement, and it is scoped as narrowly as
+                    // the API allows.
+                    experimental_features: if ray_tracing {
+                        unsafe { wgpu::ExperimentalFeatures::enabled() }
+                    } else {
+                        wgpu::ExperimentalFeatures::disabled()
+                    },
                     ..Default::default()
                 },
             )

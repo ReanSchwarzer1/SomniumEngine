@@ -90,14 +90,23 @@ impl GeometryPool {
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Vertex Buffer"),
             size: vertex_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+            // Phase 24J: BLAS_INPUT lets the acceleration-structure build read
+            // positions straight out of the shared pool, so ray tracing needs
+            // no second copy of the geometry.
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::BLAS_INPUT,
             mapped_at_creation: false,
         });
 
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Index Buffer"),
             size: index_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::INDEX
+                | wgpu::BufferUsages::BLAS_INPUT,
             mapped_at_creation: false,
         });
 

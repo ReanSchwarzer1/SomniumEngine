@@ -263,7 +263,11 @@ impl PostProcessPass {
                 // copies the result back here, so every later pass keeps
                 // reading one well-known target instead of a view that
                 // alternates between two ping-pong textures each frame.
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                // Phase 24J: the ray-traced shadow debug view writes straight
+                // into the HDR target, so the existing post chain displays it
+                // without a separate blit.
+                | wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

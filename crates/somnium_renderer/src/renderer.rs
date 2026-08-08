@@ -120,6 +120,10 @@ pub struct SomniumRenderer {
     pub gtao_pass: crate::pass::gtao::GtaoPass,
     pub bloom_pass: crate::pass::bloom::BloomPass,
     pub dof_pass: crate::pass::dof::DofPass,
+    pub raytrace_pass: crate::pass::raytrace::RaytracePass,
+    rt_debug_pass: crate::pass::raytrace::RtDebugPass,
+    /// Geometry registered for tracing: (vertex_offset, vertex_count, index_offset, index_count).
+    rt_geometry: Vec<(u32, u32, u32, u32)>,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -294,6 +298,17 @@ impl SomniumRenderer {
         let mut auto_exposure_pass =
             crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
 
+        // Phase 24J: acceleration structures. Constructed even when the device
+        // lacks ray query — the pass then does nothing, which keeps the call
+        // sites free of feature checks.
+        let raytrace_pass = crate::pass::raytrace::RaytracePass::new(
+            &ctx.device,
+            ctx.features.contains(crate::context::RAY_TRACING_FEATURES),
+        );
+
+        let rt_debug_pass =
+            crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
+
         // Phase 24Z: depth of field, driven by the same aperture as exposure.
         let dof_pass = crate::pass::dof::DofPass::new(
             &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
@@ -448,6 +463,9 @@ impl SomniumRenderer {
             gtao_pass,
             bloom_pass,
             dof_pass,
+            raytrace_pass,
+            rt_debug_pass,
+            rt_geometry: Vec::new(),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -631,7 +649,28 @@ impl SomniumRenderer {
 
         // 3. Meshes ----------------------------------------------------------
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene.meshes.iter()
-            .map(|mesh| self.geometry.upload_mesh(&ctx.queue, &mesh.vertices, &mesh.indices, 0))
+            .map(|mesh| {
+                let alloc = self.geometry.upload_mesh(
+                    &ctx.queue, &mesh.vertices, &mesh.indices, 0,
+                );
+                // Phase 24J: a BLAS describes geometry in object space, so it
+                // is built once here and then referenced by however many
+                // instances place it in the world.
+                self.raytrace_pass.register_mesh(
+                    &ctx.device,
+                    alloc.vertex_offset,
+                    mesh.vertices.len() as u32,
+                    alloc.index_offset,
+                    alloc.index_count,
+                );
+                self.rt_geometry.push((
+                    alloc.vertex_offset,
+                    mesh.vertices.len() as u32,
+                    alloc.index_offset,
+                    alloc.index_count,
+                ));
+                alloc
+            })
             .collect();
 
         // 4. Build UploadedNode list ----------------------------------------
@@ -980,6 +1019,7 @@ impl SomniumRenderer {
             self.gtao_pass.resize(&ctx.device, width, height);
             self.bloom_pass.resize(&ctx.device, width, height);
             self.dof_pass.resize(&ctx.device, width, height);
+            self.rt_debug_pass.invalidate();
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1362,6 +1402,28 @@ impl SomniumRenderer {
         // which would read as "everything is occluded" on the first frame.
         self.hiz_ready = true;
 
+        // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
+        // Rebuilt each frame from the same draw queue the raster path uses, so
+        // the traced scene and the drawn one cannot drift apart.
+        if self.raytrace_pass.supported() {
+            let instances: Vec<(u32, glam::Mat4)> = self
+                .draw_queue
+                .iter()
+                .map(|cmd| (cmd.vertex_offset, cmd.transform))
+                .collect();
+            let geometry = std::mem::take(&mut self.rt_geometry);
+            self.raytrace_pass.build(
+                &ctx.device,
+                &mut encoder,
+                &self.geometry.vertex_buffer,
+                &self.geometry.index_buffer,
+                &geometry,
+                &instances,
+            );
+            self.rt_geometry = geometry;
+
+        }
+
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
@@ -1477,6 +1539,28 @@ impl SomniumRenderer {
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.grid_enabled {
             self.grid_pass.record(&mut encoder, &self.postprocess_pass.hdr_view);
+        }
+
+        // ── 7.75 Ray-traced shadow debug (Phase 24J) ─────────────────────────
+        // After shading, not before it. The shading pass clears the HDR target,
+        // so a debug view written earlier is simply overwritten — which is
+        // exactly what happened on the first attempt, and looks identical to
+        // the acceleration structures silently not working.
+        if self.raytrace_pass.supported() {
+            if let Some(tlas) = self.raytrace_pass.tlas() {
+                self.rt_debug_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    tlas,
+                    &self.vis_pass.depth_view,
+                    &self.postprocess_pass.hdr_view,
+                    self.view_proj,
+                    self.light_direction,
+                    ctx.config.width,
+                    ctx.config.height,
+                );
+            }
         }
 
         // ── 7.8 TAA resolve (Phase 24F) ──────────────────────────────────────
