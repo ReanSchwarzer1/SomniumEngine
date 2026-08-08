@@ -692,7 +692,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
         tangent = normalize(cross(up, geo_normal));
     }
-    let bitangent = cross(geo_normal, tangent);
+    // Handedness, from the sign of the UV determinant.
+    //
+    // A mirrored UV island has a negative determinant, and mirroring is
+    // routine on bark and other trunk-like meshes because it halves the
+    // texture needed for a symmetric surface. Without this sign the bitangent
+    // points the wrong way there, which inverts the normal map's green channel
+    // and tilts the shading normal away from the light. It shows as hard-edged
+    // patches that follow UV seams rather than anything in the geometry —
+    // dark navy where the wrongly-tilted normal picks up sky instead of sun.
+    let handedness = select(-1.0, 1.0, tbn_det >= 0.0);
+    let bitangent = cross(geo_normal, tangent) * handedness;
     let tbn       = mat3x3<f32>(tangent, bitangent, geo_normal);
 
     // PBR surface setup
