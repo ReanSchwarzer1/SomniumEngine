@@ -825,5 +825,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         result = mix(result, tints[cascade], 0.5);
     }
 
-    return vec4<f32>(result, 1.0);
+    // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a
+    // near-mirror surface under a 100 000 lux sun overshoots it, and the
+    // resulting Inf poisons anything downstream that divides — TAA's tone-map
+    // step turns it into NaN. Prevented here as well as guarded there.
+    return vec4<f32>(min(result, vec3<f32>(60000.0)), 1.0);
 }

@@ -46,6 +46,29 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VOut {
     return VOut(vec4<f32>(p, 0.0, 1.0), vec2<f32>((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5));
 }
 
+/// Largest value allowed into the blend.
+///
+/// The HDR target is Rgba16Float, whose finite range ends at 65 504.
+const HDR_CEILING: f32 = 60000.0;
+
+/// Strip non-finite values before they reach the blend.
+///
+/// This is what produced the black speckling across shiny surfaces. With a
+/// 100 000 lux sun, the GGX highlight on a near-mirror surface — the helmet's
+/// visor, wet bark — exceeds what Rgba16Float can hold, so the shading pass
+/// stores `Inf`. Then `tonemap_for_blend(Inf)` is `Inf / (1 + Inf)`, which is
+/// **NaN**, and NaN propagates through min, max and clamp unpredictably, lands
+/// in the history buffer, and persists there because history feeds itself.
+///
+/// It appeared only with TAA on because without it nothing ever divides by
+/// infinity — the tone mapper simply clamps a huge value to white.
+///
+/// `c == c` is false only for NaN, which detects it without needing `isnan`.
+fn sanitize(c: vec3<f32>) -> vec3<f32> {
+    let finite = select(vec3<f32>(0.0), c, c == c);
+    return clamp(finite, vec3<f32>(0.0), vec3<f32>(HDR_CEILING));
+}
+
 /// Tone-map into a bounded range before blending, and back out after.
 ///
 /// Averaging HDR values directly lets a single very bright sample dominate the
@@ -136,7 +159,7 @@ fn sample_history_catmull_rom(uv: vec2<f32>, resolution: vec2<f32>) -> vec3<f32>
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let resolution = 1.0 / taa.inv_resolution;
     let coord = vec2<i32>(in.uv * resolution);
-    let current = textureLoad(current_tex, coord, 0).rgb;
+    let current = sanitize(textureLoad(current_tex, coord, 0).rgb);
 
     // ── REPROJECTION ────────────────────────────────────────────────────────
     // Depth-based: reconstruct this pixel's world position, then project it
@@ -203,7 +226,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let c = tonemap_for_blend(
-                textureLoad(current_tex, coord + vec2<i32>(x, y), 0).rgb);
+                sanitize(textureLoad(current_tex, coord + vec2<i32>(x, y), 0).rgb));
             minimum = min(minimum, c);
             maximum = max(maximum, c);
             moment1 += c;
@@ -220,7 +243,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     minimum = max(minimum, mean - sigma * 1.25);
     maximum = min(maximum, mean + sigma * 1.25);
 
-    let history_raw = sample_history_catmull_rom(prev_uv, resolution);
+    let history_raw = sanitize(sample_history_catmull_rom(prev_uv, resolution));
     // Clip first to preserve hue, then hard-clamp into the same box.
     //
     // The clip alone is not enough, and this is what produced a black outline
