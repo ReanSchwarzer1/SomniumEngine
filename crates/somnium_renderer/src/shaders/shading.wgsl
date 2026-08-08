@@ -649,10 +649,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let duv0  = uv1 - uv0;
     let duv1  = uv2 - uv0;
 
-    let tbn_det  = duv0.x * duv1.y - duv1.x * duv0.y;
-    let inv_det  = 1.0 / (tbn_det + 1e-7);
-    var tangent  = normalize((edge0 * duv1.y - edge1 * duv0.y) * inv_det);
-    tangent      = normalize(tangent - dot(tangent, geo_normal) * geo_normal);
+    // Degenerate UVs have to be detected, not nudged past.
+    //
+    // This read `1.0 / (tbn_det + 1e-7)`, which does not rescue a degenerate
+    // triangle — it manufactures a huge `inv_det`, and when the numerator is
+    // also near zero `normalize` returns NaN. A NaN normal reflects whatever
+    // the environment map holds, so on foliage it came out as flat facets of
+    // sky blue scattered through the canopy, across bark, and streaked down
+    // grass blades. Packed foliage atlases produce exactly this: collinear or
+    // duplicated UVs on cards, and mirrored islands that flip the determinant.
+    //
+    // Adding an epsilon is also wrong for a *negative* determinant near
+    // -1e-7, where it pushes the denominator toward zero rather than away.
+    let tbn_det = duv0.x * duv1.y - duv1.x * duv0.y;
+    var tangent = vec3<f32>(0.0);
+    var tbn_valid = abs(tbn_det) > 1.0e-12;
+    if tbn_valid {
+        let raw_tangent = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
+        if dot(raw_tangent, raw_tangent) > 1.0e-16 {
+            tangent = normalize(raw_tangent);
+            // Gram-Schmidt can also collapse, when the tangent is parallel to
+            // the normal.
+            let ortho = tangent - dot(tangent, geo_normal) * geo_normal;
+            if dot(ortho, ortho) > 1.0e-12 {
+                tangent = normalize(ortho);
+            } else {
+                tbn_valid = false;
+            }
+        } else {
+            tbn_valid = false;
+        }
+    }
+    if !tbn_valid {
+        // A stable arbitrary frame. The normal map is skipped below when the
+        // frame is arbitrary, since applying one to a meaningless tangent is
+        // how the garbage got in.
+        let up = select(
+            vec3<f32>(0.0, 1.0, 0.0),
+            vec3<f32>(1.0, 0.0, 0.0),
+            abs(geo_normal.y) > 0.99,
+        );
+        tangent = normalize(cross(up, geo_normal));
+    }
     let bitangent = cross(geo_normal, tangent);
     let tbn       = mat3x3<f32>(tangent, bitangent, geo_normal);
 
@@ -701,7 +739,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     surface.normal = geo_normal;
     var normal_variance = 0.0;
-    if material.normal_map >= 0 {
+    if material.normal_map >= 0 && tbn_valid {
         let nm_sample  = textureSample(textures[material.normal_map], default_sampler, uv).rgb;
         let tangent_n  = nm_sample * 2.0 - vec3<f32>(1.0);
         surface.normal = normalize(tbn * tangent_n);
