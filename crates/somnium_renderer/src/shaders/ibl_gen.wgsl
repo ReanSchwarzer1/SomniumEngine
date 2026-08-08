@@ -27,6 +27,10 @@ struct GenParams {
 }
 
 @group(0) @binding(0) var<uniform> params: GenParams;
+// Phase 24C: atmosphere LUTs, built once by `pass/atmosphere.rs`.
+@group(0) @binding(3) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(4) var multiscatter_lut:  texture_2d<f32>;
+@group(0) @binding(5) var atmos_sampler:     sampler;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -62,28 +66,39 @@ fn cube_dir(face: u32, uv: vec2<f32>) -> vec3<f32> {
 /// The procedural sky, matching `shading.wgsl`'s background so reflections
 /// agree with what the camera sees.
 fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
-    let up            = ray_dir.y;
-    let horizon_color = vec3<f32>(0.5, 0.7, 0.9);
-    let zenith_color  = vec3<f32>(0.05, 0.1, 0.3);
-    let ground_color  = vec3<f32>(0.05, 0.04, 0.03);
-
-    var col = mix(horizon_color, zenith_color, pow(max(up, 0.0), 0.5));
-    col = mix(col, ground_color, exp(-max(-up, 0.0) * 10.0));
-
-    // Phase 24A: the gradient above is a unit-less shape; `.w` turns it into a
-    // luminance that tracks the sun, so ambient falls off toward night instead
-    // of staying at daylight forever.
-    col *= params.sun_color.w;
-
+    // Phase 24C. This was three hardcoded colour constants; it is now a real
+    // ray-march through a Rayleigh/Mie/ozone atmosphere. The difference that
+    // matters is not the daytime look — it is that everything below now falls
+    // out of the sun's own position and intensity, so dusk, night and the
+    // reddening of a low sun are consequences rather than special cases.
     let sun_dir = normalize(params.sun_direction.xyz);
-    let sun_dot = max(dot(ray_dir, sun_dir), 0.0);
-    let sun     = pow(sun_dot, 1024.0) * params.sun_color.rgb * 2.0;
-    let glow    = pow(sun_dot, 64.0)   * params.sun_color.rgb * 0.1;
 
-    // The cube is Rgba16Float, whose finite range ends at 65 504. A 100 000 lux
-    // sun overshoots that, and an Inf here would spread through the GGX
-    // prefilter into every roughness mip and out across the whole scene.
-    return min(col + sun + glow, vec3<f32>(60000.0));
+    // Camera altitude above sea level, in km. Held slightly off the ground so
+    // the view ray never starts inside the planet.
+    let view_pos = vec3<f32>(0.0, GROUND_RADIUS + 0.5, 0.0);
+
+    // `.w` carries the sun's illuminance in lux (Phase 24A).
+    let sun_illuminance = params.sun_color.w;
+
+    var radiance = raymarch_sky(
+        transmittance_lut, multiscatter_lut, atmos_sampler,
+        view_pos, ray_dir, sun_dir, 32,
+    ) * sun_illuminance;
+
+    // Sharp features (sun disc, moon disc, stars) are deliberately absent
+    // here and drawn over the background instead — see `sky_detail`. Keeping
+    // them out also avoids double-counting the sun, whose specular highlight
+    // the shading pass already computes from the analytic light.
+    // Night fades in on the sun's *illuminance*, not its elevation. Dimming a
+    // light and moving it below the horizon are different things, and the dial
+    // in the inspector is intensity — so keying off elevation meant turning the
+    // sun down to moonlight left a starless sky. 10 lux is roughly civil
+    // twilight, the point where the eye starts picking out stars.
+    let moon_dir = -sun_dir;
+    let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
+    radiance += night_sky_ambient(ray_dir, moon_dir, moon_strength);
+
+    return min(radiance, vec3<f32>(60000.0));
 }
 
 @fragment

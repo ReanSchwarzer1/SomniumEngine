@@ -118,8 +118,11 @@ impl ShadingPass {
         );
 
         let shader_source = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("../shaders/brdf.wgsl"),
+            // Phase 24C: the background samples the atmosphere-generated
+            // cubemap and adds sharp sky detail analytically.
+            include_str!("../shaders/atmosphere.wgsl"),
             include_str!("../shaders/shading.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

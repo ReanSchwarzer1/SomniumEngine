@@ -114,6 +114,7 @@ pub struct SomniumRenderer {
 
     /// Post-processing pass: owns the HDR render target + tone-maps to swapchain.
     postprocess_pass: PostProcessPass,
+    atmosphere_pass: crate::pass::atmosphere::AtmospherePass,
     auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
@@ -320,7 +321,10 @@ impl SomniumRenderer {
         // Phase 19: build the environment cubemap before the shading pass, which
         // binds it. Contents are generated on the first frame (and whenever the
         // sun changes), not here.
-        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device);
+        // Phase 24C: the atmosphere LUTs must exist before the IBL pass, which
+        // binds them to ray-march the sky into the environment cubemap.
+        let atmosphere_pass = crate::pass::atmosphere::AtmospherePass::new(&ctx.device);
+        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &atmosphere_pass);
 
         let vis_pass = VisibilityBufferPass::new(
             &ctx.device, ctx.config.width, ctx.config.height, &global_pool.layout,
@@ -394,6 +398,7 @@ impl SomniumRenderer {
             grid_pass,
             grid_enabled: false,
             postprocess_pass,
+            atmosphere_pass,
             auto_exposure_pass,
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
@@ -1034,6 +1039,10 @@ impl SomniumRenderer {
         // No-ops unless the sun actually moved, so this is free in the common
         // case. The sky is captured from the same procedural function the
         // background uses, keeping reflections consistent with what is drawn.
+        // Phase 24C: the scattering LUTs the sky march reads. Built once —
+        // they depend on the atmosphere's composition, not on sun or camera.
+        self.atmosphere_pass.ensure_built(&ctx.device, &ctx.queue);
+
         self.ibl_pass.generate_if_needed(
             &ctx.device,
             &ctx.queue,

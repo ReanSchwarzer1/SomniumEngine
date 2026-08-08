@@ -1026,3 +1026,18 @@ treating it as a stretch goal.
 `light_units.rs` is written from the papers above, not transcribed from any engine.
 Bevy was read as a worked example of applying the same model on wgpu, per the rules in
 §13.27; its preset *values* are physical constants rather than authored content.
+
+---
+
+### 13.29 Atmospheric scattering (Phase 24C / 24D)
+
+| Piece | Reference |
+|---|---|
+| Sky model, multiple-scattering approximation, analytic segment integration | Hillaire, *A Scalable and Production Ready Sky and Atmosphere Rendering Technique* (EGSR 2020) |
+| Transmittance LUT parameterisation, ray-sphere helpers | Bruneton & Neyret, *Precomputed Atmospheric Scattering* (EGSR 2008), and Bruneton's 2017 revision |
+| Rayleigh / Mie / ozone coefficients | The values published with Hillaire's paper, which are the standard Earth fit |
+| LUT resolutions | Chosen to match `bevy_pbr::atmosphere` (MIT / Apache-2.0), which is also a wgpu implementation |
+
+Written from the papers. Bevy's `bruneton_functions.wgsl` was read to confirm the exact
+form of the transmittance mapping — the easiest part of the model to get subtly wrong —
+and its LUT sizes were adopted; both are covered by §13.27's terms.

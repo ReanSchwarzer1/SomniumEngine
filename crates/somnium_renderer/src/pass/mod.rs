@@ -1,3 +1,4 @@
+pub mod atmosphere;
 pub mod auto_exposure;
 pub mod cull;
 pub mod fxaa;

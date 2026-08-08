@@ -68,7 +68,7 @@ pub struct IblPass {
 const ENV_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 impl IblPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, atmosphere: &super::atmosphere::AtmospherePass) -> Self {
         let cubemap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Environment Cubemap"),
             size: wgpu::Extent3d {
@@ -135,19 +135,39 @@ impl IblPass {
             mapped_at_creation: false,
         });
 
-        // Sky pass: uniform only.
+        // Sky pass: uniform plus the Phase 24C atmosphere LUTs.
+        let lut_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let sky_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("IBL Sky BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                lut_entry(3),
+                lut_entry(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         // Prefilter pass: uniform + source cube + sampler.
@@ -186,7 +206,21 @@ impl IblPass {
         let sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("IBL Sky BG"),
             layout: &sky_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(atmosphere.transmittance_view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(atmosphere.multiscatter_view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(atmosphere.sampler()),
+                },
+            ],
         });
 
         let prefilter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -201,7 +235,15 @@ impl IblPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("IBL Gen Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/ibl_gen.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}
+{}",
+                    include_str!("../shaders/atmosphere.wgsl"),
+                    include_str!("../shaders/ibl_gen.wgsl"),
+                )
+                .into(),
+            ),
         });
 
         let make_pipeline = |label: &str, bgl: &wgpu::BindGroupLayout, entry: &str| {
@@ -323,7 +365,7 @@ impl IblPass {
                 sun_color.x,
                 sun_color.y,
                 sun_color.z,
-                sun_luminance(sun_color) * SKY_LUMINANCE_PER_LUX,
+                sun_luminance(sun_color),
             ],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&p));
