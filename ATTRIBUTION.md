@@ -1010,3 +1010,19 @@ Bevy having shipped ReSTIR GI and a Hillaire atmosphere on wgpu is also the stro
 available evidence that Phase 24 is achievable on this API rather than requiring raw
 Vulkan or D3D12 — which is why the plan targets hardware ray tracing first rather than
 treating it as a stretch goal.
+
+---
+
+### 13.28 Physical light units, exposure and AgX (Phase 24A / 24B)
+
+| Piece | Reference |
+|---|---|
+| Photometric light units, EV100, the 1.2 exposure constant | Lagarde & de Rousiers, *Moving Frostbite to PBR* (SIGGRAPH 2014); Filament's documented camera model |
+| Lux / lumen preset tables | Standard photometric references, cross-checked against `bevy_light`'s `light_consts` (MIT / Apache-2.0) |
+| Histogram auto-exposure | Standard log-luminance histogram + weighted reduction; adaptation rate expressed per second |
+| AgX | Troy Sobotka, [AgX](https://github.com/sobotka/AgX). The analytic inset/outset matrices and the sixth-order contrast fit are the widely reproduced minimal formulation of it. |
+| ACES fit (retained as an option) | Narkowicz 2015 — already used since Phase 11.5K |
+
+`light_units.rs` is written from the papers above, not transcribed from any engine.
+Bevy was read as a worked example of applying the same model on wgpu, per the rules in
+§13.27; its preset *values* are physical constants rather than authored content.

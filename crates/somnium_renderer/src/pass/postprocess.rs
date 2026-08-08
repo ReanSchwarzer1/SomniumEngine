@@ -20,6 +20,9 @@ pub struct PostProcessPass {
     pub scene_copy_texture: wgpu::Texture,
     pub scene_copy_view: wgpu::TextureView,
     params_buffer: wgpu::Buffer,
+    /// Handle to the auto-exposure result, kept so the bind group can be
+    /// rebuilt on resize without threading it back through the caller.
+    exposure_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
 }
 
@@ -33,6 +36,8 @@ impl PostProcessPass {
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        // Result buffer of `crate::pass::auto_exposure::AutoExposurePass`.
+        exposure_buffer: &wgpu::Buffer,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -64,6 +69,18 @@ impl PostProcessPass {
                         },
                         count: None,
                     },
+                    // Phase 24A-3: metered exposure, written by the
+                    // auto-exposure compute pass earlier in the frame.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -76,10 +93,22 @@ impl PostProcessPass {
 
         // Default: exposure=1.0, vignette_strength=1.0.
         let params_buffer = {
-            let data: [f32; 4] = [1.0, 1.0, 0.0, 0.0];
+            // Must match `PostParams` in postprocess.wgsl exactly: three floats
+            // then four u32s carried as raw bits. `copy_from_slice` below
+            // requires the lengths to agree.
+            let data: [f32; 8] = [
+                1.0 / (1.2 * 32768.0), // exposure at EV100 15
+                1.0,                   // vignette strength
+                0.0,                   // chromatic aberration
+                f32::from_bits(0),     // tonemapper: AgX
+                f32::from_bits(1),     // auto exposure on
+                0.0,
+                0.0,
+                0.0,
+            ];
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("PostProcess Params"),
-                size: 16,
+                size: 32,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: true,
             });
@@ -95,7 +124,9 @@ impl PostProcessPass {
             Self::make_scene_copy_texture(device, width, height);
         let bind_group = Self::make_bind_group(
             device, &bind_group_layout, &hdr_view, &sampler, &params_buffer,
+            exposure_buffer,
         );
+        let exposure_buffer = exposure_buffer.clone();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
@@ -141,6 +172,7 @@ impl PostProcessPass {
         });
 
         Self {
+            exposure_buffer,
             pipeline,
             bind_group_layout,
             bind_group,
@@ -206,6 +238,7 @@ impl PostProcessPass {
         hdr_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         params_buffer: &wgpu::Buffer,
+        exposure_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Bind Group"),
@@ -222,6 +255,10 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: exposure_buffer.as_entire_binding(),
                 },
             ],
         })
@@ -242,6 +279,7 @@ impl PostProcessPass {
             &self.hdr_view,
             &self.sampler,
             &self.params_buffer,
+            &self.exposure_buffer,
         );
     }
 
@@ -256,8 +294,25 @@ impl PostProcessPass {
         exposure: f32,
         vignette_strength: f32,
         ca_strength: f32,
+        tonemapper: u32,
+        auto_exposure: bool,
     ) {
-        let data: [f32; 4] = [exposure, vignette_strength, ca_strength, 0.0];
+        // The uniform is three floats plus a u32; bytemuck cannot cast a mixed
+        // array, so the index is bit-cast into the fourth float slot and read
+        // back as a u32 in WGSL.
+        // Three floats then four u32s. bytemuck cannot cast a mixed array, so
+        // the integers ride in float slots as raw bits and WGSL reads them back
+        // as u32 — same four bytes either way.
+        let data: [f32; 8] = [
+            exposure,
+            vignette_strength,
+            ca_strength,
+            f32::from_bits(tonemapper),
+            f32::from_bits(u32::from(auto_exposure)),
+            0.0,
+            0.0,
+            0.0,
+        ];
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 

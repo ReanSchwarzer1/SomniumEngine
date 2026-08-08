@@ -570,7 +570,7 @@ impl GameApp for HelloGame {
         );
         ctx.world.spawn((
             Transform { translation: Vec3::ZERO, rotation: light_rot, scale: Vec3::ONE },
-            LightComponent::directional(5.0),
+            LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT),
             Name::new("SunLight"),
             WorldTransform::identity(),
         ));
@@ -580,7 +580,7 @@ impl GameApp for HelloGame {
         // draw beyond the sun. Both sit near the origin scene.
         ctx.world.spawn((
             Transform::from_translation(Vec3::new(4.0, 3.0, 2.0)),
-            LightComponent::point(4.0, 12.0),
+            LightComponent::point(somnium_core::light_units::lumens::BULB_100W, 12.0),
             Name::new("PointLight"),
             WorldTransform::identity(),
         ));
@@ -592,7 +592,7 @@ impl GameApp for HelloGame {
                 scale: Vec3::ONE,
             },
             LightComponent::spot(
-                8.0, 20.0,
+                somnium_core::light_units::lumens::FLOODLIGHT, 20.0,
                 20.0_f32.to_radians(),
                 30.0_f32.to_radians(),
             ),
@@ -824,14 +824,14 @@ impl GameApp for HelloGame {
 
                         match light.light_type {
                             LightType::Directional => {
-                                renderer.set_directional_light(to_light, light.color * light.intensity);
+                                renderer.set_directional_light(to_light, light.photometric_color());
                             }
                             LightType::Point | LightType::Spot => {
                                 let l_type = if light.light_type == LightType::Point { 0 } else { 1 };
                                 renderer.submit_local_light(somnium_renderer::cluster::GpuLocalLight {
                                     position_ws: transform.translation.to_array(),
                                     range: light.range,
-                                    color: (light.color * light.intensity).to_array(),
+                                    color: light.photometric_color().to_array(),
                                     light_type: l_type,
                                     // Spot axis = travel direction. Unused for point lights.
                                     direction_ws: forward.to_array(),

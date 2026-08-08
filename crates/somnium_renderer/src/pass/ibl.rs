@@ -19,6 +19,17 @@ const CUBE_SIZE: u32 = 256;
 /// Mip levels; mip `i` is prefiltered for roughness `i / (MIP_COUNT - 1)`.
 const MIP_COUNT: u32 = 6;
 
+/// Sky-dome luminance (cd/m²) per lux of sun illuminance.
+///
+/// Mirrors `somnium_core::light_units::SKY_LUMINANCE_PER_LUX`; duplicated
+/// because core depends on the renderer rather than the other way round.
+const SKY_LUMINANCE_PER_LUX: f32 = 0.08;
+
+/// Photometric luminance of a linear-RGB light colour (Rec. 709 weights).
+fn sun_luminance(color: glam::Vec3) -> f32 {
+    color.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722))
+}
+
 /// Uniform matching `GenParams` in `ibl_gen.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -296,7 +307,24 @@ impl IblPass {
             _src_size: CUBE_SIZE as f32,
             _pad: 0.0,
             sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, 0.0],
-            sun_color: [sun_color.x, sun_color.y, sun_color.z, 0.0],
+            // Phase 24A: `.w` carries the sky-dome luminance scale. The sky
+            // gradient is authored as a unit-ish colour, but with the sun now
+            // in lux it has to be a luminance too, or ambient is five orders of
+            // magnitude too dark and every shadow reads as pure black.
+            //
+            // A clear day sky is ~8 000 cd/m² under ~100 000 lux of sun, hence
+            // 0.08 cd/m² per lux. Scaling the dome by the sun's own output is
+            // also what finally lets night happen: lower the sun and the sky
+            // darkens with it, instead of holding daylight ambient forever.
+            //
+            // Interim — Phase 24C computes sky radiance from real atmospheric
+            // scattering and this scale factor disappears.
+            sun_color: [
+                sun_color.x,
+                sun_color.y,
+                sun_color.z,
+                sun_luminance(sun_color) * SKY_LUMINANCE_PER_LUX,
+            ],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&p));
     }

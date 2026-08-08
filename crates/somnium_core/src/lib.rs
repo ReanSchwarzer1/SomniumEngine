@@ -51,6 +51,7 @@ pub mod context;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod light_units;
 pub mod log_capture;
 pub mod scene_serial;
 pub mod time;
@@ -172,7 +173,17 @@ pub struct LightComponent {
     pub light_type: LightType,
     /// Linear-RGB color of the light.
     pub color: glam::Vec3,
-    /// Intensity multiplier applied to `color` before GPU upload.
+    /// Physical light output (Phase 24A).
+    ///
+    /// Units depend on `light_type`, matching how the real fixture is spec'd:
+    /// - [`LightType::Directional`] — **illuminance in lux**, e.g. 100 000 for
+    ///   direct midday sun, 1 000 overcast, 0.05 under a full moon.
+    /// - [`LightType::Point`] / [`LightType::Spot`] — **luminous power in
+    ///   lumens**, the number printed on a bulb's box (~800 for a 60 W).
+    ///
+    /// Presets live in [`light_units::lux`] and [`light_units::lumens`]. This
+    /// used to be an arbitrary multiplier, which is why no value of it could
+    /// mean "night" — see [`light_units`].
     pub intensity: f32,
     /// Attenuation radius for point/spot lights. Ignored for directional.
     pub range: f32,
@@ -183,7 +194,23 @@ pub struct LightComponent {
 }
 
 impl LightComponent {
-    /// Convenience constructor for a white directional light.
+    /// Photometric intensity converted to the radiometric quantity shading
+    /// wants, scaled by colour.
+    ///
+    /// Directional lights hand over illuminance unchanged; point and spot
+    /// lights convert luminous power to intensity, since shading divides by
+    /// distance squared and needs candela rather than lumens.
+    #[must_use]
+    pub fn photometric_color(&self) -> glam::Vec3 {
+        let scale = match self.light_type {
+            LightType::Directional => self.intensity,
+            LightType::Point => light_units::point_candela(self.intensity),
+            LightType::Spot => light_units::spot_candela(self.intensity, self.outer_angle),
+        };
+        self.color * scale
+    }
+
+    /// Convenience constructor for a white directional light, in **lux**.
     pub fn directional(intensity: f32) -> Self {
         Self {
             light_type: LightType::Directional,
@@ -195,7 +222,7 @@ impl LightComponent {
         }
     }
 
-    /// Convenience constructor for a white point light.
+    /// Convenience constructor for a white point light, in **lumens**.
     pub fn point(intensity: f32, range: f32) -> Self {
         Self {
             light_type: LightType::Point,
@@ -207,7 +234,7 @@ impl LightComponent {
         }
     }
 
-    /// Convenience constructor for a white spot light.
+    /// Convenience constructor for a white spot light, in **lumens**.
     pub fn spot(intensity: f32, range: f32, inner_angle: f32, outer_angle: f32) -> Self {
         Self {
             light_type: LightType::Spot,
@@ -436,8 +463,28 @@ pub fn normalized_from_camera_speed(speed: f32) -> f32 {
 /// exists, the renderer's own defaults (everything off) apply.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PostProcessComponent {
-    /// Linear exposure multiplier applied before tone mapping.
-    pub exposure: f32,
+    /// Manual exposure value at ISO 100 (Phase 24A).
+    ///
+    /// Replaces the old linear multiplier. EV100 is a photographic stop scale —
+    /// +1 halves the light reaching the sensor — so it stays usable across the
+    /// ~10⁹ range that physical light units introduced. Presets are in
+    /// [`light_units::ev100`]. Ignored when `auto_exposure` is on.
+    pub ev100: f32,
+    /// Aperture in f-stops. Drives `ev100` via [`light_units::ev100_from_camera`]
+    /// when `use_physical_camera` is set.
+    pub aperture_f_stops: f32,
+    /// Shutter time in seconds.
+    pub shutter_speed_s: f32,
+    /// Sensor sensitivity in ISO.
+    pub sensitivity_iso: f32,
+    /// Derive `ev100` from aperture/shutter/ISO instead of setting it directly.
+    pub use_physical_camera: bool,
+    /// Meter the scene each frame and adapt `ev100` to it (Phase 24A-3).
+    pub auto_exposure: bool,
+    /// Stops added on top of the metered or manual value. Negative darkens.
+    pub exposure_compensation: f32,
+    /// Which tone-mapping curve maps HDR luminance to display (Phase 24B).
+    pub tonemapper: Tonemapper,
     /// Whether the radial vignette is applied.
     pub vignette_enabled: bool,
     /// Vignette strength when enabled.
@@ -466,7 +513,14 @@ impl Default for PostProcessComponent {
     fn default() -> Self {
         Self {
             ibl_intensity: 0.35,
-            exposure: 1.0,
+            ev100: light_units::ev100::SUNLIGHT,
+            aperture_f_stops: 16.0,
+            shutter_speed_s: 1.0 / 100.0,
+            sensitivity_iso: 100.0,
+            use_physical_camera: false,
+            auto_exposure: true,
+            exposure_compensation: 0.0,
+            tonemapper: Tonemapper::AgX,
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,
@@ -476,7 +530,72 @@ impl Default for PostProcessComponent {
     }
 }
 
+/// Tone-mapping curve applied at the end of the frame (Phase 24B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tonemapper {
+    /// Troy Sobotka's AgX. Handles very bright saturated light without the hue
+    /// shift ACES shows, which matters once a 100 000 lux sun is in frame.
+    #[default]
+    AgX,
+    /// Narkowicz's ACES fit — what the engine used before Phase 24B.
+    Aces,
+    /// Plain Reinhard. Mostly useful as a reference point when comparing.
+    Reinhard,
+}
+
+impl Tonemapper {
+    /// Stable index for the GPU uniform. Must match `postprocess.wgsl`.
+    #[must_use]
+    pub fn as_index(self) -> u32 {
+        match self {
+            Self::AgX => 0,
+            Self::Aces => 1,
+            Self::Reinhard => 2,
+        }
+    }
+
+    /// Cycle order for the inspector's tonemapper button.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::AgX => Self::Aces,
+            Self::Aces => Self::Reinhard,
+            Self::Reinhard => Self::AgX,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AgX => "AgX",
+            Self::Aces => "ACES",
+            Self::Reinhard => "Reinhard",
+        }
+    }
+}
+
 impl PostProcessComponent {
+    /// The EV100 actually used this frame, before auto-exposure metering.
+    #[must_use]
+    pub fn manual_ev100(&self) -> f32 {
+        let base = if self.use_physical_camera {
+            light_units::ev100_from_camera(
+                self.aperture_f_stops,
+                self.shutter_speed_s,
+                self.sensitivity_iso,
+            )
+        } else {
+            self.ev100
+        };
+        base - self.exposure_compensation
+    }
+
+    /// Linear multiplier from scene luminance to display range.
+    #[must_use]
+    pub fn exposure_multiplier(&self) -> f32 {
+        light_units::exposure_from_ev100(self.manual_ev100())
+    }
+
     /// Vignette strength to send to the renderer (0 when disabled).
     pub fn effective_vignette(&self) -> f32 {
         if self.vignette_enabled { self.vignette_strength.max(0.0) } else { 0.0 }

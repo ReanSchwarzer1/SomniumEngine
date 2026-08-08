@@ -22,6 +22,7 @@ struct GenParams {
     _pad: f32,
     /// Direction TOWARD the sun, plus its colour.
     sun_direction: vec4<f32>,
+    /// `.rgb` sun colour scaled by illuminance; `.w` sky-dome luminance scale.
     sun_color: vec4<f32>,
 }
 
@@ -69,11 +70,20 @@ fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
     var col = mix(horizon_color, zenith_color, pow(max(up, 0.0), 0.5));
     col = mix(col, ground_color, exp(-max(-up, 0.0) * 10.0));
 
+    // Phase 24A: the gradient above is a unit-less shape; `.w` turns it into a
+    // luminance that tracks the sun, so ambient falls off toward night instead
+    // of staying at daylight forever.
+    col *= params.sun_color.w;
+
     let sun_dir = normalize(params.sun_direction.xyz);
     let sun_dot = max(dot(ray_dir, sun_dir), 0.0);
     let sun     = pow(sun_dot, 1024.0) * params.sun_color.rgb * 2.0;
     let glow    = pow(sun_dot, 64.0)   * params.sun_color.rgb * 0.1;
-    return col + sun + glow;
+
+    // The cube is Rgba16Float, whose finite range ends at 65 504. A 100 000 lux
+    // sun overshoots that, and an Inf here would spread through the GGX
+    // prefilter into every roughness mip and out across the whole scene.
+    return min(col + sun + glow, vec3<f32>(60000.0));
 }
 
 @fragment

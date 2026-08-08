@@ -286,10 +286,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var sky = mix(horizon_color, zenith_color, pow(max(up, 0.0), 0.5));
         sky = mix(sky, ground_color, exp(-max(-up, 0.0) * 10.0));
 
+        // Phase 24A: the gradient above is a unit-less shape. With the sun in
+        // lux it has to become a luminance, or the background sits five orders
+        // of magnitude below the scene and the sky renders pure black.
+        //
+        // A clear day sky is ~8 000 cd/m² under ~100 000 lux of sun. Deriving
+        // it from the sun rather than fixing it is also what makes night
+        // possible: lower the sun and the sky follows it down.
+        //
+        // Interim — Phase 24C computes this from atmospheric scattering.
+        let illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
+        sky *= illuminance * 0.08;
+
+        // The sun disc and its glow are fractions of the sun's own output, so
+        // they scale with it for free.
         let sun_dir = normalize(light.direction);
         let sun_dot = max(dot(ray_dir, sun_dir), 0.0);
-        let sun     = pow(sun_dot, 1024.0) * vec3<f32>(10.0, 8.0, 5.0);
-        let glow    = pow(sun_dot, 64.0)   * vec3<f32>(0.5, 0.4, 0.2);
+        let sun     = pow(sun_dot, 1024.0) * light.color;
+        let glow    = pow(sun_dot, 64.0)   * light.color * 0.05;
 
         return vec4<f32>(sky + sun + glow, 1.0);
     }

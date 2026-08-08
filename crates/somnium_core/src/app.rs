@@ -785,7 +785,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_post = self.selected_entity
                 .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
                 .map(|pp| (
-                    [pp.exposure, pp.vignette_strength, pp.ca_strength, pp.ibl_intensity],
+                    [pp.ev100, pp.vignette_strength, pp.ca_strength, pp.ibl_intensity],
                     pp.vignette_enabled,
                     pp.ca_enabled,
                     pp.fxaa_enabled,
@@ -1280,7 +1280,16 @@ impl<G: GameApp> Engine<G> {
             .entities()
             .find_map(|e| self.world.get::<PostProcessComponent>(e).copied());
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
-            r.exposure = pp.exposure.max(0.0);
+            // Phase 24A: exposure is now derived from EV100 rather than being a
+            // free multiplier. Auto-exposure overrides it on the GPU from the
+            // metered histogram, so this value is what a manual camera would use
+            // and the fallback if metering has not produced a reading yet.
+            r.exposure = pp.exposure_multiplier();
+            r.auto_exposure = pp.auto_exposure;
+            // Adaptation is per second, so it needs the real frame time or the
+            // eye adjusts at a rate that depends on frame rate.
+            r.frame_delta_time = self.time.delta_time().as_secs_f32();
+            r.tonemapper = pp.tonemapper.as_index();
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             r.fxaa_enabled = pp.fxaa_enabled;
@@ -1758,10 +1767,18 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::CreateEntity(kind) => {
                 let name_str = kind.label();
                 let light = match kind {
-                    CreateKind::DirectionalLight => Some(LightComponent::directional(3.0)),
-                    CreateKind::PointLight => Some(LightComponent::point(3.0, 10.0)),
+                    CreateKind::DirectionalLight => Some(LightComponent::directional(
+                        crate::light_units::lux::DIRECT_SUNLIGHT,
+                    )),
+                    CreateKind::PointLight => Some(LightComponent::point(
+                        crate::light_units::lumens::BULB_100W,
+                        10.0,
+                    )),
                     CreateKind::SpotLight => Some(LightComponent::spot(
-                        3.0, 15.0, 25.0_f32.to_radians(), 35.0_f32.to_radians(),
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        25.0_f32.to_radians(),
+                        35.0_f32.to_radians(),
                     )),
                     _ => None,
                 };
@@ -1883,7 +1900,7 @@ impl<G: GameApp> Engine<G> {
                 ) {
                     if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                         match field {
-                            IF::PostExposure => pp.exposure = value.max(0.0),
+                            IF::PostExposure => pp.ev100 = value,
                             IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
                             IF::PostCaStrength => pp.ca_strength = value.max(0.0),
                             IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
@@ -2118,7 +2135,7 @@ impl<G: GameApp> Engine<G> {
                 );
                 self.world.spawn((
                     Transform { translation: glam::Vec3::ZERO, rotation: light_rot, scale: glam::Vec3::ONE },
-                    LightComponent::directional(5.0),
+                    LightComponent::directional(crate::light_units::lux::DIRECT_SUNLIGHT),
                     Name::new("SunLight"),
                     WorldTransform::identity(),
                 ));

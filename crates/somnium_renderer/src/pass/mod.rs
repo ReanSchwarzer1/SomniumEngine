@@ -1,3 +1,4 @@
+pub mod auto_exposure;
 pub mod cull;
 pub mod fxaa;
 pub mod gizmo;

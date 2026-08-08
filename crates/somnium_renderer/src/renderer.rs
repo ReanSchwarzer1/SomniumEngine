@@ -114,8 +114,15 @@ pub struct SomniumRenderer {
 
     /// Post-processing pass: owns the HDR render target + tone-maps to swapchain.
     postprocess_pass: PostProcessPass,
+    auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
+    /// Meter the frame and adapt exposure to it, rather than using `exposure`.
+    pub auto_exposure: bool,
+    /// Seconds since the previous frame, for exposure adaptation.
+    pub frame_delta_time: f32,
+    /// Tone-mapping curve index; matches `Tonemapper::as_index`.
+    pub tonemapper: u32,
     /// Radial vignette strength (0 = off, 1 = default, higher = stronger).
     ///
     /// Defaults to **off**: an always-on vignette darkens the viewport edges,
@@ -265,10 +272,20 @@ impl SomniumRenderer {
         // Phase 11.5H: Editor infinite-grid overlay (renders to HDR target).
         let grid_pass = GridPass::new(&ctx.device, HDR_FORMAT, &global_pool.view_proj_buffer);
 
+        // Phase 24A-3: built before the post-process pass, which binds its
+        // result buffer.
+        let mut auto_exposure_pass =
+            crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
+
         // Phase 11.5K: Post-process pass owns the Rgba16Float HDR render target.
         let postprocess_pass = PostProcessPass::new(
-            &ctx.device, ctx.config.format, ctx.config.width, ctx.config.height,
+            &ctx.device,
+            ctx.config.format,
+            ctx.config.width,
+            ctx.config.height,
+            auto_exposure_pass.exposure_buffer(),
         );
+        auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
@@ -377,7 +394,14 @@ impl SomniumRenderer {
             grid_pass,
             grid_enabled: false,
             postprocess_pass,
-            exposure: 1.0,
+            auto_exposure_pass,
+            // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
+            // call into somnium_core for this — core depends on the renderer,
+            // not the other way round — so the value is inlined.
+            exposure: 1.0 / (1.2 * 32768.0),
+            auto_exposure: true,
+            frame_delta_time: 1.0 / 60.0,
+            tonemapper: 0,
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
             fxaa_pass: crate::pass::fxaa::FxaaPass::new(
@@ -579,6 +603,35 @@ impl SomniumRenderer {
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
     pub fn set_ibl_intensity(&mut self, intensity: f32) {
         self.ibl_intensity = intensity.max(0.0);
+    }
+
+    /// Colour the HDR target is cleared to, in cd/m² (Phase 24A).
+    ///
+    /// This used to be a flat 0.07 grey, which was fine when light was an
+    /// arbitrary multiplier and became black the moment exposure turned
+    /// physical — 0.07 cd/m² against a 100 000 lux scene is night.
+    ///
+    /// Anywhere no geometry is drawn is sky, so the clear takes the same
+    /// horizon colour and sun-driven luminance scale that `ibl_gen.wgsl` gives
+    /// the environment cubemap. The background then matches the light the scene
+    /// is actually receiving, and darkens with the sun instead of staying put.
+    ///
+    /// Interim: Phase 24C draws the atmosphere properly and this goes away.
+    fn background_color(&self) -> wgpu::Color {
+        // Matches `horizon_color` in ibl_gen.wgsl.
+        const HORIZON: glam::Vec3 = glam::Vec3::new(0.5, 0.7, 0.9);
+        const SKY_LUMINANCE_PER_LUX: f32 = 0.08;
+
+        let illuminance = self
+            .light_color
+            .dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+        let sky = HORIZON * (illuminance * SKY_LUMINANCE_PER_LUX);
+        wgpu::Color {
+            r: f64::from(sky.x),
+            g: f64::from(sky.y),
+            b: f64::from(sky.z),
+            a: 1.0,
+        }
     }
 
     /// Set the directional light parameters for this frame.
@@ -844,6 +897,8 @@ impl SomniumRenderer {
             self.vis_pass.resize(&ctx.device, width, height, &self.global_pool.layout);
             self.shading_pass.resize(&ctx.device, &self.vis_pass.view);
             self.postprocess_pass.resize(&ctx.device, width, height);
+            self.auto_exposure_pass
+                .resize(&ctx.device, &self.postprocess_pass.hdr_view);
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
@@ -1225,7 +1280,7 @@ impl SomniumRenderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.07, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(self.background_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1319,12 +1374,29 @@ impl SomniumRenderer {
             self.grid_pass.record(&mut encoder, &self.postprocess_pass.hdr_view);
         }
 
-        // ── 8. Post-process Pass: HDR → swapchain (ACES + vignette) ──────────
+        // ── 7.9 Auto-exposure: meter the finished HDR frame ──────────────────
+        // Runs after everything that writes HDR and before tone mapping, so it
+        // meters exactly the image being exposed. The reading lands one frame
+        // late by construction — that is what adaptation is.
+        if self.auto_exposure {
+            self.auto_exposure_pass.record(
+                &mut encoder,
+                &ctx.queue,
+                ctx.config.width,
+                ctx.config.height,
+                self.frame_delta_time,
+                0.0,
+            );
+        }
+
+        // ── 8. Post-process Pass: HDR → swapchain (tone map + vignette) ──────
         self.postprocess_pass.set_params(
             &ctx.queue,
             self.exposure,
             self.vignette_strength,
             self.chromatic_aberration,
+            self.tonemapper,
+            self.auto_exposure,
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
         // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
