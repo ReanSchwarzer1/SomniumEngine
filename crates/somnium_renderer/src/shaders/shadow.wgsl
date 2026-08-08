@@ -54,7 +54,20 @@ struct Material {
     flags: u32,
     occlusion_map: i32,
     transmission: f32,
-    emissive: vec3<f32>,
+    // Three scalars, not a vec3.
+    //
+    // WGSL gives vec3<f32> a 16-byte alignment, so `emissive: vec3<f32>` here
+    // sat at offset 64 and rounded the struct to 96 bytes, while Rust's
+    // repr(C) packs [f32; 3] at offset 52 for a total of 80. Every material
+    // past index 0 was therefore read from the wrong offset: `metallic` came
+    // back as garbage, and a metallic reading of ~1 zeroes kD, so the sun's
+    // diffuse term vanished on those materials and only IBL remained. That is
+    // why primitives looked flat and showed no shadow (there was no sun term
+    // left to darken), and why foliage rendered with wrong colours -- one bug,
+    // scaling with material index.
+    emissive_r: f32,
+    emissive_g: f32,
+    emissive_b: f32,
     emissive_map: i32,
     _pad0: f32,
     _pad1: f32,

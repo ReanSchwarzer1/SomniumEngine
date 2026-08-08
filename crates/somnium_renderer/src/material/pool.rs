@@ -5,6 +5,12 @@ use bytemuck::{Pod, Zeroable};
 /// Material structure that matches the GPU layout in shading.wgsl.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
+/// **The WGSL mirror of this struct must not use `vec3<f32>`.** WGSL aligns a
+/// vec3 to 16 bytes; Rust's `repr(C)` aligns `[f32; 3]` to 4. `emissive` as a
+/// vec3 in the shader therefore sat at offset 64 with a 96-byte stride, against
+/// this struct's offset 52 and 80-byte stride, and every material past index 0
+/// was decoded from the wrong bytes. Keep vector members as scalars in the
+/// shader, or pad them to a 16-byte boundary on both sides.
 pub struct GpuMaterial {
     pub base_color: [f32; 4],
     pub roughness: f32,

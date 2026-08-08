@@ -28,7 +28,20 @@ struct Material {
     flags: u32,
     occlusion_map: i32,
     transmission: f32,
-    emissive: vec3<f32>,
+    // Three scalars, not a vec3.
+    //
+    // WGSL gives vec3<f32> a 16-byte alignment, so `emissive: vec3<f32>` here
+    // sat at offset 64 and rounded the struct to 96 bytes, while Rust's
+    // repr(C) packs [f32; 3] at offset 52 for a total of 80. Every material
+    // past index 0 was therefore read from the wrong offset: `metallic` came
+    // back as garbage, and a metallic reading of ~1 zeroes kD, so the sun's
+    // diffuse term vanished on those materials and only IBL remained. That is
+    // why primitives looked flat and showed no shadow (there was no sun term
+    // left to darken), and why foliage rendered with wrong colours -- one bug,
+    // scaling with material index.
+    emissive_r: f32,
+    emissive_g: f32,
+    emissive_b: f32,
     emissive_map: i32,
     _pad0: f32,
     _pad1: f32,
@@ -734,6 +747,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if light._pad2_z > 0.5 && light._pad2_z < 1.5 {
         return vec4<f32>(vec3<f32>(shadow_factor), 1.0);
     }
+    // 6 = final shadow_factor in hue, immune to exposure.
+    //   green = shadowed (< 0.5), red = lit (>= 0.5)
+    if light._pad2_z > 5.5 && light._pad2_z < 6.5 {
+        if shadow_factor < 0.5 { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
+        return vec4<f32>(4.0, 0.0, 0.0, 1.0);
+    }
     // 5 = blocker_search verdict at this fragment, in hue.
     //   red   = search found no blocker (PCSS early-returns lit)
     //   green = search found one (a shadow should appear here)
@@ -894,13 +913,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Phase 24T: self-emitted light. Independent of every light in the
         // scene by definition — a screen is just as bright in a dark room.
-        var emissive = material.emissive;
+        var emissive = vec3<f32>(material.emissive_r, material.emissive_g, material.emissive_b);
         if material.emissive_map >= 0 {
             emissive *= textureSample(
                 textures[material.emissive_map], default_sampler, uv).rgb;
         }
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
+
+        // 7 = which term actually lights this fragment, in hue.
+        //   green = sun dominates, red = ambient dominates
+        //   blue  = the surface reads as metallic (kD would be ~0)
+        if light._pad2_z > 6.5 && light._pad2_z < 7.5 {
+            let ld = dot(direct_light, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let la = dot(ambient, vec3<f32>(0.2126, 0.7152, 0.0722));
+            if surface.metallic > 0.5 { return vec4<f32>(0.0, 0.0, 4.0, 1.0); }
+            if ld > la { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
+            return vec4<f32>(4.0, 0.0, 0.0, 1.0);
+        }
 
         // 2 = sun only, 3 = ambient only. Isolates which term a surface's
         // brightness actually comes from.

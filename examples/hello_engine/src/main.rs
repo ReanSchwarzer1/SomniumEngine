@@ -1015,16 +1015,6 @@ impl GameApp for HelloGame {
                     let mesh     = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
                     let material = unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity   = archetype.entities()[row];
-                    if std::env::var("SOMNIUM_SHADOWTEST").is_ok() && ctx.time.frame_count() < 2 {
-                        let n = ctx.world.get::<Name>(entity)
-                            .map(|n| n.as_str().to_string())
-                            .unwrap_or_else(|| "?".into());
-                        let t = wt.0.w_axis.truncate();
-                        tracing::info!(
-                            "submit: {n} idx_count={} pos=({:.1},{:.1},{:.1}) scale_x={:.2}",
-                            mesh.index_count, t.x, t.y, t.z, wt.0.x_axis.length()
-                        );
-                    }
                     renderer.submit(somnium_renderer::command::DrawCommand {
                         sort_key:     somnium_renderer::command::SortKey::new(0, material.id as u16, entity.index()),
                         vertex_offset: mesh.vertex_offset,

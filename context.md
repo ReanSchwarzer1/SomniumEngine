@@ -1302,26 +1302,28 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ## 18. Known Issues & Active Bugs
 
-**Visibility-buffer geometry does not receive shadows (open).** Narrowed a long
-way by measurement, in a scene reduced to one cube over one plane with the demo's
-water and helmet despawned (`SOMNIUM_SHADOWTEST`):
+**RESOLVED — `GpuMaterial` layout mismatch (was: primitives cast no shadows,
+foliage wrong colours).** WGSL aligns `vec3<f32>` to 16 bytes; Rust's `repr(C)`
+aligns `[f32; 3]` to 4. So `emissive: vec3<f32>` in the shader's `Material` sat
+at offset 64 with a 96-byte stride, against the CPU struct's offset 52 and
+80-byte stride. Material 0 decoded correctly and **every material after it was
+read from the wrong bytes** — the error grew with the index, which is why the
+glTF helmet looked right while editor primitives and foliage did not.
 
-- The shadow atlas holds the caster. `SOMNIUM_SHADOW_DEBUG=4` shows green
-  (a nearer depth is stored) across exactly the ground region where the cube's
-  shadow belongs.
-- `blocker_search` finds it: mode 5 reports a blocker on **4181 of 4200**
-  fragments across that region.
-- The fragment still renders fully lit, and replacing the filter's
-  `textureSampleCompare` with a manual `textureLoad` comparison changed
-  nothing — so PCSS reaches the right answer and something **downstream of
-  `sample_shadow_cascade`** discards it.
+The visible symptom was not obviously a material bug: garbage `metallic` came
+back near 1, and `kD = (1 - F)(1 - metallic)` then zeroes the diffuse lobe, so
+the sun contributed almost nothing and the surface was lit by IBL alone. With no
+sun term left, multiplying by `shadow_factor` changed nothing — the shadows had
+been computed correctly the whole time and had nothing to act on. Measured
+before the fix: sun dominated on 0 of 14000 plane samples. After: 8658, garbage
+metallic 0, and a cube's shadow reads 3.4 against 110.3 in the open.
 
-Ruled out: the atlas, the cascade matrices, the cascade blend (guarded), the
-normal-offset bias (removed; it was dimensionally wrong and walked samples out
-of the shadow), the comparison sampler, and ReSTIR (off, and its target is
-cleared). **Next: trace `shadow_factor` from `sample_shadow`'s return to
-`direct_light`** — the discard is in those few lines, and everything either side
-of them has now been measured.
+Found by measuring rather than reading, via `SOMNIUM_SHADOW_DEBUG` (1 = shadow
+factor, 2 = sun only, 3 = ambient only, 4 = shadow-map plumbing, 5 =
+blocker_search verdict, 6 = shadow factor in hue, 7 = sun-vs-ambient dominance).
+Modes 6 and 7 are what cracked it: 6 proved the shadow was correct, 7 proved the
+sun term was missing. Reading the shadow code repeatedly found nothing because
+the shadow code was never wrong.
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.
