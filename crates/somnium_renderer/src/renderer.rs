@@ -117,6 +117,7 @@ pub struct SomniumRenderer {
     atmosphere_pass: crate::pass::atmosphere::AtmospherePass,
     auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
     taa_pass: crate::pass::taa::TaaPass,
+    pub gtao_pass: crate::pass::gtao::GtaoPass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -299,6 +300,11 @@ impl SomniumRenderer {
         );
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
+        // Phase 24I: screen-space occlusion, consumed by the shading pass.
+        let gtao_pass = crate::pass::gtao::GtaoPass::new(
+            &ctx.device, ctx.config.width, ctx.config.height,
+        );
+
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let mut taa_pass = crate::pass::taa::TaaPass::new(
             &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
@@ -358,6 +364,7 @@ impl SomniumRenderer {
             &shadow_resources.comparison_sampler,
             &ibl_pass.cube_view,
             &ibl_pass.sampler,
+            gtao_pass.output_view(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -418,6 +425,7 @@ impl SomniumRenderer {
             atmosphere_pass,
             auto_exposure_pass,
             taa_pass,
+            gtao_pass,
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -942,6 +950,7 @@ impl SomniumRenderer {
                 .resize(&ctx.device, &self.postprocess_pass.hdr_view);
             self.render_width = width;
             self.render_height = height;
+            self.gtao_pass.resize(&ctx.device, width, height);
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1323,6 +1332,19 @@ impl SomniumRenderer {
         // geometry. wgpu zero-fills a new texture, and zero is the near plane,
         // which would read as "everything is occluded" on the first frame.
         self.hiz_ready = true;
+
+        // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
+        // After the visibility pass has filled depth, before shading reads it.
+        self.gtao_pass
+            .ensure_bind_groups(&ctx.device, &self.vis_pass.depth_view);
+        self.gtao_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.proj_matrix,
+            ctx.config.width,
+            ctx.config.height,
+            0.1,
+        );
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         {

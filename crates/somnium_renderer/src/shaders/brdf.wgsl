@@ -14,6 +14,9 @@ struct Surface {
     f0: vec3<f32>,
     /// Baked ambient occlusion (glTF/ARM red channel). 1.0 = fully open sky.
     occlusion: f32,
+    /// Average unoccluded direction, world space (Phase 24I). Falls back to the
+    /// surface normal where nothing occludes.
+    bent_normal: vec3<f32>,
 };
 
 struct AngularInfo {

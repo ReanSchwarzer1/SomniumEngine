@@ -17,6 +17,8 @@ pub struct ShadingPass {
     /// be rebuilt on resize.
     env_view: wgpu::TextureView,
     env_sampler: wgpu::Sampler,
+    /// Phase 24I: GTAO output, kept for the same reason.
+    gtao_view: wgpu::TextureView,
 }
 
 impl ShadingPass {
@@ -29,6 +31,7 @@ impl ShadingPass {
         shadow_sampler: &wgpu::Sampler,
         env_view: &wgpu::TextureView,
         env_sampler: &wgpu::Sampler,
+        gtao_view: &wgpu::TextureView,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -88,6 +91,17 @@ impl ShadingPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Phase 24I: GTAO visibility + bent normal.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -115,6 +129,7 @@ impl ShadingPass {
             shadow_sampler,
             env_view,
             env_sampler,
+            gtao_view,
         );
 
         let shader_source = format!(
@@ -181,6 +196,7 @@ impl ShadingPass {
             shadow_sampler: shadow_sampler.clone(),
             env_view: env_view.clone(),
             env_sampler: env_sampler.clone(),
+            gtao_view: gtao_view.clone(),
         }
     }
 
@@ -193,6 +209,7 @@ impl ShadingPass {
         shadow_sampler: &wgpu::Sampler,
         env_view: &wgpu::TextureView,
         env_sampler: &wgpu::Sampler,
+        gtao_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -222,6 +239,10 @@ impl ShadingPass {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(env_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(gtao_view),
+                },
             ],
         })
     }
@@ -236,6 +257,7 @@ impl ShadingPass {
             &self.shadow_sampler,
             &self.env_view,
             &self.env_sampler,
+            &self.gtao_view,
         );
     }
 }

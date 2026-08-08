@@ -107,6 +107,8 @@ struct ClusterParams {
 // for roughness i / ENV_MAX_MIP.
 @group(1) @binding(4) var env_cube:    texture_cube<f32>;
 @group(1) @binding(5) var env_sampler: sampler;
+// Phase 24I: `rgb` = bent normal in [0,1], `a` = screen-space visibility.
+@group(1) @binding(6) var gtao_tex: texture_2d<f32>;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -155,7 +157,12 @@ fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     // Diffuse: the roughest mip approximates a cosine-convolved irradiance
     // map. Not a true convolution, but close enough visually and it saves a
     // whole extra prefilter chain.
-    let irradiance = textureSampleLevel(env_cube, env_sampler, n, ENV_MAX_MIP).rgb;
+    // Bent normal rather than the surface normal: it points along the average
+    // *unoccluded* direction, so a surface in a crevice gathers light from the
+    // opening instead of from the wall beside it. This is the part of GTAO that
+    // changes the colour of indirect light rather than only its amount.
+    let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
+    let irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
     let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
     let diffuse = irradiance * surface.albedo * kd;
 
@@ -501,6 +508,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = max(mr.g, 0.05);
         surface.metallic  = mr.b;
     }
+    // Phase 24I: fold screen-space occlusion into the baked term.
+    //
+    // Multiplied rather than replacing: the two measure different things. A
+    // baked map knows about detail too small or too enclosed to appear on
+    // screen, while GTAO knows about geometry the map's author never saw —
+    // a trunk meeting terrain, one object resting against another. Taking the
+    // minimum would discard whichever is more informative at any given pixel.
+    let gtao = textureLoad(gtao_tex, pixel_coords, 0);
+    surface.occlusion = surface.occlusion * gtao.a;
+
+    // GTAO works in view space; the gather happens in world space.
+    let bent_view = gtao.rgb * 2.0 - 1.0;
+    let bent_world = normalize(
+        (transpose(view.view) * vec4<f32>(bent_view, 0.0)).xyz);
+    surface.bent_normal = select(surface.normal, bent_world, length(bent_view) > 0.1);
+
     // Occlusion comes from its own texture, never from the metallic-roughness
     // map: glTF leaves that map's red channel undefined, and models that store
     // AO separately (the damaged helmet among them) leave it at zero, which

@@ -278,6 +278,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.f0 = vec3<f32>(0.04);
     // Terrain splat layers carry no occlusion map; leave indirect light open.
     surface.occlusion = 1.0;
+    // No screen-space term here yet; the surface normal is the best guess.
+    surface.bent_normal = surface.normal;
 
     let view_pos = view.view * vec4<f32>(in.world_pos, 1.0);
     let view_depth = -view_pos.z;
