@@ -1374,7 +1374,15 @@ reported: foliage steady, plane/cube/helmet vibrating. (It was *not* specular
 aliasing, which was the first guess and wrong — primitives are matte grey at
 roughness 0.5.)
 
-Dilation is now gated on the **neighbourhood depth spread**: inside a smooth
+The gate is measured **against the local depth gradient** (`dpdx`/`dpdy` of the
+centre depth), not an absolute value. The depth buffer is non-linear, so a fixed
+epsilon means centimetres near the camera and tens of metres far from it: it
+gated correctly up close and swallowed real silhouettes at distance, leaving
+distant foliage shimmering. A multiple of the gradient is unitless and holds at
+any distance — a smooth surface varies at roughly the gradient, an edge varies
+far above it. `dilation_epsilon` is that multiple (4.0 by default).
+
+Dilation is gated on the **neighbourhood depth spread**: inside a smooth
 surface the spread is tiny and the pixel keeps its own depth; at a silhouette
 the spread is large and the nearest sample wins outright. An earlier attempt
 subtracted a fixed epsilon from every comparison instead — that fixed the smooth

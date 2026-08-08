@@ -187,7 +187,7 @@ impl TaaPass {
             dilation_epsilon: std::env::var("SOMNIUM_TAA_DILATE_EPS")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
-                .unwrap_or(1.0e-4),
+                .unwrap_or(4.0),
             debug_mode: std::env::var("SOMNIUM_TAA_DEBUG")
                 .ok()
                 .and_then(|v| v.parse().ok())

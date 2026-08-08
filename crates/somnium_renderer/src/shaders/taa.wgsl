@@ -232,6 +232,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     var dmax = -1.0e9;
     var closest = coord;
     let centre_depth = textureLoad(depth_tex, coord, 0);
+    // How fast depth changes across one pixel here, from the hardware
+    // derivatives. This is the scale a *smooth* surface varies at, so anything
+    // near it is slope and anything far above it is an edge.
+    //
+    // A fixed epsilon cannot do this job: the depth buffer is non-linear, so
+    // the same absolute difference means centimetres up close and tens of
+    // metres at distance. A constant threshold therefore gated correctly near
+    // the camera and swallowed real silhouettes far from it — which is why
+    // distant foliage still shimmered after the previous attempt.
+    let depth_grad = abs(dpdx(centre_depth)) + abs(dpdy(centre_depth));
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let c = coord + vec2<i32>(x, y);
@@ -244,8 +254,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             dmax = max(dmax, d);
         }
     }
+    // `dilation_epsilon` is now a multiple of the local gradient rather than an
+    // absolute depth, so it carries no units and holds at any distance.
+    // Setting it to 0 makes every neighbourhood count as an edge, which is the
+    // original unconditional dilation.
     var depth = dmin;
-    if dmax - dmin < taa.dilation_epsilon {
+    if dmax - dmin <= depth_grad * taa.dilation_epsilon {
         depth = centre_depth;
         closest = coord;
     }
