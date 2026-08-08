@@ -48,6 +48,8 @@ pub enum InspectorField {
     LightColorR,
     LightColorG,
     LightColorB,
+    /// Colour temperature in Kelvin (Phase 24E). Drives the light's hue.
+    LightColorTemperature,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto

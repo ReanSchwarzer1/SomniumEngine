@@ -124,6 +124,9 @@ pub struct SomniumRenderer {
     pub frame_delta_time: f32,
     /// Stops applied on top of the metered exposure. Negative darkens.
     pub exposure_compensation: f32,
+    /// Half the sun's angular diameter, radians (Phase 24E). Drives the
+    /// specular highlight's size and the shadow penumbra's width.
+    pub sun_angular_radius: f32,
     /// Tone-mapping curve index; matches `Tonemapper::as_index`.
     pub tonemapper: u32,
     /// Radial vignette strength (0 = off, 1 = default, higher = stronger).
@@ -409,6 +412,7 @@ impl SomniumRenderer {
             auto_exposure: true,
             frame_delta_time: 1.0 / 60.0,
             exposure_compensation: 0.0,
+            sun_angular_radius: 0.004_654,
             tonemapper: 0,
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
@@ -1070,7 +1074,8 @@ impl SomniumRenderer {
             ],
             shadow_map_size: ATLAS_SIZE as f32,
             ibl_intensity: self.ibl_intensity,
-            _pad2: [0.0; 2],
+            sun_angular_radius: self.sun_angular_radius,
+            _pad2: 0.0,
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,

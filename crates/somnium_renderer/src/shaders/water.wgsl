@@ -56,7 +56,7 @@ struct DirectionalLight {
     cascade_splits:  vec4<f32>,
     shadow_map_size: f32,
     ibl_intensity:   f32,
-    _pad2_y:         f32,
+    sun_angular_radius:         f32,
     _pad2_z:         f32,
 }
 

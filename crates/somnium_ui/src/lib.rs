@@ -56,6 +56,7 @@ struct InspectorHandles {
     light_col_r:     NodeHandle,
     light_col_g:     NodeHandle,
     light_col_b:     NodeHandle,
+    light_temp_k:    NodeHandle,
     /// Row containers for the point/spot-only fields, so they can be hidden
     /// wholesale (label included) when a directional light is selected — range
     /// and cone angles mean nothing for a sun.
@@ -618,6 +619,7 @@ impl UiManager {
             (h.light_col_r,     IF::LightColorR),
             (h.light_col_g,     IF::LightColorG),
             (h.light_col_b,     IF::LightColorB),
+            (h.light_temp_k,    IF::LightColorTemperature),
             (h.post_exposure,   IF::PostExposure),
             (h.post_exp_comp,   IF::PostExposureCompensation),
             (h.post_vig_str,    IF::PostVignetteStrength),
@@ -1350,6 +1352,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let light_col_r     = make_row_step(ui, "Col R", 34.0, font_id, light_section, 0.005);
     let light_col_g     = make_row_step(ui, "Col G", 34.0, font_id, light_section, 0.005);
     let light_col_b     = make_row_step(ui, "Col B", 34.0, font_id, light_section, 0.005);
+    // Phase 24E: one physically meaningful dial in place of three coupled
+    // channels. 0 keeps whatever explicit RGB is set above.
+    let light_temp_k    = make_row_step(ui, "Kelvin", 34.0, font_id, light_section, 5.0);
     let (light_range_row, light_range) = make_row_rw(ui, "Rng",  34.0, font_id, light_section, 0.1);
     let (light_inner_row, light_inner) = make_row_rw(ui, "In°",  34.0, font_id, light_section, 0.2);
     let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
@@ -1447,7 +1452,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
         light_section, light_intensity, light_range, light_inner, light_outer,
-        light_col_r, light_col_g, light_col_b,
+        light_col_r, light_col_g, light_col_b, light_temp_k,
         light_range_row, light_inner_row, light_outer_row,
         terrain_section, terrain_layer, terrain_tile,
         foliage_section, foliage_toggle, foliage_label,

@@ -123,6 +123,88 @@ pub mod ev100 {
     pub const MOONLIT_NIGHT: f32 = -2.0;
 }
 
+/// The sun's angular diameter as seen from Earth, in degrees.
+///
+/// Drives two things that a point-source sun cannot produce: the width of a
+/// shadow's penumbra, and the size of the specular highlight. Both are why a
+/// real sunlit sphere has a soft-edged shadow and a highlight with area, while
+/// an idealised directional light gives a razor edge and a pinprick.
+pub const SUN_ANGULAR_DIAMETER_DEG: f32 = 0.53;
+
+/// Colour-temperature presets in Kelvin.
+pub mod kelvin {
+    /// Candle flame.
+    pub const CANDLE: f32 = 1_900.0;
+    /// Domestic tungsten bulb.
+    pub const TUNGSTEN: f32 = 2_700.0;
+    /// Sun within an hour of the horizon.
+    pub const SUNRISE: f32 = 3_200.0;
+    /// Direct midday sun — the reference white for daylight film.
+    pub const NOON_SUN: f32 = 5_500.0;
+    /// Overcast daylight.
+    pub const OVERCAST: f32 = 6_500.0;
+    /// Light from a clear blue sky, in shade.
+    pub const BLUE_SKY: f32 = 12_000.0;
+}
+
+/// Convert a colour temperature to linear RGB, normalised so the brightest
+/// channel is 1.0.
+///
+/// Kelvin is how lighting is actually specified — bulbs, film stock and camera
+/// white balance are all quoted in it — and it collapses three coupled RGB
+/// sliders into one dial that cannot produce a physically impossible colour.
+///
+/// Uses the Planckian-locus approximation: an analytic fit to blackbody
+/// chromaticity, accurate across roughly 1 000–15 000 K, which covers every
+/// light source anyone reasonably places in a scene.
+#[must_use]
+pub fn kelvin_to_rgb(kelvin: f32) -> glam::Vec3 {
+    let t = (kelvin / 100.0).clamp(10.0, 400.0);
+
+    let red = if t <= 66.0 {
+        255.0
+    } else {
+        329.698_73 * (t - 60.0).powf(-0.133_204_76)
+    };
+
+    let green = if t <= 66.0 {
+        99.470_802 * t.ln() - 161.119_57
+    } else {
+        288.122_16 * (t - 60.0).powf(-0.075_514_846)
+    };
+
+    let blue = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.517_73 * (t - 10.0).ln() - 305.044_79
+    };
+
+    let srgb = glam::Vec3::new(red, green, blue).clamp(glam::Vec3::ZERO, glam::Vec3::splat(255.0))
+        / 255.0;
+
+    // The fit is in sRGB; shading works in linear, so decode. Skipping this is
+    // a subtle and very common bug — it makes warm lights far too saturated.
+    let linear = glam::Vec3::new(
+        srgb_to_linear(srgb.x),
+        srgb_to_linear(srgb.y),
+        srgb_to_linear(srgb.z),
+    );
+
+    // Normalise so changing temperature changes hue, not brightness. Intensity
+    // is the light's own control and must stay independent.
+    linear / linear.max_element().max(1e-4)
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// Sky-dome luminance (cd/m²) per lux of sun illuminance.
 ///
 /// A clear daytime sky measures roughly 8 000 cd/m² while the sun delivers about
@@ -214,6 +296,39 @@ mod tests {
         let narrow = spot_candela(lumens::BULB_100W, 0.1);
         let wide = spot_candela(lumens::BULB_100W, 1.2);
         assert_eq!(narrow, wide);
+    }
+
+    /// Warm light must be redder than neutral, cool light bluer, and both must
+    /// stay normalised so temperature never doubles as a brightness control.
+    #[test]
+    fn colour_temperature_shifts_hue_not_brightness() {
+        let warm = kelvin_to_rgb(kelvin::TUNGSTEN);
+        let neutral = kelvin_to_rgb(6_600.0);
+        let cool = kelvin_to_rgb(kelvin::BLUE_SKY);
+
+        assert!(warm.x > warm.z, "tungsten should be red-dominant, got {warm:?}");
+        assert!(cool.z > cool.x, "blue sky should be blue-dominant, got {cool:?}");
+        assert!(
+            (neutral.x - neutral.z).abs() < 0.2,
+            "6600 K should be near neutral, got {neutral:?}",
+        );
+
+        for c in [warm, neutral, cool] {
+            assert!(
+                (c.max_element() - 1.0).abs() < 1e-3,
+                "not normalised: {c:?}",
+            );
+        }
+    }
+
+    /// The fit must stay finite and in range at the extremes of the clamp.
+    #[test]
+    fn extreme_colour_temperatures_stay_in_range() {
+        for k in [0.0, 500.0, 1_000.0, 20_000.0, 1e9] {
+            let c = kelvin_to_rgb(k);
+            assert!(c.is_finite(), "{k} K produced {c:?}");
+            assert!(c.min_element() >= 0.0 && c.max_element() <= 1.0 + 1e-3);
+        }
     }
 
     /// Degenerate camera settings must fall back rather than produce NaN or

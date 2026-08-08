@@ -2000,6 +2000,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::LightColorR
                         | IF::LightColorG
                         | IF::LightColorB
+                        | IF::LightColorTemperature
                 ) {
                     if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
                         let mut new_light = old_light;
@@ -2023,6 +2024,9 @@ impl<G: GameApp> Engine<G> {
                             IF::LightColorR => new_light.color.x = value.max(0.0),
                             IF::LightColorG => new_light.color.y = value.max(0.0),
                             IF::LightColorB => new_light.color.z = value.max(0.0),
+                            IF::LightColorTemperature => {
+                                new_light.color_temperature_k = value.max(0.0);
+                            }
                             _ => unreachable!(),
                         }
                         if live {

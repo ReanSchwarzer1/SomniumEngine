@@ -185,6 +185,14 @@ pub struct LightComponent {
     /// used to be an arbitrary multiplier, which is why no value of it could
     /// mean "night" — see [`light_units`].
     pub intensity: f32,
+    /// Colour temperature in Kelvin (Phase 24E).
+    ///
+    /// When non-zero this drives `color`, so the light's hue comes from one
+    /// physically meaningful dial instead of three coupled RGB channels that
+    /// can express colours no real emitter produces. Presets in
+    /// [`light_units::kelvin`]. Zero keeps whatever `color` holds, so lights
+    /// authored before this existed still behave.
+    pub color_temperature_k: f32,
     /// Attenuation radius for point/spot lights. Ignored for directional.
     pub range: f32,
     /// Spot inner cone half-angle (radians). Fully-lit region.
@@ -200,6 +208,16 @@ impl LightComponent {
     /// Directional lights hand over illuminance unchanged; point and spot
     /// lights convert luminous power to intensity, since shading divides by
     /// distance squared and needs candela rather than lumens.
+    /// Linear-RGB tint, from colour temperature when one is set.
+    #[must_use]
+    pub fn tint(&self) -> glam::Vec3 {
+        if self.color_temperature_k > 0.0 {
+            light_units::kelvin_to_rgb(self.color_temperature_k)
+        } else {
+            self.color
+        }
+    }
+
     #[must_use]
     pub fn photometric_color(&self) -> glam::Vec3 {
         let scale = match self.light_type {
@@ -207,7 +225,7 @@ impl LightComponent {
             LightType::Point => light_units::point_candela(self.intensity),
             LightType::Spot => light_units::spot_candela(self.intensity, self.outer_angle),
         };
-        self.color * scale
+        self.tint() * scale
     }
 
     /// Convenience constructor for a white directional light, in **lux**.
@@ -216,6 +234,7 @@ impl LightComponent {
             light_type: LightType::Directional,
             color: glam::Vec3::ONE,
             intensity,
+            color_temperature_k: 0.0,
             range: 0.0,
             inner_angle: 0.0,
             outer_angle: 0.0,
@@ -228,6 +247,7 @@ impl LightComponent {
             light_type: LightType::Point,
             color: glam::Vec3::ONE,
             intensity,
+            color_temperature_k: 0.0,
             range,
             inner_angle: 0.0,
             outer_angle: 0.0,
@@ -240,6 +260,7 @@ impl LightComponent {
             light_type: LightType::Spot,
             color: glam::Vec3::ONE,
             intensity,
+            color_temperature_k: 0.0,
             range,
             inner_angle,
             outer_angle,

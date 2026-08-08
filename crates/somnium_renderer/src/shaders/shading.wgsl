@@ -52,7 +52,7 @@ struct DirectionalLight {
     cascade_splits:  vec4<f32>,               // offset 288  view-space far Z per cascade
     shadow_map_size: f32,                     // offset 304  total atlas texels (4096)
     ibl_intensity:   f32,                     // offset 308  Phase 22C: editable indirect strength
-    _pad2_y:         f32,                     // offset 312
+    sun_angular_radius: f32,                  // offset 312  Phase 24E
     _pad2_z:         f32,                     // offset 316
 }
 
@@ -489,7 +489,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // ── PBR path (existing) ──────────────────────────────────────────────
         let light_dir   = normalize(light.direction);
         let light_color = light.color;
-        let direct_light = evaluate_brdf(surface, light_dir) * light_color * shadow_factor;
+
+        // Phase 24E: the sun is a disc, not a point. A point source gives a
+        // highlight one pixel wide on anything smooth, which is among the
+        // clearest tells that an image is rendered rather than photographed.
+        let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
+            * light_color * shadow_factor;
         // Phase 19: real environment lighting instead of a flat 3% fudge —
         // this is what lets metals reflect the sky.
         let ambient = evaluate_ibl(surface);

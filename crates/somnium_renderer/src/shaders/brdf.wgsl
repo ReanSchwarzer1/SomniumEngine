@@ -66,6 +66,39 @@ fn Diffuse_Burley(albedo: vec3<f32>, roughness: f32, n_dot_v: f32, n_dot_l: f32,
 }
 
 // Final BRDF Evaluation (Simplified for Isotropic)
+/// BRDF for an area light of angular radius `angular_radius` (Phase 24E).
+///
+/// The sun subtends 0.53°, so its highlight has area. Widening the specular
+/// lobe's roughness by the source's angular size spreads the highlight to match
+/// (Karis' sphere-light approximation), and the energy factor keeps the lobe's
+/// total reflected light constant so spreading it does not also brighten it.
+///
+/// The correction applies to the **specular term only**. Diffuse reflection
+/// does not care how large the source is, only how much light arrives, so
+/// scaling it here would darken every lit surface as a side effect.
+fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
+    let angular = get_angular_info(surface.normal, surface.view_dir, l);
+
+    let alpha = surface.roughness * surface.roughness;
+    let widened = clamp(alpha + angular_radius * 0.5, alpha, 1.0);
+    let energy = alpha / max(widened, 1e-4);
+    let spec_roughness = sqrt(widened);
+
+    let D = D_GGX(angular.n_dot_h, spec_roughness);
+    let V = V_SmithGGX(angular.n_dot_v, angular.n_dot_l, spec_roughness);
+    let F = F_Schlick(surface.f0, angular.v_dot_h);
+    let Fr = D * V * F * energy;
+
+    let kS = F;
+    let kD = (vec3<f32>(1.0) - kS) * (1.0 - surface.metallic);
+    let Fd = Diffuse_Burley(
+        surface.albedo, surface.roughness,
+        angular.n_dot_v, angular.n_dot_l, angular.v_dot_h,
+    );
+
+    return (kD * Fd + Fr) * angular.n_dot_l;
+}
+
 fn evaluate_brdf(surface: Surface, l: vec3<f32>) -> vec3<f32> {
     let angular = get_angular_info(surface.normal, surface.view_dir, l);
     

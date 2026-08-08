@@ -67,7 +67,14 @@ pub struct GpuDirectionalLight {
     /// Rides in this buffer's former padding because every pass that needs it
     /// -- shading, transparent, terrain, water -- already binds the light.
     pub ibl_intensity: f32,
-    pub _pad2: [f32; 2],
+    /// Half the light's angular diameter, in radians (Phase 24E).
+    ///
+    /// The sun is not a point: it subtends 0.53°, which is what gives shadows a
+    /// penumbra that widens with distance from the caster and gives the
+    /// specular highlight area instead of a pinprick. Rides in this buffer's
+    /// remaining padding, so no pass needed a layout change.
+    pub sun_angular_radius: f32,
+    pub _pad2: f32,
 }
 
 impl Default for GpuDirectionalLight {
@@ -87,7 +94,9 @@ impl Default for GpuDirectionalLight {
             cascade_splits: [5.0, 20.0, 50.0, 100.0],
             shadow_map_size: ATLAS_SIZE as f32,
             ibl_intensity: 0.35,
-            _pad2: [0.0; 2],
+            // 0.53° diameter → 0.00463 rad radius.
+            sun_angular_radius: 0.004_654,
+            _pad2: 0.0,
         }
     }
 }
