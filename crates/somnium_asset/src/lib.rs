@@ -65,6 +65,13 @@ pub struct LoadedMaterial {
     pub alpha_mode:            AlphaMode,
     /// Threshold for [`AlphaMode::Mask`].
     pub alpha_cutoff:          f32,
+    /// How much light passes *through* the surface (Phase 24S).
+    ///
+    /// 0 is opaque. Leaves and grass blades are thin enough that a large
+    /// fraction of the light hitting their far side comes out toward the
+    /// viewer, which is why real foliage glows when backlit and looks flat and
+    /// dead without it — no amount of correcting the albedo substitutes.
+    pub transmission:          f32,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
     pub double_sided:          bool,
 }
@@ -139,6 +146,9 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 gltf::material::AlphaMode::Blend  => AlphaMode::Blend,
             },
             alpha_cutoff:          mat.alpha_cutoff().unwrap_or(0.5),
+            transmission:          mat
+                .transmission()
+                .map_or(0.0, |t| t.transmission_factor()),
             double_sided:          mat.double_sided(),
             albedo_map:            pbr.base_color_texture().map(|t| t.texture().source().index()),
             occlusion_map:         mat.occlusion_texture().map(|t| t.texture().source().index()),
@@ -172,6 +182,13 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             // blade edges crisp without eroding thin tips.
             m.alpha_cutoff = 0.5;
             m.double_sided = true;
+            // A sidecar cutout mask means foliage: thin, and translucent.
+            // The glTF carries no transmission factor for these assets, and
+            // inferring it from the same convention is better than leaving
+            // every leaf opaque.
+            if m.transmission <= 0.0 {
+                m.transmission = 0.5;
+            }
         }
     }
 
@@ -187,6 +204,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             metallic_roughness_map: None,
             alpha_mode:            AlphaMode::Opaque,
             alpha_cutoff:          0.5,
+            transmission:          0.0,
             double_sided:          false,
         });
     }

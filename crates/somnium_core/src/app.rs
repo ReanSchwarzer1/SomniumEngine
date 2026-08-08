@@ -1830,6 +1830,8 @@ impl<G: GameApp> Engine<G> {
                                     alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
                                 },
                             );
                             self.default_material_id = Some(id);

@@ -27,6 +27,10 @@ struct Material {
     alpha_cutoff: f32,
     flags: u32,
     occlusion_map: i32,
+    transmission: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).
@@ -134,6 +138,49 @@ fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
     let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
     let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
     return f0 * ab.x + ab.y;
+}
+
+/// Light transmitted through a thin surface (Phase 24S).
+///
+/// Frostbite's approximation (Barré-Brisebois & Bouchard). A real subsurface
+/// solve is out of scope, but the visual signature of translucency is
+/// specific and cheap to reproduce: light leaving the *far* side of a thin
+/// surface, spread by scattering, brightest when the viewer looks almost
+/// straight into the source through the material.
+///
+/// This is what the foliage has been missing all along. Leaves lit only by
+/// reflection stay flat and dark no matter how correct their albedo is —
+/// which is exactly the symptom the grass has shown since Phase 17. A backlit
+/// leaf glowing green is most of what makes vegetation read as alive.
+fn transmitted_light(
+    surface: Surface,
+    light_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    transmission: f32,
+) -> vec3<f32> {
+    if transmission <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    /// Bends the transmitted direction back toward the surface normal, so the
+    /// glow wraps around the silhouette instead of appearing only where the
+    /// light is exactly behind.
+    const DISTORTION: f32 = 0.25;
+    /// Tightens the lobe. Higher means the glow appears only closer to
+    /// straight-through, which is what thin, dense material looks like.
+    const POWER: f32 = 4.0;
+    /// Ambient share, so a leaf in shade is still translucent rather than
+    /// switching off entirely when the sun is not behind it.
+    const AMBIENT: f32 = 0.15;
+
+    // The direction light takes leaving the far side.
+    let transmit_dir = normalize(-light_dir + surface.normal * DISTORTION);
+    let lobe = pow(saturate(dot(surface.view_dir, transmit_dir)), POWER);
+
+    // Tinted by albedo: light passing through a leaf picks up its colour, which
+    // is why backlit foliage reads more saturated than the same leaf lit from
+    // the front.
+    return light_color * (lobe + AMBIENT) * transmission * surface.albedo;
 }
 
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
@@ -721,6 +768,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // clearest tells that an image is rendered rather than photographed.
         let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor;
+
+        // Phase 24S. Deliberately *not* multiplied by the shadow factor: the
+        // whole point is light arriving through the surface from the side the
+        // shadow map says is dark. Attenuating it by the shadow would remove
+        // exactly the case the term exists for.
+        let transmitted = transmitted_light(
+            surface, light_dir, light_color, material.transmission);
         // Phase 19: real environment lighting instead of a flat 3% fudge —
         // this is what lets metals reflect the sky.
         let ambient = evaluate_ibl(surface);
@@ -755,7 +809,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        result = direct_light + local_light_contrib + ambient;
+        result = direct_light + transmitted + local_light_contrib + ambient;
     }
 
     // ── Cascade debug overlay (controlled by _padding repurposed as a flag) ──

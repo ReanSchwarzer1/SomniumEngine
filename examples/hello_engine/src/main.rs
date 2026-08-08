@@ -265,6 +265,8 @@ impl VoxelTerrain {
                 normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
             },
         );
 
@@ -867,6 +869,8 @@ impl GameApp for HelloGame {
                         albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
                     },
                 );
 
@@ -1139,6 +1143,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
             albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -1149,6 +1155,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
             albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
         },
     );
 
@@ -1203,6 +1211,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 albedo_map: -1, normal_map: -1, metallic_roughness_map: -1, alpha_cutoff: 0.0,
                 flags: 0,
                 occlusion_map: -1,
+                transmission: 0.0,
+                _pad: [0.0; 3],
             },
         )
     };
