@@ -116,7 +116,7 @@ pub struct SomniumRenderer {
     postprocess_pass: PostProcessPass,
     atmosphere_pass: crate::pass::atmosphere::AtmospherePass,
     auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
-    taa_pass: crate::pass::taa::TaaPass,
+    pub taa_pass: crate::pass::taa::TaaPass,
     pub gtao_pass: crate::pass::gtao::GtaoPass,
     pub bloom_pass: crate::pass::bloom::BloomPass,
     pub dof_pass: crate::pass::dof::DofPass,

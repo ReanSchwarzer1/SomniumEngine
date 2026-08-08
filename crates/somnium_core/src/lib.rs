@@ -530,6 +530,22 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
+    /// Bloom (Phase 24T).
+    pub bloom_enabled: bool,
+    pub bloom_intensity: f32,
+    /// Screen-space occlusion (Phase 24I).
+    pub gtao_enabled: bool,
+    /// Depth of field (Phase 24Z). Focus distance is in metres.
+    pub dof_enabled: bool,
+    pub dof_focus_distance: f32,
+    /// Temporal anti-aliasing (Phase 24F).
+    pub taa_enabled: bool,
+    /// Ray-traced direct lighting (Phase 24K).
+    ///
+    /// Only has an effect where the device granted ray query; the renderer
+    /// falls back to the shadow map otherwise, so the toggle is safe to leave
+    /// on regardless of hardware.
+    pub restir_enabled: bool,
     /// Replace PBR shading with the banded cel look.
     ///
     /// Lived only behind the F5 key, which is easy to hit by accident and gave
@@ -582,6 +598,13 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            bloom_enabled: true,
+            bloom_intensity: 0.04,
+            gtao_enabled: true,
+            dof_enabled: false,
+            dof_focus_distance: 10.0,
+            taa_enabled: true,
+            restir_enabled: false,
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,

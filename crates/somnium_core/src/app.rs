@@ -796,6 +796,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     chromatic: pp.ca_enabled,
                     fxaa: pp.fxaa_enabled,
                     cel_shading: pp.cel_shading,
+                    taa: pp.taa_enabled,
+                    gtao: pp.gtao_enabled,
+                    restir: pp.restir_enabled,
+                    bloom: pp.bloom_enabled,
+                    dof: pp.dof_enabled,
+                    extras: [
+                        pp.bloom_intensity,
+                        pp.dof_focus_distance,
+                        pp.temperature,
+                        pp.contrast,
+                        pp.saturation,
+                        pp.grain,
+                    ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
                 });
@@ -1301,6 +1314,14 @@ impl<G: GameApp> Engine<G> {
             r.tonemapper = pp.tonemapper.as_index();
             r.exposure_compensation = pp.exposure_compensation;
             r.shading_mode = u32::from(pp.cel_shading);
+            r.taa_pass.set_enabled(pp.taa_enabled);
+            r.gtao_pass.enabled = pp.gtao_enabled;
+            r.bloom_pass.enabled = pp.bloom_enabled;
+            r.bloom_pass.intensity = pp.bloom_intensity;
+            r.dof_pass.enabled = pp.dof_enabled;
+            r.dof_pass.focus_distance = pp.dof_focus_distance;
+            r.dof_pass.f_stop = pp.aperture_f_stops;
+            r.restir_pass.enabled = pp.restir_enabled;
             r.grading = somnium_renderer::pass::postprocess::Grading {
                 temperature: pp.temperature,
                 tint: pp.tint,
@@ -1939,6 +1960,12 @@ impl<G: GameApp> Engine<G> {
                     field,
                     IF::PostExposure
                         | IF::PostExposureCompensation
+                        | IF::PostBloomIntensity
+                        | IF::PostFocusDistance
+                        | IF::PostTemperature
+                        | IF::PostContrast
+                        | IF::PostSaturation
+                        | IF::PostGrain
                         | IF::PostVignetteStrength
                         | IF::PostCaStrength
                         | IF::PostIblIntensity
@@ -1947,6 +1974,12 @@ impl<G: GameApp> Engine<G> {
                         match field {
                             IF::PostExposure => pp.ev100 = value,
                             IF::PostExposureCompensation => pp.exposure_compensation = value,
+                            IF::PostBloomIntensity => pp.bloom_intensity = value.max(0.0),
+                            IF::PostFocusDistance => pp.dof_focus_distance = value.max(0.01),
+                            IF::PostTemperature => pp.temperature = value.clamp(-1.0, 1.0),
+                            IF::PostContrast => pp.contrast = value.max(0.0),
+                            IF::PostSaturation => pp.saturation = value.max(0.0),
+                            IF::PostGrain => pp.grain = value.max(0.0),
                             IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
                             IF::PostCaStrength => pp.ca_strength = value.max(0.0),
                             IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
@@ -2314,6 +2347,26 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::CelShading => {
                             pp.cel_shading = !pp.cel_shading;
                             pp.cel_shading
+                        }
+                        PostFxToggle::Taa => {
+                            pp.taa_enabled = !pp.taa_enabled;
+                            pp.taa_enabled
+                        }
+                        PostFxToggle::Gtao => {
+                            pp.gtao_enabled = !pp.gtao_enabled;
+                            pp.gtao_enabled
+                        }
+                        PostFxToggle::Restir => {
+                            pp.restir_enabled = !pp.restir_enabled;
+                            pp.restir_enabled
+                        }
+                        PostFxToggle::Bloom => {
+                            pp.bloom_enabled = !pp.bloom_enabled;
+                            pp.bloom_enabled
+                        }
+                        PostFxToggle::DepthOfField => {
+                            pp.dof_enabled = !pp.dof_enabled;
+                            pp.dof_enabled
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

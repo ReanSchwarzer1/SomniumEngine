@@ -58,6 +58,16 @@ pub enum InspectorField {
     /// Stops added on top of the metered exposure. Negative darkens — this is
     /// the control for "auto-exposure is right but I want it a stop down".
     PostExposureCompensation,
+    /// Bloom strength (Phase 24T).
+    PostBloomIntensity,
+    /// Focus distance in metres (Phase 24Z).
+    PostFocusDistance,
+    /// Colour grading (Phase 24Y).
+    PostTemperature,
+    PostContrast,
+    PostSaturation,
+    /// Film grain (Phase 24Z).
+    PostGrain,
     PostVignetteStrength,
     PostCaStrength,
     /// Scene-wide indirect-light strength (Phase 22C).
@@ -89,6 +99,16 @@ pub enum PostFxToggle {
     AutoExposure,
     /// Banded cel shading in place of PBR.
     CelShading,
+    /// Bloom (Phase 24T).
+    Bloom,
+    /// Screen-space ambient occlusion (Phase 24I).
+    Gtao,
+    /// Depth of field (Phase 24Z).
+    DepthOfField,
+    /// Temporal anti-aliasing (Phase 24F).
+    Taa,
+    /// Ray-traced direct lighting (Phase 24K).
+    Restir,
 }
 
 /// High-level editor commands produced by the native UI layer.

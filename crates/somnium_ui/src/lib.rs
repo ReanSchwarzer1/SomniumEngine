@@ -107,6 +107,22 @@ struct InspectorHandles {
     post_fxaa_label:  NodeHandle,
     post_cel_toggle:  NodeHandle,
     post_cel_label:   NodeHandle,
+    post_taa_toggle:    NodeHandle,
+    post_taa_label:     NodeHandle,
+    post_gtao_toggle:   NodeHandle,
+    post_gtao_label:    NodeHandle,
+    post_restir_toggle: NodeHandle,
+    post_restir_label:  NodeHandle,
+    post_bloom_toggle:  NodeHandle,
+    post_bloom_label:   NodeHandle,
+    post_bloom_amt:     NodeHandle,
+    post_dof_toggle:    NodeHandle,
+    post_dof_label:     NodeHandle,
+    post_dof_focus:     NodeHandle,
+    post_temperature:   NodeHandle,
+    post_contrast:      NodeHandle,
+    post_saturation:    NodeHandle,
+    post_grain:         NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -118,6 +134,13 @@ pub struct PostInspectorState {
     pub chromatic: bool,
     pub fxaa: bool,
     pub cel_shading: bool,
+    pub taa: bool,
+    pub gtao: bool,
+    pub restir: bool,
+    pub bloom: bool,
+    pub dof: bool,
+    /// `[bloom_intensity, focus_distance, temperature, contrast, saturation, grain]`.
+    pub extras: [f32; 6],
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -527,6 +550,27 @@ impl UiManager {
                 self.native_ui.send(TextMessage::set_text(
                     h.post_cel_label, format!("{} Cel Shading", tick(cel_on)),
                 ));
+                for (label, on, name) in [
+                    (h.post_taa_label, v.taa, "TAA"),
+                    (h.post_gtao_label, v.gtao, "GTAO"),
+                    (h.post_restir_label, v.restir, "RT Direct Light"),
+                    (h.post_bloom_label, v.bloom, "Bloom"),
+                    (h.post_dof_label, v.dof, "Depth of Field"),
+                ] {
+                    self.native_ui.send(TextMessage::set_text(
+                        label, format!("{} {name}", tick(on)),
+                    ));
+                }
+                for (field, value) in [
+                    (h.post_bloom_amt, v.extras[0]),
+                    (h.post_dof_focus, v.extras[1]),
+                    (h.post_temperature, v.extras[2]),
+                    (h.post_contrast, v.extras[3]),
+                    (h.post_saturation, v.extras[4]),
+                    (h.post_grain, v.extras[5]),
+                ] {
+                    self.native_ui.send(NumericFieldMessage::set_value(field, value));
+                }
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -629,6 +673,12 @@ impl UiManager {
             (h.light_temp_k,    IF::LightColorTemperature),
             (h.post_exposure,   IF::PostExposure),
             (h.post_exp_comp,   IF::PostExposureCompensation),
+            (h.post_bloom_amt,  IF::PostBloomIntensity),
+            (h.post_dof_focus,  IF::PostFocusDistance),
+            (h.post_temperature, IF::PostTemperature),
+            (h.post_contrast,   IF::PostContrast),
+            (h.post_saturation, IF::PostSaturation),
+            (h.post_grain,      IF::PostGrain),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -674,6 +724,18 @@ impl UiManager {
                     self.editor_events
                         .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
                     continue;
+                }
+                for (handle, which) in [
+                    (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
+                    (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
+                    (self.inspector_handles.post_restir_toggle, PostFxToggle::Restir),
+                    (self.inspector_handles.post_bloom_toggle, PostFxToggle::Bloom),
+                    (self.inspector_handles.post_dof_toggle, PostFxToggle::DepthOfField),
+                ] {
+                    if msg.destination == handle {
+                        self.editor_events.push_back(EditorEvent::TogglePostFx(which));
+                        break;
+                    }
                 }
                 if msg.destination == self.inspector_handles.post_cel_toggle {
                     self.editor_events
@@ -1407,6 +1469,21 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_ca_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.0002);
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
+
+    // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
+    // list reads as a pipeline rather than an unsorted pile of switches.
+    let (post_taa_toggle, post_taa_label)     = make_toggle(ui, "TAA", font_id, post_section);
+    let (post_gtao_toggle, post_gtao_label)   = make_toggle(ui, "GTAO", font_id, post_section);
+    let (post_restir_toggle, post_restir_label) =
+        make_toggle(ui, "RT Direct Light", font_id, post_section);
+    let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
+    let post_bloom_amt  = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
+    let (post_dof_toggle, post_dof_label)     = make_toggle(ui, "Depth of Field", font_id, post_section);
+    let post_dof_focus  = make_row_step(ui, "Focus", 34.0, font_id, post_section, 0.1);
+    let post_temperature = make_row_step(ui, "Temp", 34.0, font_id, post_section, 0.01);
+    let post_contrast    = make_row_step(ui, "Contr", 34.0, font_id, post_section, 0.01);
+    let post_saturation  = make_row_step(ui, "Sat", 34.0, font_id, post_section, 0.01);
+    let post_grain       = make_row_step(ui, "Grain", 34.0, font_id, post_section, 0.002);
     ui.set_visibility(post_section, false);
 
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
@@ -1484,6 +1561,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
         post_cel_toggle, post_cel_label,
+        post_taa_toggle, post_taa_label, post_gtao_toggle, post_gtao_label,
+        post_restir_toggle, post_restir_label, post_bloom_toggle, post_bloom_label,
+        post_bloom_amt, post_dof_toggle, post_dof_label, post_dof_focus,
+        post_temperature, post_contrast, post_saturation, post_grain,
         post_fxaa_toggle, post_fxaa_label,
     }
 }
