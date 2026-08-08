@@ -514,6 +514,58 @@ impl GameApp for HelloGame {
         // it from the editor via Create > Voxel Terrain. `sync_voxel_terrain`
         // builds the streaming driver when that entity appears.
 
+        // Phase 24K: shadow smoke test. A wide ground plane with a cube above
+        // it, both through the visibility buffer — which is what the traced
+        // path can currently see, since terrain and water write depth in their
+        // own later passes.
+        //
+        // In code rather than driven through the editor UI: building this by
+        // synthesising clicks was attempted twice and produced scenes that
+        // looked plausible but were not what they claimed, which is worse than
+        // no test. Spawned with MeshKind only, so the same auto-attach path the
+        // editor's Create menu uses supplies the mesh and material.
+        if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
+            ctx.world.spawn((
+                Transform {
+                    translation: Vec3::new(0.0, 0.0, 0.0),
+                    rotation: glam::Quat::IDENTITY,
+                    scale: Vec3::new(40.0, 1.0, 40.0),
+                },
+                Name::new("ShadowGround"),
+                WorldTransform::identity(),
+                MeshKind::Plane,
+            ));
+            ctx.world.spawn((
+                Transform {
+                    translation: Vec3::new(0.0, 3.0, 0.0),
+                    rotation: glam::Quat::IDENTITY,
+                    scale: Vec3::splat(2.0),
+                },
+                Name::new("ShadowCaster"),
+                WorldTransform::identity(),
+                MeshKind::Cube,
+            ));
+
+            // A second cube high against the sky. If this one is visible and the
+            // low one is not, the low cube is rendering but has no contrast
+            // against the plane; if neither shows, it is not being drawn.
+            ctx.world.spawn((
+                Transform {
+                    translation: Vec3::new(-6.0, 14.0, 0.0),
+                    rotation: glam::Quat::IDENTITY,
+                    scale: Vec3::splat(2.0),
+                },
+                Name::new("SkyCube"),
+                WorldTransform::identity(),
+                MeshKind::Cube,
+            ));
+
+            // Look down at the ground so the cast shadow fills the frame.
+            self.camera.position = Vec3::new(0.0, 9.0, 16.0);
+            self.camera.yaw = -90.0;
+            self.camera.pitch = -30.0;
+        }
+
         // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
         // meshing, LODs, sculpt brushes, and auto-splat without editor input.
         // Normally terrain is created via Create > Terrain in the editor.
@@ -910,6 +962,13 @@ impl GameApp for HelloGame {
                         MaterialComponent { id: default_mat }
                     ));
                     
+                    if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
+                        tracing::info!(
+                            "shadowtest attach: kind={:?} vtx_off={} idx_off={} idx_count={} mat={}",
+                            kind, alloc.vertex_offset, alloc.index_offset, alloc.index_count, default_mat
+                        );
+                    }
+
                     // Fix selection if needed
                     if *ctx.selected_entity == Some(entity) {
                         *ctx.selected_entity = Some(new_entity);

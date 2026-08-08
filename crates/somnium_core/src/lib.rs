@@ -604,7 +604,11 @@ impl Default for PostProcessComponent {
             dof_enabled: false,
             dof_focus_distance: 10.0,
             taa_enabled: true,
-            restir_enabled: false,
+            // Seeded from the environment so the debug switch and the Post FX
+            // toggle agree. The component is the single source of truth and is
+            // copied into the pass every frame, so a pass-side default would be
+            // overwritten before it ever took effect.
+            restir_enabled: std::env::var("SOMNIUM_RESTIR").as_deref() == Ok("1"),
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,
