@@ -25,6 +25,11 @@ struct TaaParams {
     blend_factor: f32,
     /// Zero on the first frame after a reset, so history is ignored.
     history_valid: f32,
+    /// Debug visualisation selector; 0 = off. See `SOMNIUM_TAA_DEBUG`.
+    debug_mode: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var current_tex:  texture_2d<f32>;
@@ -32,6 +37,8 @@ struct TaaParams {
 @group(0) @binding(2) var depth_tex:    texture_depth_2d;
 @group(0) @binding(3) var linear_samp:  sampler;
 @group(0) @binding(4) var<uniform> taa: TaaParams;
+/// Auto-exposure result; `[0]` is the linear multiplier (Phase 24A-3).
+@group(0) @binding(5) var<storage, read> metered: array<f32, 2>;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -75,12 +82,29 @@ fn sanitize(c: vec3<f32>) -> vec3<f32> {
 /// mean, so a specular glint flickers instead of resolving — exactly the
 /// foliage sparkle this pass exists to remove. Blending in a compressed space
 /// weights samples by how they will actually appear (Karis).
-fn tonemap_for_blend(c: vec3<f32>) -> vec3<f32> {
+///
+/// **Exposure is applied first, and this is not optional.** The curve assumes
+/// roughly exposure-normalised input, but the HDR target holds *pre-exposure*
+/// luminance in cd/m² — thousands outdoors. Feeding it raw, 5 000 maps to
+/// 0.9998 and 6 000 to 0.99983, so an entire neighbourhood collapses into
+/// ~1e-4 of range at the very top of the curve. The clip box becomes
+/// degenerate, history is judged out of bounds on essentially every pixel, and
+/// the inverse `c / (1 - c)` is so ill-conditioned there that a 1e-4 correction
+/// changes the result by a factor of two. That is what produced the black
+/// patches, and a debug view of the clip flags showed it firing on 100% of the
+/// frame rather than only at silhouettes.
+fn blend_exposure() -> f32 {
+    return max(metered[0], 1e-8);
+}
+
+fn tonemap_for_blend(c_in: vec3<f32>) -> vec3<f32> {
+    let c = c_in * blend_exposure();
     return c / (1.0 + max(max(c.r, c.g), c.b));
 }
 
 fn untonemap_for_blend(c: vec3<f32>) -> vec3<f32> {
-    return c / max(1.0 - max(max(c.r, c.g), c.b), 1e-4);
+    let expanded = c / max(1.0 - max(max(c.r, c.g), c.b), 1e-4);
+    return expanded / blend_exposure();
 }
 
 /// Clip `history` to the colour range of the current 3x3 neighbourhood
@@ -264,5 +288,54 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     );
 
     let blended = mix(tonemap_for_blend(current), history, taa.blend_factor);
-    return vec4<f32>(untonemap_for_blend(blended), 1.0);
+    let resolved = untonemap_for_blend(blended);
+
+    // ── Instrumentation ─────────────────────────────────────────────────────
+    // Three attempts at this bug were reasoned from plausible mechanisms and
+    // all three were wrong. These modes show the intermediate values directly,
+    // so the failing pixels can be read rather than guessed at.
+    //
+    // Values are written raw, and the caller disables tone mapping for these
+    // modes, so what reaches the screen is the number rather than a graded
+    // version of it.
+    switch taa.debug_mode {
+        // 1: history straight out of the Catmull-Rom filter, before any
+        // clipping. If the black is already here, the fault is upstream in
+        // reprojection or in what the history buffer holds.
+        case 1u: { return vec4<f32>(history_raw, 1.0); }
+        // 2: history after clip and clamp, back in linear space. Black here but
+        // not in mode 1 means the clip is what darkens it.
+        case 2u: { return vec4<f32>(untonemap_for_blend(history), 1.0); }
+        // 3: this frame's own colour, for reference.
+        case 3u: { return vec4<f32>(current, 1.0); }
+        // 4/5: the neighbourhood bounds the clip works against. If `minimum` is
+        // black on the failing pixels, the box legitimately permits black and
+        // the clamp was never going to help.
+        case 4u: { return vec4<f32>(untonemap_for_blend(minimum), 1.0); }
+        case 5u: { return vec4<f32>(untonemap_for_blend(maximum), 1.0); }
+        // 6: what actually happened, as a flag image.
+        //    red   = the clip moved history (it fell outside the box)
+        //    green = the clamp moved it further
+        //    blue  = history passed through untouched
+        case 6u: {
+            let clipped = clip_to_neighbourhood(
+                tonemap_for_blend(history_raw), minimum, maximum);
+            let moved_by_clip = distance(clipped, tonemap_for_blend(history_raw)) > 1e-4;
+            let moved_by_clamp = distance(history, clipped) > 1e-4;
+            return vec4<f32>(
+                select(0.0, 1.0, moved_by_clip),
+                select(0.0, 1.0, moved_by_clamp),
+                select(1.0, 0.0, moved_by_clip || moved_by_clamp),
+                1.0,
+            );
+        }
+        // 7: how far history sits from this frame, amplified. Bright means the
+        // two disagree strongly, which is where a bad blend shows up.
+        case 7u: {
+            return vec4<f32>(abs(untonemap_for_blend(history) - current) * 4.0, 1.0);
+        }
+        default: {}
+    }
+
+    return vec4<f32>(resolved, 1.0);
 }

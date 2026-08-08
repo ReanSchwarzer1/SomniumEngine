@@ -29,6 +29,8 @@ struct TaaParams {
     inv_resolution: [f32; 2],
     blend_factor: f32,
     history_valid: f32,
+    debug_mode: u32,
+    _pad: [u32; 3],
 }
 
 pub struct TaaPass {
@@ -51,6 +53,13 @@ pub struct TaaPass {
     /// Cleared on resize and on the first frame, when no history exists.
     history_valid: bool,
     enabled: bool,
+    /// Metered exposure, for normalising the blend space.
+    exposure_buffer: wgpu::Buffer,
+    /// Debug visualisation selector, from `SOMNIUM_TAA_DEBUG`.
+    ///
+    /// 1 raw history · 2 clipped history · 3 current · 4 neighbourhood min
+    /// 5 neighbourhood max · 6 clip/clamp flags · 7 history-vs-current delta.
+    debug_mode: u32,
 }
 
 impl TaaPass {
@@ -59,6 +68,7 @@ impl TaaPass {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        exposure_buffer: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("taa.wgsl"),
@@ -82,6 +92,17 @@ impl TaaPass {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The metered exposure, so the blend can work in exposed space.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -147,8 +168,13 @@ impl TaaPass {
             write_index: 0,
             prev_view_proj: glam::Mat4::IDENTITY,
             frame_index: 0,
+            exposure_buffer: exposure_buffer.clone(),
             history_valid: false,
             enabled: std::env::var("SOMNIUM_TAA").as_deref() != Ok("0"),
+            debug_mode: std::env::var("SOMNIUM_TAA_DEBUG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 
@@ -194,6 +220,12 @@ impl TaaPass {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// True when a debug view is active, so the caller can bypass tone mapping
+    /// and show the raw values rather than a graded version of them.
+    pub fn debugging(&self) -> bool {
+        self.debug_mode != 0
     }
 
     /// Sub-pixel offset for this frame's projection, in NDC.
@@ -271,6 +303,10 @@ impl TaaPass {
                         binding: 4,
                         resource: self.params.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.exposure_buffer.as_entire_binding(),
+                    },
                 ],
             })
         };
@@ -315,6 +351,8 @@ impl TaaPass {
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
                 blend_factor: BLEND_FACTOR,
                 history_valid: f32::from(u8::from(self.history_valid)),
+                debug_mode: self.debug_mode,
+                _pad: [0; 3],
             }),
         );
 

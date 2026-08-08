@@ -119,6 +119,9 @@ fn tonemap(hdr: vec3<f32>) -> vec3<f32> {
     switch pp.tonemapper {
         case 1u: { return aces_film(hdr); }
         case 2u: { return reinhard(hdr); }
+        // 3: passthrough, for debug views. A curve would grade the very values
+        // being inspected, and exposure would crush a 0/1 flag image to black.
+        case 3u: { return clamp(hdr, vec3(0.0), vec3(1.0)); }
         default: { return agx(hdr); }
     }
 }

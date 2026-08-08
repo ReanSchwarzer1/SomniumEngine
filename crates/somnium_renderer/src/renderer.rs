@@ -307,7 +307,11 @@ impl SomniumRenderer {
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let mut taa_pass = crate::pass::taa::TaaPass::new(
-            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+            &ctx.device,
+            HDR_FORMAT,
+            ctx.config.width,
+            ctx.config.height,
+            auto_exposure_pass.exposure_buffer(),
         );
 
 
@@ -1499,13 +1503,17 @@ impl SomniumRenderer {
         }
 
         // ── 8. Post-process Pass: HDR → swapchain (tone map + vignette) ──────
+        // A TAA debug view must reach the screen unmodified: exposure would
+        // crush a 0/1 flag image to black, and a tone curve would grade the
+        // very values being inspected.
+        let debugging = self.taa_pass.debugging();
         self.postprocess_pass.set_params(
             &ctx.queue,
-            self.exposure,
-            self.vignette_strength,
-            self.chromatic_aberration,
-            self.tonemapper,
-            self.auto_exposure,
+            if debugging { 1.0 } else { self.exposure },
+            if debugging { 0.0 } else { self.vignette_strength },
+            if debugging { 0.0 } else { self.chromatic_aberration },
+            if debugging { 3 } else { self.tonemapper },
+            self.auto_exposure && !debugging,
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
         // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
