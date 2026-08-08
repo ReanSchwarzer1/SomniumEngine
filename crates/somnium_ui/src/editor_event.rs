@@ -87,6 +87,8 @@ pub enum PostFxToggle {
     Fxaa,
     /// Meter the scene each frame instead of using a fixed EV100.
     AutoExposure,
+    /// Banded cel shading in place of PBR.
+    CelShading,
 }
 
 /// High-level editor commands produced by the native UI layer.

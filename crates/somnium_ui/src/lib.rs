@@ -105,6 +105,8 @@ struct InspectorHandles {
     post_ca_label:   NodeHandle,
     post_fxaa_toggle: NodeHandle,
     post_fxaa_label:  NodeHandle,
+    post_cel_toggle:  NodeHandle,
+    post_cel_label:   NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -115,6 +117,7 @@ pub struct PostInspectorState {
     pub vignette: bool,
     pub chromatic: bool,
     pub fxaa: bool,
+    pub cel_shading: bool,
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -494,6 +497,7 @@ impl UiManager {
             Some(v) => {
                 let ([exp, ec, vig, ca, ibl_i], vig_on, ca_on, fxaa_on, auto_on, tonemap) =
                     (v.values, v.vignette, v.chromatic, v.fxaa, v.auto_exposure, v.tonemapper);
+                let cel_on = v.cel_shading;
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(exposure, exp));
                 self.native_ui.send(NumericFieldMessage::set_value(exp_comp, ec));
@@ -519,6 +523,9 @@ impl UiManager {
                 ));
                 self.native_ui.send(TextMessage::set_text(
                     tonemap_label, format!("Tonemap: {tonemap}"),
+                ));
+                self.native_ui.send(TextMessage::set_text(
+                    h.post_cel_label, format!("{} Cel Shading", tick(cel_on)),
                 ));
             }
             None => self.native_ui.set_visibility(section, false),
@@ -666,6 +673,11 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.post_auto_exp_toggle {
                     self.editor_events
                         .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_cel_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::CelShading));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_tonemap_button {
@@ -1135,13 +1147,17 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     ui.add_node(ins_hdr_txt, ins_hdr_h);
 
     // Inspector content
-    let ins_content = BorderBuilder::new(
+    // A ScrollViewer, matching the outliner above it. It was a plain Border,
+    // which clips silently: the inspector has grown section by section — light,
+    // post-processing, terrain, foliage — and its lower rows had started
+    // disappearing behind the log panel with no way to reach them. Anything
+    // that grows with the feature set needs to scroll rather than be trusted to
+    // fit.
+    let ins_content = ScrollViewerBuilder::new(
         WidgetBuilder::new()
             .with_row(3).with_column(0)
-            .with_background(theme::BG_DARK)
-            .with_foreground(theme::TRANSPARENT),
+            .with_background(theme::BG_DARK),
     )
-    .with_stroke_thickness(Thickness::ZERO)
     .build();
     let ins_content_h = ui.add_node(ins_content, right_grid_h);
 
@@ -1390,6 +1406,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Chromatic Ab.", font_id, post_section);
     let post_ca_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.0002);
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
+    let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
     ui.set_visibility(post_section, false);
 
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
@@ -1466,6 +1483,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_auto_exp_label, post_tonemap_button, post_tonemap_label,
         post_ibl, post_vig_toggle, post_vig_str,
         post_ca_toggle, post_ca_str, post_vig_label, post_ca_label,
+        post_cel_toggle, post_cel_label,
         post_fxaa_toggle, post_fxaa_label,
     }
 }

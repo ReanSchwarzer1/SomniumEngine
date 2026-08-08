@@ -1436,10 +1436,16 @@ impl SomniumRenderer {
             &self.postprocess_pass.hdr_view,
             &self.vis_pass.depth_view,
         );
+        // The *jittered* matrix, deliberately. World position is reconstructed
+        // from the depth buffer, and that buffer was rendered with the jitter
+        // applied — reconstructing with the unjittered matrix puts every pixel
+        // a fraction off, and since the jitter changes each frame the error
+        // changes with it. That reads as a permanent shimmer, which is exactly
+        // the artefact TAA is supposed to remove.
         if self.taa_pass.record(
             &mut encoder,
             &ctx.queue,
-            self.view_proj_unjittered,
+            self.view_proj,
             ctx.config.width,
             ctx.config.height,
         )

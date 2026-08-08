@@ -795,6 +795,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     vignette: pp.vignette_enabled,
                     chromatic: pp.ca_enabled,
                     fxaa: pp.fxaa_enabled,
+                    cel_shading: pp.cel_shading,
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
                 });
@@ -1299,6 +1300,7 @@ impl<G: GameApp> Engine<G> {
             r.frame_delta_time = self.time.delta_time().as_secs_f32();
             r.tonemapper = pp.tonemapper.as_index();
             r.exposure_compensation = pp.exposure_compensation;
+            r.shading_mode = u32::from(pp.cel_shading);
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             r.fxaa_enabled = pp.fxaa_enabled;
@@ -1890,6 +1892,24 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleShadingMode => {
+                // Drive the component so the inspector's tick stays truthful;
+                // the renderer field is synced from it each frame.
+                // Collected first: `entities()` borrows the world immutably and
+                // `get_mut` needs it mutably.
+                let target = self
+                    .world
+                    .entities()
+                    .find(|e| self.world.get::<PostProcessComponent>(*e).is_some());
+                if let Some(e) = target {
+                    if let Some(pp) = self.world.get_mut::<PostProcessComponent>(e) {
+                        pp.cel_shading = !pp.cel_shading;
+                        info!(
+                            "Shading mode: {}",
+                            if pp.cel_shading { "Cel-Shading" } else { "PBR" },
+                        );
+                    }
+                    return;
+                }
                 if let Some(r) = &mut self.renderer {
                     r.shading_mode = if r.shading_mode == 0 { 1 } else { 0 };
                     info!("Shading mode toggled to: {}", if r.shading_mode == 1 { "Cel-Shading" } else { "PBR" });
@@ -2275,6 +2295,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::AutoExposure => {
                             pp.auto_exposure = !pp.auto_exposure;
                             pp.auto_exposure
+                        }
+                        PostFxToggle::CelShading => {
+                            pp.cel_shading = !pp.cel_shading;
+                            pp.cel_shading
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

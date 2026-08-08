@@ -506,6 +506,13 @@ pub struct PostProcessComponent {
     pub exposure_compensation: f32,
     /// Which tone-mapping curve maps HDR luminance to display (Phase 24B).
     pub tonemapper: Tonemapper,
+    /// Replace PBR shading with the banded cel look.
+    ///
+    /// Lived only behind the F5 key, which is easy to hit by accident and gave
+    /// no indication of what had happened — the scene simply turned flat and
+    /// dark with no visible control to undo it. Owning it here means the
+    /// inspector shows the current state.
+    pub cel_shading: bool,
     /// Whether the radial vignette is applied.
     pub vignette_enabled: bool,
     /// Vignette strength when enabled.
@@ -542,6 +549,7 @@ impl Default for PostProcessComponent {
             auto_exposure: true,
             exposure_compensation: 0.0,
             tonemapper: Tonemapper::AgX,
+            cel_shading: false,
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,
