@@ -210,32 +210,44 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Taking the nearest depth in a 3x3 neighbourhood makes edge pixels follow
     // the foreground instead. Spartan does the same thing in
     // `get_closest_pixel_velocity_3x3`, for the same reason.
-    // Start from this pixel and only prefer a neighbour that is *meaningfully*
-    // nearer.
+    // Dilate only where there is a *real* depth discontinuity.
     //
-    // Starting from 1.0 and taking any smaller value means that on a smooth
-    // surface, where all nine depths are nearly equal, the winner is decided by
-    // differences far below the surface's own curvature — and the sub-pixel
-    // jitter perturbs those every frame. The chosen neighbour then flips
-    // frame to frame and `prev_uv` jumps by a whole pixel, so history is
-    // fetched from a different place each frame. Foliage is unaffected because
-    // its depth discontinuities between leaves are real and large, which is
-    // exactly the split observed: foliage steady, flat and smooth surfaces
-    // vibrating.
+    // Taking the nearest of the nine unconditionally decides the winner by
+    // differences far below the surface's own curvature on smooth geometry,
+    // and the sub-pixel jitter perturbs exactly those every frame: the chosen
+    // neighbour flips, `prev_uv` jumps a pixel, and history is fetched from
+    // somewhere new each frame. That was the plane, the cube and the helmet
+    // vibrating while foliage stayed still — foliage has genuine, large depth
+    // steps between leaves.
     //
-    // `taa.dilation_epsilon` of 0 restores the old behaviour for comparison.
-    var depth = textureLoad(depth_tex, coord, 0);
+    // Subtracting a fixed epsilon from every comparison fixed the smooth case
+    // but broke the other end: it also suppressed dilation at real silhouettes,
+    // and a little foliage jitter came back. The epsilon has to gate *whether
+    // there is an edge at all*, not bias which neighbour wins. So: measure the
+    // spread across the neighbourhood, and dilate only when that spread says an
+    // edge is present. Inside a smooth surface the spread is tiny and this
+    // pixel keeps its own depth; at a silhouette the spread is large and the
+    // nearest sample wins outright, exactly as before.
+    var dmin = 1.0e9;
+    var dmax = -1.0e9;
     var closest = coord;
+    let centre_depth = textureLoad(depth_tex, coord, 0);
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let c = coord + vec2<i32>(x, y);
             let d = textureLoad(depth_tex, c, 0);
             // Smaller is nearer: this depth buffer has 0 at the near plane.
-            if d < depth - taa.dilation_epsilon {
-                depth = d;
+            if d < dmin {
+                dmin = d;
                 closest = c;
             }
+            dmax = max(dmax, d);
         }
+    }
+    var depth = dmin;
+    if dmax - dmin < taa.dilation_epsilon {
+        depth = centre_depth;
+        closest = coord;
     }
 
     // Reconstruct from the pixel the depth actually came from, not from this

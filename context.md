@@ -1364,11 +1364,24 @@ deliberately reconstructs from a neighbour's position. Up to ~1px on detailed
 geometry is correct behaviour. Judge a reprojection bug by whether *flat*
 regions are off — sky never dilates.
 
-**Remaining helmet shimmer is a different phenomenon**, most likely specular
-aliasing: it is the one metallic, normal-mapped, high-gloss surface in the
-scene, which is exactly what 24F's Toksvig specular AA targets and what TAA can
-only partly hide. Worth checking the Toksvig term is actually reaching that
-material before assuming more TAA work is needed.
+**Second cause, also fixed: closest-depth dilation on smooth surfaces.** Taking
+the nearest of the nine unconditionally decides the winner by depth differences
+far below a smooth surface's own curvature, and the jitter perturbs exactly those
+every frame — the chosen neighbour flips, `prev_uv` jumps a pixel, and history
+comes from somewhere new each frame. Foliage was immune because its depth steps
+between leaves are real and large, which is precisely the split the user
+reported: foliage steady, plane/cube/helmet vibrating. (It was *not* specular
+aliasing, which was the first guess and wrong — primitives are matte grey at
+roughness 0.5.)
+
+Dilation is now gated on the **neighbourhood depth spread**: inside a smooth
+surface the spread is tiny and the pixel keeps its own depth; at a silhouette
+the spread is large and the nearest sample wins outright. An earlier attempt
+subtracted a fixed epsilon from every comparison instead — that fixed the smooth
+case but suppressed dilation at real silhouettes too, and brought a little
+foliage jitter back. The epsilon has to gate *whether an edge exists*, not bias
+which neighbour wins. `SOMNIUM_TAA_DILATE_EPS=0` disables the gate entirely,
+which the user confirmed is markedly worse.
 
 **Note on measurement**: screen-capture frame deltas are useless here — 0.776 to
 2.018 across three runs of one identical build. Every comparison drawn from them
