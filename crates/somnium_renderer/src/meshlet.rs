@@ -250,8 +250,18 @@ fn build_one(
     }
     let axis_len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
 
-    // A cluster whose normals cancel out has no meaningful facing. Cutoff -1
-    // means "never cull", so such a cluster is simply always drawn.
+    // A cluster whose normals cancel out has no meaningful facing, so it must
+    // never be cone-culled.
+    //
+    // The sentinel for that is 2.0, not -1.0. `cull.wgsl` skips the cone test
+    // entirely when `cone.w > 1.0` — unreachable by a dot product — but -1.0
+    // *passes* that guard and enters the test with a zero axis, where
+    // `normalize(vec3(0))` is NaN and the cluster is rejected.
+    //
+    // A cube hits this every time: its six face normals cancel exactly, so all
+    // twelve triangles land in one meshlet with a zero-sum axis and the whole
+    // mesh disappears. Planes survived because their normals all point one way,
+    // which is why primitives seemed to work until a cube was involved.
     if axis_len < 1e-6 {
         return Meshlet {
             triangle_offset,
@@ -260,8 +270,8 @@ fn build_one(
             radius,
             aabb_min: min,
             aabb_max: max,
-            cone_axis: [0.0, 0.0, 0.0],
-            cone_cutoff: -1.0,
+            cone_axis: [0.0, 1.0, 0.0],
+            cone_cutoff: 2.0,
         };
     }
     let axis = [axis[0] / axis_len, axis[1] / axis_len, axis[2] / axis_len];
@@ -473,7 +483,17 @@ mod tests {
         let idx = vec![0, 1, 2, 3, 4, 5];
         let b = build_meshlets(&verts, &idx);
         assert_eq!(b.meshlets.len(), 1);
-        assert_eq!(b.meshlets[0].cone_cutoff, -1.0);
+        // 2.0, not -1.0. `cull.wgsl` skips the cone test only when
+        // `cone.w > 1.0`; -1.0 passes that guard and enters the test with a
+        // zero axis, where `normalize(vec3(0))` is NaN and the cluster is
+        // dropped. This test asserted the sentinel that caused the bug, so it
+        // passed while every cube in the engine vanished — a cube's six face
+        // normals cancel exactly, which is precisely this case.
+        assert_eq!(b.meshlets[0].cone_cutoff, 2.0);
+        assert!(
+            b.meshlets[0].cone_cutoff > 1.0,
+            "the sentinel must exceed the guard in cull.wgsl, or the test is              not checking the thing that matters",
+        );
     }
 
     #[test]

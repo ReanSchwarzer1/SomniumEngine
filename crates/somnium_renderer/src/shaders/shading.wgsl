@@ -339,35 +339,26 @@ fn sample_shadow_cascade(
     // along depth. Depth bias has to grow with slope to stop acne, and by the
     // time it is large enough on a grazing surface it has detached the shadow
     // from its caster. Offsetting in the plane of the surface sidesteps both.
+    // A depth-space bias, not a world-space normal offset.
     //
-    // The offset has to be a WORLD distance. This previously read
-    // `2.0 / shadow_map_size * (1 << cascade) * 4.0`, which is NDC-per-texel
-    // over the whole 4096 atlas rather than one cascade's 2048 quadrant — a
-    // dimensionless ~0.008 that happened to look like a plausible number.
-    // A texel of cascade 0 covers roughly 0.02 world units here, so the offset
-    // cleared about a third of a texel and ~half of every surface's samples
-    // self-shadowed: not visible as acne stripes but as a uniform ~0.5 shadow
-    // factor over everything, which flattened real shadows into the wash.
+    // Two previous attempts offset the sample position along the normal by a
+    // "world texel size" recovered from the cascade matrix. That recovery is
+    // wrong: column 0 of `proj * view` mixes the x, y and depth scales, so its
+    // length is not the cascade's world width, and the resulting offset was far
+    // enough to walk the sample out of the shadow entirely. Measured directly,
+    // the shadow map holds the caster and reports occlusion correctly at the
+    // un-offset position — it was only ever the offset that lost it.
     //
-    // Recovered from the cascade's own matrix: column 0's length is the
-    // world→clip scale on X, so 2/scale is the cascade's world extent, and
-    // dividing by its resolution gives the true world size of one texel.
-    let cascade_extent = 2.0 / max(length(light.view_proj[cascade][0].xyz), 1e-6);
-    let cascade_res = light.shadow_map_size * 0.5;   // 2x2 quadrants in the atlas
-    let texel_world = cascade_extent / cascade_res;
-    // Kept deliberately small. An earlier attempt scaled this by sqrt(2) and a
-    // grazing-angle term up to 3x, which on the wider cascades pushed the
-    // sample far enough off the surface to leave the shadow altogether — the
-    // shadow factor went nearly uniform and casters stopped darkening anything
-    // at all. Over-biasing removes shadows just as thoroughly as under-biasing
-    // fills them with acne, and it is the harder of the two to recognise.
-    let offset_pos = world_pos + normal * texel_world * 1.5;
-
+    // Comparing at the fragment's own position with a small depth epsilon,
+    // widened at grazing angles where a texel spans more depth, is both simpler
+    // and what the probe that found this actually did.
+    let offset_pos = world_pos;
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    let compare_depth = ndc.z;
+    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
+    let compare_depth = ndc.z - (0.0005 + 0.0025 * (1.0 - n_dot_l));
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
@@ -496,11 +487,22 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
     shadow = min(shadow, contact_shadow(world_pos, normalize(light.direction), pixel));
 
     // Blend over the last 10% of the cascade's range.
+    //
+    // The `max(band, 1e-4)` here was hiding a degenerate case rather than
+    // handling it. When `far - near` collapses, dividing by 1e-4 sends
+    // `into_band` to a huge positive number, `saturate` pins it to 1, and the
+    // mix returns the *next* cascade outright — which does not cover this
+    // fragment, so its lookup falls outside and early-returns "lit". Every
+    // shadow in the visibility-buffer path was being blended away to nothing
+    // this way, while terrain and water kept theirs because neither blends
+    // cascades at all. Guard the band instead of dividing by an epsilon.
     let band = (far - near) * 0.1;
-    let into_band = (view_depth - (far - band)) / max(band, 1e-4);
-    if into_band > 0.0 && cascade < 3u {
-        let next = sample_shadow_cascade(world_pos, normal, cascade + 1u, pixel);
-        return mix(shadow, next, saturate(into_band));
+    if band > 1e-3 && cascade < 3u {
+        let into_band = (view_depth - (far - band)) / band;
+        if into_band > 0.0 {
+            let next = sample_shadow_cascade(world_pos, normal, cascade + 1u, pixel);
+            return mix(shadow, next, saturate(into_band));
+        }
     }
     return shadow;
 }
@@ -731,6 +733,43 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
     if light._pad2_z > 0.5 && light._pad2_z < 1.5 {
         return vec4<f32>(vec3<f32>(shadow_factor), 1.0);
+    }
+    // 5 = blocker_search verdict at this fragment, in hue.
+    //   red   = search found no blocker (PCSS early-returns lit)
+    //   green = search found one (a shadow should appear here)
+    if light._pad2_z > 4.5 && light._pad2_z < 5.5 {
+        let c = get_cascade_index(view_depth);
+        let lc = light.view_proj[c] * vec4<f32>(hit_point, 1.0);
+        let nd = lc.xyz / lc.w;
+        let cuv = vec2<f32>(nd.x * 0.5 + 0.5, 1.0 - (nd.y * 0.5 + 0.5));
+        if any(cuv < vec2<f32>(0.0)) || any(cuv > vec2<f32>(1.0)) {
+            return vec4<f32>(0.0, 0.0, 4.0, 1.0);
+        }
+        let ac = atlas_uv(c, cuv);
+        let ts = 1.0 / light.shadow_map_size;
+        let sr = max(light.sun_angular_radius * 40.0, 2.0) * ts;
+        let bd = blocker_search(ac, c, nd.z - 0.0005, sr, 0.0);
+        if bd < 0.0 { return vec4<f32>(4.0, 0.0, 0.0, 1.0); }
+        return vec4<f32>(0.0, 4.0, 0.0, 1.0);
+    }
+    // 4 = shadow-map plumbing, in hue so it survives exposure and tonemapping.
+    //   red   = cascade uv outside [0,1] or compare_depth > 1 (early-out to lit)
+    //   green = in range, and the atlas holds a nearer depth (should be shadow)
+    //   blue  = in range, nothing nearer (correctly lit)
+    if light._pad2_z > 3.5 && light._pad2_z < 4.5 {
+        let c = get_cascade_index(view_depth);
+        let lc = light.view_proj[c] * vec4<f32>(hit_point, 1.0);
+        let nd = lc.xyz / lc.w;
+        let cuv = vec2<f32>(nd.x * 0.5 + 0.5, 1.0 - (nd.y * 0.5 + 0.5));
+        if any(cuv < vec2<f32>(0.0)) || any(cuv > vec2<f32>(1.0)) || nd.z > 1.0 {
+            return vec4<f32>(4.0, 0.0, 0.0, 1.0);
+        }
+        let ac = atlas_uv(c, cuv);
+        let d = textureLoad(shadow_atlas, vec2<i32>(ac * light.shadow_map_size), 0);
+        if d < nd.z - 0.0005 {
+            return vec4<f32>(0.0, 4.0, 0.0, 1.0);
+        }
+        return vec4<f32>(0.0, 0.0, 4.0, 1.0);
     }
 
     // ── Shading ───────────────────────────────────────────────────────────────

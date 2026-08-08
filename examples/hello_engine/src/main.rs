@@ -525,12 +525,33 @@ impl GameApp for HelloGame {
         // no test. Spawned with MeshKind only, so the same auto-attach path the
         // editor's Create menu uses supplies the mesh and material.
         if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
+            // Remove the demo's water and helmet. Both sit at Y=0 and both have
+            // confounded this test repeatedly — the water plane is coplanar with
+            // any ground at Y=0 and z-fights it, and the helmet sits below a
+            // raised ground so it cannot cast onto it. What is left is a plane
+            // and a cube and nothing else, so a shadow either appears or does not.
+            let name_req = ComponentSet::from_ids(vec![ComponentId::of::<Name>()]);
+            let mut doomed = Vec::new();
+            for archetype in ctx.world.query_archetypes(&name_req, &ComponentSet::empty()) {
+                let n_col = archetype.column_index(ComponentId::of::<Name>()).unwrap();
+                for row in 0..archetype.len() {
+                    let n = unsafe { archetype.column(n_col).get::<Name>(row) };
+                    let s = n.as_str();
+                    if s == "WaterPlane" || s.contains("Helmet") || s.contains("helmet") {
+                        doomed.push(archetype.entities()[row]);
+                    }
+                }
+            }
+            for e in doomed {
+                ctx.world.despawn(e);
+            }
+
             ctx.world.spawn((
                 Transform {
                     // Y=6, not 0: the demo's WaterPlane also sits at Y=0, and
                     // two coplanar surfaces z-fight — which made every capture
                     // of this scene a mix of both.
-                    translation: Vec3::new(0.0, 6.0, 0.0),
+                    translation: Vec3::new(0.0, 0.0, 0.0),
                     rotation: glam::Quat::IDENTITY,
                     scale: Vec3::new(40.0, 1.0, 40.0),
                 },
@@ -540,7 +561,7 @@ impl GameApp for HelloGame {
             ));
             ctx.world.spawn((
                 Transform {
-                    translation: Vec3::new(0.0, 9.0, 0.0),
+                    translation: Vec3::new(0.0, 3.0, 0.0),
                     rotation: glam::Quat::IDENTITY,
                     scale: Vec3::splat(2.0),
                 },
@@ -564,9 +585,9 @@ impl GameApp for HelloGame {
             ));
 
             // Look down at the ground so the cast shadow fills the frame.
-            self.camera.position = Vec3::new(0.0, 15.0, 16.0);
+            self.camera.position = Vec3::new(0.0, 3.5, 12.0);
             self.camera.yaw = -90.0;
-            self.camera.pitch = -30.0;
+            self.camera.pitch = -3.0;
         }
 
         // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
@@ -994,6 +1015,16 @@ impl GameApp for HelloGame {
                     let mesh     = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
                     let material = unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity   = archetype.entities()[row];
+                    if std::env::var("SOMNIUM_SHADOWTEST").is_ok() && ctx.time.frame_count() < 2 {
+                        let n = ctx.world.get::<Name>(entity)
+                            .map(|n| n.as_str().to_string())
+                            .unwrap_or_else(|| "?".into());
+                        let t = wt.0.w_axis.truncate();
+                        tracing::info!(
+                            "submit: {n} idx_count={} pos=({:.1},{:.1},{:.1}) scale_x={:.2}",
+                            mesh.index_count, t.x, t.y, t.z, wt.0.x_axis.length()
+                        );
+                    }
                     renderer.submit(somnium_renderer::command::DrawCommand {
                         sort_key:     somnium_renderer::command::SortKey::new(0, material.id as u16, entity.index()),
                         vertex_offset: mesh.vertex_offset,

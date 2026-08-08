@@ -1302,18 +1302,26 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ## 18. Known Issues & Active Bugs
 
-**Visibility-buffer geometry does not receive shadows (open, highest priority).**
-Casting is fine — the helmet and a cube both appear in the shadow atlas, and
-both cast correctly onto terrain and onto water. Receiving is broken, and only
-in `shading.wgsl`: primitives and meshes drawn through the visibility buffer
-show no shadow at all, while terrain and water do. The asymmetry points
-straight at the difference between them — `terrain.wgsl` and `water.wgsl` use a
-plain 3x3 PCF, `shading.wgsl` uses the PCSS path added in 24H. Ruled out by
-measurement: the shadow atlas (casters land in it), the cascade matrices
-(shared with terrain), and the normal-offset bias magnitude (softened, no
-change). **Next step: instrument `blocker_search` — output `blocker_count` and
-the raw `textureLoad` depth to screen.** Reading it has now failed three times;
-measuring found every previous shadow bug on the first try.
+**Visibility-buffer geometry does not receive shadows (open).** Narrowed a long
+way by measurement, in a scene reduced to one cube over one plane with the demo's
+water and helmet despawned (`SOMNIUM_SHADOWTEST`):
+
+- The shadow atlas holds the caster. `SOMNIUM_SHADOW_DEBUG=4` shows green
+  (a nearer depth is stored) across exactly the ground region where the cube's
+  shadow belongs.
+- `blocker_search` finds it: mode 5 reports a blocker on **4181 of 4200**
+  fragments across that region.
+- The fragment still renders fully lit, and replacing the filter's
+  `textureSampleCompare` with a manual `textureLoad` comparison changed
+  nothing — so PCSS reaches the right answer and something **downstream of
+  `sample_shadow_cascade`** discards it.
+
+Ruled out: the atlas, the cascade matrices, the cascade blend (guarded), the
+normal-offset bias (removed; it was dimensionally wrong and walked samples out
+of the shadow), the comparison sampler, and ReSTIR (off, and its target is
+cleared). **Next: trace `shadow_factor` from `sample_shadow`'s return to
+`direct_light`** — the discard is in those few lines, and everything either side
+of them has now been measured.
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.
