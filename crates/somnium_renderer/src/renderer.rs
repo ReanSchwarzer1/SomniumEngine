@@ -1204,7 +1204,8 @@ impl SomniumRenderer {
             shadow_map_size: ATLAS_SIZE as f32,
             ibl_intensity: self.ibl_intensity,
             sun_angular_radius: self.sun_angular_radius,
-            _pad2: 0.0,
+            // TEMP: shadow_factor debug visualisation.
+            _pad2: if std::env::var("SOMNIUM_SHADOW_DEBUG").is_ok() { 1.0 } else { 0.0 },
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,
@@ -1454,6 +1455,11 @@ impl SomniumRenderer {
                 );
             }
         }
+
+        // Outside the ray-tracing guards on purpose: a pass that stopped running
+        // still owns a stale target, and that is exactly the case that needs
+        // clearing.
+        self.restir_pass.clear_if_inactive(&mut encoder);
 
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.

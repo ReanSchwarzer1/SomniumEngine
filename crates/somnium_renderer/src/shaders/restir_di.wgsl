@@ -183,10 +183,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ── Visibility ──────────────────────────────────────────────────────────
     // One ray, for the sample that survived resampling.
     if r.w > 0.0 && occluded(origin, r.sample_dir) {
-        // Zeroing the weight rather than the sample keeps the reservoir's
-        // history intact, so a pixel that becomes visible again recovers
-        // immediately instead of restarting.
+        // The running total has to go with the weight. Zeroing `w` alone left
+        // `w_sum` holding the candidates' contribution, and the temporal
+        // combine below recomputes `w = w_sum / (m * p_hat)` from it — which
+        // resurrected the occluded sample at roughly w_sum/(m + prev_m) and
+        // turned every shadow into a faint wash. Clearing the target function
+        // as well keeps a shadowed pixel shadowed once its history agrees:
+        // prev.w is then 0 too, so the reuse weight is 0 and the reservoir
+        // stays empty rather than drifting back toward lit.
         r.w = 0.0;
+        r.p_hat = 0.0;
+        r.w_sum = 0.0;
     }
 
     // ── Temporal reuse ──────────────────────────────────────────────────────

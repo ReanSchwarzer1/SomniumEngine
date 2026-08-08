@@ -339,8 +339,27 @@ fn sample_shadow_cascade(
     // along depth. Depth bias has to grow with slope to stop acne, and by the
     // time it is large enough on a grazing surface it has detached the shadow
     // from its caster. Offsetting in the plane of the surface sidesteps both.
-    let texel_world = 2.0 / light.shadow_map_size * f32(1u << cascade) * 4.0;
-    let offset_pos = world_pos + normal * texel_world;
+    //
+    // The offset has to be a WORLD distance. This previously read
+    // `2.0 / shadow_map_size * (1 << cascade) * 4.0`, which is NDC-per-texel
+    // over the whole 4096 atlas rather than one cascade's 2048 quadrant — a
+    // dimensionless ~0.008 that happened to look like a plausible number.
+    // A texel of cascade 0 covers roughly 0.02 world units here, so the offset
+    // cleared about a third of a texel and ~half of every surface's samples
+    // self-shadowed: not visible as acne stripes but as a uniform ~0.5 shadow
+    // factor over everything, which flattened real shadows into the wash.
+    //
+    // Recovered from the cascade's own matrix: column 0's length is the
+    // world→clip scale on X, so 2/scale is the cascade's world extent, and
+    // dividing by its resolution gives the true world size of one texel.
+    let cascade_extent = 2.0 / max(length(light.view_proj[cascade][0].xyz), 1e-6);
+    let cascade_res = light.shadow_map_size * 0.5;   // 2x2 quadrants in the atlas
+    let texel_world = cascade_extent / cascade_res;
+    // sqrt(2) covers the diagonal, and the grazing-angle term is where acne
+    // actually lives: at normal incidence almost no offset is needed.
+    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
+    let slope = clamp(1.0 - n_dot_l, 0.15, 1.0);
+    let offset_pos = world_pos + normal * texel_world * 1.41421 * (1.0 + 2.0 * slope);
 
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
@@ -705,6 +724,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
     if traced.a > 0.5 {
         shadow_factor = traced.r;
+    }
+
+    // TEMP shadow debug: bit 1 of _padding shows shadow_factor directly.
+    if light._pad2_z > 0.5 {
+        return vec4<f32>(vec3<f32>(shadow_factor), 1.0);
     }
 
     // ── Shading ───────────────────────────────────────────────────────────────

@@ -33,6 +33,10 @@ pub struct RestirPass {
     reservoirs: Vec<wgpu::Buffer>,
     binds: Vec<wgpu::BindGroup>,
     vis_view: Option<wgpu::TextureView>,
+    vis_tex: Option<wgpu::Texture>,
+    /// Set once the pass has written the target, so a disabled pass knows it
+    /// still has stale contents to clear.
+    vis_dirty: bool,
     write_index: usize,
     frame: u32,
     history_valid: bool,
@@ -54,6 +58,8 @@ impl RestirPass {
                 reservoirs: Vec::new(),
                 binds: Vec::new(),
                 vis_view: None,
+                vis_tex: None,
+                vis_dirty: false,
                 write_index: 0,
                 frame: 0,
                 history_valid: false,
@@ -153,6 +159,8 @@ impl RestirPass {
             reservoirs: Vec::new(),
             binds: Vec::new(),
             vis_view: None,
+            vis_tex: None,
+            vis_dirty: false,
             write_index: 0,
             frame: 0,
             history_valid: false,
@@ -196,10 +204,16 @@ impl RestirPass {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: VIS_FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_DST so the target can be cleared when the pass is switched
+            // off — see `clear_if_inactive`.
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         self.vis_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.vis_tex = Some(tex);
+        self.vis_dirty = false;
 
         if !self.supported {
             return;
@@ -270,6 +284,28 @@ impl RestirPass {
         }
     }
 
+    /// Zero the visibility target when the pass is switched off.
+    ///
+    /// Shading treats alpha > 0.5 as "a traced result exists" and prefers it
+    /// over the shadow map. `record` early-returns when the pass is inactive
+    /// but the texture keeps whatever it last wrote, so turning the feature off
+    /// left every surface pinned to a stale traced visibility of 1.0 — shadow
+    /// maps stayed overridden and the scene lost its shadows entirely, with no
+    /// way back short of a resize. Alpha 0 is the same signal an unsupported
+    /// device produces, so clearing restores the fallback exactly.
+    pub fn clear_if_inactive(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.active() || !self.vis_dirty {
+            return;
+        }
+        if let Some(tex) = self.vis_tex.as_ref() {
+            encoder.clear_texture(tex, &wgpu::ImageSubresourceRange::default());
+            self.vis_dirty = false;
+            // History indexes a different lighting state now; keeping it would
+            // reintroduce the stale result the moment the pass came back.
+            self.history_valid = false;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
@@ -317,6 +353,7 @@ impl RestirPass {
         pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         drop(pass);
 
+        self.vis_dirty = true;
         self.write_index = 1 - self.write_index;
         self.frame = self.frame.wrapping_add(1);
         self.history_valid = true;
