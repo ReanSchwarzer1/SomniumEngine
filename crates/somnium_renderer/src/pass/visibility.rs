@@ -34,14 +34,23 @@ impl VisibilityBufferPass {
             depth_or_array_layers: 1,
         };
 
-        // R32Uint can pack InstanceID (e.g., 10 bits) and TriangleID (e.g., 22 bits).
+        // Rg32Uint: instance id in .r, primitive id in .g.
+        //
+        // This was R32Uint with both packed into 32 bits, which forces a
+        // trade-off with no good answer. A 16/16 split capped meshes at 65 536
+        // triangles and shattered the island tree's 714 000-triangle leaf mesh;
+        // moving to 20 bits of primitive fixed that and capped instances at
+        // 4 095, which a densely painted foliage scene blows through in turn —
+        // and then *every* mesh fetches another instance's vertices, which is
+        // far worse. Two full channels cost 4 bytes per pixel more and remove
+        // both limits, so neither failure can come back.
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("VisibilityBuffer_Texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
+            format: wgpu::TextureFormat::Rg32Uint,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -114,7 +123,7 @@ impl VisibilityBufferPass {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R32Uint,
+                    format: wgpu::TextureFormat::Rg32Uint,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -161,7 +170,7 @@ impl VisibilityBufferPass {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R32Uint,
+                    format: wgpu::TextureFormat::Rg32Uint,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

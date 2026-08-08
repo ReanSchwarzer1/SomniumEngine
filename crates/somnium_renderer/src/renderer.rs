@@ -1252,22 +1252,6 @@ impl SomniumRenderer {
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones. The visibility pass only draws the opaque
         // range; the transparent pass indexes into the tail.
-        // The visibility buffer packs 12 bits of instance id (see
-        // visibility.wgsl), so id + 1 must stay under 4096. Past that the id
-        // wraps into the primitive field and geometry is shaded from an
-        // unrelated instance — silently, which is exactly how the 16-bit
-        // primitive cap went unnoticed until foliage made it visible.
-        if self.draw_queue.len() >= 4095 {
-            static WARNED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!(
-                    "draw queue has {} instances; the visibility buffer packs 12 bits                      of instance id, so ids past 4094 wrap and will shade from the                      wrong instance",
-                    self.draw_queue.len()
-                );
-            }
-        }
-
         let transparent_base = self.draw_queue.len() as u32;
         let mut transparent_draws: Vec<crate::pass::transparent::TransparentDraw> =
             Vec::with_capacity(self.transparent_queue.len());

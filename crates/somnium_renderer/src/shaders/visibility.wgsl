@@ -118,7 +118,7 @@ fn fs_main(
     @location(1) @interpolate(flat) prim_idx: u32,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) material_id: u32
-) -> @location(0) u32 {
+) -> @location(0) vec2<u32> {
     // Derivatives are taken at top level, where control flow is uniform, and
     // fed to textureSampleGrad below. Sampling inside the branch directly would
     // break WGSL's uniformity rule, and dropping to LOD 0 instead would make
@@ -144,17 +144,7 @@ fn fs_main(
     //
     // Add 1 so 0 stays reserved as the sky/background sentinel (the vis buffer
     // clears to 0). Instance 0 therefore encodes as 0x00010000, never 0.
-    // 12 bits instance, 20 bits primitive — not 16/16.
-    //
-    // 16 bits caps a mesh at 65 536 triangles, and the island tree's leaf
-    // primitive has ~714 000. Past the cap `prim_idx` wrapped, so the shading
-    // pass pulled a completely unrelated triangle's vertices and UVs: shattered
-    // facets showing random fragments of the leaf atlas, sitting right next to
-    // correctly drawn leaves whose indices happened to land under 65 536.
-    //
-    // 20 bits reaches 1 048 576 and covers it. The cost is 4 095 instances
-    // rather than 65 535; the submission path warns when that is approached,
-    // because the failure mode on the other side is just as quiet.
-    let packed_id = ((instance_id + 1u) << 20u) | (prim_idx & 0xFFFFFu);
-    return packed_id;
+    // Separate channels: no packing, so no cap on either field. `+ 1` keeps 0
+    // free as the "nothing here" value the shading pass tests for.
+    return vec2<u32>(instance_id + 1u, prim_idx);
 }

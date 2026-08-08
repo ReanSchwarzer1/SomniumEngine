@@ -58,15 +58,17 @@ pub struct DrawCommand {
 
 /// Maximum number of draws in one frame.
 ///
-/// The visibility buffer packs `(instance + 1, primitive)` into a single
-/// `R32Uint` as a 16/16 split, so the instance index must fit in 16 bits with
-/// room for the `+1` sky sentinel. Raised from 1022 (the old 10/22 split) in
-/// Phase 15C.
+/// No longer set by the visibility buffer, which now writes instance id and
+/// primitive id into separate channels of an `Rg32Uint` and caps neither. This
+/// is simply the instance buffer's own budget.
 pub const MAX_DRAWS_PER_FRAME: u32 = 65_535;
 
 /// Maximum triangles in a single draw.
 ///
-/// The other half of the 16/16 split. A mesh larger than this must be split
-/// across draws — exceeding it wraps the primitive index and would shade the
-/// wrong triangle. Phase 15D's meshlets make this moot by construction.
-pub const MAX_TRIANGLES_PER_DRAW: u32 = 65_536;
+/// **No longer a hardware-imposed cap.** The visibility buffer used to pack
+/// instance and primitive ids into one 32-bit channel, and this was the
+/// primitive half: a mesh past it wrapped and shaded from an unrelated
+/// triangle, which is what shattered the island tree's 714 000-triangle leaf
+/// mesh. Both ids now occupy their own channel of an `Rg32Uint`, so neither
+/// wraps. Kept as a sanity bound only.
+pub const MAX_TRIANGLES_PER_DRAW: u32 = 4_000_000;

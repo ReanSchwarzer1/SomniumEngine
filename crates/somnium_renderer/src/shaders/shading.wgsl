@@ -547,7 +547,8 @@ fn compute_depth_slice(view_depth: f32) -> u32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_coords = vec2<i32>(in.clip_pos.xy);
-    let vis_data     = textureLoad(vis_buffer, pixel_coords, 0).r;
+    let vis_texel    = textureLoad(vis_buffer, pixel_coords, 0).rg;
+    let vis_data     = vis_texel.x;
 
     // ── Sky / background ────────────────────────────────────────────────────
     if vis_data == 0u {
@@ -576,9 +577,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── PBR surface ─────────────────────────────────────────────────────────
     // Phase 15C: 16/16 split (see visibility.wgsl for the packing).
-    // 12 bits instance, 20 bits primitive. See the packing in visibility.wgsl.
-    let instance_id = (vis_data >> 20u) - 1u;
-    let prim_id     = vis_data & 0xFFFFFu;
+    // Separate channels, no packing. See visibility.wgsl.
+    let instance_id = vis_texel.x - 1u;
+    let prim_id     = vis_texel.y;
 
     let instance = instances[instance_id];
     let material = materials[instance.material_id];

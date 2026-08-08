@@ -1302,45 +1302,25 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ## 18. Known Issues & Active Bugs
 
-**RESOLVED — shattered foliage (visibility-buffer primitive id overflow).** The
-visibility buffer packed 16 bits of instance id and 16 of primitive id, capping
-a mesh at 65 536 triangles. The island tree's leaf primitive has ~714 000, so
-`prim_idx` wrapped and the shading pass pulled an unrelated triangle's vertices
-and UVs — shattered facets showing random fragments of the leaf atlas, sitting
-next to correctly drawn leaves whose indices happened to land under the cap.
-This had been recorded as a benign warning ("warns, wraps") and was in fact the
-cause of the foliage looking wrong.
+**RESOLVED — shattered foliage (visibility-buffer id packing).** The visibility
+buffer packed instance id and primitive id into one `R32Uint`, which forces a
+trade-off with no good answer:
 
-Repacked to **12 bits instance / 20 bits primitive**: 1 048 576 triangles, at
-the cost of 4 095 instances instead of 65 535. The submission path now warns as
-that is approached, since the instance side fails just as silently as the
-primitive side did. The long-term fix is splitting oversized primitives at
-upload, or keying on meshlet id plus triangle-in-meshlet, which would need
-neither cap.
+- **16/16** capped meshes at 65 536 triangles. The island tree's leaf primitive
+  has ~714 000, so `prim_idx` wrapped and shading pulled an unrelated triangle's
+  vertices — shattered facets showing random atlas fragments beside correctly
+  drawn leaves. This had sat in these notes as a benign "warns, wraps".
+- **12/20** fixed that and capped instances at 4 095. A densely painted foliage
+  scene passes that easily, and then *every* mesh fetches another instance's
+  vertices — far worse, and how it was found: the fix shattered the whole scene.
 
+Now `Rg32Uint` with each id in its own channel. Costs 4 bytes per pixel and
+removes both caps, so neither failure can return. `MAX_TRIANGLES_PER_DRAW` is no
+longer a hardware bound.
 
-**RESOLVED — `GpuMaterial` layout mismatch (was: primitives cast no shadows,
-foliage wrong colours).** WGSL aligns `vec3<f32>` to 16 bytes; Rust's `repr(C)`
-aligns `[f32; 3]` to 4. So `emissive: vec3<f32>` in the shader's `Material` sat
-at offset 64 with a 96-byte stride, against the CPU struct's offset 52 and
-80-byte stride. Material 0 decoded correctly and **every material after it was
-read from the wrong bytes** — the error grew with the index, which is why the
-glTF helmet looked right while editor primitives and foliage did not.
-
-The visible symptom was not obviously a material bug: garbage `metallic` came
-back near 1, and `kD = (1 - F)(1 - metallic)` then zeroes the diffuse lobe, so
-the sun contributed almost nothing and the surface was lit by IBL alone. With no
-sun term left, multiplying by `shadow_factor` changed nothing — the shadows had
-been computed correctly the whole time and had nothing to act on. Measured
-before the fix: sun dominated on 0 of 14000 plane samples. After: 8658, garbage
-metallic 0, and a cube's shadow reads 3.4 against 110.3 in the open.
-
-Found by measuring rather than reading, via `SOMNIUM_SHADOW_DEBUG` (1 = shadow
-factor, 2 = sun only, 3 = ambient only, 4 = shadow-map plumbing, 5 =
-blocker_search verdict, 6 = shadow factor in hue, 7 = sun-vs-ambient dominance).
-Modes 6 and 7 are what cracked it: 6 proved the shadow was correct, 7 proved the
-sun term was missing. Reading the shadow code repeatedly found nothing because
-the shadow code was never wrong.
+**Lesson**: rebalancing bits between two fields that both need more is not a
+fix, it is a choice of which cap to hit. The trade only looked acceptable
+because the scene under test was sparse enough to hide the other side.
 
 **RESOLVED — TAA shimmer (jittered shadow cascades).** `inv_view_proj` is taken
 from the *jittered* matrix, which is correct for reconstructing world position
