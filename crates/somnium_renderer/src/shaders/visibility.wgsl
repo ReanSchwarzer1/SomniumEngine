@@ -144,6 +144,17 @@ fn fs_main(
     //
     // Add 1 so 0 stays reserved as the sky/background sentinel (the vis buffer
     // clears to 0). Instance 0 therefore encodes as 0x00010000, never 0.
-    let packed_id = ((instance_id + 1u) << 16u) | (prim_idx & 0xFFFFu);
+    // 12 bits instance, 20 bits primitive — not 16/16.
+    //
+    // 16 bits caps a mesh at 65 536 triangles, and the island tree's leaf
+    // primitive has ~714 000. Past the cap `prim_idx` wrapped, so the shading
+    // pass pulled a completely unrelated triangle's vertices and UVs: shattered
+    // facets showing random fragments of the leaf atlas, sitting right next to
+    // correctly drawn leaves whose indices happened to land under 65 536.
+    //
+    // 20 bits reaches 1 048 576 and covers it. The cost is 4 095 instances
+    // rather than 65 535; the submission path warns when that is approached,
+    // because the failure mode on the other side is just as quiet.
+    let packed_id = ((instance_id + 1u) << 20u) | (prim_idx & 0xFFFFFu);
     return packed_id;
 }

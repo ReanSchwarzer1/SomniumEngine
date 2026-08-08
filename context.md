@@ -1302,6 +1302,23 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ## 18. Known Issues & Active Bugs
 
+**RESOLVED — shattered foliage (visibility-buffer primitive id overflow).** The
+visibility buffer packed 16 bits of instance id and 16 of primitive id, capping
+a mesh at 65 536 triangles. The island tree's leaf primitive has ~714 000, so
+`prim_idx` wrapped and the shading pass pulled an unrelated triangle's vertices
+and UVs — shattered facets showing random fragments of the leaf atlas, sitting
+next to correctly drawn leaves whose indices happened to land under the cap.
+This had been recorded as a benign warning ("warns, wraps") and was in fact the
+cause of the foliage looking wrong.
+
+Repacked to **12 bits instance / 20 bits primitive**: 1 048 576 triangles, at
+the cost of 4 095 instances instead of 65 535. The submission path now warns as
+that is approached, since the instance side fails just as silently as the
+primitive side did. The long-term fix is splitting oversized primitives at
+upload, or keying on meshlet id plus triangle-in-meshlet, which would need
+neither cap.
+
+
 **RESOLVED — `GpuMaterial` layout mismatch (was: primitives cast no shadows,
 foliage wrong colours).** WGSL aligns `vec3<f32>` to 16 bytes; Rust's `repr(C)`
 aligns `[f32; 3]` to 4. So `emissive: vec3<f32>` in the shader's `Material` sat
