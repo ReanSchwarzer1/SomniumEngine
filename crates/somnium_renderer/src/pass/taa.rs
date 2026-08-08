@@ -279,16 +279,28 @@ impl TaaPass {
 
     /// Resolve this frame. Returns the view holding the result, which the
     /// caller should use in place of the raw HDR target.
+    /// `view_proj_jittered` must match the matrix the depth buffer was rendered
+    /// with; `view_proj_unjittered` is what gets stored for the next frame.
+    ///
+    /// The two are different spaces and mixing them is a real bug, not a
+    /// nicety. World position is reconstructed from depth, so that step needs
+    /// the jittered matrix. The history buffer holds the *resolved* image,
+    /// which converges to the un-jittered camera, so projecting into it needs
+    /// the un-jittered matrix. Using one for both leaves a sub-pixel error that
+    /// changes every frame with the jitter — which at a silhouette alternately
+    /// fetches foreground and background, and at this blend weight accumulates
+    /// into a dark fringe wherever dark meets bright.
     pub fn record(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
-        view_proj: glam::Mat4,
+        view_proj_jittered: glam::Mat4,
+        view_proj_unjittered: glam::Mat4,
         width: u32,
         height: u32,
     ) -> Option<&wgpu::TextureView> {
         if !self.enabled {
-            self.prev_view_proj = view_proj;
+            self.prev_view_proj = view_proj_unjittered;
             self.history_valid = false;
             return None;
         }
@@ -298,7 +310,7 @@ impl TaaPass {
             &self.params,
             0,
             bytemuck::bytes_of(&TaaParams {
-                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                inv_view_proj: view_proj_jittered.inverse().to_cols_array_2d(),
                 prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
                 blend_factor: BLEND_FACTOR,
@@ -332,7 +344,7 @@ impl TaaPass {
 
         let result = self.write_index;
         self.write_index = read;
-        self.prev_view_proj = view_proj;
+        self.prev_view_proj = view_proj_unjittered;
         self.frame_index = self.frame_index.wrapping_add(1);
         self.history_valid = true;
 
