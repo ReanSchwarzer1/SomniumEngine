@@ -1325,33 +1325,25 @@ Modes 6 and 7 are what cracked it: 6 proved the shadow was correct, 7 proved the
 sun term was missing. Reading the shadow code repeatedly found nothing because
 the shadow code was never wrong.
 
-**TAA shimmer: objects appear to vibrate (open).** Measured, not yet diagnosed.
-With a *static* camera on a static scene, where a converged history should equal
-the current frame:
+**RESOLVED — TAA shimmer (jittered shadow cascades).** `inv_view_proj` is taken
+from the *jittered* matrix, which is correct for reconstructing world position
+from a jittered depth buffer, and was then also being fed to
+`compute_cascades`. So the shadow cascade frusta shifted by the sub-pixel jitter
+every frame, moving every shadow-map texel in world space. TAA cannot average
+that out — it is a real change in the scene, not a sampling difference — so it
+read as everything vibrating. `jitter_ndc` returns zero when TAA is off, which
+is exactly why switching TAA off removed the shimmer, and why the fault looked
+like it lived in TAA rather than in what the jitter touched. Cascades are now
+fitted from `view_proj_unjittered.inverse()`.
 
-- `SOMNIUM_TAA_DEBUG=1` (history) reads **234.1** mean against mode 3 (current)
-  at **250.9** — history is systematically ~7% darker.
-- The neighbourhood box (modes 4/5) spans **250.4 to 251.4**, barely one unit
-  wide, so history sitting 16 below it is pulled hard every frame. History
-  drifting dark and then being yanked back each frame is consistent with a
-  per-frame oscillation, which is what "vibrating" looks like.
+Measured over consecutive frames on a static camera, mean frame-to-frame delta
+in the shadow region: **2.905 with TAA on before, 2.942 with TAA off, 0.669
+after** — 4.3x more stable than before and well below the TAA-off baseline.
 
-Ruled out: jitter amplitude and sequence (Halton 2,3, +/-0.5 px), the
-jittered/unjittered matrix split (reprojection correctly uses the unjittered
-one), `BLEND_FACTOR` (0.9), and the history ping-pong (two bind groups, indices
-alternate correctly).
-
-**Careful with mode 6**: it flags any movement over 1e-4, so a "99.9% clipped"
-reading is normal and does *not* mean history was rejected. Judge the clip by
-comparing mode 1 against mode 2 instead.
-
-**Next: find why history drifts darker.** Prime suspect is the per-frame
-`tonemap_for_blend` / `untonemap_for_blend` round trip — history is stored
-linear and recompressed every frame, and that pair is ill-conditioned near the
-top of the curve, which is exactly where a sunlit scene sits. Storing history in
-the compressed space would remove the round trip entirely. A box floor was tried
-and reverted: it changed nothing measurable, because the box width is not what
-is wrong.
+Two dead ends recorded so they are not retried: a floor on the variance clip box
+(applied twice, measured twice, changed nothing — history sat at 234.1 against
+current 250.9 either way), and the `tonemap_for_blend` round trip (its inverse
+is exact, and the Catmull-Rom weights sum to 1, so neither loses energy).
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.

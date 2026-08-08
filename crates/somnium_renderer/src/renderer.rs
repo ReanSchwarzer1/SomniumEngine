@@ -1187,7 +1187,21 @@ impl SomniumRenderer {
         );
 
         // ── 1. Compute cascades and upload light buffer ───────────────────────
-        let cascades = compute_cascades(self.light_direction, inv_view_proj);
+        // Fitted from the UNJITTERED inverse.
+        //
+        // `inv_view_proj` above is the jittered one, which is right for
+        // reconstructing world position from a jittered depth buffer but wrong
+        // here: it makes the cascade frusta shift by the sub-pixel jitter every
+        // frame, so every shadow-map texel lands somewhere slightly different in
+        // world space and every shadow edge crawls. TAA cannot average that
+        // away, because it is a real change in the scene rather than a sampling
+        // difference — which is why the shimmer vanished when TAA was switched
+        // off: `jitter_ndc` returns zero when TAA is disabled, so the cascades
+        // stopped moving.
+        let cascades = compute_cascades(
+            self.light_direction,
+            self.view_proj_unjittered.inverse(),
+        );
 
         let gpu_light = GpuDirectionalLight {
             direction: self.light_direction.to_array(),
