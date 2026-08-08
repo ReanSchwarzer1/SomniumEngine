@@ -15,7 +15,8 @@ struct PostParams {
     tonemapper:        u32,
     /// Non-zero when `metered` should be used in place of `exposure`.
     auto_exposure:     u32,
-    _pad0:             u32,
+    /// How much of the bloom chain reaches the image.
+    bloom_intensity:   f32,
     _pad1:             u32,
     _pad2:             u32,
 }
@@ -25,6 +26,8 @@ struct PostParams {
 @group(0) @binding(2) var<uniform> pp: PostParams;
 /// `[0]` = metered exposure multiplier, `[1]` = adapted EV100 (Phase 24A-3).
 @group(0) @binding(3) var<storage, read> metered: array<f32, 2>;
+/// Blurred bloom chain (Phase 24T).
+@group(0) @binding(4) var bloom_tex: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -140,6 +143,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         textureSample(hdr_tex, hdr_samp, in.uv).g,
         textureSample(hdr_tex, hdr_samp, in.uv + ca_off).b,
     );
+
+    // Phase 24T: bloom added *before* exposure and tone mapping, because it is
+    // scattering inside the lens — it happens to the light on its way to the
+    // sensor, not to the picture afterwards.
+    let bloom = textureSample(bloom_tex, hdr_samp, in.uv).rgb;
+    hdr += bloom * pp.bloom_intensity;
 
     // Exposure. Physical now, not an arbitrary gain: either the value the
     // manual camera settings imply, or what the histogram metered this frame.

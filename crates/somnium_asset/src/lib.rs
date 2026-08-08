@@ -72,6 +72,14 @@ pub struct LoadedMaterial {
     /// viewer, which is why real foliage glows when backlit and looks flat and
     /// dead without it — no amount of correcting the albedo substitutes.
     pub transmission:          f32,
+    /// Light the surface emits on its own, linear RGB (Phase 24T).
+    ///
+    /// Carried in the same photometric scale as everything else since 24A, so
+    /// a screen or a lit sign has to be given a real luminance rather than a
+    /// number that happened to look right.
+    pub emissive:              [f32; 3],
+    /// Texture modulating `emissive`, if the material has one.
+    pub emissive_map:          Option<usize>,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
     pub double_sided:          bool,
 }
@@ -149,6 +157,10 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission:          mat
                 .transmission()
                 .map_or(0.0, |t| t.transmission_factor()),
+            emissive:              mat.emissive_factor(),
+            emissive_map:          mat
+                .emissive_texture()
+                .map(|t| t.texture().source().index()),
             double_sided:          mat.double_sided(),
             albedo_map:            pbr.base_color_texture().map(|t| t.texture().source().index()),
             occlusion_map:         mat.occlusion_texture().map(|t| t.texture().source().index()),
@@ -205,6 +217,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             alpha_mode:            AlphaMode::Opaque,
             alpha_cutoff:          0.5,
             transmission:          0.0,
+            emissive:              [0.0; 3],
+            emissive_map:          None,
             double_sided:          false,
         });
     }

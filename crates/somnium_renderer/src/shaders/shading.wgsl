@@ -28,6 +28,8 @@ struct Material {
     flags: u32,
     occlusion_map: i32,
     transmission: f32,
+    emissive: vec3<f32>,
+    emissive_map: i32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -815,7 +817,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        result = direct_light + transmitted + local_light_contrib + ambient;
+        // Phase 24T: self-emitted light. Independent of every light in the
+        // scene by definition — a screen is just as bright in a dark room.
+        var emissive = material.emissive;
+        if material.emissive_map >= 0 {
+            emissive *= textureSample(
+                textures[material.emissive_map], default_sampler, uv).rgb;
+        }
+
+        result = direct_light + transmitted + local_light_contrib + ambient + emissive;
     }
 
     // ── Cascade debug overlay (controlled by _padding repurposed as a flag) ──

@@ -266,6 +266,8 @@ impl VoxelTerrain {
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
             },
         );
@@ -871,6 +873,8 @@ impl GameApp for HelloGame {
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
                     },
                 );
@@ -1145,6 +1149,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
         },
     );
@@ -1157,6 +1163,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
         },
     );
@@ -1213,6 +1221,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
             },
         )

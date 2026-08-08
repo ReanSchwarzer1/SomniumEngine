@@ -54,6 +54,8 @@ struct Material {
     flags: u32,
     occlusion_map: i32,
     transmission: f32,
+    emissive: vec3<f32>,
+    emissive_map: i32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,

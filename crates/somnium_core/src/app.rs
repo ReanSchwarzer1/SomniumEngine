@@ -1831,6 +1831,8 @@ impl<G: GameApp> Engine<G> {
                 flags: 0,
                 occlusion_map: -1,
                 transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
                 _pad: [0.0; 3],
                                 },
                             );

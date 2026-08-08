@@ -23,6 +23,8 @@ pub struct PostProcessPass {
     /// Handle to the auto-exposure result, kept so the bind group can be
     /// rebuilt on resize without threading it back through the caller.
     exposure_buffer: wgpu::Buffer,
+    /// Bloom chain, kept so the bind group survives a resize.
+    bloom_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
 }
 
@@ -38,6 +40,7 @@ impl PostProcessPass {
         height: u32,
         // Result buffer of `crate::pass::auto_exposure::AutoExposurePass`.
         exposure_buffer: &wgpu::Buffer,
+        bloom_view: &wgpu::TextureView,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -66,6 +69,17 @@ impl PostProcessPass {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Phase 24T: the blurred bloom chain.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
                         count: None,
                     },
@@ -125,8 +139,10 @@ impl PostProcessPass {
         let bind_group = Self::make_bind_group(
             device, &bind_group_layout, &hdr_view, &sampler, &params_buffer,
             exposure_buffer,
+            bloom_view,
         );
         let exposure_buffer = exposure_buffer.clone();
+        let bloom_view = bloom_view.clone();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
@@ -173,6 +189,7 @@ impl PostProcessPass {
 
         Self {
             exposure_buffer,
+            bloom_view,
             pipeline,
             bind_group_layout,
             bind_group,
@@ -244,6 +261,7 @@ impl PostProcessPass {
         sampler: &wgpu::Sampler,
         params_buffer: &wgpu::Buffer,
         exposure_buffer: &wgpu::Buffer,
+        bloom_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Bind Group"),
@@ -265,6 +283,10 @@ impl PostProcessPass {
                     binding: 3,
                     resource: exposure_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(bloom_view),
+                },
             ],
         })
     }
@@ -285,6 +307,7 @@ impl PostProcessPass {
             &self.sampler,
             &self.params_buffer,
             &self.exposure_buffer,
+            &self.bloom_view,
         );
     }
 
@@ -301,6 +324,7 @@ impl PostProcessPass {
         ca_strength: f32,
         tonemapper: u32,
         auto_exposure: bool,
+        bloom_intensity: f32,
     ) {
         // The uniform is three floats plus a u32; bytemuck cannot cast a mixed
         // array, so the index is bit-cast into the fourth float slot and read
@@ -314,7 +338,7 @@ impl PostProcessPass {
             ca_strength,
             f32::from_bits(tonemapper),
             f32::from_bits(u32::from(auto_exposure)),
-            0.0,
+            bloom_intensity,
             0.0,
             0.0,
         ];

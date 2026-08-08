@@ -24,6 +24,10 @@ pub struct GpuMaterial {
     pub occlusion_map: i32,
     /// Fraction of light transmitted through the surface (Phase 24S).
     pub transmission: f32,
+    /// Self-emitted light, linear RGB (Phase 24T).
+    pub emissive: [f32; 3],
+    /// Bindless index of the emissive texture, or -1.
+    pub emissive_map: i32,
     /// Explicit tail padding to a 16-byte multiple.
     ///
     /// WGSL requires the array stride of a storage-buffer element to be a
@@ -132,17 +136,19 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_gpu_material_is_the_64_byte_shader_layout() {
+    fn the_gpu_material_is_the_80_byte_shader_layout() {
         // Must match `Material` in shading.wgsl, visibility.wgsl, shadow.wgsl
         // and transparent.wgsl. A mismatch does not fail validation; the shader
         // simply reads the wrong words, which is why this is pinned.
         //
+        // 48 bytes originally; 64 after Phase 24S added `transmission`; 80
+        // after Phase 24T added emissive colour and its texture index.
         // Was 48 bytes until Phase 24S added `transmission`. That took the
         // struct to 52, and WGSL requires a storage-buffer array's stride to be
         // a multiple of the element alignment — 16 here, because of
         // `base_color` — so it rounds to 64. The padding is declared explicitly
         // rather than left implicit for the same reason this test exists.
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 64);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
     }
 }

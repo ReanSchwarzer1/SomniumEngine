@@ -118,6 +118,7 @@ pub struct SomniumRenderer {
     auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
     taa_pass: crate::pass::taa::TaaPass,
     pub gtao_pass: crate::pass::gtao::GtaoPass,
+    pub bloom_pass: crate::pass::bloom::BloomPass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -290,6 +291,11 @@ impl SomniumRenderer {
         let mut auto_exposure_pass =
             crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
 
+        // Phase 24T: built before the post-process pass, which samples its result.
+        let bloom_pass = crate::pass::bloom::BloomPass::new(
+            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+        );
+
         // Phase 11.5K: Post-process pass owns the Rgba16Float HDR render target.
         let postprocess_pass = PostProcessPass::new(
             &ctx.device,
@@ -297,6 +303,7 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
             auto_exposure_pass.exposure_buffer(),
+            bloom_pass.result_view(),
         );
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
@@ -431,6 +438,7 @@ impl SomniumRenderer {
             auto_exposure_pass,
             taa_pass,
             gtao_pass,
+            bloom_pass,
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -583,6 +591,8 @@ impl SomniumRenderer {
                 metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
                 occlusion_map: resolve_tex(mat.occlusion_map),
                 transmission: mat.transmission,
+                emissive: mat.emissive,
+                emissive_map: resolve_tex(mat.emissive_map),
                 _pad: [0.0; 3],
                 // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                 // and BLEND goes to the forward pass, so a cutoff on either
@@ -958,6 +968,7 @@ impl SomniumRenderer {
             self.render_width = width;
             self.render_height = height;
             self.gtao_pass.resize(&ctx.device, width, height);
+            self.bloom_pass.resize(&ctx.device, width, height);
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1502,6 +1513,18 @@ impl SomniumRenderer {
             );
         }
 
+        // ── 7.95 Bloom (Phase 24T) ───────────────────────────────────────────
+        // After TAA, so the chain is built from a resolved image rather than a
+        // jittered one; a blur of unstable input broadcasts that instability
+        // across everything it touches.
+        self.bloom_pass.record(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &self.postprocess_pass.hdr_view,
+            (ctx.config.width, ctx.config.height),
+        );
+
         // ── 8. Post-process Pass: HDR → swapchain (tone map + vignette) ──────
         // A TAA debug view must reach the screen unmodified: exposure would
         // crush a 0/1 flag image to black, and a tone curve would grade the
@@ -1514,6 +1537,7 @@ impl SomniumRenderer {
             if debugging { 0.0 } else { self.chromatic_aberration },
             if debugging { 3 } else { self.tonemapper },
             self.auto_exposure && !debugging,
+            if debugging { 0.0 } else { self.bloom_pass.intensity() },
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
         // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
