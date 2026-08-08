@@ -125,6 +125,10 @@ fn sample_history_catmull_rom(uv: vec2<f32>, resolution: vec2<f32>) -> vec3<f32>
     result += textureSampleLevel(history_tex, linear_samp,
         vec2<f32>(tex_pos3.x, tex_pos3.y), 0.0).rgb * w3.x * w3.y;
 
+    // Clamping at zero bounds the undershoot but does not remove it — a tap
+    // set that sums below zero still lands at black rather than at the colour
+    // it should have. The caller clamps to the current neighbourhood, which is
+    // what actually contains it.
     return max(result, vec3<f32>(0.0));
 }
 
@@ -217,8 +221,24 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     maximum = min(maximum, mean + sigma * 1.25);
 
     let history_raw = sample_history_catmull_rom(prev_uv, resolution);
-    let history = clip_to_neighbourhood(
-        tonemap_for_blend(history_raw), minimum, maximum);
+    // Clip first to preserve hue, then hard-clamp into the same box.
+    //
+    // The clip alone is not enough, and this is what produced a black outline
+    // around every silhouette. `clip_to_neighbourhood` only moves history that
+    // falls *outside* the box — but at a silhouette the box spans from the dark
+    // object to the bright background, so it is wide, and a near-black value
+    // sits comfortably inside it and passes through at 90% weight.
+    //
+    // Catmull-Rom is what manufactures those values: its outer taps carry
+    // negative weights, so it undershoots at high-contrast edges. Clamping the
+    // filter output at zero turned that undershoot into black instead of
+    // preventing it. The clamp below bounds history by what the current frame
+    // actually contains, so no filter can invent a colour that is not there.
+    let history = clamp(
+        clip_to_neighbourhood(tonemap_for_blend(history_raw), minimum, maximum),
+        minimum,
+        maximum,
+    );
 
     let blended = mix(tonemap_for_blend(current), history, taa.blend_factor);
     return vec4<f32>(untonemap_for_blend(blended), 1.0);

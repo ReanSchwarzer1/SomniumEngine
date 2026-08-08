@@ -148,7 +148,7 @@ impl TaaPass {
             prev_view_proj: glam::Mat4::IDENTITY,
             frame_index: 0,
             history_valid: false,
-            enabled: true,
+            enabled: std::env::var("SOMNIUM_TAA").as_deref() != Ok("0"),
         }
     }
 
