@@ -365,6 +365,7 @@ impl SomniumRenderer {
             &ibl_pass.cube_view,
             &ibl_pass.sampler,
             gtao_pass.output_view(),
+            &vis_pass.depth_view,
         );
 
         // Phase 21: forward pass for blended materials. Built here because it

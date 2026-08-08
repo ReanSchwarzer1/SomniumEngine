@@ -109,6 +109,8 @@ struct ClusterParams {
 @group(1) @binding(5) var env_sampler: sampler;
 // Phase 24I: `rgb` = bent normal in [0,1], `a` = screen-space visibility.
 @group(1) @binding(6) var gtao_tex: texture_2d<f32>;
+// Phase 24X: scene depth, for the contact-shadow march.
+@group(1) @binding(7) var scene_depth: texture_depth_2d;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -335,6 +337,75 @@ fn sample_shadow_cascade(
     return shadow / f32(SHADOW_FILTER_SAMPLES);
 }
 
+// ── Contact shadows (Phase 24X) ─────────────────────────────────────────────
+//
+// A shadow map cannot resolve contact. Its texels cover centimetres at best,
+// and the normal-offset bias from 24H deliberately pushes samples off the
+// surface, which erases exactly the darkening where two surfaces meet — a
+// trunk against soil, a leaf on the leaf beneath it. Those small dark contacts
+// are a large part of why objects read as resting on a surface rather than
+// hovering above it.
+//
+// This marches a short ray through the depth buffer toward the light and looks
+// for anything crossing it. Parameters follow Bend Studio's screen-space
+// shadows; the wavefront scheduling that makes their version fast is not ported
+// here, only the sampling behaviour.
+
+/// Steps along the ray. Short by design — this fills the gap the shadow map
+/// leaves at contact range, and anything longer is the shadow map's job.
+const CONTACT_STEPS: i32 = 12;
+/// World-space length of the march.
+const CONTACT_LENGTH: f32 = 0.35;
+/// How far behind a depth sample still counts as the same surface.
+///
+/// Without a thickness limit every thin object casts an infinitely deep
+/// shadow volume behind itself, because the march cannot tell a thin leaf from
+/// a wall extending away from the camera.
+const CONTACT_THICKNESS: f32 = 0.05;
+
+fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, pixel: vec2<f32>) -> f32 {
+    let step_world = CONTACT_LENGTH / f32(CONTACT_STEPS);
+
+    // Jitter the start so the march's step pattern becomes noise rather than
+    // visible banding; TAA then resolves it.
+    let jitter = interleaved_gradient_noise(pixel, u32(light.shadow_map_size) % 64u);
+
+    var occluded = 0.0;
+    for (var i = 1; i <= CONTACT_STEPS; i = i + 1) {
+        let t = (f32(i) + jitter) * step_world;
+        let sample_pos = world_pos + light_dir * t;
+
+        let clip = view.view_proj * vec4<f32>(sample_pos, 1.0);
+        if clip.w <= 0.0 {
+            break;
+        }
+        let ndc = clip.xyz / clip.w;
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
+            break;
+        }
+
+        // Compare the ray's depth against what the depth buffer actually holds
+        // at that pixel. Closer stored depth means geometry sits between this
+        // point and the light.
+        let texel = vec2<i32>(uv * vec2<f32>(textureDimensions(scene_depth)));
+        let scene_z = textureLoad(scene_depth, texel, 0);
+        let diff = ndc.z - scene_z;
+
+        // The upper bound is what stops a surface far behind the ray from
+        // registering as an occluder.
+        if diff > 0.0 && diff < CONTACT_THICKNESS {
+            // Fade with distance so the shadow ends softly instead of stopping
+            // at a hard ring where the march runs out.
+            occluded = max(occluded, 1.0 - f32(i) / f32(CONTACT_STEPS));
+        }
+    }
+
+    // Contrast, following Bend's parameter of the same name: contacts are
+    // small and a linear falloff reads as haze rather than as shadow.
+    return saturate(1.0 - occluded * 4.0);
+}
+
 /// Shadow factor in [0,1]; 1.0 = fully lit.
 ///
 /// Blends across the cascade boundary rather than switching at it. An abrupt
@@ -345,7 +416,11 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
     let near = select(light.cascade_splits[cascade - 1u], 0.0, cascade == 0u);
     let far = light.cascade_splits[cascade];
 
-    let shadow = sample_shadow_cascade(world_pos, normal, cascade, pixel);
+    var shadow = sample_shadow_cascade(world_pos, normal, cascade, pixel);
+
+    // Contact shadows only ever darken. The shadow map is authoritative for
+    // everything at its own scale; this fills in below that scale.
+    shadow = min(shadow, contact_shadow(world_pos, normalize(light.direction), pixel));
 
     // Blend over the last 10% of the cascade's range.
     let band = (far - near) * 0.1;
