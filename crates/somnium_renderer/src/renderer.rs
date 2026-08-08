@@ -1488,7 +1488,13 @@ impl SomniumRenderer {
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
         // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
         // gizmos and UI text stay pixel-sharp.
-        if self.fxaa_enabled {
+        // Phase 24F: TAA supersedes FXAA. Running both means edges get
+        // processed twice — TAA resolves them from accumulated samples, then
+        // FXAA blurs along whatever gradients remain, dragging dark pixels into
+        // bright neighbours. That contributed to the rim around silhouettes,
+        // and there is nothing left for FXAA to usefully do once TAA is on.
+        let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled();
+        if fxaa_active {
             self.fxaa_pass.update(&ctx.queue, ctx.config.width, ctx.config.height);
             self.postprocess_pass.record(&mut encoder, &self.fxaa_pass.ldr_view);
             self.fxaa_pass.record(&mut encoder, &surface_view);

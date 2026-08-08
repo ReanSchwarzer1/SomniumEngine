@@ -144,15 +144,35 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // per-instance transforms, which the visibility pass does not yet produce.
     // Moving geometry will ghost until that lands; the neighbourhood clip below
     // limits how badly.
-    let depth = textureLoad(depth_tex, coord, 0);
-
-    // Nothing was drawn here. Skip reprojection rather than reconstructing a
-    // position on the far plane, which lands anywhere at all.
-    if depth <= 0.0 {
-        return vec4<f32>(current, 1.0);
+    // Closest-depth dilation. Reprojecting a pixel using its *own* depth is
+    // wrong at a silhouette: an edge pixel often carries the background's
+    // depth, so it reprojects to where the background was and fetches history
+    // that belongs to something else. That shows up as a dark rim tracing every
+    // object — which is exactly what it did here, most visibly on tree trunks
+    // against bright ground.
+    //
+    // Taking the nearest depth in a 3x3 neighbourhood makes edge pixels follow
+    // the foreground instead. Spartan does the same thing in
+    // `get_closest_pixel_velocity_3x3`, for the same reason.
+    var depth = 1.0;
+    var closest = coord;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let c = coord + vec2<i32>(x, y);
+            let d = textureLoad(depth_tex, c, 0);
+            // Smaller is nearer: this depth buffer has 0 at the near plane.
+            if d < depth {
+                depth = d;
+                closest = c;
+            }
+        }
     }
 
-    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0, depth, 1.0);
+    // Reconstruct from the pixel the depth actually came from, not from this
+    // one — using one pixel's depth with another's screen position is what
+    // produced the offset in the first place.
+    let closest_uv = (vec2<f32>(closest) + 0.5) * taa.inv_resolution;
+    let ndc = vec4<f32>(closest_uv.x * 2.0 - 1.0, 1.0 - closest_uv.y * 2.0, depth, 1.0);
     let world = taa.inv_view_proj * ndc;
     let world_pos = world.xyz / world.w;
 
