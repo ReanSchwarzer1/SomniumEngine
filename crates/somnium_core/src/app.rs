@@ -784,12 +784,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // Phase 15A1: post-processing settings for the inspector.
             let sel_post = self.selected_entity
                 .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
-                .map(|pp| (
-                    [pp.ev100, pp.vignette_strength, pp.ca_strength, pp.ibl_intensity],
-                    pp.vignette_enabled,
-                    pp.ca_enabled,
-                    pp.fxaa_enabled,
-                ));
+                .map(|pp| somnium_ui::PostInspectorState {
+                    values: [
+                        pp.ev100,
+                        pp.exposure_compensation,
+                        pp.vignette_strength,
+                        pp.ca_strength,
+                        pp.ibl_intensity,
+                    ],
+                    vignette: pp.vignette_enabled,
+                    chromatic: pp.ca_enabled,
+                    fxaa: pp.fxaa_enabled,
+                    auto_exposure: pp.auto_exposure,
+                    tonemapper: pp.tonemapper.label(),
+                });
             // Phase 17C: terrain layer + foliage settings for the inspector.
             let sel_terrain = self.selected_entity.and_then(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
@@ -1895,6 +1903,7 @@ impl<G: GameApp> Engine<G> {
                 if matches!(
                     field,
                     IF::PostExposure
+                        | IF::PostExposureCompensation
                         | IF::PostVignetteStrength
                         | IF::PostCaStrength
                         | IF::PostIblIntensity

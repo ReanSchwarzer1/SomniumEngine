@@ -106,6 +106,18 @@ struct InspectorHandles {
     post_fxaa_label:  NodeHandle,
 }
 
+/// Everything the Post FX inspector section displays.
+#[derive(Debug, Clone, Copy)]
+pub struct PostInspectorState {
+    /// `[ev100, exposure_compensation, vignette, chromatic_aberration, ibl]`.
+    pub values: [f32; 5],
+    pub vignette: bool,
+    pub chromatic: bool,
+    pub fxaa: bool,
+    pub auto_exposure: bool,
+    pub tonemapper: &'static str,
+}
+
 /// Names shown in the foliage picker (Phase 17F).
 ///
 /// Mirrors `somnium_core::FOLIAGE_PALETTE` by index. The UI crate deliberately
@@ -464,17 +476,26 @@ impl UiManager {
     /// `values` is `[exposure, vignette_strength, ca_strength, ibl_intensity]`
     /// plus the three enable flags; pass `None` when the selection has no
     /// `PostProcessComponent`.
-    pub fn update_post_inspector(&mut self, values: Option<([f32; 4], bool, bool, bool)>) {
+    ///
+    /// Grouped into a struct rather than a tuple: it had already grown to four
+    /// positional booleans, which is exactly the shape that invites passing
+    /// them in the wrong order.
+    pub fn update_post_inspector(&mut self, values: Option<PostInspectorState>) {
         let h = &self.inspector_handles;
         let (section, exposure, vig_str, ca_str, ibl) =
             (h.post_section, h.post_exposure, h.post_vig_str, h.post_ca_str, h.post_ibl);
         let (vig_label, ca_label, fxaa_label) =
             (h.post_vig_label, h.post_ca_label, h.post_fxaa_label);
+        let (exp_comp, auto_label, tonemap_label) =
+            (h.post_exp_comp, h.post_auto_exp_label, h.post_tonemap_label);
 
         match values {
-            Some(([exp, vig, ca, ibl_i], vig_on, ca_on, fxaa_on)) => {
+            Some(v) => {
+                let ([exp, ec, vig, ca, ibl_i], vig_on, ca_on, fxaa_on, auto_on, tonemap) =
+                    (v.values, v.vignette, v.chromatic, v.fxaa, v.auto_exposure, v.tonemapper);
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(exposure, exp));
+                self.native_ui.send(NumericFieldMessage::set_value(exp_comp, ec));
                 self.native_ui.send(NumericFieldMessage::set_value(vig_str, vig));
                 self.native_ui.send(NumericFieldMessage::set_value(ca_str, ca));
                 self.native_ui.send(NumericFieldMessage::set_value(ibl, ibl_i));
@@ -488,6 +509,15 @@ impl UiManager {
                 ));
                 self.native_ui.send(TextMessage::set_text(
                     fxaa_label, format!("{} FXAA", tick(fxaa_on)),
+                ));
+                // These two were added with the exposure controls but never
+                // refreshed, so their ticks sat permanently empty regardless of
+                // the real state.
+                self.native_ui.send(TextMessage::set_text(
+                    auto_label, format!("{} Auto Exposure", tick(auto_on)),
+                ));
+                self.native_ui.send(TextMessage::set_text(
+                    tonemap_label, format!("Tonemap: {tonemap}"),
                 ));
             }
             None => self.native_ui.set_visibility(section, false),

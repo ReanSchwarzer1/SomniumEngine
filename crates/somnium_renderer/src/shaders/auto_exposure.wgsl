@@ -94,9 +94,10 @@ fn build_histogram(
             params.highlight_start_nits, params.highlight_end_nits, lum);
         let weight = centre_weight * mix(0.25, 1.0, highlight);
 
-        // The histogram counts in integers, so the weight is quantised. 256
-        // steps is far finer than the 256 luminance bins it feeds.
-        atomicAdd(&local_bins[luminance_to_bin(lum)], u32(weight * 256.0));
+        // The histogram counts in integers, so the weight is quantised. 64
+        // steps is ample, and keeps the per-bin total inside u32 even if every
+        // pixel of a 4K frame lands in the same bin.
+        atomicAdd(&local_bins[luminance_to_bin(lum)], u32(weight * 64.0));
     }
 
     workgroupBarrier();
@@ -106,8 +107,11 @@ fn build_histogram(
     }
 }
 
-var<workgroup> bin_totals: array<u32, 256>;
-var<workgroup> bin_weights: array<u32, 256>;
+// f32, not u32. Weighting multiplied the per-bin totals by up to 64, and
+// `count * lid` then overflowed a u32 outright — which drove the metered
+// exposure to nonsense and washed the whole frame to white.
+var<workgroup> bin_totals: array<f32, 256>;
+var<workgroup> bin_weights: array<f32, 256>;
 
 @compute @workgroup_size(256, 1, 1)
 fn resolve_exposure(@builtin(local_invocation_index) lid: u32) {
@@ -116,8 +120,8 @@ fn resolve_exposure(@builtin(local_invocation_index) lid: u32) {
     // Two reductions in lockstep: the bin index weighted by its own total,
     // which gives a weighted mean of *log* luminance, and the plain total,
     // which is the denominator that mean needs.
-    bin_totals[lid]  = count * lid;
-    bin_weights[lid] = count;
+    bin_totals[lid]  = f32(count) * f32(lid);
+    bin_weights[lid] = f32(count);
     workgroupBarrier();
 
     for (var cutoff = 128u; cutoff > 0u; cutoff >>= 1u) {
@@ -139,8 +143,8 @@ fn resolve_exposure(@builtin(local_invocation_index) lid: u32) {
     // Bins hold summed *weights* now, not pixel counts. Bin 0 is the near-black
     // bucket and is excluded, so subtract it back out of the denominator; it
     // contributes nothing to the numerator either way, being index zero.
-    let weighted_sum = f32(bin_totals[0]);
-    let total_weight = max(f32(bin_weights[0]) - f32(count), 1.0);
+    let weighted_sum = bin_totals[0];
+    let total_weight = max(bin_weights[0] - f32(count), 1.0);
 
     // Undo the bin mapping to recover average log2 luminance.
     let mean_bin = weighted_sum / total_weight;
