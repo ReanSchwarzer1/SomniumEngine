@@ -1214,11 +1214,105 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17H | ✅ Complete | **Cutout foliage: alpha masks, alpha-weighted mips, and the island tree.** Three reported faults, three unrelated causes. (1) *Everything looked blue-grey.* Poly Haven ships vegetation as **alpha-cutout cards** — the diffuse atlas carries blade colour only where the mask is opaque (78% of `grass_medium_01` is near-black) and the cutout lives in a **separate `_alpha_` map their glTF never references**. Trusting the glTF meant rendering the black background as if it were the plant, leaving ambient sky as the brightest thing on screen. The loader now folds a sibling `X_alpha_2k.png` into `X_diff_2k.jpg`'s alpha channel by filename convention and promotes the material to `MASK` + double-sided; a missing sidecar is not an error. (2) *Saplings had no trunk.* `ensure_palette_mesh` kept the largest **primitive**, but a glTF node is usually several — the sapling is `branches` + `twigs`, the island tree is trunk + branches + leaves. Primitives are now grouped by node transform, the heaviest **node** wins, and all of its primitives are kept as `FoliagePart`s with a local transform. (3) *The island tree painted nothing.* Not the triangle cap, as assumed: the file lists `KHR_texture_transform` in `extensionsRequired` and the `gltf` crate rejected the import outright. Enabling the feature fixed it; failed imports are now cached so a broken model no longer retries — and stalls — on every brush dab. **Mip generation** was also wrong for cutouts: a plain box filter averages blade colour with the transparent background, so foliage darkened with distance, and averaging a binary mask drops texels under the 0.5 cutoff so coverage erodes until distant grass vanishes. Colour is now averaged **weighted by alpha**, and each level's alpha is rescaled to preserve coverage (Castaño). Both reduce exactly to the old behaviour for opaque textures. |
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
 | 16 | ⬜ Planned | Scripting (Rhai or Lua) |
-| 17 | ⬜ Planned | Terrain improvements: foliage scattering, terrain colliders, layer UI |
+| 25A | ⬜ Planned | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
+| 25B | ⬜ Planned | **Terrain chunks in the TLAS.** 24J keys a BLAS per mesh by `vertex_offset`; terrain chunks never enter the draw queue it builds from, so terrain neither casts nor receives ray-traced shadows. Add committed chunk geometry as BLAS entries at the current LOD, rebuilt on sculpt. Together with 25A this is the whole of the 24K verification: a hill casting a soft traced shadow onto the valley beside it is a test that cannot pass by accident. |
+| 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
+| 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
+| 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
+| 25F | ⬜ Planned | **Stochastic hex-tiling.** The strongest remaining tell that terrain is rendered rather than photographed is *repetition*: one tiled albedo at a fixed rate produces a visible grid the eye locks onto immediately, and no amount of lighting work hides it. Heitz–Neyret hex-tiling samples the same texture at three hexagonal-lattice offsets with randomised rotation and blends by barycentric weight, breaking the lattice without a second texture or a visible seam. Reference: `bgfx-master/examples/49-hextile/fs_hextile.sc`; UE's TextureGraph ships the same idea as `AdjustHexaplanar*.usf`. |
+| 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
+| 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
+| 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
+| 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
+
+---
+
+## 17.5 Phase 25 — Photorealistic Terrain (plan)
+
+### 25.1 Why terrain is the weakest surface in the engine
+
+Terrain already does more than it gets credit for: four PBR layers blended from a
+splatmap, height-sharpened weights, triplanar projection on cliffs, CSM shadows
+and clustered local lights. On its own that is a respectable terrain shader.
+
+The problem is not the shader, it is *where it runs*. `TerrainPass::record` is at
+`renderer.rs:1516` — after the visibility pass (1386 and 1408), after the
+acceleration-structure build and ReSTIR (1419–1443), after GTAO (1458). Terrain
+is therefore invisible to all of them, and `terrain.wgsl` keeps its **own copies**
+of `sample_shadow`, the cascade selection and the cluster lookup.
+
+Two consequences, and the second is the expensive one:
+
+1. Terrain receives no GTAO, no contact shadows, no traced visibility, and gets
+   TAA reprojection from a depth buffer it never wrote to.
+2. **Every lighting improvement in Phase 24 either had to be implemented twice or
+   quietly skipped terrain.** That is not a terrain bug, it is a structural tax on
+   all future lighting work.
+
+This is precisely the fault 24C fixed for the sky, where the same constants lived
+in three files and night was impossible until they became one. The resolution is
+the same: **one shading path, one source of truth**, which is why 25A leads.
+
+### 25.2 What the reference engines actually do
+
+| Engine | Taken | Where |
+|---|---|---|
+| **O3DE** | Macro + detail **clipmaps** — whole-terrain low frequency plus camera-centred high frequency, so detail cost scales with *screen* area, not world area. Also `AppendHeightToWeight`, which folds a material's own height into its blend weight. | `Gems/Terrain/Assets/Shaders/Terrain/` |
+| **O3DE** | A dedicated terrain **depth pass** feeding the shared depth buffer — the architecture 25A adopts. | `Terrain_DepthPass.azsl` |
+| **CDLOD** | `morphVertex` — continuous LOD morphing so a level switch happens only once both meshes agree. | `BasicCDLOD/Shaders/CDLODTerrain.vsh` |
+| **bgfx** | **Hex-tiling** (Heitz–Neyret): three lattice-offset samples with randomised rotation, blended barycentrically, to destroy visible tiling. | `examples/49-hextile/fs_hextile.sc` |
+| **Unreal** | The same hexaplanar idea, independently, in TextureGraph — confirmation this is the standard answer rather than a trick. | `Plugins/TextureGraph/Shaders/Layer/AdjustHexaplanar*.usf` |
+| **Bevy** | **Biplanar** projection: two dominant axes instead of three, near-identical quality for two thirds of the taps. | `bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl` |
+| **bevy_terrain** | Compute-driven tile refinement into indirect draws — noted, not adopted; the existing chunk/LOD system already fills this role and replacing it would be churn, not quality. | `src/shaders/tiling_prepass/refine_tiles.wgsl` |
+
+### 25.3 Sequencing, and why 25A and 25B come first
+
+25A and 25B are not photorealism features. They are sequenced first because:
+
+- **They unblock 24K.** ReSTIR reads the visibility-buffer depth and traces the
+  TLAS. Terrain is in neither, so there is currently no surface in the demo that
+  can *show* a traced shadow — the ground filling the frame is the water plane,
+  which shades in its own pass and never samples `restir_vis`. A hill shadowing
+  the valley beside it is a test that cannot pass by accident, unlike the
+  cube-on-a-plane scenes that failed twice.
+- **They stop the duplication tax** before 25D–25H add substantially more shader
+  surface that would otherwise have to be written twice.
+- **They are worth more than they look.** GTAO, contact shadows and correct TAA
+  arriving on terrain at once is a visible change on its own, before any new
+  texturing work lands.
+
+Ordering by visible gain per unit of work after that: **25F** (repetition is the
+loudest artefact and hex-tiling is a self-contained shader change), then **25E**
+(materials meeting instead of cross-fading), then **25D** (the resolution
+ceiling), then **25C** (popping), then **25H**/**25G**/**25I** as refinement.
+
+### 25.4 Verification plan
+
+Terrain makes the lighting work testable, so each sub-phase states its own check:
+
+- **25A** — the same scene with `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
+  it cannot today. Terrain pixels appear in the visibility buffer debug view.
+- **25B** — `SOMNIUM_RT_DEBUG=1` shows a terrain hill's shadow cast across terrain.
+  This is the 24K acceptance test; 24K stays 🟡 until it passes.
+- **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **25F** — a flat plain from a high camera: the tiling grid must not be findable.
+- Every sub-phase keeps `cargo test --workspace` green, currently 198 tests.
 
 ---
 
 ## 18. Known Issues & Active Bugs
+
+**24K cannot be visually verified until Phase 25A/25B.** The pass dispatches and
+shading consumes it, but no surface in the demo view can show the result: the only
+visibility-buffer geometry is the helmet, and the ground filling the frame is the
+water plane, which shades in its own pass and never samples `restir_vis`.
+
+**Editor primitives spawned at `on_init` do not appear.** `SOMNIUM_SHADOWTEST`
+spawns a ground plane and cube; the attach log confirms both get meshes uploaded
+and clustered (Plane 6 indices, Cube 36, material 1) and the gizmo draws at the
+right transform, but no geometry renders. Cause not yet found — unrelated to
+ray tracing, and it is why the 24K test scene had to be abandoned.
+
 
 | ID | Severity | Component | Description | Root Cause | Fix Status |
 |---|---|---|---|---|---|
