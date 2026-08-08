@@ -122,6 +122,7 @@ pub struct SomniumRenderer {
     pub dof_pass: crate::pass::dof::DofPass,
     pub raytrace_pass: crate::pass::raytrace::RaytracePass,
     rt_debug_pass: crate::pass::raytrace::RtDebugPass,
+    pub restir_pass: crate::pass::restir::RestirPass,
     /// Geometry registered for tracing: (vertex_offset, vertex_count, index_offset, index_count).
     rt_geometry: Vec<(u32, u32, u32, u32)>,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
@@ -306,6 +307,14 @@ impl SomniumRenderer {
             ctx.features.contains(crate::context::RAY_TRACING_FEATURES),
         );
 
+        // Phase 24K: reservoir-based direct lighting, on top of 24J.
+        let restir_pass = crate::pass::restir::RestirPass::new(
+            &ctx.device,
+            raytrace_pass.supported(),
+            ctx.config.width,
+            ctx.config.height,
+        );
+
         let rt_debug_pass =
             crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
 
@@ -400,6 +409,9 @@ impl SomniumRenderer {
             &ibl_pass.sampler,
             gtao_pass.output_view(),
             &vis_pass.depth_view,
+            restir_pass
+                .visibility_view()
+                .expect("ReSTIR always allocates its visibility target"),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -465,6 +477,7 @@ impl SomniumRenderer {
             dof_pass,
             raytrace_pass,
             rt_debug_pass,
+            restir_pass,
             rt_geometry: Vec::new(),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
@@ -1020,6 +1033,7 @@ impl SomniumRenderer {
             self.bloom_pass.resize(&ctx.device, width, height);
             self.dof_pass.resize(&ctx.device, width, height);
             self.rt_debug_pass.invalidate();
+            self.restir_pass.resize(&ctx.device, width, height);
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1422,6 +1436,23 @@ impl SomniumRenderer {
             );
             self.rt_geometry = geometry;
 
+            // Phase 24K: traced direct lighting. Here because it needs the TLAS
+            // built above and the depth the visibility pass filled, and because
+            // shading below consumes its result.
+            if let Some(tlas) = self.raytrace_pass.tlas() {
+                self.restir_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    tlas,
+                    &self.vis_pass.depth_view,
+                    self.view_proj,
+                    self.light_direction,
+                    self.sun_angular_radius,
+                    ctx.config.width,
+                    ctx.config.height,
+                );
+            }
         }
 
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────

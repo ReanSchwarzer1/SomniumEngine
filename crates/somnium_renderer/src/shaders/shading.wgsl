@@ -117,6 +117,9 @@ struct ClusterParams {
 @group(1) @binding(6) var gtao_tex: texture_2d<f32>;
 // Phase 24X: scene depth, for the contact-shadow march.
 @group(1) @binding(7) var scene_depth: texture_depth_2d;
+// Phase 24K: traced sun visibility. `.a` is 0 when ReSTIR did not run, which
+// is how the shader knows to fall back to the shadow map.
+@group(1) @binding(8) var restir_vis: texture_2d<f32>;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -695,7 +698,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_pos   = view.view * vec4<f32>(hit_point, 1.0);
     let view_depth = -view_pos.z; // right-handed: Z is negative in front of camera
 
-    let shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
+    // Phase 24K: prefer the traced result where it exists. It has no cascades,
+    // no depth bias and no peter-panning, and its penumbra comes from the sun's
+    // actual angular size rather than from a filter chosen to look about right.
+    let traced = textureLoad(restir_vis, pixel_coords, 0);
+    var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
+    if traced.a > 0.5 {
+        shadow_factor = traced.r;
+    }
 
     // ── Shading ───────────────────────────────────────────────────────────────
     var result: vec3<f32>;

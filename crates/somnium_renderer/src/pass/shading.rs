@@ -21,6 +21,8 @@ pub struct ShadingPass {
     gtao_view: wgpu::TextureView,
     /// Phase 24X: scene depth, for contact shadows.
     depth_view: wgpu::TextureView,
+    /// Phase 24K: traced sun visibility.
+    restir_view: wgpu::TextureView,
 }
 
 impl ShadingPass {
@@ -35,6 +37,7 @@ impl ShadingPass {
         env_sampler: &wgpu::Sampler,
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
+        restir_view: &wgpu::TextureView,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -94,6 +97,18 @@ impl ShadingPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Phase 24K: traced sun visibility, replacing the shadow
+                    // map when ReSTIR is active.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                     // Phase 24X: scene depth, for the contact-shadow march.
                     wgpu::BindGroupLayoutEntry {
                         binding: 7,
@@ -145,6 +160,7 @@ impl ShadingPass {
             env_sampler,
             gtao_view,
             depth_view,
+            restir_view,
         );
 
         let shader_source = format!(
@@ -213,6 +229,7 @@ impl ShadingPass {
             env_sampler: env_sampler.clone(),
             gtao_view: gtao_view.clone(),
             depth_view: depth_view.clone(),
+            restir_view: restir_view.clone(),
         }
     }
 
@@ -227,6 +244,7 @@ impl ShadingPass {
         env_sampler: &wgpu::Sampler,
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
+        restir_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -264,6 +282,10 @@ impl ShadingPass {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(depth_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(restir_view),
+                },
             ],
         })
     }
@@ -280,6 +302,7 @@ impl ShadingPass {
             &self.env_sampler,
             &self.gtao_view,
             &self.depth_view,
+            &self.restir_view,
         );
     }
 }
