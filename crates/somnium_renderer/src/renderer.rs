@@ -1332,7 +1332,16 @@ impl SomniumRenderer {
                 &ctx.device,
                 &ctx.queue,
                 &self.cull_aabbs,
-                self.view_proj,
+                // Un-jittered: a visibility decision must not depend on a
+                // sub-pixel sampling offset. With the jittered matrix the
+                // frustum planes — and the Hi-Z occlusion test behind them —
+                // moved every frame, so any cluster sitting on the threshold
+                // was culled on some frames and drawn on others. That is
+                // geometry appearing and disappearing at jitter frequency,
+                // which reads as the mesh vibrating, and it hits foliage
+                // hardest because it is thousands of small clusters all near
+                // the threshold at once.
+                self.view_proj_unjittered,
                 !self.culling_enabled,
                 self.hiz_pass.size(),
                 self.hiz_pass.mip_count(),

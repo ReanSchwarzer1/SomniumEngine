@@ -1336,14 +1336,35 @@ is exactly why switching TAA off removed the shimmer, and why the fault looked
 like it lived in TAA rather than in what the jitter touched. Cascades are now
 fitted from `view_proj_unjittered.inverse()`.
 
-Measured over consecutive frames on a static camera, mean frame-to-frame delta
-in the shadow region: **2.905 with TAA on before, 2.942 with TAA off, 0.669
-after** — 4.3x more stable than before and well below the TAA-off baseline.
+Confirmed by the user directly: shadows no longer jitter. **Do not trust the
+frame-delta numbers originally recorded here** — screen-capture frame deltas were
+later shown to vary from 0.776 to 2.018 across three runs of an *identical
+build*, which is the whole range those comparisons were drawn from. The fix is
+sound on its mechanism and on the user's observation, not on that measurement.
 
 Two dead ends recorded so they are not retried: a floor on the variance clip box
 (applied twice, measured twice, changed nothing — history sat at 234.1 against
 current 250.9 either way), and the `tonemap_for_blend` round trip (its inverse
 is exact, and the Catmull-Rom weights sum to 1, so neither loses energy).
+
+**Meshes still vibrate with TAA on (open).** Shadows are fixed; the geometry
+itself still shimmers, and stops when TAA is switched off.
+
+The mechanism to look for is the same as the cascade bug: something other than
+sampling that the jitter reaches. GPU culling was one — `cull_pass.update` took
+the jittered `view_proj`, so the frustum planes and the Hi-Z occlusion test moved
+every frame and any cluster on the threshold was culled on some frames and drawn
+on others. Now fitted from `view_proj_unjittered`. **Unverified**: whether that
+is what the user sees.
+
+Two changes were tried and reverted after measuring worse, but the measurement
+was later found to be noise, so neither is actually ruled out: reprojecting TAA
+entirely in un-jittered space, and a floor on the variance clip box.
+
+**A usable metric is the blocker here.** Screen-capture frame deltas are useless
+— 0.776 to 2.018 across three runs of the same build. Anything conclusive needs
+an in-engine measurement: accumulate per-pixel variance over N frames on the GPU
+with a fixed camera, and read back one number.
 
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
 Not yet investigated.

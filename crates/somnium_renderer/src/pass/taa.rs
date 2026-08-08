@@ -318,14 +318,17 @@ impl TaaPass {
     /// `view_proj_jittered` must match the matrix the depth buffer was rendered
     /// with; `view_proj_unjittered` is what gets stored for the next frame.
     ///
-    /// The two are different spaces and mixing them is a real bug, not a
-    /// nicety. World position is reconstructed from depth, so that step needs
-    /// the jittered matrix. The history buffer holds the *resolved* image,
-    /// which converges to the un-jittered camera, so projecting into it needs
-    /// the un-jittered matrix. Using one for both leaves a sub-pixel error that
-    /// changes every frame with the jitter — which at a silhouette alternately
-    /// fetches foreground and background, and at this blend weight accumulates
-    /// into a dark fringe wherever dark meets bright.
+    /// The two are different spaces and mixing them is a real bug. World
+    /// position is reconstructed from depth, so that step needs the jittered
+    /// matrix; the history holds the *resolved* image, which converges to the
+    /// un-jittered camera, so projecting into it needs the un-jittered one.
+    ///
+    /// Reprojecting entirely in un-jittered space was tried, on the theory that
+    /// `prev_uv = uv - jitter` resamples history at a new fractional offset
+    /// every frame. Measured, it was **worse** — mean frame-to-frame delta on a
+    /// static camera went from 0.807 to 1.667 — so the sub-pixel error it
+    /// introduces at depth discontinuities costs more than the resampling it
+    /// avoids. Do not retry it.
     pub fn record(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
