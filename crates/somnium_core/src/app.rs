@@ -1301,6 +1301,17 @@ impl<G: GameApp> Engine<G> {
             r.tonemapper = pp.tonemapper.as_index();
             r.exposure_compensation = pp.exposure_compensation;
             r.shading_mode = u32::from(pp.cel_shading);
+            r.grading = somnium_renderer::pass::postprocess::Grading {
+                temperature: pp.temperature,
+                tint: pp.tint,
+                contrast: pp.contrast,
+                saturation: pp.saturation,
+                gain: pp.gain,
+                lift: pp.lift,
+                gamma: pp.gamma,
+                grain: pp.grain,
+                time: self.time.elapsed().as_secs_f32(),
+            };
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             r.fxaa_enabled = pp.fxaa_enabled;

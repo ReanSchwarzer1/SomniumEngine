@@ -17,8 +17,25 @@ struct PostParams {
     auto_exposure:     u32,
     /// How much of the bloom chain reaches the image.
     bloom_intensity:   f32,
-    _pad1:             u32,
-    _pad2:             u32,
+    // ── Colour grading (Phase 24Y) ──────────────────────────────────────────
+    /// White balance, -1 cooler … +1 warmer.
+    temperature:       f32,
+    /// White balance on the green–magenta axis.
+    tint:              f32,
+    /// 1.0 is neutral; pivots around middle grey.
+    contrast:          f32,
+    /// 1.0 is neutral; 0 is monochrome.
+    saturation:        f32,
+    /// ASC CDL slope / offset / power. Neutral is (1, 0, 1).
+    gain:              f32,
+    lift:              f32,
+    gamma:             f32,
+    // ── Lens (Phase 24Z) ────────────────────────────────────────────────────
+    /// Film grain strength. 0 = off.
+    grain:             f32,
+    /// Seconds, so grain moves rather than sitting as a static pattern.
+    time:              f32,
+    _pad0:             f32,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -118,6 +135,62 @@ fn reinhard(x: vec3<f32>) -> vec3<f32> {
     return clamp(x / (vec3(1.0) + x), vec3(0.0), vec3(1.0));
 }
 
+// ── Colour grading (Phase 24Y) ──────────────────────────────────────────────
+//
+// Applied *after* tone mapping, in display space. Grading before it would
+// fight the curve: the tone mapper's job is to fit scene luminance into a
+// display's range, and shifting colours beforehand changes what it is fitting.
+//
+// These are the controls a colourist actually uses. Exposure and the tone curve
+// decide how bright the image is and how it rolls off; grading decides what it
+// *feels* like, and no amount of the former substitutes for the latter.
+
+/// White balance on the orange–blue and green–magenta axes.
+///
+/// Applied as a channel scale rather than a full chromatic-adaptation
+/// transform. A true Bradford adaptation would be more correct, but this is a
+/// look control rather than a colour-management step, and being able to reason
+/// about what the slider does is worth more here than the last few percent.
+fn white_balance(c: vec3<f32>, temperature: f32, tint: f32) -> vec3<f32> {
+    let t = clamp(temperature, -1.0, 1.0);
+    let g = clamp(tint, -1.0, 1.0);
+    let scale = vec3<f32>(
+        1.0 + t * 0.2,
+        1.0 + g * 0.1,
+        1.0 - t * 0.2,
+    );
+    return c * scale;
+}
+
+/// ASC CDL: slope, offset, power. The grading standard film uses.
+fn color_decision_list(c: vec3<f32>, slope: f32, offset: f32, power: f32) -> vec3<f32> {
+    let adjusted = c * slope + offset;
+    return pow(max(adjusted, vec3<f32>(0.0)), vec3<f32>(max(power, 1e-3)));
+}
+
+fn apply_grading(c_in: vec3<f32>) -> vec3<f32> {
+    var c = white_balance(c_in, pp.temperature, pp.tint);
+    c = color_decision_list(c, pp.gain, pp.lift, pp.gamma);
+
+    // Contrast pivots around middle grey rather than around black, so raising
+    // it darkens shadows and lifts highlights instead of just brightening
+    // everything.
+    const MIDDLE_GREY: f32 = 0.18;
+    c = (c - MIDDLE_GREY) * pp.contrast + MIDDLE_GREY;
+
+    let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(vec3<f32>(luma), c, pp.saturation);
+
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+/// Hash for grain and dither.
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
 fn tonemap(hdr: vec3<f32>) -> vec3<f32> {
     switch pp.tonemapper {
         case 1u: { return aces_film(hdr); }
@@ -158,9 +231,31 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Tone map → LDR in [0, 1].
     let ldr = tonemap(hdr);
 
+    // Phase 24Y: grading, in display space after the curve.
+    var graded = apply_grading(ldr);
+
     // Radial vignette: darkens screen edges.
     let uv_c = in.uv - vec2(0.5);
     let vign  = 1.0 - smoothstep(0.35, 0.75, length(uv_c) * 1.4 * pp.vignette_strength);
+    graded *= vign;
 
-    return vec4(ldr * vign, 1.0);
+    // Phase 24Z: film grain. Scaled by how dark the pixel is, because sensor
+    // noise is most visible in shadows — applying it flat looks like dirt on
+    // the lens rather than like film.
+    if pp.grain > 0.0 {
+        let n = hash21(in.uv * 1024.0 + fract(pp.time) * 137.0) - 0.5;
+        let luma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+        graded += n * pp.grain * (1.0 - smoothstep(0.0, 0.7, luma));
+    }
+
+    // Phase 24Z: ordered dither before the 8-bit write.
+    //
+    // Not optional now that exposure is physical. A smooth dark gradient — a
+    // night sky, a wall falling into shadow — quantises to visible bands at 8
+    // bits, and the eye finds those bands far more objectionable than the noise
+    // that hides them. Half a bit of noise is enough.
+    let dither = (hash21(in.uv * 2048.0) - 0.5) / 255.0;
+    graded += dither;
+
+    return vec4(clamp(graded, vec3(0.0), vec3(1.0)), 1.0);
 }

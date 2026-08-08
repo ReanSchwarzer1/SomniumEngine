@@ -515,6 +515,21 @@ pub struct PostProcessComponent {
     pub exposure_compensation: f32,
     /// Which tone-mapping curve maps HDR luminance to display (Phase 24B).
     pub tonemapper: Tonemapper,
+    /// Colour grading, applied after tone mapping (Phase 24Y).
+    ///
+    /// Exposure and the tone curve decide how bright the image is and how it
+    /// rolls off. These decide what it feels like, and no amount of the former
+    /// substitutes for the latter.
+    pub temperature: f32,
+    pub tint: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    /// ASC CDL slope / offset / power. Neutral is (1, 0, 1).
+    pub gain: f32,
+    pub lift: f32,
+    pub gamma: f32,
+    /// Film grain strength (Phase 24Z). 0 = off.
+    pub grain: f32,
     /// Replace PBR shading with the banded cel look.
     ///
     /// Lived only behind the F5 key, which is easy to hit by accident and gave
@@ -559,6 +574,14 @@ impl Default for PostProcessComponent {
             exposure_compensation: 0.0,
             tonemapper: Tonemapper::AgX,
             cel_shading: false,
+            temperature: 0.0,
+            tint: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            gain: 1.0,
+            lift: 0.0,
+            gamma: 1.0,
+            grain: 0.0,
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,

@@ -2,6 +2,7 @@ pub mod atmosphere;
 pub mod auto_exposure;
 pub mod bloom;
 pub mod cull;
+pub mod dof;
 pub mod fxaa;
 pub mod gizmo;
 pub mod grid;

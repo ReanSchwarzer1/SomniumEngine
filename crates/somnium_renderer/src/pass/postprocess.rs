@@ -8,6 +8,40 @@ use wgpu;
 /// HDR render target format shared by all passes that write to the HDR buffer.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Colour grading and lens settings (Phases 24Y and 24Z).
+///
+/// Grouped rather than passed positionally: `set_params` had already grown past
+/// the point where a caller could get the order right by reading the call site.
+#[derive(Debug, Clone, Copy)]
+pub struct Grading {
+    pub temperature: f32,
+    pub tint: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub gain: f32,
+    pub lift: f32,
+    pub gamma: f32,
+    pub grain: f32,
+    /// Seconds, so grain animates instead of sitting still.
+    pub time: f32,
+}
+
+impl Default for Grading {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,
+            tint: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            gain: 1.0,
+            lift: 0.0,
+            gamma: 1.0,
+            grain: 0.0,
+            time: 0.0,
+        }
+    }
+}
+
 /// Post-processing pass: HDR texture → tone-mapped swapchain output.
 pub struct PostProcessPass {
     pub pipeline: wgpu::RenderPipeline,
@@ -110,19 +144,23 @@ impl PostProcessPass {
             // Must match `PostParams` in postprocess.wgsl exactly: three floats
             // then four u32s carried as raw bits. `copy_from_slice` below
             // requires the lengths to agree.
-            let data: [f32; 8] = [
+            let data: [f32; 16] = [
                 1.0 / (1.2 * 32768.0), // exposure at EV100 15
                 1.0,                   // vignette strength
                 0.0,                   // chromatic aberration
                 f32::from_bits(0),     // tonemapper: AgX
                 f32::from_bits(1),     // auto exposure on
-                0.0,
-                0.0,
+                0.0,                   // bloom intensity
+                0.0, 0.0,              // temperature, tint
+                1.0, 1.0,              // contrast, saturation
+                1.0, 0.0, 1.0,         // gain, lift, gamma
+                0.0,                   // grain
+                0.0,                   // time
                 0.0,
             ];
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("PostProcess Params"),
-                size: 32,
+                size: 64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: true,
             });
@@ -325,6 +363,7 @@ impl PostProcessPass {
         tonemapper: u32,
         auto_exposure: bool,
         bloom_intensity: f32,
+        grading: Grading,
     ) {
         // The uniform is three floats plus a u32; bytemuck cannot cast a mixed
         // array, so the index is bit-cast into the fourth float slot and read
@@ -332,14 +371,22 @@ impl PostProcessPass {
         // Three floats then four u32s. bytemuck cannot cast a mixed array, so
         // the integers ride in float slots as raw bits and WGSL reads them back
         // as u32 — same four bytes either way.
-        let data: [f32; 8] = [
+        let data: [f32; 16] = [
             exposure,
             vignette_strength,
             ca_strength,
             f32::from_bits(tonemapper),
             f32::from_bits(u32::from(auto_exposure)),
             bloom_intensity,
-            0.0,
+            grading.temperature,
+            grading.tint,
+            grading.contrast,
+            grading.saturation,
+            grading.gain,
+            grading.lift,
+            grading.gamma,
+            grading.grain,
+            grading.time,
             0.0,
         ];
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));

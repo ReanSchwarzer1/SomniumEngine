@@ -119,6 +119,7 @@ pub struct SomniumRenderer {
     taa_pass: crate::pass::taa::TaaPass,
     pub gtao_pass: crate::pass::gtao::GtaoPass,
     pub bloom_pass: crate::pass::bloom::BloomPass,
+    pub dof_pass: crate::pass::dof::DofPass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -127,6 +128,8 @@ pub struct SomniumRenderer {
     pub frame_delta_time: f32,
     /// Stops applied on top of the metered exposure. Negative darkens.
     pub exposure_compensation: f32,
+    /// Colour grading and lens settings (Phases 24Y / 24Z).
+    pub grading: crate::pass::postprocess::Grading,
     /// View-projection without TAA's sub-pixel jitter, for reprojection.
     view_proj_unjittered: glam::Mat4,
     /// Current render target size, for computing the jitter offset.
@@ -291,6 +294,11 @@ impl SomniumRenderer {
         let mut auto_exposure_pass =
             crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
 
+        // Phase 24Z: depth of field, driven by the same aperture as exposure.
+        let dof_pass = crate::pass::dof::DofPass::new(
+            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+        );
+
         // Phase 24T: built before the post-process pass, which samples its result.
         let bloom_pass = crate::pass::bloom::BloomPass::new(
             &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
@@ -439,6 +447,7 @@ impl SomniumRenderer {
             taa_pass,
             gtao_pass,
             bloom_pass,
+            dof_pass,
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -446,6 +455,7 @@ impl SomniumRenderer {
             auto_exposure: true,
             frame_delta_time: 1.0 / 60.0,
             exposure_compensation: 0.0,
+            grading: crate::pass::postprocess::Grading::default(),
             sun_angular_radius: 0.004_654,
             view_proj_unjittered: glam::Mat4::IDENTITY,
             render_width: ctx.config.width,
@@ -969,6 +979,7 @@ impl SomniumRenderer {
             self.render_height = height;
             self.gtao_pass.resize(&ctx.device, width, height);
             self.bloom_pass.resize(&ctx.device, width, height);
+            self.dof_pass.resize(&ctx.device, width, height);
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1513,6 +1524,30 @@ impl SomniumRenderer {
             );
         }
 
+        // ── 7.93 Depth of field (Phase 24Z) ──────────────────────────────────
+        // Before bloom, so the blurred highlights bloom rather than the sharp
+        // ones — that ordering is what produces the soft circular flare a real
+        // lens gives an out-of-focus light.
+        self.dof_pass.ensure_bind_group(
+            &ctx.device,
+            &self.postprocess_pass.hdr_view,
+            &self.vis_pass.depth_view,
+        );
+        if let Some(result) = self.dof_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            ctx.config.width,
+            ctx.config.height,
+            0.1,
+            1000.0,
+        ) {
+            encoder.copy_texture_to_texture(
+                result.as_image_copy(),
+                self.postprocess_pass.hdr_texture.as_image_copy(),
+                self.postprocess_pass.hdr_texture.size(),
+            );
+        }
+
         // ── 7.95 Bloom (Phase 24T) ───────────────────────────────────────────
         // After TAA, so the chain is built from a resolved image rather than a
         // jittered one; a blur of unstable input broadcasts that instability
@@ -1538,6 +1573,13 @@ impl SomniumRenderer {
             if debugging { 3 } else { self.tonemapper },
             self.auto_exposure && !debugging,
             if debugging { 0.0 } else { self.bloom_pass.intensity() },
+            // Grading is a look, and a debug view is not one — it must reach
+            // the screen as the numbers it holds.
+            if debugging {
+                crate::pass::postprocess::Grading::default()
+            } else {
+                self.grading
+            },
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
         // FXAA resolve it to the swapchain. Editor overlays draw afterwards, so
