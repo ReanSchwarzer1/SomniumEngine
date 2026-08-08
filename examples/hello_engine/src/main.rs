@@ -527,7 +527,10 @@ impl GameApp for HelloGame {
         if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
             ctx.world.spawn((
                 Transform {
-                    translation: Vec3::new(0.0, 0.0, 0.0),
+                    // Y=6, not 0: the demo's WaterPlane also sits at Y=0, and
+                    // two coplanar surfaces z-fight — which made every capture
+                    // of this scene a mix of both.
+                    translation: Vec3::new(0.0, 6.0, 0.0),
                     rotation: glam::Quat::IDENTITY,
                     scale: Vec3::new(40.0, 1.0, 40.0),
                 },
@@ -537,7 +540,7 @@ impl GameApp for HelloGame {
             ));
             ctx.world.spawn((
                 Transform {
-                    translation: Vec3::new(0.0, 3.0, 0.0),
+                    translation: Vec3::new(0.0, 9.0, 0.0),
                     rotation: glam::Quat::IDENTITY,
                     scale: Vec3::splat(2.0),
                 },
@@ -561,7 +564,7 @@ impl GameApp for HelloGame {
             ));
 
             // Look down at the ground so the cast shadow fills the frame.
-            self.camera.position = Vec3::new(0.0, 9.0, 16.0);
+            self.camera.position = Vec3::new(0.0, 15.0, 16.0);
             self.camera.yaw = -90.0;
             self.camera.pitch = -30.0;
         }

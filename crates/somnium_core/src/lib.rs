@@ -608,7 +608,12 @@ impl Default for PostProcessComponent {
             // toggle agree. The component is the single source of truth and is
             // copied into the pass every frame, so a pass-side default would be
             // overwritten before it ever took effect.
-            restir_enabled: std::env::var("SOMNIUM_RESTIR").as_deref() == Ok("1"),
+            // On by default, as requested. Safe to do now that the two bugs
+            // that made it destructive are fixed: it no longer leaves a stale
+            // all-lit visibility pinned over the shadow map when switched off,
+            // and occluded samples are no longer resurrected by temporal reuse.
+            // SOMNIUM_RESTIR=0 forces it off.
+            restir_enabled: std::env::var("SOMNIUM_RESTIR").as_deref() != Ok("0"),
             vignette_enabled: false,
             vignette_strength: 1.0,
             ca_enabled: false,

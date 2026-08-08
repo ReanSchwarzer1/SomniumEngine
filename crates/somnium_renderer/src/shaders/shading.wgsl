@@ -726,8 +726,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow_factor = traced.r;
     }
 
-    // TEMP shadow debug: bit 1 of _padding shows shadow_factor directly.
-    if light._pad2_z > 0.5 {
+    // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
+    if light._pad2_z > 0.5 && light._pad2_z < 1.5 {
         return vec4<f32>(vec3<f32>(shadow_factor), 1.0);
     }
 
@@ -860,6 +860,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
+
+        // 2 = sun only, 3 = ambient only. Isolates which term a surface's
+        // brightness actually comes from.
+        if light._pad2_z > 1.5 && light._pad2_z < 2.5 {
+            result = direct_light;
+        } else if light._pad2_z > 2.5 {
+            result = ambient;
+        }
     }
 
     // ── Cascade debug overlay (controlled by _padding repurposed as a flag) ──

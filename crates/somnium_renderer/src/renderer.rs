@@ -1205,7 +1205,10 @@ impl SomniumRenderer {
             ibl_intensity: self.ibl_intensity,
             sun_angular_radius: self.sun_angular_radius,
             // TEMP: shadow_factor debug visualisation.
-            _pad2: if std::env::var("SOMNIUM_SHADOW_DEBUG").is_ok() { 1.0 } else { 0.0 },
+            _pad2: std::env::var("SOMNIUM_SHADOW_DEBUG")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0),
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,
