@@ -30,6 +30,11 @@ struct TaaParams {
     blend_factor: f32,
     history_valid: f32,
     debug_mode: u32,
+    /// Minimum depth advantage before closest-depth dilation prefers a
+    /// neighbour. Guards against near-ties on smooth surfaces flipping the
+    /// choice every frame. `SOMNIUM_TAA_DILATE_EPS=0` restores the old
+    /// behaviour for A/B comparison.
+    dilation_epsilon: f32,
     _pad: [u32; 3],
 }
 
@@ -58,8 +63,12 @@ pub struct TaaPass {
     /// Debug visualisation selector, from `SOMNIUM_TAA_DEBUG`.
     ///
     /// 1 raw history · 2 clipped history · 3 current · 4 neighbourhood min
-    /// 5 neighbourhood max · 6 clip/clamp flags · 7 history-vs-current delta.
+    /// 5 neighbourhood max · 6 clip/clamp flags · 7 history-vs-current delta
+    /// 8 |prev_uv - uv| in pixels.
     debug_mode: u32,
+    /// Minimum depth advantage before dilation prefers a neighbour, from
+    /// `SOMNIUM_TAA_DILATE_EPS`. 0 restores the unguarded behaviour.
+    dilation_epsilon: f32,
 }
 
 impl TaaPass {
@@ -171,6 +180,10 @@ impl TaaPass {
             exposure_buffer: exposure_buffer.clone(),
             history_valid: false,
             enabled: std::env::var("SOMNIUM_TAA").as_deref() != Ok("0"),
+            dilation_epsilon: std::env::var("SOMNIUM_TAA_DILATE_EPS")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(1.0e-4),
             debug_mode: std::env::var("SOMNIUM_TAA_DEBUG")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -373,6 +386,7 @@ impl TaaPass {
                 inv_view_proj: view_proj_unjittered.inverse().to_cols_array_2d(),
                 prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
+                dilation_epsilon: self.dilation_epsilon,
                 blend_factor: BLEND_FACTOR,
                 history_valid: f32::from(u8::from(self.history_valid)),
                 debug_mode: self.debug_mode,
