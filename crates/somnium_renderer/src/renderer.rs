@@ -116,6 +116,7 @@ pub struct SomniumRenderer {
     postprocess_pass: PostProcessPass,
     atmosphere_pass: crate::pass::atmosphere::AtmospherePass,
     auto_exposure_pass: crate::pass::auto_exposure::AutoExposurePass,
+    taa_pass: crate::pass::taa::TaaPass,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -124,6 +125,11 @@ pub struct SomniumRenderer {
     pub frame_delta_time: f32,
     /// Stops applied on top of the metered exposure. Negative darkens.
     pub exposure_compensation: f32,
+    /// View-projection without TAA's sub-pixel jitter, for reprojection.
+    view_proj_unjittered: glam::Mat4,
+    /// Current render target size, for computing the jitter offset.
+    render_width: u32,
+    render_height: u32,
     /// Half the sun's angular diameter, radians (Phase 24E). Drives the
     /// specular highlight's size and the shadow penumbra's width.
     pub sun_angular_radius: f32,
@@ -293,6 +299,12 @@ impl SomniumRenderer {
         );
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
+        // Phase 24F: resolves the jittered HDR frames into a stable image.
+        let mut taa_pass = crate::pass::taa::TaaPass::new(
+            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+        );
+
+
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
             &ctx.device, ctx.config.format, &global_pool.view_proj_buffer,
@@ -405,6 +417,7 @@ impl SomniumRenderer {
             postprocess_pass,
             atmosphere_pass,
             auto_exposure_pass,
+            taa_pass,
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -413,6 +426,9 @@ impl SomniumRenderer {
             frame_delta_time: 1.0 / 60.0,
             exposure_compensation: 0.0,
             sun_angular_radius: 0.004_654,
+            view_proj_unjittered: glam::Mat4::IDENTITY,
+            render_width: ctx.config.width,
+            render_height: ctx.config.height,
             tonemapper: 0,
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
@@ -608,8 +624,21 @@ impl SomniumRenderer {
     pub fn set_view(&mut self, view: glam::Mat4, proj: glam::Mat4, camera_pos: glam::Vec3) {
         self.view_matrix = view;
         self.proj_matrix = proj;
-        self.view_proj   = proj * view;
-        self.camera_pos  = camera_pos;
+        // Unjittered, for TAA's own reprojection: it has to compare like with
+        // like across frames, and each frame's jitter is different.
+        self.view_proj_unjittered = proj * view;
+
+        // Phase 24F: nudge the projection by a sub-pixel offset so successive
+        // frames sample the scene at slightly different positions. Applied to
+        // the clip-space translation, which shifts the whole image without
+        // touching the projection's shape.
+        let jitter = self.taa_pass.jitter_ndc(self.render_width, self.render_height);
+        let mut jittered = proj;
+        jittered.z_axis.x += jitter.x;
+        jittered.z_axis.y += jitter.y;
+
+        self.view_proj  = jittered * view;
+        self.camera_pos = camera_pos;
     }
 
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
@@ -911,6 +940,14 @@ impl SomniumRenderer {
             self.postprocess_pass.resize(&ctx.device, width, height);
             self.auto_exposure_pass
                 .resize(&ctx.device, &self.postprocess_pass.hdr_view);
+            self.render_width = width;
+            self.render_height = height;
+            self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
+            self.taa_pass.rebuild(
+                &ctx.device,
+                &self.postprocess_pass.hdr_view,
+                &self.vis_pass.depth_view,
+            );
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
@@ -1389,6 +1426,33 @@ impl SomniumRenderer {
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.grid_enabled {
             self.grid_pass.record(&mut encoder, &self.postprocess_pass.hdr_view);
+        }
+
+        // ── 7.8 TAA resolve (Phase 24F) ──────────────────────────────────────
+        // Between the last thing that writes HDR and the metering, so exposure
+        // is measured on the resolved image rather than on a jittered one.
+        self.taa_pass.ensure_bind_groups(
+            &ctx.device,
+            &self.postprocess_pass.hdr_view,
+            &self.vis_pass.depth_view,
+        );
+        if self.taa_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.view_proj_unjittered,
+            ctx.config.width,
+            ctx.config.height,
+        )
+        .is_some()
+        {
+            // Copy back into the HDR target so every later pass keeps reading
+            // one target, rather than a view that alternates each frame.
+            let written = self.taa_pass.last_written();
+            encoder.copy_texture_to_texture(
+                self.taa_pass.resolved_texture(written).as_image_copy(),
+                self.postprocess_pass.hdr_texture.as_image_copy(),
+                self.postprocess_pass.hdr_texture.size(),
+            );
         }
 
         // ── 7.9 Auto-exposure: meter the finished HDR frame ──────────────────

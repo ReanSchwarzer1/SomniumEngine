@@ -406,11 +406,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     surface.normal = geo_normal;
+    var normal_variance = 0.0;
     if material.normal_map >= 0 {
         let nm_sample  = textureSample(textures[material.normal_map], default_sampler, uv).rgb;
         let tangent_n  = nm_sample * 2.0 - vec3<f32>(1.0);
         surface.normal = normalize(tbn * tangent_n);
+
+        // Phase 24F: specular anti-aliasing. A normal-map texel that averages
+        // many differently-oriented normals has a *shorter* vector than a unit
+        // one — the shortening measures how much detail the mip threw away.
+        // Toksvig's insight is that this recovers the lost variance, which is
+        // then folded into roughness so the lobe widens instead of sparkling.
+        //
+        // Without it, thin or distant detail flickers on every camera move, and
+        // TAA fights the flicker rather than resolving it.
+        let len = length(tbn * tangent_n);
+        normal_variance = saturate(1.0 - len * len);
     }
+
+    // Widen roughness by the variance the normal map lost to mipping.
+    // Squared because roughness is perceptual and alpha is what the BRDF uses.
+    if normal_variance > 0.0 {
+        let alpha = surface.roughness * surface.roughness;
+        surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
+    }
+
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);

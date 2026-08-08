@@ -203,7 +203,12 @@ impl PostProcessPass {
                 // which means sampling the scene colour. A pass cannot sample
                 // the target it renders into, so the HDR texture is copied into
                 // `scene_copy_texture` first.
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                // Phase 24F: TAA resolves into its own history buffer and
+                // copies the result back here, so every later pass keeps
+                // reading one well-known target instead of a view that
+                // alternates between two ping-pong textures each frame.
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
