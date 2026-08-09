@@ -1198,7 +1198,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24R | ⬜ Planned | **Area lights (LTC).** Rect, disc and tube lights via Linearly Transformed Cosines — analytic, no sampling noise, correct soft shadows and elongated highlights. Softboxes, windows and strip lights are most of what makes an interior read as photographed rather than rendered, and no amount of point-light tuning substitutes. Reference: `bevy_pbr/src/ltc/`, `bevy_light/src/rect_light.rs`. |
 | 24S | ✅ Complete | **Transmission and subsurface scattering.** Frostbite's approximation (Barré-Brisebois & Bouchard) rather than a real subsurface solve: light leaving the *far* side of a thin surface, spread by scattering, brightest looking almost straight into the source through the material. **This is what the foliage was missing all along.** Leaves lit only by reflection stay flat and dark regardless of how correct the albedo is — the symptom the grass has shown since Phase 17, and which no amount of albedo or occlusion work could have fixed. Transmitted light is tinted by albedo, which is why backlit foliage reads more saturated than the same leaf lit from the front, and it is deliberately **not** multiplied by the shadow factor: the entire point is light arriving through the surface from the side the shadow map calls dark. Materials take `transmissionFactor` from `KHR_materials_transmission` where present; foliage assets do not set it, so a sidecar cutout mask is taken as evidence of thin geometry and infers 0.5 — the same convention-over-metadata rule the alpha masks and ARM packing already use. `GpuMaterial` grew from 48 to 64 bytes (WGSL rounds the array stride to the 16-byte alignment `base_color` forces); the layout test caught this and was updated rather than deleted. |
 | 24T | ✅ Complete | **Emissive materials and physical bloom.** Materials carry `emissiveFactor` and an emissive texture from glTF, added to shading independently of every light in the scene — a screen is as bright in a dark room as a lit one. Bloom is **deliberately not threshold-based**: a threshold asks "which pixels count as bright?", a question with no physical answer whose meaning changes the moment exposure does — a scene metered for night would bloom everything, one metered for noon nothing. Real bloom is light scattering inside the lens, which happens to *all* light in proportion to how much there is. So a progressive 13-tap downsample builds a mip chain and a 9-tap tent upsample sums it back additively (Jimenez, SIGGRAPH 2014); bright regions dominate naturally because they carry more energy. Added **before** exposure and tone mapping, since it is scattering on the way to the sensor rather than a filter over the picture, and built **after** TAA, because a blur of unstable input broadcasts that instability everywhere it reaches. `GpuMaterial` grew 64 → 80 bytes; the layout test was updated again. |
-| 24U | ⬜ Planned | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
+| 24U | 🟡 Partial | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
 | 24V | ✅ Complete | **Local lights in physical units, with source radius.** The photometric half landed with 24A-1 — point and spot lights carry lumens converted to candela, and `smooth_distance_attenuation` already divides by distance squared, so illuminance was correct. What was missing is that they were still **point** sources. Lights now carry a `source_radius` in metres (distinct from `range`, which is reach): a 5 cm bulb a metre away subtends a real angle, and feeding that through `evaluate_brdf_area` is what stops its highlight being a single pixel on anything polished. **IES profiles are not included** — that is an asset-pipeline job and is better as its own sub-phase than half-done here. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
@@ -1222,7 +1222,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
-| 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
+| 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 
 ---
@@ -1865,6 +1865,70 @@ showed nothing.
 their visual delta at tuft scale is subtle and was not isolated with an A/B —
 there is no runtime toggle for them. The sRGB fix is the change with the
 objectively verifiable mechanism.
+
+
+### 25.11 24U + 25I — one froxel volume for aerial perspective and fog
+
+Taken together because they are the same integral. A 3-D table indexed by
+(screen x, screen y, distance) holds the light scattered *into* the view ray up
+to that distance and the transmittance surviving it; shading applies both with
+one fetch:
+
+    colour = colour * transmittance + inscattering
+
+They differ only in what scatters — the atmosphere's Rayleigh and Mie terms, or
+a fog medium — and in whether the sun is shadow-tested per step. Bevy keeps
+them apart (a 3-D LUT for aerial perspective, a screen-space march for fog);
+folding them into one volume means distant hills desaturate and a shaft crosses
+a valley by the same code, and there is no second definition of what the air is
+made of. That is the same argument 25A-2 made for terrain shading.
+
+**The plan assumed a LUT that did not exist.** 24U was written as "fed by 24C's
+aerial-perspective LUT" — 24C built transmittance and multiple-scattering
+tables and a sky march, and no aerial LUT. Building it was most of this work.
+
+Details taken from `bevy_pbr/src/atmosphere/aerial_view_lut.wgsl` that are easy
+to drop and visible when dropped: **log-space storage**, so hardware filtering
+between slices interpolates an exponential correctly; the **half-slice offset**
+when sampling, because each texel is the integral over its whole slice; and a
+**linear fade over the first slice**, without which the full first slice of
+scattering is applied at zero distance and fog appears on the lens.
+
+Two things worth recording:
+
+- **Units.** The atmosphere model is in kilometres — extinction km⁻¹, scale
+  heights of 8 km and 1.2 km — and the scene marches in metres. The air terms
+  are converted per-metre at the sample; without that the air is a thousand
+  times denser and reads as fog going opaque a metre from the camera.
+- **The shadow lookup is deliberately not the surface one.** `shading.wgsl`'s
+  PCSS exists to make a shadow *edge* look right and costs 40 taps; a froxel
+  needs a yes/no answer at a thirtieth of the screen's resolution and the
+  volume's own filtering smooths it. Reusing the surface path here would be
+  slower and wrong — a different algorithm for a different job, not a copy.
+
+**Verification.** `SOMNIUM_VOLUMETRICS=0/1` on the default scene:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 784 523 | **279.74** | **694 948 (89%)** |
+| sky | 137 077 | 0.0000 | 0 |
+
+Mean terrain luminance falls 4554.7 → 4313.2, which is the correct *sign*: at
+this sun angle extinction removes more than in-scattering adds, so distant
+ground loses contrast toward the sky rather than brightening. **Sky comes back
+bit-identical**, which is the control that matters — the sky's radiance already
+comes from a full march through the same atmosphere, and applying the volume to
+it as well would count the air twice.
+
+**Status.** 25I is complete: aerial perspective reaches terrain, meshes and
+foliage alike, because it is applied once at the end of the shared shading path
+— the 25A-2 payoff again. 24U is **partial**: the froxel volume, the fog medium
+with height falloff and a Henyey-Greenstein phase, and the per-froxel shadow
+test for shafts are all implemented and on by default, but **light shafts have
+not been visually confirmed** — that needs a low sun behind an occluder, which
+the current scene does not have. The code path is exercised; the picture is
+not. Also absent: temporal reprojection of the volume, which is what lets the
+step count come down without the fog crawling.
 
 
 ### 25.4 Verification plan

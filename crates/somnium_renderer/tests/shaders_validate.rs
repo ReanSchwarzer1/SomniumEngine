@@ -14,6 +14,7 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
+const ATMOSPHERE_VOL: &str = include_str!("../src/shaders/volumetric.wgsl");
 const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
 const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
 const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
@@ -47,6 +48,15 @@ fn the_shading_module_validates() {
         "shading",
         &format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
     );
+}
+
+#[test]
+fn the_volumetric_module_validates() {
+    // The froxel volume for aerial perspective and fog (24U/25I), which is
+    // concatenated after the atmosphere so it can reuse its density, phase and
+    // LUT helpers rather than defining a second atmosphere.
+    check("volumetric", &format!("{ATMOSPHERE}
+{ATMOSPHERE_VOL}"));
 }
 
 #[test]

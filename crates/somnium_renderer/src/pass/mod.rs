@@ -20,4 +20,5 @@ pub mod shadow;
 pub mod taa;
 pub mod transparent;
 pub mod visibility;
+pub mod volumetric;
 pub mod water;

@@ -997,6 +997,16 @@ Modules that Phase 24 draws on:
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
 | 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
 
+**24U/25I froxel volumetrics.** `bevy_pbr/src/atmosphere/aerial_view_lut.wgsl`
+supplied the 3-D LUT layout, the log-space storage, the half-slice sampling
+offset and the analytic per-segment integration;
+`bevy_pbr/src/volumetric_fog/volumetric_fog.wgsl` supplied the shadow-sampled
+in-scattering for shafts and the Henyey-Greenstein asymmetry parameter. Bevy
+keeps the two as separate features; Somnium folds them into one volume, because
+they are the same integral over the same ray and a second definition of the
+medium is the duplication Phase 25A-2 was spent removing. Bevy's temporal
+reprojection of the volume is not ported.
+
 **17E foliage curved normals.** `SpartanEngine-master/data/shaders/g_buffer.hlsl`
 was read for the 17E remainder and supplied the curved-card normal treatment in
 `shading.wgsl` — rotating the shading normal about the along-card axis by an

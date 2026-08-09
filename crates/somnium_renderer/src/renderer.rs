@@ -208,6 +208,8 @@ pub struct SomniumRenderer {
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
+    /// Phases 24U/25I: froxel volume carrying aerial perspective and fog.
+    pub volumetric_pass: crate::pass::volumetric::VolumetricPass,
 
     /// Phase 15E: Hi-Z depth pyramid, rebuilt from the visibility depth buffer
     /// each frame and consumed by the two-phase occlusion cull.
@@ -406,6 +408,8 @@ impl SomniumRenderer {
         let hiz_pass = crate::pass::hiz::HiZPass::new(
             &ctx.device, ctx.config.width, ctx.config.height, &vis_pass.depth_view,
         );
+        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
+
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
@@ -420,6 +424,8 @@ impl SomniumRenderer {
             restir_pass
                 .visibility_view()
                 .expect("ReSTIR always allocates its visibility target"),
+            &volumetric_pass.view,
+            &volumetric_pass.sampler,
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -510,6 +516,7 @@ impl SomniumRenderer {
             material_double_sided: Vec::new(),
             single_sided_args: 0,
             ibl_pass,
+            volumetric_pass,
             hiz_pass,
             hiz_ready: false,
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
@@ -1681,6 +1688,30 @@ impl SomniumRenderer {
             ctx.config.height,
             0.1,
         );
+
+        // ── 6.95 Froxel volumetrics (Phases 24U, 25I) ────────────────────────
+        //
+        // After the shadow pass, whose atlas it samples for light shafts, and
+        // before shading, which consumes the volume. The atmosphere LUTs are
+        // already built by `ensure_built` above.
+        self.volumetric_pass.ensure_bind_group(
+            &ctx.device,
+            self.atmosphere_pass.transmittance_view(),
+            self.atmosphere_pass.multiscatter_view(),
+            self.atmosphere_pass.sampler(),
+            &self.global_pool.light_buffer,
+            &self.shadow_resources.atlas_depth_view,
+        );
+        self.volumetric_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.view_proj_unjittered.inverse(),
+            self.camera_pos,
+            self.light_direction,
+            self.light_color,
+        );
+        self.shading_pass
+            .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         {

@@ -134,6 +134,12 @@ struct ClusterParams {
 // Phase 24K: traced sun visibility. `.a` is 0 when ReSTIR did not run, which
 // is how the shader knows to fall back to the shadow map.
 @group(1) @binding(8) var restir_vis: texture_2d<f32>;
+// Phases 24U/25I: froxel volumetrics. rgb = log in-scattering to this depth,
+// a = surviving transmittance. See pass/volumetric.rs.
+@group(1) @binding(9) var volumetrics: texture_3d<f32>;
+@group(1) @binding(10) var volumetric_sampler: sampler;
+// Metres the volume spans; 0 when volumetrics are switched off.
+@group(1) @binding(11) var<uniform> volumetric_range: vec4<f32>;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -1148,6 +1154,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // rather than a material property (Phase 25A-2).
     if material.terrain_index >= 0 {
         result = terrain_brush_overlay(u32(material.terrain_index), hit_point, result);
+    }
+
+    // ── Aerial perspective and fog (Phases 25I, 24U) ─────────────────────────
+    //
+    // One fetch applies both: distant surfaces lose contrast into the sky's own
+    // colour, and any fog medium adds its in-scattering along the way. Applied
+    // here, at the end of the shared shading path, it reaches **terrain, meshes
+    // and foliage alike** — which is the payoff of 25A-2 putting terrain in this
+    // pass rather than its own.
+    //
+    // The sky is not touched: it returned far above, and its radiance already
+    // came from a full march through the same atmosphere. Applying this to it
+    // as well would count the air twice.
+    if volumetric_range.x > 0.0 {
+        let dist = length(hit_point - view.camera_pos);
+        let slices = f32(textureDimensions(volumetrics).z);
+
+        // Each texel is the integral over its *whole* slice, so sampling at a
+        // slice boundary needs the previous slice's centre — hence the half
+        // slice offset (bevy's aerial_view_lut sampling does the same).
+        let w = saturate(dist / volumetric_range.x - 0.5 / slices);
+        let sample = textureSampleLevel(
+            volumetrics, volumetric_sampler, vec3<f32>(in.uv, w), 0.0);
+
+        // Anything nearer than the first slice centre clamps to that slice, so
+        // without this fade the full first-slice scattering would be applied
+        // right at the camera — fog appearing on the lens.
+        let fade = saturate(dist / (volumetric_range.x / slices));
+        let inscatter = exp(sample.rgb) * fade;
+        let transmittance = mix(1.0, sample.a, fade);
+
+        result = result * transmittance + inscatter;
     }
 
     // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a
