@@ -64,14 +64,40 @@ pub enum InspectorField {
     PostFocusDistance,
     /// Colour grading (Phase 24Y).
     PostTemperature,
+    /// Green/magenta axis, the other half of a white balance.
+    PostTint,
     PostContrast,
     PostSaturation,
+    /// Lift/gamma/gain (Phase 24Y): shadows, midtones and highlights. These
+    /// are the three handles a colourist actually reaches for, and until now
+    /// they existed in the component with no way to touch them.
+    PostLift,
+    PostGamma,
+    PostGain,
     /// Film grain (Phase 24Z).
     PostGrain,
     PostVignetteStrength,
     PostCaStrength,
     /// Scene-wide indirect-light strength (Phase 22C).
     PostIblIntensity,
+    /// Fog extinction per metre (Phase 24U). 0 leaves aerial perspective only.
+    PostFogDensity,
+    /// Metres over which fog density falls to 1/e, so it pools in valleys.
+    PostFogHeight,
+    /// Henyey-Greenstein asymmetry; positive scatters forward toward the sun.
+    PostFogAsymmetry,
+    /// Physical camera (Phase 24A). Only meaningful with
+    /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
+    /// is why aperture matters even when exposure is manual.
+    PostAperture,
+    /// Shutter speed as its denominator: 100 means 1/100 s.
+    PostShutter,
+    PostIso,
+    /// GTAO (Phase 24I): sampling radius in metres, and how hard the occlusion
+    /// is applied. Radius is the one that decides whether AO reads as contact
+    /// darkening or as a broad dirty smear.
+    PostAoRadius,
+    PostAoIntensity,
     // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
     /// Which splat layer the sculpt brush paints, 0..=3.
     TerrainPaintLayer,
@@ -109,6 +135,13 @@ pub enum PostFxToggle {
     Taa,
     /// Ray-traced direct lighting (Phase 24K).
     Restir,
+    /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
+    Volumetrics,
+    /// Shadow-test the fog per froxel, which is what draws light shafts.
+    LightShafts,
+    /// Drive exposure from aperture/shutter/ISO instead of a raw EV100
+    /// (Phase 24A). With this off the three camera rows do nothing.
+    PhysicalCamera,
 }
 
 /// High-level editor commands produced by the native UI layer.

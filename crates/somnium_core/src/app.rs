@@ -801,6 +801,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     restir: pp.restir_enabled,
                     bloom: pp.bloom_enabled,
                     dof: pp.dof_enabled,
+                    volumetrics: pp.volumetrics_enabled,
+                    physical_camera: pp.use_physical_camera,
+                    shafts: pp.light_shafts,
                     extras: [
                         pp.bloom_intensity,
                         pp.dof_focus_distance,
@@ -808,6 +811,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.contrast,
                         pp.saturation,
                         pp.grain,
+                        pp.fog_density,
+                        pp.fog_height_falloff,
+                        pp.fog_asymmetry,
+                        pp.tint,
+                        pp.lift,
+                        pp.gamma,
+                        pp.gain,
+                        pp.aperture_f_stops,
+                        // Shown as the denominator: 0.01 s reads as 100.
+                        if pp.shutter_speed_s > 0.0 { 1.0 / pp.shutter_speed_s } else { 0.0 },
+                        pp.sensitivity_iso,
+                        pp.gtao_radius,
+                        pp.gtao_intensity,
                     ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
@@ -1322,6 +1338,13 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
+            r.gtao_pass.radius = pp.gtao_radius;
+            r.gtao_pass.intensity = pp.gtao_intensity;
+            r.volumetric_pass.enabled = pp.volumetrics_enabled;
+            r.volumetric_pass.fog.density = pp.fog_density;
+            r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
+            r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
+            r.volumetric_pass.fog.shafts = pp.light_shafts;
             r.grading = somnium_renderer::pass::postprocess::Grading {
                 temperature: pp.temperature,
                 tint: pp.tint,
@@ -1975,6 +1998,18 @@ impl<G: GameApp> Engine<G> {
                     field,
                     IF::PostExposure
                         | IF::PostExposureCompensation
+                        | IF::PostTint
+                        | IF::PostLift
+                        | IF::PostGamma
+                        | IF::PostGain
+                        | IF::PostAperture
+                        | IF::PostShutter
+                        | IF::PostIso
+                        | IF::PostAoRadius
+                        | IF::PostAoIntensity
+                        | IF::PostFogDensity
+                        | IF::PostFogHeight
+                        | IF::PostFogAsymmetry
                         | IF::PostBloomIntensity
                         | IF::PostFocusDistance
                         | IF::PostTemperature
@@ -1989,9 +2024,29 @@ impl<G: GameApp> Engine<G> {
                         match field {
                             IF::PostExposure => pp.ev100 = value,
                             IF::PostExposureCompensation => pp.exposure_compensation = value,
+                            // Clamped hard: fog is an exponential, and a
+                            // density a couple of orders too high is an opaque
+                            // grey screen with no way back except undo.
+                            IF::PostFogDensity => pp.fog_density = value.clamp(0.0, 0.05),
+                            IF::PostFogHeight => pp.fog_height_falloff = value.max(0.0),
+                            IF::PostFogAsymmetry => pp.fog_asymmetry = value.clamp(-0.95, 0.95),
                             IF::PostBloomIntensity => pp.bloom_intensity = value.max(0.0),
                             IF::PostFocusDistance => pp.dof_focus_distance = value.max(0.01),
                             IF::PostTemperature => pp.temperature = value.clamp(-1.0, 1.0),
+                            IF::PostTint => pp.tint = value.clamp(-1.0, 1.0),
+                            IF::PostLift => pp.lift = value.clamp(-1.0, 1.0),
+                            // Gamma is a divisor in the grade, so zero would
+                            // blow the midtones out to infinity.
+                            IF::PostGamma => pp.gamma = value.clamp(0.05, 4.0),
+                            IF::PostGain => pp.gain = value.max(0.0),
+                            IF::PostAperture => pp.aperture_f_stops = value.clamp(0.7, 45.0),
+                            // The row is the denominator, so 100 means 1/100 s.
+                            IF::PostShutter => {
+                                pp.shutter_speed_s = 1.0 / value.clamp(1.0, 8000.0);
+                            }
+                            IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
+                            IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
+                            IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
                             IF::PostContrast => pp.contrast = value.max(0.0),
                             IF::PostSaturation => pp.saturation = value.max(0.0),
                             IF::PostGrain => pp.grain = value.max(0.0),
@@ -2370,6 +2425,18 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::Gtao => {
                             pp.gtao_enabled = !pp.gtao_enabled;
                             pp.gtao_enabled
+                        }
+                        PostFxToggle::PhysicalCamera => {
+                            pp.use_physical_camera = !pp.use_physical_camera;
+                            pp.use_physical_camera
+                        }
+                        PostFxToggle::Volumetrics => {
+                            pp.volumetrics_enabled = !pp.volumetrics_enabled;
+                            pp.volumetrics_enabled
+                        }
+                        PostFxToggle::LightShafts => {
+                            pp.light_shafts = !pp.light_shafts;
+                            pp.light_shafts
                         }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;

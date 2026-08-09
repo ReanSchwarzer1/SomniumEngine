@@ -123,6 +123,24 @@ struct InspectorHandles {
     post_contrast:      NodeHandle,
     post_saturation:    NodeHandle,
     post_grain:         NodeHandle,
+    post_vol_toggle:    NodeHandle,
+    post_vol_label:     NodeHandle,
+    post_shafts_toggle: NodeHandle,
+    post_shafts_label:  NodeHandle,
+    post_phys_toggle:   NodeHandle,
+    post_phys_label:    NodeHandle,
+    post_aperture:      NodeHandle,
+    post_shutter:       NodeHandle,
+    post_iso:           NodeHandle,
+    post_tint:          NodeHandle,
+    post_lift:          NodeHandle,
+    post_gamma:         NodeHandle,
+    post_gain:          NodeHandle,
+    post_ao_radius:     NodeHandle,
+    post_ao_intensity:  NodeHandle,
+    post_fog_density:   NodeHandle,
+    post_fog_height:    NodeHandle,
+    post_fog_asym:      NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -139,8 +157,15 @@ pub struct PostInspectorState {
     pub restir: bool,
     pub bloom: bool,
     pub dof: bool,
-    /// `[bloom_intensity, focus_distance, temperature, contrast, saturation, grain]`.
-    pub extras: [f32; 6],
+    /// Phases 24U/25I.
+    pub volumetrics: bool,
+    pub shafts: bool,
+    /// Exposure comes from aperture/shutter/ISO rather than the EV row.
+    pub physical_camera: bool,
+    /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
+    /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
+    /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
+    pub extras: [f32; 18],
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -556,6 +581,9 @@ impl UiManager {
                     (h.post_restir_label, v.restir, "RT Direct Light"),
                     (h.post_bloom_label, v.bloom, "Bloom"),
                     (h.post_dof_label, v.dof, "Depth of Field"),
+                    (h.post_vol_label, v.volumetrics, "Volumetrics"),
+                    (h.post_shafts_label, v.shafts, "Light Shafts"),
+                    (h.post_phys_label, v.physical_camera, "Physical Camera"),
                 ] {
                     self.native_ui.send(TextMessage::set_text(
                         label, format!("{} {name}", tick(on)),
@@ -568,6 +596,18 @@ impl UiManager {
                     (h.post_contrast, v.extras[3]),
                     (h.post_saturation, v.extras[4]),
                     (h.post_grain, v.extras[5]),
+                    (h.post_fog_density, v.extras[6]),
+                    (h.post_fog_height, v.extras[7]),
+                    (h.post_fog_asym, v.extras[8]),
+                    (h.post_tint, v.extras[9]),
+                    (h.post_lift, v.extras[10]),
+                    (h.post_gamma, v.extras[11]),
+                    (h.post_gain, v.extras[12]),
+                    (h.post_aperture, v.extras[13]),
+                    (h.post_shutter, v.extras[14]),
+                    (h.post_iso, v.extras[15]),
+                    (h.post_ao_radius, v.extras[16]),
+                    (h.post_ao_intensity, v.extras[17]),
                 ] {
                     self.native_ui.send(NumericFieldMessage::set_value(field, value));
                 }
@@ -679,6 +719,18 @@ impl UiManager {
             (h.post_contrast,   IF::PostContrast),
             (h.post_saturation, IF::PostSaturation),
             (h.post_grain,      IF::PostGrain),
+            (h.post_fog_density, IF::PostFogDensity),
+            (h.post_fog_height,  IF::PostFogHeight),
+            (h.post_fog_asym,    IF::PostFogAsymmetry),
+            (h.post_tint,       IF::PostTint),
+            (h.post_lift,       IF::PostLift),
+            (h.post_gamma,      IF::PostGamma),
+            (h.post_gain,       IF::PostGain),
+            (h.post_aperture,   IF::PostAperture),
+            (h.post_shutter,    IF::PostShutter),
+            (h.post_iso,        IF::PostIso),
+            (h.post_ao_radius,  IF::PostAoRadius),
+            (h.post_ao_intensity, IF::PostAoIntensity),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -731,6 +783,9 @@ impl UiManager {
                     (self.inspector_handles.post_restir_toggle, PostFxToggle::Restir),
                     (self.inspector_handles.post_bloom_toggle, PostFxToggle::Bloom),
                     (self.inspector_handles.post_dof_toggle, PostFxToggle::DepthOfField),
+                    (self.inspector_handles.post_vol_toggle, PostFxToggle::Volumetrics),
+                    (self.inspector_handles.post_shafts_toggle, PostFxToggle::LightShafts),
+                    (self.inspector_handles.post_phys_toggle, PostFxToggle::PhysicalCamera),
                 ] {
                     if msg.destination == handle {
                         self.editor_events.push_back(EditorEvent::TogglePostFx(which));
@@ -1456,6 +1511,17 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Auto Exposure", font_id, post_section);
     let post_exposure = make_row_step(ui, "EV", 34.0, font_id, post_section, 0.05);
     let post_exp_comp = make_row_step(ui, "EC", 34.0, font_id, post_section, 0.05);
+    // Phase 24A. With this on, EV above is computed from the three rows under
+    // it, so a scene is lit by picking a real exposure triangle instead of a
+    // number with no units. Aperture drives the DoF blur either way.
+    let (post_phys_toggle, post_phys_label) =
+        make_toggle(ui, "Physical Camera", font_id, post_section);
+    let post_aperture = make_row_step(ui, "f/", 34.0, font_id, post_section, 0.05);
+    // Shown as the denominator a photographer reads — 100 means 1/100 s —
+    // because the seconds themselves are a third of a hundredth and no scrub
+    // rate makes that row usable.
+    let post_shutter  = make_row_step(ui, "1/s", 34.0, font_id, post_section, 1.0);
+    let post_iso      = make_row_step(ui, "ISO", 34.0, font_id, post_section, 2.0);
     let (post_tonemap_button, post_tonemap_label) =
         make_toggle(ui, "Tonemap: AgX", font_id, post_section);
     // Indirect-light strength. Low values give contrasty shadows, high values a
@@ -1474,6 +1540,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // list reads as a pipeline rather than an unsorted pile of switches.
     let (post_taa_toggle, post_taa_label)     = make_toggle(ui, "TAA", font_id, post_section);
     let (post_gtao_toggle, post_gtao_label)   = make_toggle(ui, "GTAO", font_id, post_section);
+    // Radius is in metres and is the control that decides whether AO reads as
+    // contact darkening under an object or as a broad smear across a hillside.
+    let post_ao_radius    = make_row_step(ui, "AO Rad", 34.0, font_id, post_section, 0.02);
+    let post_ao_intensity = make_row_step(ui, "AO Amt", 34.0, font_id, post_section, 0.02);
     let (post_restir_toggle, post_restir_label) =
         make_toggle(ui, "RT Direct Light", font_id, post_section);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
@@ -1481,9 +1551,29 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_dof_toggle, post_dof_label)     = make_toggle(ui, "Depth of Field", font_id, post_section);
     let post_dof_focus  = make_row_step(ui, "Focus", 34.0, font_id, post_section, 0.1);
     let post_temperature = make_row_step(ui, "Temp", 34.0, font_id, post_section, 0.01);
+    // The other white-balance axis; without it "Temp" can only slide a scene
+    // between orange and blue and never correct a green cast.
+    let post_tint        = make_row_step(ui, "Tint", 34.0, font_id, post_section, 0.01);
     let post_contrast    = make_row_step(ui, "Contr", 34.0, font_id, post_section, 0.01);
     let post_saturation  = make_row_step(ui, "Sat", 34.0, font_id, post_section, 0.01);
+    // Phase 24Y lift/gamma/gain: shadows, midtones, highlights.
+    let post_lift        = make_row_step(ui, "Lift", 34.0, font_id, post_section, 0.005);
+    let post_gamma       = make_row_step(ui, "Gamma", 34.0, font_id, post_section, 0.01);
+    let post_gain        = make_row_step(ui, "Gain", 34.0, font_id, post_section, 0.01);
     let post_grain       = make_row_step(ui, "Grain", 34.0, font_id, post_section, 0.002);
+
+    // Phases 24U/25I. Aerial perspective is always on with the volume — the
+    // atmosphere is not optional — so the toggle covers the whole volume and
+    // the density below controls only the fog medium on top of it.
+    let (post_vol_toggle, post_vol_label) = make_toggle(ui, "Volumetrics", font_id, post_section);
+    let (post_shafts_toggle, post_shafts_label) =
+        make_toggle(ui, "Light Shafts", font_id, post_section);
+    // Fog density is tiny — a visible haze is ~1e-3 per metre — so the scrub
+    // rate has to be far finer than the other rows or one pixel of drag takes
+    // the scene from clear to opaque.
+    let post_fog_density = make_row_step(ui, "Fog", 34.0, font_id, post_section, 0.00005);
+    let post_fog_height  = make_row_step(ui, "FogH", 34.0, font_id, post_section, 1.0);
+    let post_fog_asym    = make_row_step(ui, "FogG", 34.0, font_id, post_section, 0.01);
     ui.set_visibility(post_section, false);
 
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
@@ -1565,6 +1655,11 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_restir_toggle, post_restir_label, post_bloom_toggle, post_bloom_label,
         post_bloom_amt, post_dof_toggle, post_dof_label, post_dof_focus,
         post_temperature, post_contrast, post_saturation, post_grain,
+        post_vol_toggle, post_vol_label, post_shafts_toggle, post_shafts_label,
+        post_fog_density, post_fog_height, post_fog_asym,
+        post_phys_toggle, post_phys_label, post_aperture, post_shutter, post_iso,
+        post_tint, post_lift, post_gamma, post_gain,
+        post_ao_radius, post_ao_intensity,
         post_fxaa_toggle, post_fxaa_label,
     }
 }
