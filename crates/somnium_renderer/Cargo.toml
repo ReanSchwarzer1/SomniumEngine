@@ -17,3 +17,11 @@ pollster     = { workspace = true }
 somnium_ui   = { workspace = true }
 bytemuck     = { workspace = true }
 somnium_asset = { workspace = true }
+
+[dev-dependencies]
+# Shader compilation happens at device-creation time, so a WGSL mistake used to
+# surface as a first-frame crash on a machine with a GPU and nowhere else.
+# naga is wgpu's own front end and is already in the dependency graph, so
+# parsing and validating each concatenated module in a test costs nothing and
+# catches the whole class before it ships.
+naga = { version = "29", features = ["wgsl-in"] }

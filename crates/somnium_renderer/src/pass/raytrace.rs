@@ -214,9 +214,21 @@ impl RaytracePass {
         }
 
         // ── Top level ───────────────────────────────────────────────────────
+        // Slots are filled densely, by `count` rather than by the draw's index
+        // in the queue. Those were the same number while every draw had a BLAS;
+        // Phase 25A-2 put terrain chunks in the draw queue, and they have none
+        // until 25B, so the two diverge the moment one is skipped.
+        //
+        // Writing at the queue index instead left holes and, worse, put live
+        // instances beyond `count` — which the clear loop below then treats as
+        // leftovers and wipes, or misses entirely on a shorter frame. The
+        // symptom was not a missing shadow but an *unstable* one: two runs of
+        // the same build had the terrain fully lit and fully shadowed, because
+        // whether the helmet survived into the TLAS depended on how many
+        // terrain chunks sorted ahead of it.
         let mut count = 0u32;
-        for (slot, (vertex_offset, model)) in instances.iter().enumerate() {
-            if slot as u32 >= MAX_TLAS_INSTANCES {
+        for (vertex_offset, model) in instances.iter() {
+            if count >= MAX_TLAS_INSTANCES {
                 break;
             }
             let Some(mesh) = self.blas.get(vertex_offset) else {
@@ -236,7 +248,7 @@ impl RaytracePass {
                 m[2], m[6], m[10], m[14],
             ];
 
-            tlas[slot] = Some(wgpu::TlasInstance::new(
+            tlas[count as usize] = Some(wgpu::TlasInstance::new(
                 &mesh.blas,
                 transform,
                 // Custom data carries the mesh identity, so a hit can find its

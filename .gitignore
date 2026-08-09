@@ -53,3 +53,4 @@ rt_*.log
 rt_*.err
 sel.log
 sel.err
+*.somcap

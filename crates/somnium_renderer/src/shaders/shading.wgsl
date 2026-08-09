@@ -43,7 +43,8 @@ struct Material {
     emissive_g: f32,
     emissive_b: f32,
     emissive_map: i32,
-    _pad0: f32,
+    // Phase 25A-2: slot in the terrain-material array, or -1.
+    terrain_index: i32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -775,6 +776,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
     }
 
+    // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
+    //
+    // The only material branch terrain needs. Everything above it — decoding
+    // the visibility buffer, fetching the triangle, interpolating position,
+    // normal and UV — is the shared path, because chunks are in the global
+    // vertex pool and carry an ordinary `vertex_offset`. Everything below it is
+    // shared too, which is what finally gives terrain GTAO, contact shadows,
+    // traced sun visibility, IBL and correct cascade blending, and what stops
+    // the next lighting change having to be written twice.
+    if material.terrain_index >= 0 {
+        let terrain = evaluate_terrain_material(
+            u32(material.terrain_index), hit_point, geo_normal, uv);
+        surface.albedo = terrain.albedo;
+        surface.roughness = terrain.roughness;
+        surface.metallic = 0.0;
+        surface.normal = terrain.normal;
+    }
+
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
@@ -791,6 +810,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
     if traced.a > 0.5 {
         shadow_factor = traced.r;
+    }
+
+    // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
+    // Material-path probes: a surface that renders black is either unlit or
+    // untextured, and only looking at the channels separately tells which.
+    if light._pad2_z > 8.5 && light._pad2_z < 9.5 {
+        return vec4<f32>(surface.albedo, 1.0);
+    }
+    if light._pad2_z > 9.5 && light._pad2_z < 10.5 {
+        return vec4<f32>(surface.normal * 0.5 + 0.5, 1.0);
+    }
+    if light._pad2_z > 10.5 && light._pad2_z < 11.5 {
+        if material.terrain_index >= 0 {
+            return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+        }
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
+
+    // 8 = the occlusion actually reaching the surface, greyscale.
+    //
+    // Added while chasing why toggling GTAO changed nothing on terrain: the
+    // ambient-only view read exactly zero there, which is what an occlusion of
+    // 0 produces, and only a direct look at the term could say whether that was
+    // GTAO's answer or a texture nobody had written.
+    if light._pad2_z > 7.5 && light._pad2_z < 8.5 {
+        return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
@@ -1002,6 +1047,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             vec3(1.0, 1.0, 0.3), // cascade 3 → yellow
         );
         result = mix(result, tints[cascade], 0.5);
+    }
+
+    // The terrain brush ring, after lighting because it is an editor overlay
+    // rather than a material property (Phase 25A-2).
+    if material.terrain_index >= 0 {
+        result = terrain_brush_overlay(u32(material.terrain_index), hit_point, result);
     }
 
     // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a

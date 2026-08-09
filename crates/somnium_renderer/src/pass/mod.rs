@@ -18,7 +18,6 @@ pub mod restir;
 pub mod shading;
 pub mod shadow;
 pub mod taa;
-pub mod terrain;
 pub mod transparent;
 pub mod visibility;
 pub mod water;

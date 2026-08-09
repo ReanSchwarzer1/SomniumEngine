@@ -3338,6 +3338,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.29.3",
+ "naga",
  "pollster 0.3.0",
  "somnium_asset",
  "somnium_ecs",

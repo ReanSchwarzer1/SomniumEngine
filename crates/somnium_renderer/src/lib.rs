@@ -11,6 +11,7 @@
 //! - **Cascaded Shadow Maps (Phase 11):** PSS partitioning + sphere-fit texel snapping.
 
 pub mod bindless;
+pub mod capture;
 pub mod cluster;
 pub mod command;
 pub mod culling;

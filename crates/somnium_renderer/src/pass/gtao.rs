@@ -148,6 +148,13 @@ impl GtaoPass {
             trace_bind: None,
             denoise_bind: None,
             frame: 0,
+            // Overwritten every frame from `PostProcessComponent::gtao_enabled`,
+            // which is where the `SOMNIUM_GTAO` switch is seeded — a default
+            // set here would never survive to the first frame.
+            //
+            // Off sets `intensity` to 0, which is `mix(1.0, ao, 0.0)` in the
+            // shader: full visibility, bent normals still written, so only the
+            // occlusion term changes.
             enabled: true,
             // A metre or so: large enough to darken where a trunk meets ground,
             // small enough that a wall does not shade the floor across a room.

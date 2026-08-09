@@ -1865,7 +1865,8 @@ impl<G: GameApp> Engine<G> {
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
                                 },
                             );
                             self.default_material_id = Some(id);

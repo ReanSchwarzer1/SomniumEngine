@@ -600,7 +600,17 @@ impl Default for PostProcessComponent {
             grain: 0.0,
             bloom_enabled: true,
             bloom_intensity: 0.04,
-            gtao_enabled: true,
+            // `SOMNIUM_GTAO=0` switches screen-space occlusion off for the
+            // Phase 25A acceptance test — the same scene either side of the
+            // flag has to differ *on terrain*, and before 25A-2 it could not.
+            //
+            // Seeded here rather than in `GtaoPass`, for the reason the ReSTIR
+            // comment below gives: this component is copied into the pass every
+            // frame, so a pass-side default is overwritten before it can ever
+            // take effect. (It was, and the first A/B run reported a difference
+            // of exactly zero everywhere — which reads identically to a feature
+            // that does not work.)
+            gtao_enabled: std::env::var("SOMNIUM_GTAO").as_deref() != Ok("0"),
             dof_enabled: false,
             dof_focus_distance: 10.0,
             taa_enabled: true,

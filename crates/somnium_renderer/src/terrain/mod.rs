@@ -10,9 +10,12 @@
 //!   per-chunk LOD with a ≤1-level neighbor constraint).
 //! - `example_repo/CDLOD-master` — log2 distance → LOD mapping.
 //!
-//! Unlike meshes in the visibility-buffer pipeline, terrain owns dedicated
-//! per-chunk vertex buffers and renders through [`crate::pass::terrain::TerrainPass`]
-//! directly into the HDR target (same integration point as the water pass).
+//! Phase 25A-2: terrain is no longer outside the visibility-buffer pipeline.
+//! Chunk vertices live in the global [`crate::geometry::GeometryPool`], chunks
+//! are submitted as ordinary `DrawCommand`s, and they shade in `shading.wgsl`
+//! like every other surface — which is what gives terrain GTAO, contact
+//! shadows, traced visibility, IBL and correct TAA, and what retires the
+//! duplicated shadow and cluster code the old terrain pass carried.
 
 pub mod brush;
 pub mod collider;
@@ -78,8 +81,14 @@ pub struct TerrainChunk {
     /// Terrain-local AABB, updated on rebuild (used for LOD distance).
     pub aabb_min: glam::Vec3,
     pub aabb_max: glam::Vec3,
-    /// Full-resolution vertex grid for this chunk.
-    pub vertex_buffer: wgpu::Buffer,
+    /// Offset of this chunk's full-resolution vertex grid in the global pool.
+    ///
+    /// Reserved once and rewritten in place forever (Phase 25A-2): the vertex
+    /// count is `(chunk_cells + 1)²` and never changes, because sculpting
+    /// rewrites height values rather than counts and a coarser LOD skips
+    /// vertices through the index buffer. `u32::MAX` means the pool was full at
+    /// terrain creation and this chunk draws nothing.
+    pub vertex_offset: u32,
     /// Heights changed — vertices must be regenerated before the next draw.
     pub dirty: bool,
     /// LOD selected for the current frame.
@@ -87,6 +96,9 @@ pub struct TerrainChunk {
     /// Edge-stitch mask for the current frame (see `mesh::EDGE_*`).
     pub edge_mask: u8,
 }
+
+/// Offset value meaning "this chunk has no pool space".
+pub const UNALLOCATED: u32 = u32::MAX;
 
 /// A material layer (Phase 14A-2). Texture data lives in the shared
 /// `TerrainLayerTextures` arrays; this carries the per-layer parameters.
@@ -96,18 +108,57 @@ pub struct TerrainLayer {
     pub tiling: f32,
 }
 
-/// GPU uniform mirrored by `TerrainParams` in `terrain.wgsl` (80 bytes).
+/// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
+/// `TerrainMaterial` in `terrain_material.wgsl` (112 bytes).
+///
+/// Phase 25A-2 moved this out of a per-terrain uniform and into a storage-buffer
+/// array indexed by `Material::terrain_index`, because terrain now shades in the
+/// same pass as everything else and there is no per-terrain bind group left to
+/// hang a uniform on. The texture fields are bindless indices into the global
+/// texture array rather than views: the splatmap and the four layers' albedo,
+/// normal and roughness maps are registered there at terrain creation.
+///
+/// **Every `vec4` member sits at a 16-byte offset**, which is what keeps Rust's
+/// `repr(C)` packing and WGSL's alignment rules agreeing — the same trap that
+/// silently mis-decoded `GpuMaterial` when `emissive` was a `vec3`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GpuTerrainParams {
+pub struct GpuTerrainMaterial {
+    /// UV repeats per metre, one per layer.                    offset 0
     pub layer_tiling: [f32; 4],
-    /// xy = brush world XZ, z = radius, w = mode (0 off, 1 sculpt, 2 paint).
+    /// xy = brush world XZ, z = radius, w = mode
+    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 16
     pub brush: [f32; 4],
+    /// Bindless index of each layer's albedo map.              offset 32
+    pub albedo_maps: [i32; 4],
+    /// Bindless index of each layer's normal map.              offset 48
+    pub normal_maps: [i32; 4],
+    /// Bindless index of each layer's roughness map.           offset 64
+    pub roughness_maps: [i32; 4],
+    /// World XZ of terrain-local (0, 0).                       offset 80
     pub terrain_origin: [f32; 2],
+    /// 1 / world size, for the splat lookup.                   offset 88
     pub inv_world_size: [f32; 2],
+    /// Bindless index of this terrain's splatmap.              offset 96
+    pub splat_map: i32,
     /// Layer index used for triplanar cliff projection (rock = 2).
     pub cliff_layer: u32,
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 2],
+}
+
+/// Bindless indices of one terrain's textures, filled in at creation.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainTextureIds {
+    pub splat_map: i32,
+    pub albedo: [i32; 4],
+    pub normal: [i32; 4],
+    pub roughness: [i32; 4],
+}
+
+impl Default for TerrainTextureIds {
+    fn default() -> Self {
+        Self { splat_map: -1, albedo: [-1; 4], normal: [-1; 4], roughness: [-1; 4] }
+    }
 }
 
 /// CPU + GPU state for one terrain (Phase 14A-2 `TerrainData`).
@@ -123,15 +174,25 @@ pub struct TerrainData {
     pub splatmap: Splatmap,
     pub layer_textures: TerrainLayerTextures,
 
-    /// Shared LOD index buffers keyed by `(lod, edge_mask)`, lazily built.
-    index_buffers: HashMap<(u8, u8), (wgpu::Buffer, u32)>,
+    /// Shared LOD index spans in the global index pool, keyed by
+    /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
+    ///
+    /// One span serves every chunk at that LOD and stitch mask, because the
+    /// index data is chunk-*relative*: the visibility pass reads
+    /// `vertices[vertex_offset + indices[index_offset + i]]`, so the chunk's own
+    /// offset supplies the difference. Allocated on first use and never
+    /// rewritten — at most 5 LODs × 16 masks exist.
+    index_blocks: HashMap<(u8, u8), (u32, u32)>,
 
-    /// `TerrainParams` uniform (group 1, binding 0).
-    pub params_buffer: wgpu::Buffer,
-    /// Model matrix uniform (group 1, binding 1).
-    pub model_buffer: wgpu::Buffer,
-    /// Group-1 bind group for `TerrainPass`.
-    pub bind_group: wgpu::BindGroup,
+    /// Vertices reserved per chunk — `(chunk_cells + 1)²`, fixed for life.
+    chunk_vertex_capacity: u32,
+
+    /// Bindless indices of the splatmap and the layer maps.
+    pub texture_ids: TerrainTextureIds,
+    /// This terrain's entry in the `MaterialPool`, carried by every chunk draw.
+    pub material_id: u32,
+    /// This terrain's slot in the terrain-material storage buffer.
+    pub terrain_index: u32,
 
     /// Model matrix submitted for the current frame.
     pub model: glam::Mat4,
@@ -156,13 +217,10 @@ pub struct TerrainData {
 
 impl TerrainData {
     /// Create a flat terrain with the default grass/dirt/rock/snow layers.
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        terrain_bgl: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        desc: TerrainDescriptor,
-    ) -> Self {
+    ///
+    /// Chunks come back with no pool space; the renderer calls
+    /// [`TerrainData::reserve_pool_spans`] once it can lend the geometry pool.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, desc: TerrainDescriptor) -> Self {
         assert!(
             desc.chunk_cells.is_power_of_two() && desc.chunk_cells >= (1 << MAX_TERRAIN_LOD),
             "chunk_cells must be a power of two ≥ {}",
@@ -176,17 +234,11 @@ impl TerrainData {
         let mut chunks = Vec::with_capacity((desc.grid_size[0] * desc.grid_size[1]) as usize);
         for cz in 0..desc.grid_size[1] {
             for cx in 0..desc.grid_size[0] {
-                let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Terrain Chunk Vertices"),
-                    size: verts_per_chunk as u64 * std::mem::size_of::<somnium_asset::Vertex>() as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
                 chunks.push(TerrainChunk {
                     grid_pos: [cx, cz],
                     aabb_min: glam::Vec3::ZERO,
                     aabb_max: glam::Vec3::ZERO,
-                    vertex_buffer,
+                    vertex_offset: UNALLOCATED,
                     dirty: true,
                     lod: 0,
                     edge_mask: 0,
@@ -209,45 +261,6 @@ impl TerrainData {
         );
         let layer_textures = TerrainLayerTextures::generate_default(device, queue);
 
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Terrain Params"),
-            size: std::mem::size_of::<GpuTerrainParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let model_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Terrain Model"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Terrain Bind Group"),
-            layout: terrain_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: model_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&splatmap.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&layer_textures.albedo_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&layer_textures.normal_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&layer_textures.roughness_view),
-                },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(sampler) },
-            ],
-        });
-
         Self {
             desc,
             heightmap,
@@ -255,14 +268,54 @@ impl TerrainData {
             layers,
             splatmap,
             layer_textures,
-            index_buffers: HashMap::new(),
-            params_buffer,
-            model_buffer,
-            bind_group,
+            index_blocks: HashMap::new(),
+            chunk_vertex_capacity: verts_per_chunk,
+            texture_ids: TerrainTextureIds::default(),
+            material_id: 0,
+            terrain_index: 0,
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
             edit_revision: 0,
+        }
+    }
+
+    /// Reserve one rewritable vertex span per chunk in the global pool.
+    ///
+    /// Called once, at creation. A chunk that cannot be placed keeps
+    /// [`UNALLOCATED`] and is skipped when draws are built, so a full pool
+    /// costs part of the terrain rather than corrupting the scene.
+    pub fn reserve_pool_spans(&mut self, pool: &mut crate::geometry::GeometryPool) {
+        let capacity = self.chunk_vertex_capacity;
+        for chunk in &mut self.chunks {
+            chunk.vertex_offset = pool.reserve_vertices(capacity).unwrap_or(UNALLOCATED);
+        }
+    }
+
+    /// The GPU-side material for this terrain, rebuilt each frame.
+    ///
+    /// Cheap enough to rebuild rather than track dirty: the brush cursor moves
+    /// every frame the editor is in terrain mode, and the model matrix arrives
+    /// with the draw submission.
+    pub fn gpu_material(&self) -> GpuTerrainMaterial {
+        let [wx, wz] = self.desc.world_size();
+        let origin = self.model.w_axis;
+        GpuTerrainMaterial {
+            layer_tiling: [
+                self.layers.first().map_or(0.25, |l| l.tiling),
+                self.layers.get(1).map_or(0.25, |l| l.tiling),
+                self.layers.get(2).map_or(0.25, |l| l.tiling),
+                self.layers.get(3).map_or(0.25, |l| l.tiling),
+            ],
+            brush: self.brush_cursor,
+            albedo_maps: self.texture_ids.albedo,
+            normal_maps: self.texture_ids.normal,
+            roughness_maps: self.texture_ids.roughness,
+            terrain_origin: [origin.x, origin.z],
+            inv_world_size: [1.0 / wx, 1.0 / wz],
+            splat_map: self.texture_ids.splat_map,
+            cliff_layer: 2,
+            _pad: [0; 2],
         }
     }
 
@@ -452,11 +505,16 @@ impl TerrainData {
         }
     }
 
-    /// Regenerate vertices for dirty chunks and upload them (Phase 14B-1).
-    pub fn rebuild_dirty_chunks(&mut self, queue: &wgpu::Queue) {
+    /// Regenerate vertices for dirty chunks and rewrite their pool spans
+    /// (Phase 14B-1, moved into the global pool by 25A-2).
+    pub fn rebuild_dirty_chunks(
+        &mut self,
+        queue: &wgpu::Queue,
+        pool: &mut crate::geometry::GeometryPool,
+    ) {
         let desc = self.desc;
         for chunk in &mut self.chunks {
-            if !chunk.dirty {
+            if !chunk.dirty || chunk.vertex_offset == UNALLOCATED {
                 continue;
             }
             let vertices = mesh::build_chunk_vertices(
@@ -468,7 +526,7 @@ impl TerrainData {
                 desc.cell_size,
                 desc.height_scale,
             );
-            queue.write_buffer(&chunk.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            pool.write_vertices(queue, chunk.vertex_offset, &vertices);
 
             let mut min_h = f32::MAX;
             let mut max_h = f32::MIN;
@@ -487,52 +545,31 @@ impl TerrainData {
         }
     }
 
-    /// Lazily build the shared index buffers for every `(lod, mask)` pair
-    /// the current chunk LOD assignment needs. Call before `TerrainPass::record`
-    /// (which only does read-only lookups inside the render pass).
-    pub fn ensure_index_buffers(&mut self, device: &wgpu::Device) {
+    /// Reserve and fill the shared index span for every `(lod, mask)` pair the
+    /// current LOD assignment needs. Call before draws are built.
+    pub fn ensure_index_blocks(
+        &mut self,
+        queue: &wgpu::Queue,
+        pool: &mut crate::geometry::GeometryPool,
+    ) {
         let cells = self.desc.chunk_cells;
         for i in 0..self.chunks.len() {
             let key = (self.chunks[i].lod, self.chunks[i].edge_mask);
-            self.index_buffers.entry(key).or_insert_with(|| {
-                let indices = mesh::build_lod_indices(cells, key.0, key.1);
-                let buffer = wgpu::util::DeviceExt::create_buffer_init(
-                    device,
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("Terrain LOD Indices"),
-                        contents: bytemuck::cast_slice(&indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    },
-                );
-                (buffer, indices.len() as u32)
-            });
+            if self.index_blocks.contains_key(&key) {
+                continue;
+            }
+            let indices = mesh::build_lod_indices(cells, key.0, key.1);
+            let Some(offset) = pool.reserve_indices(indices.len() as u32) else {
+                continue; // pool full: this LOD/mask draws nothing this frame
+            };
+            pool.write_indices(queue, offset, &indices);
+            self.index_blocks.insert(key, (offset, indices.len() as u32));
         }
     }
 
-    /// Read-only index buffer lookup for a `(lod, mask)` pair.
-    pub fn index_buffer_ref(&self, lod: u8, mask: u8) -> Option<(&wgpu::Buffer, u32)> {
-        self.index_buffers.get(&(lod, mask)).map(|(b, n)| (b, *n))
-    }
-
-    /// Upload the params + model uniforms for this frame.
-    pub fn upload_uniforms(&self, queue: &wgpu::Queue) {
-        let [wx, wz] = self.desc.world_size();
-        let origin = self.model.w_axis;
-        let params = GpuTerrainParams {
-            layer_tiling: [
-                self.layers.first().map_or(0.25, |l| l.tiling),
-                self.layers.get(1).map_or(0.25, |l| l.tiling),
-                self.layers.get(2).map_or(0.25, |l| l.tiling),
-                self.layers.get(3).map_or(0.25, |l| l.tiling),
-            ],
-            brush: self.brush_cursor,
-            terrain_origin: [origin.x, origin.z],
-            inv_world_size: [1.0 / wx, 1.0 / wz],
-            cliff_layer: 2,
-            _pad: [0; 3],
-        };
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-        queue.write_buffer(&self.model_buffer, 0, bytemuck::bytes_of(&self.model.to_cols_array()));
+    /// Read-only lookup of the `(index_offset, index_count)` for a `(lod, mask)`.
+    pub fn index_block(&self, lod: u8, mask: u8) -> Option<(u32, u32)> {
+        self.index_blocks.get(&(lod, mask)).copied()
     }
 
     // ── Raycast (Phase 14D-2 step 1) ─────────────────────────────────────────
