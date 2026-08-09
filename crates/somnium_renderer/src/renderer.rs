@@ -1443,6 +1443,27 @@ impl SomniumRenderer {
         // which would read as "everything is occluded" on the first frame.
         self.hiz_ready = true;
 
+        // ── 6.45 Terrain depth prepass (Phase 25A-1) ─────────────────────────
+        //
+        // Terrain shades in its own pass near the end of the frame, so it used
+        // to reach the shared depth buffer only *after* the acceleration
+        // structures, ReSTIR and GTAO had already sampled it — all three
+        // behaved as though terrain were not in the scene. Writing its depth
+        // here, with no fragment stage, puts terrain in front of every consumer
+        // of that buffer without changing how it shades.
+        if !self.terrain_queue.is_empty() {
+            let queued: Vec<&crate::terrain::TerrainData> = self
+                .terrain_queue
+                .iter()
+                .map(|&(id, _)| &self.terrains[id as usize])
+                .collect();
+            self.terrain_pass.record_depth_prepass(
+                &mut encoder,
+                &self.vis_pass.depth_view,
+                &queued,
+            );
+        }
+
         // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
         // Rebuilt each frame from the same draw queue the raster path uses, so
         // the traced scene and the drawn one cannot drift apart.
