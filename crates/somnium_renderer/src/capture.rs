@@ -118,6 +118,116 @@ pub fn compare(before: &CapturedFrame, after: &CapturedFrame, class: u8) -> Diff
     stats
 }
 
+// ── PNG output ──────────────────────────────────────────────────────────────
+//
+// `SOMNIUM_CAPTURE_PNG=<file>` writes the captured frame as an ordinary image.
+//
+// Every phase in this project is judged by looking at something, and the only
+// way to look at it was to grab the desktop — which needs the window in front,
+// and silently produces a picture of whatever *was* in front when it is not.
+// That failed twice in one session and wasted both runs. Writing the image from
+// the frame the engine already read back removes the desktop from the loop
+// entirely, and needs no image crate: PNG's container is a handful of CRC'd
+// chunks and its compression has a legal "store it uncompressed" mode.
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in bytes {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut typed = kind.to_vec();
+    typed.extend_from_slice(data);
+    out.extend_from_slice(&typed);
+    out.extend_from_slice(&crc32(&typed).to_be_bytes());
+}
+
+/// Encode 8-bit RGB rows as a PNG.
+///
+/// Deflate is used in **stored** mode — no compression. A real encoder would
+/// halve the file; this one has no dependencies and cannot get the entropy
+/// coding wrong, which is the right trade for a diagnostic.
+fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((width as usize * 3 + 1) * height as usize);
+    for y in 0..height as usize {
+        raw.push(0); // filter: none
+        let row = y * width as usize * 3;
+        raw.extend_from_slice(&rgb[row..row + width as usize * 3]);
+    }
+
+    let mut zlib = vec![0x78, 0x01];
+    let mut offset = 0usize;
+    while offset < raw.len() {
+        let n = (raw.len() - offset).min(65535);
+        let last = u8::from(offset + n == raw.len());
+        zlib.push(last);
+        zlib.extend_from_slice(&(n as u16).to_le_bytes());
+        zlib.extend_from_slice(&(!(n as u16)).to_le_bytes());
+        zlib.extend_from_slice(&raw[offset..offset + n]);
+        offset += n;
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit, truecolour RGB
+    png_chunk(&mut out, b"IHDR", &ihdr);
+    png_chunk(&mut out, b"IDAT", &zlib);
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// Tone-map linear HDR to 8-bit sRGB for viewing.
+///
+/// Metered off the frame's own geometry rather than a fixed exposure: the scene
+/// spans 100 000 lux daylight to moonlight, and a constant would render one of
+/// those as white and the other as black. Sky is excluded from the metering for
+/// the same reason it is a separate class in the diff — it is most of the frame
+/// and none of what is being looked at.
+fn tonemap_to_srgb(frame: &CapturedFrame) -> Vec<u8> {
+    let mut sum = 0.0f64;
+    let mut n = 0usize;
+    for i in 0..frame.terrain.len() {
+        if frame.terrain[i] != PIXEL_SKY {
+            sum += frame.luminance(i) as f64;
+            n += 1;
+        }
+    }
+    let mean = if n > 0 { (sum / n as f64) as f32 } else { 1.0 };
+    // Middle grey at 0.18, the usual photographic anchor.
+    let exposure = 0.18 / mean.max(1e-6);
+
+    let mut out = Vec::with_capacity(frame.rgb.len());
+    for i in 0..frame.terrain.len() {
+        for c in 0..3 {
+            let v = (frame.rgb[i * 3 + c] * exposure).max(0.0);
+            let mapped = v / (1.0 + v); // Reinhard
+            let srgb = mapped.powf(1.0 / 2.2);
+            out.push((srgb.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+    }
+    out
+}
+
 /// Half-precision to single-precision, for the `Rgba16Float` HDR target.
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -156,6 +266,7 @@ fn f16_to_f32(bits: u16) -> f32 {
 /// resolves them once the GPU is done.
 pub struct FrameCapture {
     write_to: Option<String>,
+    write_png: Option<String>,
     compare_to: Option<String>,
     target_frame: u64,
     frame: u64,
@@ -169,6 +280,7 @@ impl FrameCapture {
     pub fn from_env() -> Self {
         Self {
             write_to: std::env::var("SOMNIUM_CAPTURE").ok(),
+            write_png: std::env::var("SOMNIUM_CAPTURE_PNG").ok(),
             compare_to: std::env::var("SOMNIUM_CAPTURE_COMPARE").ok(),
             target_frame: std::env::var("SOMNIUM_CAPTURE_FRAME")
                 .ok()
@@ -184,7 +296,7 @@ impl FrameCapture {
     /// Whether anything is configured at all. Keeps the per-frame cost at one
     /// bool test when it is not.
     pub fn active(&self) -> bool {
-        self.write_to.is_some() || self.compare_to.is_some()
+        self.write_to.is_some() || self.write_png.is_some() || self.compare_to.is_some()
     }
 
     /// Advance the frame counter and report whether this is the capture frame.
@@ -334,6 +446,14 @@ impl FrameCapture {
             match std::fs::write(path, captured.encode()) {
                 Ok(()) => tracing::info!("CAPTURE written to {path}"),
                 Err(e) => tracing::error!("CAPTURE write to {path} failed: {e}"),
+            }
+        }
+
+        if let Some(path) = &self.write_png {
+            let rgb = tonemap_to_srgb(&captured);
+            match std::fs::write(path, encode_png(width, height, &rgb)) {
+                Ok(()) => tracing::info!("CAPTURE png written to {path}"),
+                Err(e) => tracing::error!("CAPTURE png write to {path} failed: {e}"),
             }
         }
 

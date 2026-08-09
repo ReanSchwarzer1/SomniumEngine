@@ -786,8 +786,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // traced sun visibility, IBL and correct cascade blending, and what stops
     // the next lighting change having to be written twice.
     if material.terrain_index >= 0 {
+        // Derivatives of world position, which the hex-tiled layer sampling
+        // needs explicitly. Taken here rather than inside the material because
+        // that is where the terrain UVs are derived from.
+        let world_ddx = dpdx(hit_point.xz);
+        let world_ddy = dpdy(hit_point.xz);
         let terrain = evaluate_terrain_material(
-            u32(material.terrain_index), hit_point, geo_normal, uv);
+            u32(material.terrain_index), hit_point, geo_normal, uv,
+            world_ddx, world_ddy);
         surface.albedo = terrain.albedo;
         surface.roughness = terrain.roughness;
         surface.metallic = 0.0;

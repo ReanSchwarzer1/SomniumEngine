@@ -997,6 +997,18 @@ Modules that Phase 24 draws on:
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
 | 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
 
+**25F hex-tiling.** `bgfx-master/examples/49-hextile/fs_hextile.sc` and
+`hextile.cpp` were read for Phase 25F and ported into
+`crates/somnium_renderer/src/shaders/hextile.wgsl` — the simplex triangle grid,
+`LoadRot2x2`, `MakeCenST`, the hash, `Gain3`, and the luminance-modulated weight
+blend. bgfx is BSD-2-Clause and the example is itself a port of Mikkelsen's
+`hextile-demo`, after Heitz & Neyret's paper, which is the technique's real
+citation. `ProduceHexWeights` is not ported (it only colours a debug view), and
+`hex_sample_normal` has no counterpart there: the reference tiles colour only,
+so it never has to counter-rotate a tangent-space normal. `hextile.cpp` also
+supplied the default rotation strength of **0**, which turned out to matter more
+than any other parameter.
+
 **25B note.** `bevy_solari/src/scene/blas.rs` was read directly for Phase 25B and
 settled the architecture rather than a detail. Its `prepare_raytracing_blas`
 builds a bottom-level structure only for meshes that were *added or modified*,

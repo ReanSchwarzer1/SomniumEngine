@@ -164,13 +164,16 @@ impl ShadingPass {
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../shaders/brdf.wgsl"),
             // Phase 24G: Vogel disk and gradient noise, used by PCSS.
             include_str!("../shaders/sampling.wgsl"),
             // Phase 24C: the background samples the atmosphere-generated
             // cubemap and adds sharp sky detail analytically.
             include_str!("../shaders/atmosphere.wgsl"),
+            // Phase 25F: stochastic hex-tiling, used by the terrain material
+            // below to break the visible repetition of a tiled layer.
+            include_str!("../shaders/hextile.wgsl"),
             // Phase 25A-2: terrain's splat/triplanar material, which is all
             // that survives of the separate terrain pass.
             include_str!("../shaders/terrain_material.wgsl"),

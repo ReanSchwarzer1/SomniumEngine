@@ -1219,7 +1219,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
-| 25F | ⬜ Planned | **Stochastic hex-tiling.** The strongest remaining tell that terrain is rendered rather than photographed is *repetition*: one tiled albedo at a fixed rate produces a visible grid the eye locks onto immediately, and no amount of lighting work hides it. Heitz–Neyret hex-tiling samples the same texture at three hexagonal-lattice offsets with randomised rotation and blends by barycentric weight, breaking the lattice without a second texture or a visible seam. Reference: `bgfx-master/examples/49-hextile/fs_hextile.sc`; UE's TextureGraph ships the same idea as `AdjustHexaplanar*.usf`. |
+| 25F | 🟡 Partial | **Stochastic hex-tiling.** Implemented, cited and validated; **off by default** (`SOMNIUM_HEXTILE=1`) because the measurement says it is not yet worth enabling. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
@@ -1569,6 +1569,70 @@ added as BLAS entries at the committed LOD, rebuilt on sculpt.
 
 **First check either way** — `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
 it cannot today.
+
+### 25.3e 25F — hex-tiling, and why it ships switched off
+
+Ported from `example_repo/bgfx-master/examples/49-hextile/fs_hextile.sc`
+(Mikkelsen's hextile-demo, after Heitz & Neyret) into `shaders/hextile.wgsl`:
+skew UV into a simplex grid, give each grid vertex a hashed offset, sample three
+times and blend by barycentric weight. `terrain_material.wgsl` uses it for the
+layer albedo and normal maps.
+
+Three things the port had to get right, and one the reference does not cover:
+
+- **`textureSampleGrad` with per-tap derivatives.** Each tap reads a different
+  part of the texture, so implicit derivatives would be taken across a
+  discontinuity and collapse mip selection into noise. The derivatives of world
+  position are taken in `shading.wgsl` where control flow is uniform and scaled
+  per layer.
+- **Sharp weights and luminance modulation**, which are what stop the blend
+  reading as a wash.
+- **Not passing textures across function boundaries.** Pulling a
+  `texture_2d<f32>` out of the binding array into a local and passing it as a
+  parameter is legal WGSL and **segfaults naga's SPIR-V backend** — the process
+  dies during pipeline creation with no diagnostic whatsoever. `hex_sample`
+  takes a bindless *index*, like every other sampling site in the engine.
+- **Normals need counter-rotating** (not in the reference, which tiles colour
+  only). A normal map stores its vector in the texture's UV frame, and each tap
+  read that texture through a different rotation; blending the raw samples
+  averages three normals that disagree about which way "along U" points.
+
+**The measurement says do not enable it yet.** Rendered side by side on the flat
+terrain, the plain path shows *no findable grid*, and the hex-tiled path shows
+its own lattice faintly. The cause is content, not code: the four layers are
+**procedural, tileable, low-contrast noise** generated in `textures.rs`, so there
+is no repetition to remove, while the technique's own tile boundaries do shift
+each patch's mean slightly. Two rounds of tuning improved but did not remove
+that — first dropping rotation to the reference's own default (`hextile.cpp`
+ships `m_tileRotationStrength = 0.0f`; at 1.0 the simplex lattice was plainly
+visible as hard triangular seams), then softening the weight exponent, gain and
+luminance bias.
+
+So it is implemented, cited, validated and **off by default**, behind
+`SOMNIUM_HEXTILE=1`. The A/B confirms it is wired correctly: 805 993 of 845 018
+terrain pixels change with mesh and sky bit-identical, and mean terrain
+luminance moves 0.08% (2815.9 → 2813.6) — the blend redistributes detail without
+raising the mean, which is the check that the luminance modulation is not
+washing the texture out. Turn it on when the layers are photographed rather than
+generated; **25D**'s detail clipmap and **25J**'s file-based layers are what
+bring that, and 25F should be re-judged then.
+
+### 25.5 17E remainder — status
+
+- **Transmission reaching foliage: already done**, in 24S rather than in a
+  separate change, and the 17E note above is stale on this point. `load_gltf`
+  infers `transmission = 0.5` when a sibling `*_alpha_*` cutout mask exists
+  (`somnium_asset/src/lib.rs`), `upload_scene` carries it into `GpuMaterial`, and
+  `shading.wgsl`'s `transmitted_light` consumes it. The chain is complete.
+- **Hemispherical leaf normals: not done.** The cheap form — blending the
+  geometric normal toward the direction from the instance origin to the hit
+  point, which needs no new data since `instance.model` is already in the shader
+  — was left unwritten deliberately: the demo has no way to *show* foliage
+  without painting it by hand in the editor, so the change could not be
+  verified, and an unverifiable shader change to foliage is exactly what this
+  phase has been paying for. It needs either a scripted foliage scene (the
+  natural companion to `SOMNIUM_TERRAIN=flat`) or the editor.
+- **Bark roughness: not done**, same reason.
 
 ### 25.4 Verification plan
 

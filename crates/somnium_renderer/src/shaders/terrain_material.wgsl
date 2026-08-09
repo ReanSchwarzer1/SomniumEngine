@@ -31,7 +31,8 @@ struct TerrainMaterial {
     inv_world_size: vec2<f32>,
     splat_map: i32,
     cliff_layer: u32,
-    _pad0: u32,
+    /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
+    hex_tiling: u32,
     _pad1: u32,
 }
 
@@ -52,14 +53,39 @@ struct TerrainLayerSample {
     roughness: f32,
 }
 
-fn terrain_sample_layer(tm: TerrainMaterial, layer: u32, uv: vec2<f32>) -> TerrainLayerSample {
+/// Sample one layer at `uv`, with `ddx`/`ddy` its screen-space derivatives.
+///
+/// Phase 25F: albedo and normal go through the hex-tiled path, roughness does
+/// not. That is a deliberate cut rather than an oversight — repetition is
+/// visible in colour and in the way light catches surface detail, and barely at
+/// all in how rough a surface is, so the third sample set buys the least per
+/// tap. Three taps per map is the whole cost of the technique.
+fn terrain_sample_layer(
+    tm: TerrainMaterial,
+    layer: u32,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> TerrainLayerSample {
     var s: TerrainLayerSample;
-    let a = textureSample(textures[tm.albedo_maps[layer]], default_sampler, uv);
-    s.albedo = a.rgb;
-    s.height = a.a;
-    s.normal_ts =
-        textureSample(textures[tm.normal_maps[layer]], default_sampler, uv).rgb * 2.0 - 1.0;
-    s.roughness = textureSample(textures[tm.roughness_maps[layer]], default_sampler, uv).r;
+    let albedo_map = tm.albedo_maps[layer];
+    let normal_map = tm.normal_maps[layer];
+
+    if tm.hex_tiling != 0u {
+        let a = hex_sample(albedo_map, uv, ddx, ddy);
+        s.albedo = a.rgb;
+        s.height = a.a;
+        s.normal_ts = hex_sample_normal(normal_map, uv, ddx, ddy);
+    } else {
+        let a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
+        s.albedo = a.rgb;
+        s.height = a.a;
+        s.normal_ts =
+            textureSampleGrad(textures[normal_map], default_sampler, uv, ddx, ddy).rgb * 2.0 - 1.0;
+    }
+
+    s.roughness =
+        textureSampleGrad(textures[tm.roughness_maps[layer]], default_sampler, uv, ddx, ddy).r;
     return s;
 }
 
@@ -99,11 +125,19 @@ fn terrain_triplanar_albedo(
 /// `splat_uv` is the terrain-global [0,1] coordinate carried in the chunk
 /// vertices, which the shading pass interpolates like any other UV — one of the
 /// things that made moving terrain into the visibility buffer cheap.
+/// `world_ddx` / `world_ddy` are the screen-space derivatives of the world
+/// position, taken in the caller where control flow is uniform. The layer UVs
+/// are `local_xz * tiling`, so their derivatives are these scaled by the same
+/// rate — which the hex-tiled path needs explicitly, since each of its taps
+/// reads a different part of the texture and implicit derivatives would be
+/// computed across that discontinuity.
 fn evaluate_terrain_material(
     terrain_index: u32,
     world_pos: vec3<f32>,
     geo_normal: vec3<f32>,
     splat_uv: vec2<f32>,
+    world_ddx: vec2<f32>,
+    world_ddy: vec2<f32>,
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
 
@@ -113,10 +147,18 @@ fn evaluate_terrain_material(
     // All four layers are sampled unconditionally: a texture fetch behind a
     // per-pixel branch has no uniform derivative to work with.
     let local_xz = world_pos.xz - tm.terrain_origin;
-    let s0 = terrain_sample_layer(tm, 0u, local_xz * tm.layer_tiling.x);
-    let s1 = terrain_sample_layer(tm, 1u, local_xz * tm.layer_tiling.y);
-    let s2 = terrain_sample_layer(tm, 2u, local_xz * tm.layer_tiling.z);
-    let s3 = terrain_sample_layer(tm, 3u, local_xz * tm.layer_tiling.w);
+    let s0 = terrain_sample_layer(
+        tm, 0u, local_xz * tm.layer_tiling.x,
+        world_ddx * tm.layer_tiling.x, world_ddy * tm.layer_tiling.x);
+    let s1 = terrain_sample_layer(
+        tm, 1u, local_xz * tm.layer_tiling.y,
+        world_ddx * tm.layer_tiling.y, world_ddy * tm.layer_tiling.y);
+    let s2 = terrain_sample_layer(
+        tm, 2u, local_xz * tm.layer_tiling.z,
+        world_ddx * tm.layer_tiling.z, world_ddy * tm.layer_tiling.z);
+    let s3 = terrain_sample_layer(
+        tm, 3u, local_xz * tm.layer_tiling.w,
+        world_ddx * tm.layer_tiling.w, world_ddy * tm.layer_tiling.w);
 
     let w = terrain_height_blend(
         weights, vec4(s0.height, s1.height, s2.height, s3.height));

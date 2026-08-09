@@ -14,6 +14,7 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
+const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
 const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
 const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
 const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
@@ -44,7 +45,7 @@ fn the_shading_module_validates() {
     // are order-independent, and this is what proves it rather than assuming.
     check(
         "shading",
-        &format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
+        &format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
     );
 }
 

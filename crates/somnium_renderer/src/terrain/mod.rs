@@ -143,7 +143,9 @@ pub struct GpuTerrainMaterial {
     pub splat_map: i32,
     /// Layer index used for triplanar cliff projection (rock = 2).
     pub cliff_layer: u32,
-    pub _pad: [u32; 2],
+    /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
+    pub hex_tiling: u32,
+    pub _pad: u32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -193,6 +195,21 @@ pub struct TerrainData {
     pub material_id: u32,
     /// This terrain's slot in the terrain-material storage buffer.
     pub terrain_index: u32,
+
+    /// Phase 25F: break the layer maps' visible repetition by hex-tiling them.
+    ///
+    /// **Off by default, on the measurement rather than on the plan.** 25F
+    /// exists because repetition is the loudest artefact a tiled terrain has —
+    /// but the four layers are *procedural, tileable, low-contrast noise*
+    /// (`textures.rs`), and rendered side by side the plain path shows no
+    /// findable grid while the hex-tiled one shows its own lattice faintly. The
+    /// technique is correct and costs three taps per map; there is simply no
+    /// repetition here for it to remove yet.
+    ///
+    /// `SOMNIUM_HEXTILE=1` enables it. Turn it on by default once the layers are
+    /// photographed rather than generated — 25D's detail clipmap and 25J's
+    /// file-based layers are what bring that.
+    pub hex_tiling: bool,
 
     /// Model matrix submitted for the current frame.
     pub model: glam::Mat4,
@@ -273,6 +290,7 @@ impl TerrainData {
             texture_ids: TerrainTextureIds::default(),
             material_id: 0,
             terrain_index: 0,
+            hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() == Ok("1"),
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
@@ -315,7 +333,8 @@ impl TerrainData {
             inv_world_size: [1.0 / wx, 1.0 / wz],
             splat_map: self.texture_ids.splat_map,
             cliff_layer: 2,
-            _pad: [0; 2],
+            hex_tiling: u32::from(self.hex_tiling),
+            _pad: 0,
         }
     }
 
