@@ -1341,6 +1341,133 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 
 ---
 
+## 17.6 Phases 26-33 — the systems Somnium does not have (plan)
+
+### 26.1 What the survey actually showed
+
+Surveying `example_repo/New_Engines` (Flax, Wicked, Esoterica, Stride, NeoAxis,
+Overload, Falco, rbfx) against Somnium's nine crates — `core`, `ecs`,
+`renderer`, `physics`, `physics_sys`, `audio`, `asset`, `ui`, `voxel` — the
+useful finding is not a list of rendering features to copy.
+
+Somnium's renderer is, feature for feature, already close to Flax's. Comparing
+`FlaxEngine/Source/Engine/Renderer/` against Phase 24 turns up the same passes
+solving the same problems: ambient occlusion, atmosphere pre-compute, colour
+grading, contrast-adaptive sharpening, depth of field, eye adaptation, histogram,
+motion blur, shadows, screen-space reflections, volumetric fog. Nearly all of it
+is either shipped or already planned in 24.
+
+The gap is everywhere else. Flax ships 37 engine modules; Somnium has nine
+crates. What is missing are not renderer features — they are the systems that
+turn a renderer into an engine:
+
+| Flax module | Somnium equivalent |
+|---|---|
+| `Animations` (+ `AnimationGraph`) | **nothing** |
+| `UI` / `Render2D` (canvas, controls, text) | `somnium_ui`, editor panels only |
+| `Content` / `ContentImporters` / `Streaming` | `somnium_asset`, direct glTF load |
+| `Profiler` | **nothing** |
+| `Navigation` | **nothing** |
+| `Particles` | a CPU emitter inside the renderer |
+| `Networking` / `Online` | **nothing** |
+| `Localization` | **nothing** |
+| `Input` | ad-hoc keycode matching in `hello_engine` |
+| `Video` | **nothing** |
+
+That imbalance is the finding worth acting on. Phase 24 has spent its length
+deepening a renderer that was already competitive, while nine whole subsystems
+sit at zero.
+
+### 26.2 Proposed phases
+
+**Phase 26 — UI framework.** `somnium_ui` draws the editor's own panels and
+nothing else; there is no way for a *game* built on Somnium to have a UI at all.
+Needs a retained widget tree with dirty tracking, a layout pass (flex / anchor /
+grid), SDF text with real shaping and kerning, input routing with focus and
+capture, 9-slice and styling, and canvases in both screen and world space. **The
+editor should then be rebuilt on top of it** — dogfooding is the only thing that
+keeps a UI framework honest, and it would retire the inspector's hand-positioned
+popups and the cycler that replaced them in 17G. References: Flax
+`Engine/UI/UICanvas` and `GUI/`, Wicked `wiGUI` / `wiFont`, Stride `Stride.UI`,
+rbfx's Urho-derived UI.
+
+**Phase 27 — Skeletal animation.** GPU skinning with a joint palette, clip
+sampling, blend trees, a state machine, IK, root motion, and animation events.
+Esoterica is the reference to study hardest: its animation system is the most
+serious of the eight surveyed, built around a graph with compile-time validation.
+Flax's `AnimationGraph` shows the authoring side through Visject. Skinning has to
+reach the visibility buffer, which is the one place this touches Phase 24's work.
+
+**Phase 28 — Asset pipeline: cooking, hot reload, streaming.** Assets load
+directly from source files at startup today — 101 MB of foliage re-parsed on
+every run, and 17H had to cache *failed* glTF imports to stop the paint brush
+stalling on a retry. Needs an offline cook to an engine-native format, content
+hashing, a runtime streaming budget with LOD residency, and hot reload.
+References: Flax `Content` / `ContentImporters` / `Streaming`, Stride
+`Stride.Assets`.
+
+**Phase 29 — Profiler and debug tooling.** There is no way to answer "why is
+this frame slow" beyond guessing. That cost real time in 17G, where a 51x
+draw-call regression was found by reasoning rather than measurement. Needs CPU
+zones, GPU timestamp queries per pass, a frame graph view, and counters for
+draws, triangles, instances and memory. **Absorbs 24AB** (lighting debug views),
+which belongs in a tooling phase rather than a lighting one. References: Flax
+`Profiler`, Wicked `wiProfiler`, Esoterica's debug views.
+
+**Phase 30 — Navigation and AI.** Navmesh generation from level geometry,
+A* with funnel smoothing, agent steering and avoidance, off-mesh links.
+References: Flax `Navigation`, Esoterica `Navmesh` — both Recast/Detour-derived.
+
+**Phase 31 — GPU particles and VFX.** The current emitter simulates on the CPU
+and draws billboards; Phase 11.5J said outright that this was a starting point.
+Needs compute-driven simulation, sorting, depth collision, ribbons and trails,
+and mesh particles. Wicked is the standout reference here — `wiEmittedParticle`
+and `wiHairParticle` are among the better open implementations, and the hair one
+is directly relevant to Phase 25's grass.
+
+**Phase 32 — Networking.** Replication, client prediction, rollback, transport.
+References: Flax `Networking` / `Online`, Wicked `wiNetwork`. Lowest priority of
+the eight unless a multiplayer target appears; listed for completeness.
+
+**Phase 33 — Input, localization, video.** Grouped because none justifies a
+phase alone: an input abstraction with action maps and rebinding (keycodes are
+currently matched inline in `hello_engine`), string tables with runtime locale
+switching, and video playback for cutscenes. References: Flax `Input`,
+`Localization`, `Video`.
+
+### 26.3 Renderer items still worth taking from Flax
+
+Four things Flax has that Phase 24 does not, all in deferred-GI territory:
+
+- **DDGI** (`Renderer/GI/DynamicDiffuseGlobalIllumination`) — probe-based
+  dynamic GI. A cheaper and more robust tier than 24L's ReSTIR GI, and the right
+  answer on hardware where ray query is slow rather than absent. Sits beside
+  **24Q**.
+- **Global Surface Atlas** (`Renderer/GI/GlobalSurfaceAtlasPass`) — a surface
+  cache in the Lumen sense, letting a ray resolve against cached shading instead
+  of re-shading its hit. Relevant to **24M**.
+- **SMAA** (`Renderer/AntiAliasing/SMAA`) — a better spatial AA than the FXAA
+  Somnium ships, which matters whenever TAA is switched off.
+- **Lightmap baking** (`Engine/ShadowsOfMordor`) — Flax's offline lightmapper.
+  The static-scene tier below every dynamic GI option, and the one that runs on
+  anything.
+
+### 26.4 Suggested order, and why
+
+**26 (UI) first.** It is the largest capability gap and the one that decides
+whether anything can be *built* with the engine rather than merely shown by it.
+
+**29 (profiler) second.** It is small, and it makes every phase after it
+verifiable with numbers instead of screenshots. This matters more than it sounds:
+a full session was lost to a screen-capture frame-delta metric that turned out to
+vary from 0.776 to 2.018 across three runs of an identical build. A GPU timestamp
+would not have done that.
+
+Then **27 (animation)** and **28 (asset pipeline)**, which are what a real
+project hits first. Then 31, 30, 33, with 32 last.
+
+---
+
 ## 18. Known Issues & Active Bugs
 
 **RESOLVED — shattered foliage (visibility-buffer id packing).** The visibility
