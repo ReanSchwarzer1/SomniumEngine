@@ -1367,6 +1367,41 @@ duplication tax — the reason each Phase 24 improvement had to be written twice
 It needs an instance-id namespace for terrain chunks and an attribute
 reconstruction path for a mesh that is not in the global vertex pool.
 
+**25A-2 design — upload chunks into the global vertex pool, do not add a
+namespace.** The earlier plan assumed terrain would need its own instance-id
+range and a bespoke attribute path in `shading.wgsl`, because chunks own their
+vertex buffers. That is the harder of the two options and it is no longer the
+better one.
+
+The visibility buffer became `Rg32Uint` during the 17E work, with instance id in
+`.r` and primitive id in `.g` and **no cap on either**. That removes the reason
+to invent a namespace: terrain chunks can simply be uploaded through
+`geometry::upload_mesh` like every other mesh and submitted as ordinary
+`DrawCommand`s. They then carry a normal `vertex_offset`, and `shading.wgsl`
+reconstructs their attributes with the code path it already has — no terrain
+branch, no second decode, nothing to keep in sync later.
+
+Consequences to design for, in order of risk:
+
+1. **Sculpting re-uploads a chunk.** `upload_mesh` is currently append-only and
+   built for load-time use, so it needs either free-list reuse or a
+   per-chunk-stable allocation that can be rewritten in place. This is the real
+   work of 25A-2 and should be settled first.
+2. **Chunk LOD switching changes index counts**, so the draw and its cluster
+   bounds have to be rebuilt with it — the same path `rebuild_dirty_chunks`
+   already drives.
+3. **Terrain then flows through GPU culling and meshlet clustering for free**,
+   which is a gain but means chunk AABBs must be correct or terrain will vanish
+   exactly the way cubes did when the cone sentinel was wrong.
+4. **`terrain.wgsl` keeps only its splat/triplanar material work**; its
+   `sample_shadow`, cascade selection and cluster lookup are deleted, since
+   shading now happens once in `shading.wgsl`.
+
+The acceptance test is unchanged and still fails today: `SOMNIUM_GTAO=0/1` must
+differ **on terrain**. Also re-check `SOMNIUM_SHADOW_DEBUG=7`, which reports
+sun-versus-ambient dominance — terrain reading ambient-dominant after this change
+would mean the material path did not survive the move.
+
 **Sequencing note (revised).** The measurement above settles what was left open:
 25A-2 has to happen for terrain to receive anything. It is a maintainability
 change *and* the visual one — there is no cheaper path to lighting on terrain.
