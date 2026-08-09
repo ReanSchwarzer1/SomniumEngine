@@ -1327,6 +1327,51 @@ it, then revisiting.
 
 ---
 
+### 25.3b 25A implementation plan (from reconnaissance, not yet started)
+
+**What the code actually looks like.** `TerrainPass::record` (`pass/terrain.rs:265`)
+opens its own render pass and writes colour into the HDR target plus depth into
+`vis_pass.depth_view`, taking `&[&TerrainData]` — chunk vertex/index buffers it
+owns. It does **not** use the instance buffer or the programmable vertex pulling
+that `record_visibility` (`renderer.rs:966`) drives. So "terrain into the
+visibility buffer" is not one change; the two paths do not currently share a
+vertex model.
+
+**Split 25A in two.** The reconnaissance says most of the value is in the
+smaller half:
+
+**25A-1 — terrain depth participates in the frame (small, most of the value).**
+Everything that currently skips terrain keys off *depth*, not off the visibility
+IDs: GTAO samples `vis_pass.depth_view`, contact shadows march it, ReSTIR
+reconstructs world position from it, TAA reprojects from it. Terrain already
+writes to that same depth view — it just does so at `renderer.rs:1516`, **after**
+all four have run. Moving terrain's depth write into a depth-only prepass ahead
+of them, and leaving its colour pass where it is, gets GTAO, contact shadows,
+traced shadows and correct TAA on terrain **without touching the shading model
+at all**. Reference: O3DE keeps exactly this split — `Terrain_DepthPass.azsl`
+feeds the shared depth buffer while `TerrainPBR_ForwardPass.azsl` shades
+separately.
+
+**25A-2 — one shading path (larger, do only if 25A-1 leaves something wanted).**
+Terrain writes visibility IDs and is reconstructed in `shading.wgsl` like
+everything else, and `terrain.wgsl`'s duplicated `sample_shadow`, cascade
+selection and cluster lookup are deleted. This is what actually retires the
+duplication tax — the reason each Phase 24 improvement had to be written twice.
+It needs an instance-id namespace for terrain chunks and an attribute
+reconstruction path for a mesh that is not in the global vertex pool.
+
+**Sequencing note.** 25A-1 is worth doing first and measuring before committing
+to 25A-2. If GTAO, contact shadows and traced shadows on terrain look right after
+the prepass alone, 25A-2 becomes a maintainability change rather than a visual
+one, and can be scheduled against that honestly rather than assumed.
+
+**25B is unchanged** and depends only on 25A-1: once terrain depth is in the
+frame before the acceleration-structure build, terrain chunk geometry can be
+added as BLAS entries at the committed LOD, rebuilt on sculpt.
+
+**First check either way** — `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
+it cannot today.
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:
