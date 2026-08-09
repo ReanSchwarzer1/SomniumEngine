@@ -103,33 +103,74 @@ pub fn load(path: &str) -> Result<HeightImage, String> {
     }
 }
 
-/// CDLOD's `.tbmp`: a 256-byte header followed by 16-bit little-endian samples.
+/// Bytes of `.tbmp` header before the pixel data. `c_TotalHeaderSize`.
+const TBMP_HEADER: usize = 256;
+/// `.tbmp` stores 16-bit heights.
+const TBMP_BPP: usize = 2;
+
+/// CDLOD's `.tbmp` — a **tiled** bitmap, not a linear raster.
 ///
-/// The header is not documented anywhere in the reference; it was read off the
-/// file. Words 1 and 2 are width and height, and word 4 is the header size —
-/// `4096 × 2048 × 2 + 256` is exactly the file's length, which is what confirms
-/// the reading rather than the layout being guessed at.
+/// The name is the warning: `TiledBitmap.cpp`. The header is
+/// `[pixelFormat, width, height, version, blockDim]` as `i32`, then the image
+/// stored as `blockDim × blockDim` tiles, row-major within a tile and row-major
+/// across tiles (`TiledBitmap::GetBlockStartPos`).
+///
+/// This was first written by reading the header bytes and guessing: word 4 is
+/// 256, and `256 + 4096 × 2048 × 2` happens to equal the file's length exactly,
+/// so "word 4 is the header size" fitted the evidence perfectly and was wrong —
+/// it is `blockDim`, and the header is *always* 256 bytes. Decoded as linear
+/// rows the terrain came out as regular horizontal terraces separated by black
+/// walls, which is what reading a tiled image row-wise looks like once it
+/// becomes geometry. A size check is not a format check.
 fn load_tbmp(path: &str) -> Result<HeightImage, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    if bytes.len() < 32 {
+    if bytes.len() < TBMP_HEADER {
         return Err(format!("{path}: too short to be a .tbmp"));
     }
     let word = |i: usize| {
         u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
     };
-    let (width, height, header) = (word(4), word(8), word(16) as usize);
-    let expected = header + (width as usize * height as usize * 2);
-    if width == 0 || height == 0 || bytes.len() < expected {
+    let (width, height, version) = (word(4), word(8), word(12));
+    // `TiledBitmap::Open`: the block dimension is only present from version 1.
+    let block_dim = if version > 0 { word(16) } else { 128 };
+    if width == 0 || height == 0 || block_dim == 0 {
+        return Err(format!("{path}: degenerate header {width}x{height} block {block_dim}"));
+    }
+
+    let expected = TBMP_HEADER + width as usize * height as usize * TBMP_BPP;
+    if bytes.len() < expected {
         return Err(format!(
-            "{path}: header says {width}x{height} with a {header}-byte header, \
-             which needs {expected} bytes but the file has {}",
+            "{path}: {width}x{height} needs {expected} bytes but the file has {}",
             bytes.len(),
         ));
     }
-    let samples = bytes[header..expected]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]) as f32 / u16::MAX as f32)
-        .collect();
+
+    let (bw, bh) = (block_dim as usize, block_dim as usize);
+    let blocks_x = width.div_ceil(block_dim) as usize;
+    let blocks_y = height.div_ceil(block_dim) as usize;
+    // Trailing blocks are narrower/shorter when the image is not a whole number
+    // of blocks, and the stride maths depends on it.
+    let edge_w = width as usize - (blocks_x - 1) * bw;
+    let edge_h = height as usize - (blocks_y - 1) * bh;
+
+    let mut samples = vec![0.0f32; width as usize * height as usize];
+    let mut pos = TBMP_HEADER;
+    for by in 0..blocks_y {
+        let this_h = if by == blocks_y - 1 { edge_h } else { bh };
+        for bx in 0..blocks_x {
+            let this_w = if bx == blocks_x - 1 { edge_w } else { bw };
+            for y in 0..this_h {
+                let dst_row = (by * bh + y) * width as usize + bx * bw;
+                for x in 0..this_w {
+                    let src = pos + (y * this_w + x) * TBMP_BPP;
+                    let v = u16::from_le_bytes([bytes[src], bytes[src + 1]]);
+                    samples[dst_row + x] = v as f32 / u16::MAX as f32;
+                }
+            }
+            pos += this_w * this_h * TBMP_BPP;
+        }
+    }
+
     Ok(HeightImage { width, height, samples })
 }
 
@@ -269,6 +310,59 @@ mod tests {
         // normal case rather than an edge one.
         let out = ramp(8, 2).resample(4, 4, 1.0);
         assert!((out[out.len() - 1] - 1.0).abs() < 1e-5);
+    }
+
+    /// Build a `.tbmp` whose value at (x, y) is `x + y * width`, tiled.
+    fn synthetic_tbmp(width: u32, height: u32, block_dim: u32) -> Vec<u8> {
+        let mut out = vec![0u8; TBMP_HEADER];
+        out[4..8].copy_from_slice(&width.to_le_bytes());
+        out[8..12].copy_from_slice(&height.to_le_bytes());
+        out[12..16].copy_from_slice(&1u32.to_le_bytes()); // version
+        out[16..20].copy_from_slice(&block_dim.to_le_bytes());
+
+        let bx_count = width.div_ceil(block_dim);
+        let by_count = height.div_ceil(block_dim);
+        for by in 0..by_count {
+            for bx in 0..bx_count {
+                let w = (width - bx * block_dim).min(block_dim);
+                let h = (height - by * block_dim).min(block_dim);
+                for y in 0..h {
+                    for x in 0..w {
+                        let gx = bx * block_dim + x;
+                        let gy = by * block_dim + y;
+                        let v = (gx + gy * width) as u16;
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_tiled_tbmp_is_de_tiled_rather_than_read_as_rows() {
+        // The bug this pins cost a full diagnosis pass: `.tbmp` is a *tiled*
+        // bitmap, and reading it linearly produced regular horizontal terraces
+        // once the heights became geometry. Non-square, and not a whole number
+        // of blocks, so the edge-block stride is exercised too.
+        let (w, h, block) = (10u32, 6u32, 4u32);
+        let dir = std::env::temp_dir().join("somnium_tbmp_tiled");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiled.tbmp");
+        std::fs::write(&path, synthetic_tbmp(w, h, block)).unwrap();
+
+        let img = load(path.to_str().unwrap()).expect("decode");
+        assert_eq!((img.width, img.height), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let expected = (x + y * w) as f32 / u16::MAX as f32;
+                let got = img.samples[(y * w + x) as usize];
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "({x}, {y}) decoded to {got}, expected {expected}",
+                );
+            }
+        }
     }
 
     #[test]

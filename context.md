@@ -1701,6 +1701,68 @@ eight needs a second splatmap and touches `Splatmap`, the paint brush,
 filtering and the inspector — a change across three crates that wants the editor
 to verify, so it is its own step rather than a rushed tail on this one.
 
+### 25.7 25L — eight layers, and a real heightmap
+
+**Eight materials, two splatmaps.** Fyrox gives every layer its own mask texture
+(`scene/terrain/mod.rs`, `Layer::mask_property_name`), which has no ceiling at
+all; packing four masks per RGBA texture is the same idea at a quarter of the
+bindings, and two textures is where the cost stops being free. All eight of
+25K's materials are now wired: grass, forest floor, rock, snow, meadow, mud,
+sand, gravel.
+
+The splat texel became a named type — `textures::SplatTexel` — because it
+crosses a crate boundary: the editor's `TerrainEditCmd` undo payloads carry
+blocks of them, and a bare `[u8; 4]` in `somnium_core` is exactly the kind of
+thing that silently disagrees after a widening. The `.somnium` terrain sidecar
+gained a version check for the same reason; a v1 file's splat block is a
+different size and is now refused rather than misread.
+
+**Layers are weight-gated, so eight are cheaper than four were.** Splat weights
+are sparse — two or three materials meet at any texel and the rest are zero — so
+`LAYER_WEIGHT_EPSILON` skips sampling a layer that cannot change the result. A
+fixed 16 samples (48 with hex-tiling) becomes the four or six that contribute.
+This is only legal because the terrain path samples with explicit derivatives
+throughout: `textureSampleGrad` has no uniformity requirement where
+`textureSample` inside that branch would be undefined.
+
+**Auto-splat assigns all eight** from altitude, slope and a low-frequency noise.
+The noise is what keeps the two grasses and the forest floor from laying down as
+horizontal altitude bands — a real hillside does not change species on a contour
+line.
+
+**Heightmaps load.** `terrain/heightmap.rs` reads 16-bit PNG, any other image
+the engine decodes, and CDLOD's `.tbmp`; `SOMNIUM_HEIGHTMAP=<path>` in the demo,
+with procedural FBM relief as the default so terrain is landscape rather than a
+plain even with no asset. Terrain has had a heightmap field since Phase 14 and
+no way to fill it except the sculpt brush.
+
+Two bugs found on the way, both in the same function, and both worth recording:
+
+1. **The resample point-sampled.** CDLOD's dataset is 4096×2048 against a 1025²
+   grid, so bilinear taps landed four source texels apart. That is the same
+   mistake as a texture without mips and far more destructive on a heightmap,
+   because the aliasing becomes *geometry*. Now area-averaged over the footprint
+   each destination vertex owns.
+2. **`.tbmp` is a *tiled* bitmap, and I decoded it as linear rows.** The header
+   is `[pixelFormat, width, height, version, blockDim]`; word 4 is 256, and
+   `256 + 4096 × 2048 × 2` happens to equal the file length exactly, so "word 4
+   is the header size" fitted the evidence perfectly and was wrong — it is
+   `blockDim`, and the header is always 256 bytes. The file stores 256×256
+   tiles (`TiledBitmap::GetBlockStartPos`). Read row-wise it produced regular
+   horizontal terraces separated by black walls. **A size check is not a format
+   check**, and the answer was in `TiledBitmap.cpp` the whole time — the name of
+   the class was the warning.
+
+The procedural-relief render is what isolated it: same mesh, LOD and material
+path, smooth landscape, so the fault had to be in the loader rather than
+anywhere downstream.
+
+**Known artefact:** the CDLOD render carries small black speckles across the
+surface — most likely shadow acne, since terrain began casting shadows in 25A-2
+and this dataset has metre-scale relief that the cascades cannot resolve.
+`SOMNIUM_SHADOW_DEBUG=1` will confirm or rule it out in one run; it does not
+appear on the smoother FBM relief.
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:

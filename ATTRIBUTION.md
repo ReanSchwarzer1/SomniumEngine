@@ -997,6 +997,16 @@ Modules that Phase 24 draws on:
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
 | 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
 
+**25L heightmaps and layer masks.** `CDLOD-master/source/BasicCDLOD/TiledBitmap/
+TiledBitmap.{h,cpp}` was read for Phase 25L and supplied the `.tbmp` header
+layout and tiled block ordering that `terrain/heightmap.rs` decodes
+(`TiledBitmap::Open`, `GetBlockStartPos`). MIT, © 2010 Filip Strugar — the same
+reference the chunked LOD scheme came from in Phase 14. Its
+`TestData/maintestdata/heightmap.tbmp` is the dataset the loader was verified
+against; the file is read from `example_repo` and is not redistributed here.
+`fyrox-impl/src/scene/terrain/mod.rs` (`Layer`) supplied the per-layer mask
+model that the two-splatmap, eight-layer arrangement packs.
+
 **25F hex-tiling.** `bgfx-master/examples/49-hextile/fs_hextile.sc` and
 `hextile.cpp` were read for Phase 25F and ported into
 `crates/somnium_renderer/src/shaders/hextile.wgsl` — the simplex triangle grid,
