@@ -131,18 +131,26 @@ fn generate_layer(recipe: &LayerRecipe) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (albedo, normal, rough)
 }
 
+/// Upload one array texture with a full mip chain.
+///
+/// Every layer must already be `size × size` RGBA8. Mips are **not optional**
+/// here: the arrays used to be created with `mip_level_count: 1`, which was
+/// tolerable for smooth procedural noise and is not for photographed detail —
+/// a 4K texture minified to a few pixels with nothing to filter between is
+/// pure aliasing, and terrain is the surface that reaches the horizon.
 fn create_array_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
     format: wgpu::TextureFormat,
+    size: u32,
     layers: &[Vec<u8>],
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    let size = LAYER_TEXTURE_SIZE;
+    let mip_level_count = (size as f32).log2().floor() as u32 + 1;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers.len() as u32 },
-        mip_level_count: 1,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
@@ -150,21 +158,38 @@ fn create_array_texture(
         view_formats: &[],
     });
     for (i, data) in layers.iter().enumerate() {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size * 4),
-                rows_per_image: Some(size),
-            },
-            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-        );
+        for (level, (lw, lh, bytes)) in build_mip_chain(data, size, size).iter().enumerate() {
+            // write_texture pads rows to COPY_BYTES_PER_ROW_ALIGNMENT; the
+            // small mips of a 4K texture fall below it.
+            let row = lw * 4;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded = row.div_ceil(align) * align;
+            let staged: std::borrow::Cow<[u8]> = if padded == row {
+                std::borrow::Cow::Borrowed(bytes)
+            } else {
+                let mut buf = vec![0u8; padded as usize * *lh as usize];
+                for y in 0..*lh as usize {
+                    let (s, d) = (y * row as usize, y * padded as usize);
+                    buf[d..d + row as usize].copy_from_slice(&bytes[s..s + row as usize]);
+                }
+                std::borrow::Cow::Owned(buf)
+            };
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &staged,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(*lh),
+                },
+                wgpu::Extent3d { width: *lw, height: *lh, depth_or_array_layers: 1 },
+            );
+        }
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -173,38 +198,173 @@ fn create_array_texture(
     (texture, view)
 }
 
-/// The three GPU array textures shared by every layer of one terrain.
+/// The GPU array textures shared by every layer of one terrain.
+///
+/// Phase 25K packs four source maps into two (see `assets/LICENSE.md`), so this
+/// is two arrays rather than three: `albedo` carries colour plus **height** in
+/// alpha, and `surface` carries normal XY, roughness and ambient occlusion.
 pub struct TerrainLayerTextures {
+    /// RGB = albedo, A = height.
     pub albedo: wgpu::Texture,
     pub albedo_view: wgpu::TextureView,
-    pub normal: wgpu::Texture,
-    pub normal_view: wgpu::TextureView,
-    pub roughness: wgpu::Texture,
-    pub roughness_view: wgpu::TextureView,
+    /// R,G = normal XY (Z reconstructed), B = roughness, A = occlusion.
+    pub surface: wgpu::Texture,
+    pub surface_view: wgpu::TextureView,
+    /// False when the packed assets were missing and the procedural fallback
+    /// was generated instead.
+    pub from_assets: bool,
+}
+
+/// Packed materials the four layers load, in the layer order the rest of the
+/// system assumes: grass, dirt, rock, snow.
+///
+/// **Layer 2 must stay rock** — it is `cliff_layer` in the terrain material and
+/// what `auto_splat` paints onto steep ground.
+pub const LAYER_MATERIALS: [&str; TERRAIN_LAYER_COUNT as usize] = [
+    "aerial_grass_rock",
+    "forrest_ground_01",
+    "aerial_rocks_04",
+    "snow_02",
+];
+
+/// Box-filtered mip chain for one RGBA8 image.
+///
+/// Deliberately **not** the alpha-weighted filter `renderer.rs` uses for glTF
+/// textures. That one exists because alpha there is cutout coverage, so colour
+/// under a transparent texel is meaningless and must not be averaged in. Here
+/// alpha is a *height map*: it is real data in its own right, and weighting
+/// albedo by it would darken every layer toward its own crevices.
+fn build_mip_chain(data: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = vec![(width, height, data.to_vec())];
+    let (mut w, mut h) = (width, height);
+    while w > 1 || h > 1 {
+        let (pw, ph) = (w, h);
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+        let prev = &levels.last().unwrap().2;
+        let mut next = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..4usize {
+                    let mut sum = 0u32;
+                    let mut n = 0u32;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let sx = (x * 2 + dx).min(pw - 1);
+                            let sy = (y * 2 + dy).min(ph - 1);
+                            sum += prev[((sy * pw + sx) * 4) as usize + c] as u32;
+                            n += 1;
+                        }
+                    }
+                    next[((y * w + x) * 4) as usize + c] = (sum / n) as u8;
+                }
+            }
+        }
+        levels.push((w, h, next));
+    }
+    levels
+}
+
+/// Where the packed layer materials live, relative to the working directory.
+const TERRAIN_ASSET_DIR: &str = "assets/terrain";
+
+/// Load one packed layer, resized to `size`, as RGBA8.
+fn load_packed(material: &str, suffix: &str, size: u32) -> Result<Vec<u8>, String> {
+    let path = format!("{TERRAIN_ASSET_DIR}/{material}_{suffix}.png");
+    let img = image::open(&path).map_err(|e| format!("{path}: {e}"))?;
+    let img = if img.width() == size && img.height() == size {
+        img
+    } else {
+        img.resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+    };
+    Ok(img.to_rgba8().into_raw())
 }
 
 impl TerrainLayerTextures {
+    /// Load the packed photographed layers, falling back to procedural ones.
+    ///
+    /// The fallback is not a courtesy: `assets/terrain` is ~650 MB and a clone
+    /// without it must still start, exactly as the glTF demo falls back to
+    /// procedural cubes.
+    pub fn load_or_generate(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        // A 4K RGBA8 array of four layers with mips is ~350 MB per array, and
+        // there are two. 2K is the default because terrain is viewed from
+        // metres away, not centimetres; `SOMNIUM_TERRAIN_RES=4096` spends the
+        // memory for the full detail the committed assets carry.
+        let size = std::env::var("SOMNIUM_TERRAIN_RES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| v.is_power_of_two() && *v >= 256)
+            .unwrap_or(2048);
+
+        match Self::load_packed_layers(device, queue, size) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                tracing::warn!(
+                    "terrain: using procedural layers ({e}). Run \
+                     tools/fetch_terrain_textures.sh and the pack_terrain example \
+                     for the photographed set."
+                );
+                Self::generate_default(device, queue)
+            }
+        }
+    }
+
+    fn load_packed_layers(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: u32,
+    ) -> Result<Self, String> {
+        let mut albedos = Vec::with_capacity(LAYER_MATERIALS.len());
+        let mut surfaces = Vec::with_capacity(LAYER_MATERIALS.len());
+        for material in LAYER_MATERIALS {
+            albedos.push(load_packed(material, "albedo", size)?);
+            surfaces.push(load_packed(material, "surface", size)?);
+        }
+        tracing::info!(
+            "terrain: loaded {} photographed layers at {size}x{size} ({})",
+            LAYER_MATERIALS.len(),
+            LAYER_MATERIALS.join(", "),
+        );
+
+        // Albedo is sRGB; the surface pack is linear data — a normal, a
+        // roughness and an occlusion, none of which are colours.
+        let (albedo, albedo_view) = create_array_texture(
+            device, queue, "Terrain Albedo+Height Array",
+            wgpu::TextureFormat::Rgba8UnormSrgb, size, &albedos,
+        );
+        let (surface, surface_view) = create_array_texture(
+            device, queue, "Terrain Surface Array",
+            wgpu::TextureFormat::Rgba8Unorm, size, &surfaces,
+        );
+        Ok(Self { albedo, albedo_view, surface, surface_view, from_assets: true })
+    }
+
     /// Generate the four default procedural layers and upload them.
     pub fn generate_default(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let mut albedos = Vec::new();
-        let mut normals = Vec::new();
-        let mut roughs = Vec::new();
+        let mut surfaces = Vec::new();
         for recipe in &RECIPES {
             let (a, n, r) = generate_layer(recipe);
+            // Match the packed layout the shader expects: the procedural
+            // albedo already carries its noise "height" in alpha, and the
+            // surface pack is normal XY, roughness, and a fully-open occlusion.
+            let mut surface = Vec::with_capacity(a.len());
+            for i in (0..n.len()).step_by(4) {
+                surface.extend([n[i], n[i + 1], r[i], 255]);
+            }
             albedos.push(a);
-            normals.push(n);
-            roughs.push(r);
+            surfaces.push(surface);
         }
         let (albedo, albedo_view) = create_array_texture(
-            device, queue, "Terrain Albedo Array", wgpu::TextureFormat::Rgba8UnormSrgb, &albedos,
+            device, queue, "Terrain Albedo+Height Array",
+            wgpu::TextureFormat::Rgba8UnormSrgb, LAYER_TEXTURE_SIZE, &albedos,
         );
-        let (normal, normal_view) = create_array_texture(
-            device, queue, "Terrain Normal Array", wgpu::TextureFormat::Rgba8Unorm, &normals,
+        let (surface, surface_view) = create_array_texture(
+            device, queue, "Terrain Surface Array",
+            wgpu::TextureFormat::Rgba8Unorm, LAYER_TEXTURE_SIZE, &surfaces,
         );
-        let (roughness, roughness_view) = create_array_texture(
-            device, queue, "Terrain Roughness Array", wgpu::TextureFormat::Rgba8Unorm, &roughs,
-        );
-        Self { albedo, albedo_view, normal, normal_view, roughness, roughness_view }
+        Self { albedo, albedo_view, surface, surface_view, from_assets: false }
     }
 }
 

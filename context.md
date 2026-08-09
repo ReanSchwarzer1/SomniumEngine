@@ -1219,7 +1219,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
-| 25F | 🟡 Partial | **Stochastic hex-tiling.** Implemented, cited and validated; **off by default** (`SOMNIUM_HEXTILE=1`) because the measurement says it is not yet worth enabling. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
+| 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
@@ -1633,6 +1633,73 @@ bring that, and 25F should be re-judged then.
   phase has been paying for. It needs either a scripted foliage scene (the
   natural companion to `SOMNIUM_TERRAIN=flat`) or the editor.
 - **Bark roughness: not done**, same reason.
+
+### 25.6 25K — photographed terrain materials
+
+Content, not code, was the blocker. 25F had nothing to fix and 25E had no height
+map, because the four layers were procedural tileable noise generated in
+`textures.rs`.
+
+**Eight CC0 materials from Poly Haven** (`aerial_grass_rock`, `leafy_grass`,
+`forrest_ground_01`, `brown_mud`, `aerial_rocks_04`, `snow_02`,
+`coast_sand_rocks_02`, `gravel_floor`) at 4K, fetched by
+`tools/fetch_terrain_textures.sh` and channel-packed by
+`somnium_asset --example pack_terrain`. `aerial_rocks_04` is deliberately the
+texture the bgfx hex-tile example ships with, so 25F can be judged against the
+material its own reference was tuned on.
+
+**Four source maps become two textures**, which is the decision everything else
+follows from:
+
+| packed texture  | R        | G        | B         | A      |
+|-----------------|----------|----------|-----------|--------|
+| `*_albedo.png`  | albedo R | albedo G | albedo B  | height |
+| `*_surface.png` | normal X | normal Y | roughness | AO     |
+
+Memory is the obvious reason — a 4K RGBA8 array with mips is ~350 MB, and two
+arrays is half of four. The one that matters more is **sample count**: the
+terrain shader samples every layer for every pixel, and 25F triples whatever it
+samples. Normal Z is reconstructed as `sqrt(1 - x² - y²)`, exact for a unit
+normal and what BC5 would force anyway; metalness is dropped because terrain
+layers are dielectric.
+
+Three things came out of the O3DE reference (`Gems/Terrain/Assets/Shaders/`):
+`DetailMaterialData`'s shape of per-map bindless indices plus per-map factors;
+`AppendHeightToWeight`, which is 25E and needs the real height map this phase
+delivers; and **`MaxAnisotropy = 16`** on its detail sampler — ground is the one
+surface always seen at a grazing angle, where an isotropic mip is chosen for the
+shorter axis and smears everything along the longer one. That is now on the
+shading sampler and is a large part of why detail survives to the horizon.
+
+Also here: the layer arrays are built **with a mip chain**. They were
+`mip_level_count: 1`, which was survivable for smooth noise and is pure aliasing
+for photographed detail. The mip filter is a plain box, deliberately *not* the
+alpha-weighted one `renderer.rs` uses for glTF — alpha there is cutout coverage,
+alpha here is a height map, and weighting albedo by it would darken every layer
+toward its own crevices.
+
+**Load resolution defaults to 2K** (`SOMNIUM_TERRAIN_RES=4096` for full detail):
+4K across two arrays is ~700 MB of VRAM. The committed assets are 4K so the
+detail is there when BC compression makes it affordable. Codec crates are pinned
+to `opt-level = 3` in the dev profile — `image` in debug is ~2 orders slower and
+decoding the layers exceeded a 90-second timeout before that.
+
+`assets/terrain/_source/` is git-ignored and re-derivable; only the packed result
+is committed. The procedural generator is kept as a fallback, because a clone
+without ~650 MB of assets must still start.
+
+**This settled 25F.** With procedural layers there was no repetition to remove
+and hex-tiling only showed its own lattice, so it shipped off. With photographed
+layers the tiling grid is immediately visible as bands marching to the horizon,
+and hex-tiling removes them. Same code, same parameters, opposite verdict,
+decided entirely by the content — so **25F is now on by default**.
+
+**Not done:** the eight materials are loaded and packed but only **four are
+wired**, because the splatmap is RGBA8 and hard-caps the layer count. Going to
+eight needs a second splatmap and touches `Splatmap`, the paint brush,
+`auto_splat`, the `TerrainEditCmd` undo payloads in `somnium_core`, foliage layer
+filtering and the inspector — a change across three crates that wants the editor
+to verify, so it is its own step rather than a rushed tail on this one.
 
 ### 25.4 Verification plan
 

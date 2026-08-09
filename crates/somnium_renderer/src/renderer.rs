@@ -1143,15 +1143,11 @@ impl SomniumRenderer {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
                 ctx,
-                layer_view(&terrain.layer_textures.albedo, layer, "Terrain Layer Albedo"),
+                layer_view(&terrain.layer_textures.albedo, layer, "Terrain Layer Albedo+Height"),
             ) as i32;
-            ids.normal[i] = self.add_texture(
+            ids.surface[i] = self.add_texture(
                 ctx,
-                layer_view(&terrain.layer_textures.normal, layer, "Terrain Layer Normal"),
-            ) as i32;
-            ids.roughness[i] = self.add_texture(
-                ctx,
-                layer_view(&terrain.layer_textures.roughness, layer, "Terrain Layer Roughness"),
+                layer_view(&terrain.layer_textures.surface, layer, "Terrain Layer Surface"),
             ) as i32;
         }
         terrain.texture_ids = ids;

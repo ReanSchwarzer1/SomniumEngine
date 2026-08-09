@@ -146,6 +146,13 @@ impl ShadingPass {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            // Phase 25K. O3DE's terrain detail sampler runs at MaxAnisotropy 16
+            // (`TerrainMaterialSrg.azsli`) and the reason is terrain-shaped:
+            // ground is the one surface always seen at a grazing angle, where
+            // an isotropic mip is chosen for the *shorter* axis and smears
+            // everything along the longer one. Trilinear alone turns a
+            // photographed layer to mush a few metres out.
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 

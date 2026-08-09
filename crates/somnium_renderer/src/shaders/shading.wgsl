@@ -798,6 +798,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = terrain.roughness;
         surface.metallic = 0.0;
         surface.normal = terrain.normal;
+        // Phase 25K: the material's own occlusion, folded into the screen-space
+        // term the same way a glTF occlusion map is — the two know different
+        // things, and GTAO cannot see detail below a pixel.
+        surface.occlusion = surface.occlusion * terrain.occlusion;
     }
 
 

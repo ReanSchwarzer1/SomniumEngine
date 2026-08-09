@@ -240,8 +240,8 @@ mod material_flag_tests {
         assert_eq!(offset(m.layer_tiling.as_ptr() as *const u8), 0);
         assert_eq!(offset(m.brush.as_ptr() as *const u8), 16);
         assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 32);
-        assert_eq!(offset(m.normal_maps.as_ptr() as *const u8), 48);
-        assert_eq!(offset(m.roughness_maps.as_ptr() as *const u8), 64);
+        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 48);
+        assert_eq!(offset(m._reserved_maps.as_ptr() as *const u8), 64);
         assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 80);
         assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 88);
         assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 96);

@@ -129,12 +129,13 @@ pub struct GpuTerrainMaterial {
     /// xy = brush world XZ, z = radius, w = mode
     /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 16
     pub brush: [f32; 4],
-    /// Bindless index of each layer's albedo map.              offset 32
+    /// Bindless index of each layer's albedo+height map.       offset 32
     pub albedo_maps: [i32; 4],
-    /// Bindless index of each layer's normal map.              offset 48
-    pub normal_maps: [i32; 4],
-    /// Bindless index of each layer's roughness map.           offset 64
-    pub roughness_maps: [i32; 4],
+    /// Bindless index of each layer's packed surface map
+    /// (normal XY, roughness, occlusion).                      offset 48
+    pub surface_maps: [i32; 4],
+    /// Free since Phase 25K folded three maps into two.        offset 64
+    pub _reserved_maps: [i32; 4],
     /// World XZ of terrain-local (0, 0).                       offset 80
     pub terrain_origin: [f32; 2],
     /// 1 / world size, for the splat lookup.                   offset 88
@@ -153,13 +154,12 @@ pub struct GpuTerrainMaterial {
 pub struct TerrainTextureIds {
     pub splat_map: i32,
     pub albedo: [i32; 4],
-    pub normal: [i32; 4],
-    pub roughness: [i32; 4],
+    pub surface: [i32; 4],
 }
 
 impl Default for TerrainTextureIds {
     fn default() -> Self {
-        Self { splat_map: -1, albedo: [-1; 4], normal: [-1; 4], roughness: [-1; 4] }
+        Self { splat_map: -1, albedo: [-1; 4], surface: [-1; 4] }
     }
 }
 
@@ -198,17 +198,13 @@ pub struct TerrainData {
 
     /// Phase 25F: break the layer maps' visible repetition by hex-tiling them.
     ///
-    /// **Off by default, on the measurement rather than on the plan.** 25F
-    /// exists because repetition is the loudest artefact a tiled terrain has —
-    /// but the four layers are *procedural, tileable, low-contrast noise*
-    /// (`textures.rs`), and rendered side by side the plain path shows no
-    /// findable grid while the hex-tiled one shows its own lattice faintly. The
-    /// technique is correct and costs three taps per map; there is simply no
-    /// repetition here for it to remove yet.
-    ///
-    /// `SOMNIUM_HEXTILE=1` enables it. Turn it on by default once the layers are
-    /// photographed rather than generated — 25D's detail clipmap and 25J's
-    /// file-based layers are what bring that.
+    /// **On by default since Phase 25K**, which is what made the judgement
+    /// possible. Against the old procedural layers there was no repetition to
+    /// remove and the technique only showed its own lattice, so it shipped
+    /// switched off. With photographed layers the tiling grid is immediately
+    /// visible as bands marching to the horizon, and hex-tiling removes them —
+    /// the same code, the same parameters, opposite verdict, decided by the
+    /// content. `SOMNIUM_HEXTILE=0` turns it off.
     pub hex_tiling: bool,
 
     /// Model matrix submitted for the current frame.
@@ -276,7 +272,7 @@ impl TerrainData {
             desc.grid_size[0] * desc.chunk_cells,
             desc.grid_size[1] * desc.chunk_cells,
         );
-        let layer_textures = TerrainLayerTextures::generate_default(device, queue);
+        let layer_textures = TerrainLayerTextures::load_or_generate(device, queue);
 
         Self {
             desc,
@@ -290,7 +286,7 @@ impl TerrainData {
             texture_ids: TerrainTextureIds::default(),
             material_id: 0,
             terrain_index: 0,
-            hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() == Ok("1"),
+            hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
@@ -327,8 +323,8 @@ impl TerrainData {
             ],
             brush: self.brush_cursor,
             albedo_maps: self.texture_ids.albedo,
-            normal_maps: self.texture_ids.normal,
-            roughness_maps: self.texture_ids.roughness,
+            surface_maps: self.texture_ids.surface,
+            _reserved_maps: [-1; 4],
             terrain_origin: [origin.x, origin.z],
             inv_world_size: [1.0 / wx, 1.0 / wz],
             splat_map: self.texture_ids.splat_map,

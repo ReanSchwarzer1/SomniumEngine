@@ -25,8 +25,8 @@ struct TerrainMaterial {
     // (0 off, 1 sculpt, 2 layer paint, 3 foliage).
     brush: vec4<f32>,
     albedo_maps: vec4<i32>,
-    normal_maps: vec4<i32>,
-    roughness_maps: vec4<i32>,
+    surface_maps: vec4<i32>,
+    _reserved_maps: vec4<i32>,
     terrain_origin: vec2<f32>,
     inv_world_size: vec2<f32>,
     splat_map: i32,
@@ -43,14 +43,21 @@ struct TerrainSurface {
     albedo: vec3<f32>,
     roughness: f32,
     normal: vec3<f32>,
+    /// Phase 25K: real per-material ambient occlusion, packed alongside the
+    /// normal. Terrain has never had this — it hardcoded a fully-open 1.0.
+    occlusion: f32,
 }
 
 struct TerrainLayerSample {
     albedo: vec3<f32>,
-    // Albedo alpha carries a procedural height, used by the blend below.
+    // Phase 25K: a real displacement map from the packed albedo's alpha, where
+    // it used to be procedural noise. This is what `terrain_height_blend`
+    // consumes, and what makes gravel settle into rock rather than cross-fade
+    // across it.
     height: f32,
     normal_ts: vec3<f32>,
     roughness: f32,
+    occlusion: f32,
 }
 
 /// Sample one layer at `uv`, with `ddx`/`ddy` its screen-space derivatives.
@@ -69,23 +76,28 @@ fn terrain_sample_layer(
 ) -> TerrainLayerSample {
     var s: TerrainLayerSample;
     let albedo_map = tm.albedo_maps[layer];
-    let normal_map = tm.normal_maps[layer];
+    let surface_map = tm.surface_maps[layer];
 
+    var a: vec4<f32>;
+    var surf: vec4<f32>;
     if tm.hex_tiling != 0u {
-        let a = hex_sample(albedo_map, uv, ddx, ddy);
-        s.albedo = a.rgb;
-        s.height = a.a;
-        s.normal_ts = hex_sample_normal(normal_map, uv, ddx, ddy);
+        a = hex_sample(albedo_map, uv, ddx, ddy);
+        surf = hex_sample(surface_map, uv, ddx, ddy);
     } else {
-        let a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
-        s.albedo = a.rgb;
-        s.height = a.a;
-        s.normal_ts =
-            textureSampleGrad(textures[normal_map], default_sampler, uv, ddx, ddy).rgb * 2.0 - 1.0;
+        a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
+        surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
     }
 
-    s.roughness =
-        textureSampleGrad(textures[tm.roughness_maps[layer]], default_sampler, uv, ddx, ddy).r;
+    s.albedo = a.rgb;
+    s.height = a.a;
+    s.roughness = surf.b;
+    s.occlusion = surf.a;
+
+    // Phase 25K: only XY are stored; Z is reconstructed. Exact for a unit
+    // normal, and it is what BC5 compression would force anyway — so the
+    // packing costs nothing and saves a channel.
+    let nxy = surf.rg * 2.0 - 1.0;
+    s.normal_ts = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
     return s;
 }
 
@@ -169,6 +181,8 @@ fn evaluate_terrain_material(
     );
     var roughness =
         s0.roughness * w.x + s1.roughness * w.y + s2.roughness * w.z + s3.roughness * w.w;
+    let occlusion =
+        s0.occlusion * w.x + s1.occlusion * w.y + s2.occlusion * w.z + s3.occlusion * w.w;
 
     // Triplanar cliff projection on steep slopes (Phase 14C step 4).
     let steepness = 1.0 - abs(geo_normal.y);
@@ -194,6 +208,7 @@ fn evaluate_terrain_material(
     var out: TerrainSurface;
     out.albedo = albedo;
     out.roughness = max(roughness, 0.05);
+    out.occlusion = occlusion;
     // Generated normal maps use Z-up tangent space; remap to TBN (x→T, y→B).
     out.normal = normalize(
         tbn * normalize(vec3(normal_ts.x, normal_ts.y, max(normal_ts.z, 0.2))));
