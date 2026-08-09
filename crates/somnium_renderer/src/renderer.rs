@@ -1674,6 +1674,29 @@ impl SomniumRenderer {
                 self.taa_pass.enabled(),
                 self.restir_pass.enabled,
             );
+            // What the terrain draws actually carry. "Submitted but no pixels"
+            // has several causes that look identical from outside — no draws,
+            // an empty index range, offsets pointing at unwritten pool space —
+            // and this separates them without another build.
+            let terrain_draws: Vec<&DrawCommand> = self
+                .draw_queue
+                .iter()
+                .filter(|d| self.terrain_material_ids.contains(&d.material_id))
+                .collect();
+            if let Some(d) = terrain_draws.first() {
+                let aabb = self.geometry.mesh_aabb(d.vertex_offset);
+                tracing::info!(
+                    "CAPTURE-TERRAIN draws={} first: v_off={} i_off={} i_count={} origin={:?} aabb={:?}",
+                    terrain_draws.len(),
+                    d.vertex_offset,
+                    d.index_offset,
+                    d.index_count,
+                    d.transform.w_axis.truncate().to_array(),
+                    aabb,
+                );
+            } else {
+                tracing::info!("CAPTURE-TERRAIN draws=0");
+            }
             self.capture.record(
                 &ctx.device,
                 &mut encoder,

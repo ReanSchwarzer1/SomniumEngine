@@ -129,11 +129,22 @@ pub fn build_lod_indices(chunk_cells: u32, lod: u8, edge_mask: u8) -> Vec<u32> {
                 ring.push(*p);
             }
 
+            // Wound counter-clockwise seen from above (+Y).
+            //
+            // The ring is built +X then +Z, which traces *clockwise* in the XZ
+            // plane viewed from above, so emitting `[center, a, b]` made every
+            // terrain triangle a back face. The old terrain pass set
+            // `cull_mode: None` — with a comment saying the winding was
+            // "uniform but unverified" — which hid it completely. Phase 25A-2
+            // put terrain in the visibility pass, which back-face culls, and
+            // the whole surface disappeared: a flat terrain rendered nothing at
+            // all, and a sculpted one showed only the slopes whose underside
+            // faced the camera.
             let center = vi(bx + 1, bz + 1);
             for i in 0..ring.len() {
                 let a = ring[i];
                 let b = ring[(i + 1) % ring.len()];
-                indices.extend_from_slice(&[center, vi(a.0, a.1), vi(b.0, b.1)]);
+                indices.extend_from_slice(&[center, vi(b.0, b.1), vi(a.0, a.1)]);
             }
         }
     }
@@ -153,6 +164,34 @@ mod tests {
             assert_eq!(indices.len() as u32, cells * cells * 2 * 3, "lod {lod}");
             let max = *indices.iter().max().unwrap();
             assert!(max < 65 * 65, "index out of range at lod {lod}");
+        }
+    }
+
+    #[test]
+    fn every_triangle_faces_up() {
+        // The failure this guards against does not look like a winding bug: the
+        // terrain simply is not there. The old terrain pass drew with culling
+        // off, so a back-facing surface still rendered, and the fault only
+        // surfaced when Phase 25A-2 moved terrain into the back-face-culling
+        // visibility pass and a flat terrain rendered zero pixels.
+        let heightmap = vec![0.0f32; 129 * 129];
+        let verts = build_chunk_vertices(&heightmap, 129, 129, 64, [0, 0], 1.0, 1.0);
+        for lod in 0..=MAX_TERRAIN_LOD {
+            for mask in [0u8, EDGE_WEST, EDGE_EAST | EDGE_SOUTH, 0b1111] {
+                let indices = build_lod_indices(64, lod, mask);
+                for tri in indices.chunks_exact(3) {
+                    let p = |i: u32| glam::Vec3::from(verts[i as usize].position);
+                    let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+                    // Counter-clockwise seen from +Y gives a +Y face normal,
+                    // which is what `FrontFace::Ccw` expects of ground.
+                    let normal = (b - a).cross(c - a);
+                    assert!(
+                        normal.y > 0.0,
+                        "lod {lod} mask {mask:04b}: triangle {tri:?} faces down (n.y = {})",
+                        normal.y,
+                    );
+                }
+            }
         }
     }
 

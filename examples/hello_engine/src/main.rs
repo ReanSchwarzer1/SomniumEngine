@@ -594,17 +594,24 @@ impl GameApp for HelloGame {
         // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
         // meshing, LODs, sculpt brushes, and auto-splat without editor input.
         // Normally terrain is created via Create > Terrain in the editor.
+        // `SOMNIUM_TERRAIN=flat` reproduces **Create > Terrain** instead: the
+        // default 16x16-chunk descriptor, no sculpting, spawned at y = 0. The
+        // sculpted 4x4 variant is not a substitute — it was the only thing
+        // 25A-2 was verified against, and the editor-created terrain turned out
+        // not to render even though that one did.
+        let flat_terrain = std::env::var("SOMNIUM_TERRAIN").as_deref() == Ok("flat");
         if std::env::var("SOMNIUM_TERRAIN").is_ok() {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                 use somnium_renderer::terrain::{brush, TerrainDescriptor};
-                let desc = TerrainDescriptor {
-                    grid_size: [4, 4],
-                    ..Default::default()
+                let desc = if flat_terrain {
+                    TerrainDescriptor::default()
+                } else {
+                    TerrainDescriptor { grid_size: [4, 4], ..Default::default() }
                 };
                 let terrain_id = renderer.create_terrain(render_ctx, desc);
                 let [wx, wz] = desc.world_size();
 
-                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                if let Some(terrain) = renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain) {
                     // Sculpt a hill and a valley to exercise the brush paths.
                     let raise = brush::TerrainBrush {
                         mode: brush::BrushMode::Raise,
@@ -626,7 +633,11 @@ impl GameApp for HelloGame {
                 }
 
                 ctx.world.spawn((
-                    Transform::from_translation(Vec3::new(-wx * 0.5, -6.0, -wz * 0.5)),
+                    Transform::from_translation(Vec3::new(
+                        -wx * 0.5,
+                        if flat_terrain { 0.0 } else { -6.0 },
+                        -wz * 0.5,
+                    )),
                     Name::new("Terrain"),
                     WorldTransform::identity(),
                     somnium_core::TerrainComponent {

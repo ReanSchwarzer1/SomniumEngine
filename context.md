@@ -1214,7 +1214,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17H | ✅ Complete | **Cutout foliage: alpha masks, alpha-weighted mips, and the island tree.** Three reported faults, three unrelated causes. (1) *Everything looked blue-grey.* Poly Haven ships vegetation as **alpha-cutout cards** — the diffuse atlas carries blade colour only where the mask is opaque (78% of `grass_medium_01` is near-black) and the cutout lives in a **separate `_alpha_` map their glTF never references**. Trusting the glTF meant rendering the black background as if it were the plant, leaving ambient sky as the brightest thing on screen. The loader now folds a sibling `X_alpha_2k.png` into `X_diff_2k.jpg`'s alpha channel by filename convention and promotes the material to `MASK` + double-sided; a missing sidecar is not an error. (2) *Saplings had no trunk.* `ensure_palette_mesh` kept the largest **primitive**, but a glTF node is usually several — the sapling is `branches` + `twigs`, the island tree is trunk + branches + leaves. Primitives are now grouped by node transform, the heaviest **node** wins, and all of its primitives are kept as `FoliagePart`s with a local transform. (3) *The island tree painted nothing.* Not the triangle cap, as assumed: the file lists `KHR_texture_transform` in `extensionsRequired` and the `gltf` crate rejected the import outright. Enabling the feature fixed it; failed imports are now cached so a broken model no longer retries — and stalls — on every brush dab. **Mip generation** was also wrong for cutouts: a plain box filter averages blade colour with the transparent background, so foliage darkened with distance, and averaging a binary mask drops texels under the 0.5 cutoff so coverage erodes until distant grass vanishes. Colour is now averaged **weighted by alpha**, and each level's alpha is rescaled to preserve coverage (Castaño). Both reduce exactly to the old behaviour for opaque textures. |
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
 | 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
-| 25A | 🟡 Partial | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
+| 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ⬜ Planned | **Terrain chunks in the TLAS.** 24J keys a BLAS per mesh by `vertex_offset`; terrain chunks never enter the draw queue it builds from, so terrain neither casts nor receives ray-traced shadows. Add committed chunk geometry as BLAS entries at the current LOD, rebuilt on sculpt. Together with 25A this is the whole of the 24K verification: a hill casting a soft traced shadow onto the valley beside it is a test that cannot pass by accident. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
@@ -1475,14 +1475,48 @@ into the pass every frame and a pass-side default never survives to frame one.
 `SOMNIUM_SHADOW_DEBUG` gained 8 = occlusion, 9 = albedo, 10 = shading normal,
 11 = terrain flag.
 
-**Still open.** The acceptance test moves terrain — all 36 469 pixels change
-with `SOMNIUM_GTAO=0/1` — but the two runs of the A/B pair do not yet land on
-the same view (the second renders 168 777 terrain pixels against 36 469, and the
-*sky* differs too, which GTAO cannot touch). Until that is reproducible the
-number is not attributable to the flag, so **25A-2 is not signed off**. The
-capture is deterministic given the same view — repeated single-flag runs agree
-to the digit — so the remaining variance is upstream of it, in what the demo has
-built by frame 240.
+4. **Terrain chunk winding was backwards, and `cull_mode: None` had been hiding
+   it since Phase 14.** The block-fan ring is built +X then +Z, which traces
+   *clockwise* in the XZ plane seen from above, so emitting `[center, a, b]`
+   made every terrain triangle a back face. The old terrain pass drew with
+   culling off — its comment said the winding was "uniform but unverified" —
+   so a fully back-facing surface still rendered. The visibility pass back-face
+   culls, and the moment terrain moved into it **a flat terrain rendered zero
+   pixels** and a sculpted one showed only the slopes whose underside faced the
+   camera. This is what "Create > Terrain draws nothing" was. Wound the other
+   way, with a test that takes the cross product of every emitted triangle at
+   every LOD and stitch mask and asserts `n.y > 0`.
+
+   Two process notes, because both cost real time. The bug was invisible in the
+   `SOMNIUM_TERRAIN=1` smoke test, whose sculpted hill happens to be seen from
+   beneath — so `SOMNIUM_TERRAIN=flat` now reproduces **Create > Terrain**
+   exactly (default 16×16 descriptor, no sculpting, spawned at y = 0) and is the
+   variant to verify against. And the first run after the fix still reported
+   zero, because `cargo test` builds the *test* profile: the binary
+   `Start-Process` launches is only rebuilt by `cargo build`.
+
+**Acceptance test: passing.** On the flat terrain, `SOMNIUM_GTAO=0` against
+`SOMNIUM_GTAO` unset, same build, same frame index:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 843 729 | **27.88** | **329 792 (39%)** |
+| mesh | 16 431 | 0.0000 | 0 |
+| sky | 61 440 | 0.0000 | 0 |
+
+Both runs render the identical view (843 729 terrain pixels either side), and
+sky and mesh come back bit-identical — sky is the control, since GTAO cannot
+touch it, and the helmet carries its own `occlusionTexture`, which overwrites
+the screen-space term. Only terrain moves, which is the thing 25A-1 could not
+make happen. Terrain pixels also appear in the visibility buffer, the plan's
+other clause. Sun-versus-ambient dominance is answered by the same measurement
+rather than by `SOMNIUM_SHADOW_DEBUG=7`: terrain reads 2813 cd/m², against the
+~150 that ambient alone would give at `ibl_intensity` 0.35, so the material
+survived the move sun-dominant.
+
+The earlier nondeterminism in this A/B was the TLAS slot bug above, compounded
+by a terrain that filled 4% of the frame; with both fixed the pair repeats to
+the digit.
 
 **25B is unchanged** and depends only on 25A-1: once terrain depth is in the
 frame before the acceleration-structure build, terrain chunk geometry can be
@@ -1495,13 +1529,14 @@ it cannot today.
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:
 
-- **25A** — the same scene with `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
-  it cannot today. Terrain pixels appear in the visibility buffer debug view.
+- **25A** — ✅ passing. `SOMNIUM_GTAO=0/1` on `SOMNIUM_TERRAIN=flat`: terrain
+  moves by 27.88 mean absolute luminance over 843 729 pixels (39% of them past
+  the 1% threshold) while sky and mesh come back bit-identical. See §25.3c.
 - **25B** — `SOMNIUM_RT_DEBUG=1` shows a terrain hill's shadow cast across terrain.
   This is the 24K acceptance test; 24K stays 🟡 until it passes.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
 - **25F** — a flat plain from a high camera: the tiling grid must not be findable.
-- Every sub-phase keeps `cargo test --workspace` green, currently 198 tests.
+- Every sub-phase keeps `cargo test --workspace` green, currently 209 tests.
 
 ---
 
