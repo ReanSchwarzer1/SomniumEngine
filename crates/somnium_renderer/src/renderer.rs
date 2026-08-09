@@ -123,8 +123,6 @@ pub struct SomniumRenderer {
     pub raytrace_pass: crate::pass::raytrace::RaytracePass,
     rt_debug_pass: crate::pass::raytrace::RtDebugPass,
     pub restir_pass: crate::pass::restir::RestirPass,
-    /// Geometry registered for tracing: (vertex_offset, vertex_count, index_offset, index_count).
-    rt_geometry: Vec<(u32, u32, u32, u32)>,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -188,8 +186,13 @@ pub struct SomniumRenderer {
     pub water_pass: crate::pass::water::WaterPass,
     water_queue: Vec<(glam::Mat4, crate::pass::water::WaterMaterialData, u32, u32, u32)>,
 
-    /// Phase 14: Heightmap terrain pass + terrain storage.
-    pub terrain_pass: crate::pass::terrain::TerrainPass,
+    /// Phase 25A-2: per-terrain splat/layer parameters read by `shading.wgsl`.
+    terrain_materials: crate::material::pool::TerrainMaterialPool,
+    /// Deterministic HDR frame readback for A/B measurement. Inert unless
+    /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
+    capture: crate::capture::FrameCapture,
+    /// Material ids belonging to a terrain, so a capture can label its pixels.
+    terrain_material_ids: std::collections::HashSet<u32>,
     /// All created terrains, indexed by terrain id (`TerrainComponent::terrain_id`).
     pub terrains: Vec<crate::terrain::TerrainData>,
     /// Terrain ids (+ model matrices) submitted for the current frame.
@@ -279,6 +282,10 @@ impl SomniumRenderer {
             mapped_at_creation: false,
         });
 
+        // Phase 25A-2: terrain's splat/layer parameters, indexed by
+        // `Material::terrain_index` from the shared shading pass.
+        let terrain_materials = crate::material::pool::TerrainMaterialPool::new(&ctx.device);
+
         let global_pool = GlobalResourcePool::new(
             &ctx.device,
             &geometry.vertex_buffer,
@@ -287,6 +294,7 @@ impl SomniumRenderer {
             &view_buffer,
             &materials_pool.buffer,
             &light_buffer,
+            &terrain_materials.buffer,
         );
 
         let materials = MaterialSystem::new();
@@ -432,18 +440,6 @@ impl SomniumRenderer {
 
         let water_pass = crate::pass::water::WaterPass::new(&ctx.device, HDR_FORMAT);
 
-        // Phase 14: terrain pass shares the view/light/cluster buffers and the
-        // shadow atlas; terrains themselves are created on demand.
-        let terrain_pass = crate::pass::terrain::TerrainPass::new(
-            &ctx.device,
-            HDR_FORMAT,
-            &global_pool.view_proj_buffer,
-            &global_pool.light_buffer,
-            &shadow_resources.atlas_depth_view,
-            &shadow_resources.comparison_sampler,
-            &global_pool.cluster_grid,
-        );
-
         Self {
             global_pool,
             materials,
@@ -478,7 +474,6 @@ impl SomniumRenderer {
             raytrace_pass,
             rt_debug_pass,
             restir_pass,
-            rt_geometry: Vec::new(),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -530,7 +525,9 @@ impl SomniumRenderer {
             supports_gpu_driven: ctx.supports_gpu_driven(),
             water_pass,
             water_queue: Vec::new(),
-            terrain_pass,
+            terrain_materials,
+            capture: crate::capture::FrameCapture::from_env(),
+            terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
             terrain_queue: Vec::new(),
             draw_queue: Vec::new(),
@@ -634,7 +631,8 @@ impl SomniumRenderer {
                 transmission: mat.transmission,
                 emissive: mat.emissive,
                 emissive_map: resolve_tex(mat.emissive_map),
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
                 // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                 // and BLEND goes to the forward pass, so a cutoff on either
                 // would punch holes in geometry that should be solid.
@@ -676,12 +674,6 @@ impl SomniumRenderer {
                     alloc.index_offset,
                     alloc.index_count,
                 );
-                self.rt_geometry.push((
-                    alloc.vertex_offset,
-                    mesh.vertices.len() as u32,
-                    alloc.index_offset,
-                    alloc.index_count,
-                ));
                 alloc
             })
             .collect();
@@ -1023,7 +1015,6 @@ impl SomniumRenderer {
     pub fn resize(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.vis_pass.resize(&ctx.device, width, height, &self.global_pool.layout);
-            self.shading_pass.resize(&ctx.device, &self.vis_pass.view);
             self.postprocess_pass.resize(&ctx.device, width, height);
             self.auto_exposure_pass
                 .resize(&ctx.device, &self.postprocess_pass.hdr_view);
@@ -1034,6 +1025,18 @@ impl SomniumRenderer {
             self.dof_pass.resize(&ctx.device, width, height);
             self.rt_debug_pass.invalidate();
             self.restir_pass.resize(&ctx.device, width, height);
+            // After every pass that owns a resolution-dependent texture, never
+            // before: the shading bind group has to reference the views those
+            // resizes just created, not the ones they replaced.
+            self.shading_pass.resize(
+                &ctx.device,
+                &self.vis_pass.view,
+                self.gtao_pass.output_view(),
+                &self.vis_pass.depth_view,
+                self.restir_pass
+                    .visibility_view()
+                    .expect("ReSTIR always allocates its visibility target"),
+            );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -1108,18 +1111,78 @@ impl SomniumRenderer {
     }
 
     /// Create a new heightmap terrain (Phase 14) and return its terrain id.
+    ///
+    /// Phase 25A-2 does three things here that the terrain pass used to do for
+    /// itself: reserve a rewritable vertex span per chunk in the global pool,
+    /// publish the splatmap and the twelve layer maps into the bindless texture
+    /// array, and register a `GpuMaterial` so chunk draws look like every other
+    /// draw to the rest of the renderer.
     pub fn create_terrain(
         &mut self,
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        let terrain = crate::terrain::TerrainData::new(
-            &ctx.device,
+        let mut terrain = crate::terrain::TerrainData::new(&ctx.device, &ctx.queue, desc);
+        terrain.reserve_pool_spans(&mut self.geometry);
+
+        // The layer maps are `texture_2d_array`s and the bindless array is
+        // `texture_2d`, so each layer is published as its own single-layer view
+        // of the same texture. No copy, no second upload.
+        let layer_view = |tex: &wgpu::Texture, layer: u32, label: &str| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut ids = crate::terrain::TerrainTextureIds::default();
+        ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
+        ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
+        for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
+            let i = layer as usize;
+            ids.albedo[i] = self.add_texture(
+                ctx,
+                layer_view(&terrain.layer_textures.albedo, layer, "Terrain Layer Albedo+Height"),
+            ) as i32;
+            ids.surface[i] = self.add_texture(
+                ctx,
+                layer_view(&terrain.layer_textures.surface, layer, "Terrain Layer Surface"),
+            ) as i32;
+        }
+        terrain.texture_ids = ids;
+        terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
+
+        // The `GpuMaterial` itself is nearly empty: `terrain_index` is what
+        // sends the shading pass down the splat path, and everything it would
+        // otherwise read lives in the terrain-material entry.
+        terrain.material_id = self.materials_pool.add_material(
             &ctx.queue,
-            &self.terrain_pass.terrain_bgl,
-            &self.terrain_pass.sampler,
-            desc,
+            GpuMaterial {
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.9,
+                metallic: 0.0,
+                albedo_map: -1,
+                normal_map: -1,
+                metallic_roughness_map: -1,
+                alpha_cutoff: 0.0,
+                flags: 0,
+                occlusion_map: -1,
+                transmission: 0.0,
+                emissive: [0.0; 3],
+                emissive_map: -1,
+                terrain_index: terrain.terrain_index as i32,
+                _pad: [0.0; 2],
+            },
         );
+        // Opaque and single-sided, which is what an unregistered material
+        // already defaults to — recorded explicitly so terrain does not depend
+        // on that default staying put.
+        self.set_material_blend(terrain.material_id, false);
+        self.set_material_double_sided(terrain.material_id, false);
+        self.terrain_material_ids.insert(terrain.material_id);
+
         self.terrains.push(terrain);
         (self.terrains.len() - 1) as u32
     }
@@ -1229,6 +1292,89 @@ impl SomniumRenderer {
             0,
             bytemuck::bytes_of(&gpu_light),
         );
+
+        // ── 1.5 Terrain becomes ordinary draws (Phase 25A-2) ─────────────────
+        //
+        // Before the sort, because from here on terrain is indistinguishable
+        // from any other geometry: it goes into the same instance buffer, the
+        // same indirect arguments, the same GPU frustum and Hi-Z culling, the
+        // same shadow pass — which is also the first time terrain casts a
+        // shadow — and the same visibility buffer, where `shading.wgsl` picks
+        // it up. There is no terrain pass left to run at the end of the frame.
+        let mut rebuilt_chunks: Vec<u32> = Vec::new();
+        for &(id, model) in &self.terrain_queue {
+            let terrain = &mut self.terrains[id as usize];
+            terrain.model = model;
+            let local_cam = model.inverse().transform_point3(self.camera_pos);
+            terrain.select_lods(local_cam);
+            rebuilt_chunks.clear();
+            terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut rebuilt_chunks);
+            terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
+            terrain.splatmap.upload_dirty(&ctx.queue);
+
+            // Phase 25B: terrain enters the ray-traced scene. A chunk's BLAS is
+            // registered the first time its heights are written and rebuilt
+            // whenever they change, which is exactly the set the rebuild above
+            // just reported — so a sculpt stroke moves the traced surface with
+            // the drawn one instead of leaving a shadow of the old ground.
+            //
+            // Always the full-detail, unstitched geometry, never the frame's
+            // LOD: a BLAS is sized once, and a traced shadow that changed shape
+            // as chunks swapped LOD would be worse than one slightly finer than
+            // what is drawn.
+            // `SOMNIUM_RT_TERRAIN=0` keeps terrain out of the acceleration
+            // structures while changing nothing else, which is the A/B that
+            // isolates what 25B added: with it, terrain both casts and receives
+            // traced shadows; without it, the TLAS holds the same scene 24J saw.
+            if self.raytrace_pass.supported()
+                && !rebuilt_chunks.is_empty()
+                && std::env::var("SOMNIUM_RT_TERRAIN").as_deref() != Ok("0")
+            {
+                if let Some((rt_index_offset, rt_index_count)) = terrain.rt_index_block() {
+                    let vertex_count = terrain.chunk_vertex_capacity();
+                    for &vertex_offset in &rebuilt_chunks {
+                        self.raytrace_pass.register_mesh(
+                            &ctx.device,
+                            vertex_offset,
+                            vertex_count,
+                            rt_index_offset,
+                            rt_index_count,
+                        );
+                        self.raytrace_pass.mark_geometry_dirty(vertex_offset);
+                    }
+                }
+            }
+            self.terrain_materials
+                .write(&ctx.queue, terrain.terrain_index, &terrain.gpu_material());
+
+            let material_id = terrain.material_id;
+            for chunk in &terrain.chunks {
+                if chunk.vertex_offset == crate::terrain::UNALLOCATED {
+                    continue;
+                }
+                let Some((index_offset, index_count)) =
+                    terrain.index_block(chunk.lod, chunk.edge_mask)
+                else {
+                    continue;
+                };
+                // Pushed straight onto the opaque queue rather than through
+                // `submit`, which would need a second mutable borrow of self —
+                // terrain's material is registered opaque, so the routing
+                // `submit` does would be a no-op anyway.
+                self.draw_queue.push(DrawCommand {
+                    sort_key: crate::command::SortKey::new(
+                        0,
+                        material_id as u16,
+                        chunk.vertex_offset,
+                    ),
+                    vertex_offset: chunk.vertex_offset,
+                    index_offset,
+                    index_count,
+                    material_id,
+                    transform: model,
+                });
+            }
+        }
 
         // ── 2. Sort draw queue ───────────────────────────────────────────────
         // This has to happen before the instance buffer is built. Instance `i`
@@ -1443,46 +1589,30 @@ impl SomniumRenderer {
         // which would read as "everything is occluded" on the first frame.
         self.hiz_ready = true;
 
-        // ── 6.45 Terrain depth prepass (Phase 25A-1) ─────────────────────────
-        //
-        // Terrain shades in its own pass near the end of the frame, so it used
-        // to reach the shared depth buffer only *after* the acceleration
-        // structures, ReSTIR and GTAO had already sampled it — all three
-        // behaved as though terrain were not in the scene. Writing its depth
-        // here, with no fragment stage, puts terrain in front of every consumer
-        // of that buffer without changing how it shades.
-        if !self.terrain_queue.is_empty() {
-            let queued: Vec<&crate::terrain::TerrainData> = self
-                .terrain_queue
-                .iter()
-                .map(|&(id, _)| &self.terrains[id as usize])
-                .collect();
-            self.terrain_pass.record_depth_prepass(
-                &mut encoder,
-                &self.vis_pass.depth_view,
-                &queued,
-            );
-        }
+        // The Phase 25A-1 terrain depth prepass stood here. It is gone with
+        // 25A-2: terrain is drawn by the visibility pass above, which fills the
+        // same depth buffer before the acceleration-structure build, ReSTIR and
+        // GTAO read it. Keeping the prepass as well would draw every chunk a
+        // second time, from whatever LOD state the previous frame left behind.
 
         // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
-        // Rebuilt each frame from the same draw queue the raster path uses, so
-        // the traced scene and the drawn one cannot drift apart.
+        // The top level is rebuilt each frame from the same draw queue the
+        // raster path uses, so the traced scene and the drawn one cannot drift
+        // apart. Bottom-level structures are rebuilt only where the geometry
+        // changed — a sculpt stroke, or a mesh's first frame (Phase 25B).
         if self.raytrace_pass.supported() {
             let instances: Vec<(u32, glam::Mat4)> = self
                 .draw_queue
                 .iter()
                 .map(|cmd| (cmd.vertex_offset, cmd.transform))
                 .collect();
-            let geometry = std::mem::take(&mut self.rt_geometry);
             self.raytrace_pass.build(
                 &ctx.device,
                 &mut encoder,
                 &self.geometry.vertex_buffer,
                 &self.geometry.index_buffer,
-                &geometry,
                 &instances,
             );
-            self.rt_geometry = geometry;
 
             // Phase 24K: traced direct lighting. Here because it needs the TLAS
             // built above and the depth the visibility pass filled, and because
@@ -1546,33 +1676,65 @@ impl SomniumRenderer {
             rpass.draw(0..3, 0..1);
         }
 
-        // ── 7.3 Terrain Pass → HDR texture (Phase 14) ────────────────────────
-        // Opaque, depth-writing draws against the visibility depth buffer, so
-        // the water pass (7.5) correctly tests against terrain.
-        if !self.terrain_queue.is_empty() {
-            let camera_world = self.camera_pos;
-            for &(id, model) in &self.terrain_queue {
-                let terrain = &mut self.terrains[id as usize];
-                terrain.model = model;
-                let local_cam = model.inverse().transform_point3(camera_world);
-                terrain.select_lods(local_cam);
-                terrain.rebuild_dirty_chunks(&ctx.queue);
-                terrain.ensure_index_buffers(&ctx.device);
-                terrain.splatmap.upload_dirty(&ctx.queue);
-                terrain.upload_uniforms(&ctx.queue);
-            }
-            let queued: Vec<&crate::terrain::TerrainData> = self
-                .terrain_queue
+        // ── 7.35 Frame capture, if one was asked for ─────────────────────────
+        //
+        // Here rather than at the end of the frame: this is the last point at
+        // which the HDR target holds exactly the shading pass's own output,
+        // before water, transparents, the editor grid, TAA and tone mapping.
+        // An A/B of the shading path should not have to see through any of
+        // those.
+        let capture_now = self.capture.tick();
+        if capture_now {
+            // The switches an A/B is meant to be varying, recorded with the
+            // capture so a null result can be told from a switch that never
+            // reached the pass — which is what the first run of this test hit.
+            tracing::info!(
+                "CAPTURE-STATE gtao={} gtao_intensity={} ibl_intensity={} taa={} restir={}",
+                self.gtao_pass.enabled,
+                self.gtao_pass.intensity,
+                self.ibl_intensity,
+                self.taa_pass.enabled(),
+                self.restir_pass.enabled,
+            );
+            // What the terrain draws actually carry. "Submitted but no pixels"
+            // has several causes that look identical from outside — no draws,
+            // an empty index range, offsets pointing at unwritten pool space —
+            // and this separates them without another build.
+            let terrain_draws: Vec<&DrawCommand> = self
+                .draw_queue
                 .iter()
-                .map(|&(id, _)| &self.terrains[id as usize])
+                .filter(|d| self.terrain_material_ids.contains(&d.material_id))
                 .collect();
-            self.terrain_pass.record(
+            if let Some(d) = terrain_draws.first() {
+                let aabb = self.geometry.mesh_aabb(d.vertex_offset);
+                tracing::info!(
+                    "CAPTURE-TERRAIN draws={} tlas_instances={} first: v_off={} i_off={} i_count={} origin={:?} aabb={:?}",
+                    terrain_draws.len(),
+                    self.raytrace_pass.instance_count(),
+                    d.vertex_offset,
+                    d.index_offset,
+                    d.index_count,
+                    d.transform.w_axis.truncate().to_array(),
+                    aabb,
+                );
+            } else {
+                tracing::info!("CAPTURE-TERRAIN draws=0");
+            }
+            self.capture.record(
+                &ctx.device,
                 &mut encoder,
-                &self.postprocess_pass.hdr_view,
-                &self.vis_pass.depth_view,
-                &queued,
+                &self.postprocess_pass.hdr_texture,
+                &self.vis_pass.texture,
+                ctx.config.width,
+                ctx.config.height,
             );
         }
+
+        // The terrain pass stood here (7.3). Terrain now shades in the pass
+        // above, with GTAO, contact shadows, traced visibility, IBL and aerial
+        // perspective reaching it for the first time — and with one copy of
+        // `sample_shadow` and the cluster lookup instead of two. It still
+        // writes depth before the water pass, because the visibility pass does.
 
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         if !self.water_queue.is_empty() {
@@ -1824,6 +1986,18 @@ impl SomniumRenderer {
         ctx.queue.submit(std::iter::once(encoder.finish()));
         if stats_draws > 0 {
             self.report_cull_stats(ctx, stats_draws);
+        }
+        if capture_now {
+            // After submit, so the copies recorded above have actually run.
+            // Resolved before the draw queue is cleared, because labelling a
+            // pixel as terrain means looking its instance back up in it.
+            let terrain_ids = &self.terrain_material_ids;
+            let draws = &self.draw_queue;
+            self.capture.resolve(&ctx.device, |instance| {
+                draws
+                    .get(instance as usize)
+                    .is_some_and(|d| terrain_ids.contains(&d.material_id))
+            });
         }
         output.present();
 

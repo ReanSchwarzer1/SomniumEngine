@@ -56,6 +56,11 @@ struct GtaoParams {
 const GTAO_SLICES: i32 = 2;
 const GTAO_STEPS:  i32 = 8;
 
+/// How far above its own tangent plane a sample must sit to count as an
+/// occluder, as a sine of the angle. Small enough to keep real contact
+/// darkening, large enough that a surface seen edge-on does not shadow itself.
+const GTAO_PLANE_BIAS: f32 = 0.1;
+
 /// View-space position for a pixel.
 fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
@@ -163,7 +168,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let s1 = load_view_position(coord + vec2<i32>(offset));
             let d1 = s1 - centre;
             let len1 = length(d1);
-            if len1 > 1e-4 && len1 < params.radius {
+            // A sample lying in the surface's own tangent plane *is* the
+            // surface, not something in front of it. Seen at a grazing angle a
+            // heightfield's neighbours run almost parallel to the view ray, so
+            // without this test every one of them registers as a horizon and
+            // the ground occludes itself to near-black — which is exactly what
+            // terrain did the first time it consumed GTAO (0.029 visibility on
+            // open ground). Requiring a sample to sit measurably *above* the
+            // tangent plane is the standard remedy and costs one dot product.
+            if len1 > 1e-4 && len1 < params.radius
+                && dot(d1 / len1, normal) > GTAO_PLANE_BIAS {
                 // Falloff keeps distant geometry from carving occlusion into
                 // surfaces it is nowhere near.
                 let falloff = saturate(1.0 - len1 / params.radius);
@@ -173,7 +187,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let s2 = load_view_position(coord - vec2<i32>(offset));
             let d2 = s2 - centre;
             let len2 = length(d2);
-            if len2 > 1e-4 && len2 < params.radius {
+            if len2 > 1e-4 && len2 < params.radius
+                && dot(d2 / len2, normal) > GTAO_PLANE_BIAS {
                 let falloff = saturate(1.0 - len2 / params.radius);
                 cos_h2 = max(cos_h2, dot(d2 / len2, view_dir) * falloff);
             }

@@ -70,6 +70,16 @@ pub struct GeometryPool {
     /// already small enough to cull as a unit.
     meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
 
+    /// Reserved vertex spans, `offset -> capacity` (Phase 25A-2).
+    ///
+    /// Only spans handed out by [`GeometryPool::reserve_vertices`] appear here.
+    /// They exist so a rewrite that outgrew its reservation is refused rather
+    /// than walking into the next span — which for terrain would mean one
+    /// chunk's heights overwriting its neighbour's, and nothing on the GPU
+    /// traps that.
+    vertex_spans: std::collections::HashMap<u32, u32>,
+    index_spans: std::collections::HashMap<u32, u32>,
+
     /// Actual pool sizes after clamping to the device limit.
     vertex_bytes: u64,
     index_bytes: u64,
@@ -118,6 +128,8 @@ impl GeometryPool {
             free_blocks: Vec::new(),
             aabbs: std::collections::HashMap::new(),
             meshlets: std::collections::HashMap::new(),
+            vertex_spans: std::collections::HashMap::new(),
+            index_spans: std::collections::HashMap::new(),
             vertex_bytes,
             index_bytes,
         }
@@ -210,6 +222,112 @@ impl GeometryPool {
         alloc
     }
 
+    // ── Rewritable spans (Phase 25A-2) ──────────────────────────────────────
+    //
+    // Terrain chunks need to live in the global pool so `shading.wgsl` can pull
+    // their attributes with the code path it already has. The question that
+    // opened is what happens when a sculpt stroke changes a chunk: `upload_mesh`
+    // is a load-time bump allocator, and the voxel free list (`upload_mesh_pooled`
+    // / `free_mesh`) hands back a *different* offset every time.
+    //
+    // Neither is what terrain wants, because of one fact about the data: a
+    // chunk's vertex count is fixed by the descriptor at `(chunk_cells + 1)²`
+    // and never changes. Sculpting rewrites height *values*, not counts, and a
+    // coarser LOD skips vertices through the index buffer rather than rebuilding
+    // the grid. So a chunk can be reserved exactly once and rewritten in place
+    // for the rest of its life.
+    //
+    // That matters beyond tidiness: `vertex_offset` is the key for the AABB map,
+    // the meshlet map, and (in 25B) the per-mesh BLAS. Free-list churn would
+    // invalidate all three on every brush dab and leave the old entries behind,
+    // since `free_mesh` does not remove them. A stable span keeps every one of
+    // those lookups correct for free.
+    //
+    // Indices go the other way. Index data depends only on `(lod, edge_mask)`
+    // and is *chunk-relative* — the visibility pass reads
+    // `vertices[vertex_offset + indices[index_offset + i]]` — so one span per
+    // key is shared by every chunk, allocated on first use and never rewritten.
+    // There are at most 5 LODs × 16 masks, about 2 MB of the index pool if
+    // every combination is ever needed.
+    //
+    // Neither span is ever released today: a terrain lives as long as the
+    // renderer does. When terrain deletion arrives it wants a `release_*` pair
+    // feeding the free list — and because every chunk span is the same size,
+    // first-fit reuse would be exact, with no fragmentation.
+
+    /// Reserve a vertex span to be rewritten in place, or `None` if the pool
+    /// cannot fit it.
+    ///
+    /// The caller keeps the returned offset for the lifetime of the geometry and
+    /// passes it back to [`GeometryPool::write_vertices`] on every rebuild.
+    pub fn reserve_vertices(&mut self, count: u32) -> Option<u32> {
+        let offset = reserve_span(
+            &mut self.next_vertex,
+            count,
+            std::mem::size_of::<Vertex>() as u64,
+            self.vertex_bytes,
+        );
+        match offset {
+            Some(offset) => {
+                self.vertex_spans.insert(offset, count);
+                Some(offset)
+            }
+            None => {
+                tracing::error!(
+                    "geometry pool full: cannot reserve {count} vertices; pool holds {:.0} MB",
+                    self.vertex_bytes as f64 / 1048576.0,
+                );
+                None
+            }
+        }
+    }
+
+    /// Reserve an index span. See [`GeometryPool::reserve_vertices`].
+    pub fn reserve_indices(&mut self, count: u32) -> Option<u32> {
+        match reserve_span(&mut self.next_index, count, 4, self.index_bytes) {
+            Some(offset) => {
+                self.index_spans.insert(offset, count);
+                Some(offset)
+            }
+            None => {
+                tracing::error!(
+                    "geometry pool full: cannot reserve {count} indices; pool holds {:.0} MB",
+                    self.index_bytes as f64 / 1048576.0,
+                );
+                None
+            }
+        }
+    }
+
+    /// Rewrite a reserved vertex span and refresh its recorded bounds.
+    ///
+    /// The AABB has to be refreshed here, not only at reservation: sculpting
+    /// changes a chunk's height range, and a stale box is what makes GPU
+    /// culling drop geometry that is plainly on screen.
+    pub fn write_vertices(&mut self, queue: &wgpu::Queue, offset: u32, vertices: &[Vertex]) {
+        if !span_accepts(&self.vertex_spans, offset, vertices.len(), "vertices") {
+            return;
+        }
+        self.aabbs.insert(offset, compute_aabb(vertices));
+        queue.write_buffer(
+            &self.vertex_buffer,
+            offset as u64 * std::mem::size_of::<Vertex>() as u64,
+            bytemuck::cast_slice(vertices),
+        );
+    }
+
+    /// Write a reserved index span.
+    pub fn write_indices(&self, queue: &wgpu::Queue, offset: u32, indices: &[u32]) {
+        if !span_accepts(&self.index_spans, offset, indices.len(), "indices") {
+            return;
+        }
+        queue.write_buffer(
+            &self.index_buffer,
+            offset as u64 * std::mem::size_of::<u32>() as u64,
+            bytemuck::cast_slice(indices),
+        );
+    }
+
     /// Return a pooled allocation's block to the free list.
     pub fn free_mesh(&mut self, alloc: MeshAllocation) {
         if alloc.vertex_capacity == 0 && alloc.index_capacity == 0 {
@@ -299,6 +417,44 @@ impl GeometryPool {
     }
 }
 
+/// Bump-allocate `count` elements of `stride` bytes, or `None` if the pool
+/// cannot hold them.
+///
+/// Split out from the two `reserve_*` methods so the arithmetic can be tested
+/// without a GPU device — the failure it guards against (moving the bump
+/// pointer past the end and letting every later write land somewhere wrong) is
+/// silent on the GPU. The `u64` maths is deliberate: the multiply overflows
+/// `u32` well inside a 256 MB pool.
+fn reserve_span(next: &mut u32, count: u32, stride: u64, capacity_bytes: u64) -> Option<u32> {
+    let end = (*next as u64 + count as u64) * stride;
+    if end > capacity_bytes {
+        return None;
+    }
+    let offset = *next;
+    *next += count;
+    Some(offset)
+}
+
+/// Whether a write of `len` elements fits the span reserved at `offset`.
+fn span_accepts(
+    spans: &std::collections::HashMap<u32, u32>,
+    offset: u32,
+    len: usize,
+    what: &str,
+) -> bool {
+    let Some(&capacity) = spans.get(&offset) else {
+        tracing::error!("write of {len} {what} at unreserved offset {offset}; skipped");
+        return false;
+    };
+    if len as u64 > capacity as u64 {
+        tracing::error!(
+            "write of {len} {what} exceeds the {capacity} reserved at offset {offset}; skipped",
+        );
+        return false;
+    }
+    true
+}
+
 /// Local-space AABB of a vertex list.
 ///
 /// An empty mesh yields an inverted box (min > max), which the culling test
@@ -339,6 +495,62 @@ mod tests {
     fn empty_mesh_yields_an_inverted_box() {
         let (min, max) = compute_aabb(&[]);
         assert!(min[0] > max[0], "empty mesh must not produce a visible box");
+    }
+
+    // ── Rewritable spans (Phase 25A-2) ──────────────────────────────────────
+
+    #[test]
+    fn spans_are_handed_out_back_to_back() {
+        let mut next = 0u32;
+        assert_eq!(reserve_span(&mut next, 100, 32, 1 << 20), Some(0));
+        assert_eq!(reserve_span(&mut next, 40, 32, 1 << 20), Some(100));
+        assert_eq!(next, 140);
+    }
+
+    #[test]
+    fn a_reservation_past_the_end_is_refused_without_moving_the_pointer() {
+        // The whole reason this is a separate function: the bump pointer moving
+        // on a rejected reservation is what corrupts every later mesh, and
+        // nothing on the GPU reports it.
+        let mut next = 10u32;
+        assert_eq!(reserve_span(&mut next, 1000, 32, 320), None);
+        assert_eq!(next, 10, "a refused reservation must not consume space");
+    }
+
+    #[test]
+    fn a_span_ending_exactly_at_the_pool_end_still_fits() {
+        let mut next = 0u32;
+        assert_eq!(reserve_span(&mut next, 10, 32, 320), Some(0));
+        assert_eq!(reserve_span(&mut next, 1, 32, 320), None);
+    }
+
+    #[test]
+    fn span_arithmetic_is_done_in_u64() {
+        // A 256 MB vertex pool holds ~8.4 M vertices, and the byte figure for a
+        // request that large overflows u32 if the multiply happens before the
+        // widening — 200 M vertices is 6.4 GB, which wraps to 2.1 GB and would
+        // read as "fits" in 32-bit maths.
+        let mut next = 0u32;
+        assert!(reserve_span(&mut next, 200_000_000, 32, 1024 * 1024 * 256).is_none());
+        assert_eq!(next, 0);
+
+        // And the ordinary case just past a full pool.
+        let mut next = 8_000_000u32;
+        assert!(reserve_span(&mut next, 1_000_000, 32, 1024 * 1024 * 256).is_none());
+        assert_eq!(next, 8_000_000);
+    }
+
+    #[test]
+    fn a_rewrite_may_be_shorter_than_its_reservation_but_never_longer() {
+        // A terrain chunk always rewrites exactly its reserved count, but the
+        // guard is what stops one chunk's heights landing in its neighbour's
+        // span if that ever stops being true.
+        let mut spans = std::collections::HashMap::new();
+        spans.insert(64u32, 100u32);
+        assert!(span_accepts(&spans, 64, 100, "vertices"));
+        assert!(span_accepts(&spans, 64, 1, "vertices"));
+        assert!(!span_accepts(&spans, 64, 101, "vertices"));
+        assert!(!span_accepts(&spans, 65, 1, "vertices"), "offset must be a reserved span");
     }
 }
 

@@ -43,7 +43,8 @@ struct Material {
     emissive_g: f32,
     emissive_b: f32,
     emissive_map: i32,
-    _pad0: f32,
+    // Phase 25A-2: slot in the terrain-material array, or -1.
+    terrain_index: i32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -297,6 +298,13 @@ fn atlas_uv(cascade: u32, uv: vec2<f32>) -> vec2<f32> {
 /// The search can afford to be coarser: it only needs an average depth, while
 /// the filter's samples are visible as noise if too few.
 const SHADOW_BLOCKER_SAMPLES: i32 = 16;
+/// Shadow texels to push the sample along the surface normal (Phase 25L).
+///
+/// Tunable in one place because it is the whole acne/peter-panning trade: too
+/// small and a heightfield stipples itself black, too large and shadows detach
+/// from what casts them. `SOMNIUM_SHADOW_OFFSET` overrides it at runtime for
+/// finding the knee.
+const SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.5;
 const SHADOW_FILTER_SAMPLES: i32 = 24;
 
 /// Average depth of occluders above this point, or -1 if there are none.
@@ -362,16 +370,46 @@ fn sample_shadow_cascade(
     // the shadow map holds the caster and reports occlusion correctly at the
     // un-offset position — it was only ever the offset that lost it.
     //
-    // Comparing at the fragment's own position with a small depth epsilon,
-    // widened at grazing angles where a texel spans more depth, is both simpler
-    // and what the probe that found this actually did.
-    let offset_pos = world_pos;
+    // **Phase 25L: the recovery was taking the wrong vector.** A depth epsilon
+    // alone is a constant in NDC, and a cascade's NDC-to-world scale varies by
+    // orders of magnitude across the four — so an epsilon tuned to stop acne in
+    // cascade 3 detaches shadows in cascade 0, and one tuned for cascade 0 does
+    // nothing further out. On the CDLOD dataset, whose relief is metre-scale
+    // against a shadow texel covering several metres, that showed as the surface
+    // stippled black wherever a texel's stored depth belonged to a neighbouring
+    // ridge rather than to this fragment.
+    //
+    // The fix the earlier attempts wanted is a **world-space** offset of one
+    // shadow texel, and it needs the cascade's world-per-NDC scale. `ndc.x` is
+    // `dot(row0, world)`, so the gradient of NDC with respect to world position
+    // is **row** 0 of the matrix, and world units per NDC unit is the reciprocal
+    // of its length. The previous attempts took *column* 0, which for
+    // `proj * view` mixes the x, y and depth scales and is not that gradient —
+    // which is exactly why the offset came out far enough to walk the sample
+    // out of the shadow.
+    //
+    // glam is column-major, so row 0 is the `.x` of each of the first three
+    // columns.
+    let m = light.view_proj[cascade];
+    let row0 = vec3<f32>(m[0].x, m[1].x, m[2].x);
+    let world_per_ndc = 1.0 / max(length(row0), 1e-9);
+    // Each cascade occupies one quadrant of the atlas, so its own resolution is
+    // half the atlas dimension, spanning 2 NDC units.
+    let texel_world = 2.0 * world_per_ndc / (light.shadow_map_size * 0.5);
+
+    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
+    // Offset along the surface normal, widened at grazing angles where one
+    // texel spans more depth. Offsetting in the plane of the surface rather
+    // than along depth is what avoids the acne/peter-panning trade entirely.
+    let offset_pos = world_pos
+        + normal * texel_world * (1.0 + 2.0 * (1.0 - n_dot_l)) * SHADOW_NORMAL_OFFSET_TEXELS;
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
-    let compare_depth = ndc.z - (0.0005 + 0.0025 * (1.0 - n_dot_l));
+    // A much smaller residual epsilon: the normal offset now does the work, and
+    // a large depth bias on top of it is what detaches a shadow from its caster.
+    let compare_depth = ndc.z - 0.0002;
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
@@ -440,8 +478,23 @@ const CONTACT_LENGTH: f32 = 0.35;
 /// a wall extending away from the camera.
 const CONTACT_THICKNESS: f32 = 0.05;
 
-fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, pixel: vec2<f32>) -> f32 {
+fn contact_shadow(
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    light_dir: vec3<f32>,
+    pixel: vec2<f32>,
+) -> f32 {
     let step_world = CONTACT_LENGTH / f32(CONTACT_STEPS);
+
+    // Phase 25L: start the march off the surface, along the normal.
+    //
+    // The march compares its own depth against the depth buffer, and its first
+    // steps are still *on* the surface it started from. On ground seen at a
+    // grazing angle — which terrain always is — those steps land within
+    // `CONTACT_THICKNESS` of the stored depth, so the surface shadows itself as
+    // a fine stipple over everything. Offsetting by one step's worth of world
+    // space is below the scale this term exists to resolve and costs nothing.
+    let start = world_pos + normal * step_world;
 
     // Jitter the start so the march's step pattern becomes noise rather than
     // visible banding; TAA then resolves it.
@@ -450,7 +503,7 @@ fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, pixel: vec2<f32>) 
     var occluded = 0.0;
     for (var i = 1; i <= CONTACT_STEPS; i = i + 1) {
         let t = (f32(i) + jitter) * step_world;
-        let sample_pos = world_pos + light_dir * t;
+        let sample_pos = start + light_dir * t;
 
         let clip = view.view_proj * vec4<f32>(sample_pos, 1.0);
         if clip.w <= 0.0 {
@@ -497,7 +550,7 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
     // Contact shadows only ever darken. The shadow map is authoritative for
     // everything at its own scale; this fills in below that scale.
-    shadow = min(shadow, contact_shadow(world_pos, normalize(light.direction), pixel));
+    shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
 
     // Blend over the last 10% of the cascade's range.
     //
@@ -775,6 +828,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
     }
 
+    // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
+    //
+    // The only material branch terrain needs. Everything above it — decoding
+    // the visibility buffer, fetching the triangle, interpolating position,
+    // normal and UV — is the shared path, because chunks are in the global
+    // vertex pool and carry an ordinary `vertex_offset`. Everything below it is
+    // shared too, which is what finally gives terrain GTAO, contact shadows,
+    // traced sun visibility, IBL and correct cascade blending, and what stops
+    // the next lighting change having to be written twice.
+    if material.terrain_index >= 0 {
+        // Derivatives of world position, which the hex-tiled layer sampling
+        // needs explicitly. Taken here rather than inside the material because
+        // that is where the terrain UVs are derived from.
+        let world_ddx = dpdx(hit_point.xz);
+        let world_ddy = dpdy(hit_point.xz);
+        let terrain = evaluate_terrain_material(
+            u32(material.terrain_index), hit_point, geo_normal, uv,
+            world_ddx, world_ddy);
+        surface.albedo = terrain.albedo;
+        surface.roughness = terrain.roughness;
+        surface.metallic = 0.0;
+        surface.normal = terrain.normal;
+        // Phase 25K: the material's own occlusion, folded into the screen-space
+        // term the same way a glTF occlusion map is — the two know different
+        // things, and GTAO cannot see detail below a pixel.
+        surface.occlusion = surface.occlusion * terrain.occlusion;
+    }
+
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
@@ -791,6 +872,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
     if traced.a > 0.5 {
         shadow_factor = traced.r;
+    }
+
+    // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
+    // Material-path probes: a surface that renders black is either unlit or
+    // untextured, and only looking at the channels separately tells which.
+    if light._pad2_z > 8.5 && light._pad2_z < 9.5 {
+        return vec4<f32>(surface.albedo, 1.0);
+    }
+    if light._pad2_z > 9.5 && light._pad2_z < 10.5 {
+        return vec4<f32>(surface.normal * 0.5 + 0.5, 1.0);
+    }
+    if light._pad2_z > 10.5 && light._pad2_z < 11.5 {
+        if material.terrain_index >= 0 {
+            return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+        }
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
+
+    // 8 = the occlusion actually reaching the surface, greyscale.
+    //
+    // Added while chasing why toggling GTAO changed nothing on terrain: the
+    // ambient-only view read exactly zero there, which is what an occlusion of
+    // 0 produces, and only a direct look at the term could say whether that was
+    // GTAO's answer or a texture nobody had written.
+    if light._pad2_z > 7.5 && light._pad2_z < 8.5 {
+        return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
@@ -1002,6 +1109,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             vec3(1.0, 1.0, 0.3), // cascade 3 → yellow
         );
         result = mix(result, tints[cascade], 0.5);
+    }
+
+    // The terrain brush ring, after lighting because it is an editor overlay
+    // rather than a material property (Phase 25A-2).
+    if material.terrain_index >= 0 {
+        result = terrain_brush_overlay(u32(material.terrain_index), hit_point, result);
     }
 
     // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a

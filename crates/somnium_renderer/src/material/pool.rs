@@ -34,13 +34,23 @@ pub struct GpuMaterial {
     pub emissive: [f32; 3],
     /// Bindless index of the emissive texture, or -1.
     pub emissive_map: i32,
+    /// Slot in the terrain-material buffer, or -1 for anything that is not
+    /// terrain (Phase 25A-2).
+    ///
+    /// Terrain's material is a splatmap, four tiled PBR layers and a triplanar
+    /// cliff projection — thirteen textures and a handful of parameters, which
+    /// will not fit here and should not bloat every other material to try.
+    /// Instead this indexes a parallel `GpuTerrainMaterial` array, and
+    /// `shading.wgsl` takes the terrain path when it is non-negative. Occupies
+    /// what was padding, so the struct's size and alignment are unchanged.
+    pub terrain_index: i32,
     /// Explicit tail padding to a 16-byte multiple.
     ///
     /// WGSL requires the array stride of a storage-buffer element to be a
     /// multiple of its alignment, which is 16 here because of `base_color`.
     /// Adding a single f32 took the struct from 48 to 52 bytes, so the padding
     /// is spelled out rather than left to the compiler to insert silently.
-    pub _pad: [f32; 3],
+    pub _pad: [f32; 2],
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -76,6 +86,62 @@ impl MaterialPool {
         queue.write_buffer(&self.buffer, (id as usize * std::mem::size_of::<GpuMaterial>()) as u64, bytemuck::bytes_of(&material));
         
         id
+    }
+}
+
+/// Storage buffer of `GpuTerrainMaterial`, bound at `@group(0) @binding(11)`.
+///
+/// Separate from `MaterialPool` because the two are written on different
+/// schedules: ordinary materials are uploaded once at import, while a terrain's
+/// entry carries the brush cursor and the model origin and is rewritten every
+/// frame it is drawn.
+pub struct TerrainMaterialPool {
+    pub buffer: wgpu::Buffer,
+    count: u32,
+}
+
+impl TerrainMaterialPool {
+    /// Room for 16 terrains, which is well past what an editor session uses —
+    /// each one costs 34 MB of vertex pool long before this buffer matters.
+    const CAPACITY: u32 = 16;
+
+    pub fn new(device: &wgpu::Device) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terrain Material Buffer"),
+            size: Self::CAPACITY as u64
+                * std::mem::size_of::<crate::terrain::GpuTerrainMaterial>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { buffer, count: 0 }
+    }
+
+    /// Claim the next slot, or `None` when the buffer is full.
+    pub fn allocate(&mut self) -> Option<u32> {
+        if self.count >= Self::CAPACITY {
+            tracing::error!("terrain material buffer full ({} entries)", Self::CAPACITY);
+            return None;
+        }
+        let index = self.count;
+        self.count += 1;
+        Some(index)
+    }
+
+    /// Write one terrain's material for this frame.
+    pub fn write(
+        &self,
+        queue: &wgpu::Queue,
+        index: u32,
+        material: &crate::terrain::GpuTerrainMaterial,
+    ) {
+        if index >= Self::CAPACITY {
+            return;
+        }
+        queue.write_buffer(
+            &self.buffer,
+            index as u64 * std::mem::size_of::<crate::terrain::GpuTerrainMaterial>() as u64,
+            bytemuck::bytes_of(material),
+        );
     }
 }
 
@@ -156,5 +222,35 @@ mod material_flag_tests {
         // rather than left implicit for the same reason this test exists.
         assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
+    }
+
+    #[test]
+    fn the_terrain_material_is_the_144_byte_shader_layout() {
+        // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
+        // member has to land on a 16-byte offset or WGSL and repr(C) disagree
+        // and the shader silently decodes the wrong words — the failure mode
+        // that cost a whole session when `emissive` was a vec3.
+        //
+        // Phase 25L took this from 112 to 144 bytes by widening the per-layer
+        // arrays from four entries to eight. The eight-element arrays are
+        // `array<vec4<_>, 2>` on the WGSL side for the same reason: a bare
+        // `array<f32, 8>` there has a 16-byte stride and would not match.
+        use crate::terrain::GpuTerrainMaterial;
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 144);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
+
+        let m = GpuTerrainMaterial::zeroed();
+        let base = &m as *const _ as usize;
+        let offset = |p: *const u8| p as usize - base;
+        assert_eq!(offset(m.layer_tiling.as_ptr() as *const u8), 0);
+        assert_eq!(offset(m.brush.as_ptr() as *const u8), 32);
+        assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 48);
+        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 80);
+        assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 112);
+        assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 120);
+        assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 128);
+        assert_eq!(offset(&m.splat_map_hi as *const i32 as *const u8), 132);
+        assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 136);
+        assert_eq!(offset(&m.hex_tiling as *const u32 as *const u8), 140);
     }
 }

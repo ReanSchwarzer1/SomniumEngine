@@ -69,7 +69,8 @@ struct Material {
     emissive_g: f32,
     emissive_b: f32,
     emissive_map: i32,
-    _pad0: f32,
+    // Phase 25A-2: slot in the terrain-material array, or -1.
+    terrain_index: i32,
     _pad1: f32,
     _pad2: f32,
 }

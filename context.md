@@ -1,6 +1,6 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-06-12  
+> **Last updated:** 2026-08-09  
 > **Current phase:** 14 SSS (heightmap terrain — COMPLETE; chunked CDLOD-style heightmap, splatmap PBR painting, sculpting brushes, editor terrain mode. Voxel world also complete, §19)  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
@@ -1214,12 +1214,12 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17H | ✅ Complete | **Cutout foliage: alpha masks, alpha-weighted mips, and the island tree.** Three reported faults, three unrelated causes. (1) *Everything looked blue-grey.* Poly Haven ships vegetation as **alpha-cutout cards** — the diffuse atlas carries blade colour only where the mask is opaque (78% of `grass_medium_01` is near-black) and the cutout lives in a **separate `_alpha_` map their glTF never references**. Trusting the glTF meant rendering the black background as if it were the plant, leaving ambient sky as the brightest thing on screen. The loader now folds a sibling `X_alpha_2k.png` into `X_diff_2k.jpg`'s alpha channel by filename convention and promotes the material to `MASK` + double-sided; a missing sidecar is not an error. (2) *Saplings had no trunk.* `ensure_palette_mesh` kept the largest **primitive**, but a glTF node is usually several — the sapling is `branches` + `twigs`, the island tree is trunk + branches + leaves. Primitives are now grouped by node transform, the heaviest **node** wins, and all of its primitives are kept as `FoliagePart`s with a local transform. (3) *The island tree painted nothing.* Not the triangle cap, as assumed: the file lists `KHR_texture_transform` in `extensionsRequired` and the `gltf` crate rejected the import outright. Enabling the feature fixed it; failed imports are now cached so a broken model no longer retries — and stalls — on every brush dab. **Mip generation** was also wrong for cutouts: a plain box filter averages blade colour with the transparent background, so foliage darkened with distance, and averaging a binary mask drops texels under the 0.5 cutoff so coverage erodes until distant grass vanishes. Colour is now averaged **weighted by alpha**, and each level's alpha is rescaled to preserve coverage (Castaño). Both reduce exactly to the old behaviour for opaque textures. |
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
 | 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
-| 25A | ⬜ Planned | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
-| 25B | ⬜ Planned | **Terrain chunks in the TLAS.** 24J keys a BLAS per mesh by `vertex_offset`; terrain chunks never enter the draw queue it builds from, so terrain neither casts nor receives ray-traced shadows. Add committed chunk geometry as BLAS entries at the current LOD, rebuilt on sculpt. Together with 25A this is the whole of the 24K verification: a hill casting a soft traced shadow onto the valley beside it is a test that cannot pass by accident. |
+| 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
+| 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
-| 25F | ⬜ Planned | **Stochastic hex-tiling.** The strongest remaining tell that terrain is rendered rather than photographed is *repetition*: one tiled albedo at a fixed rate produces a visible grid the eye locks onto immediately, and no amount of lighting work hides it. Heitz–Neyret hex-tiling samples the same texture at three hexagonal-lattice offsets with randomised rotation and blends by barycentric weight, breaking the lattice without a second texture or a visible seam. Reference: `bgfx-master/examples/49-hextile/fs_hextile.sc`; UE's TextureGraph ships the same idea as `AdjustHexaplanar*.usf`. |
+| 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
@@ -1406,6 +1406,163 @@ would mean the material path did not survive the move.
 25A-2 has to happen for terrain to receive anything. It is a maintainability
 change *and* the visual one — there is no cheaper path to lighting on terrain.
 
+### 25.3c 25A-2 — what shipped, and the three bugs it uncovered
+
+**The chunk-reallocation question is settled: a stable per-chunk span, rewritten
+in place. No free list.** The deciding fact is that a chunk's vertex count is
+`(chunk_cells + 1)²` and never changes — sculpting rewrites height *values*, and
+a coarser LOD skips vertices through the index buffer rather than rebuilding the
+grid. So `GeometryPool` gained `reserve_vertices` / `reserve_indices` and
+`write_vertices` / `write_indices`: reserve once at terrain creation, rewrite
+forever. Free-list churn (the voxel path) was the alternative and is worse here,
+because `vertex_offset` is the key for the AABB map, the meshlet map and 25B's
+per-mesh BLAS — churning it would invalidate all three on every brush dab and
+leave the stale entries behind, since `free_mesh` does not remove them.
+`write_vertices` refreshes the AABB, which is what keeps GPU culling honest
+after a sculpt. Index data is *chunk-relative*, so one span per `(lod,
+edge_mask)` is shared by every chunk: at most 5 × 16 spans, ~2 MB.
+
+Terrain is now expanded into ordinary `DrawCommand`s before the draw sort, so it
+flows through the instance buffer, the indirect args, GPU frustum and Hi-Z
+culling, the shadow pass (**terrain casts shadows for the first time**) and the
+visibility buffer. `shading.wgsl` reconstructs its attributes with the path it
+already had; the only terrain branch is the *material*, which is what
+`terrain_material.wgsl` still holds — splat weights, height blending, triplanar
+cliffs and the brush ring. `terrain.wgsl`'s `sample_shadow`, cascade selection
+and cluster lookup are deleted along with the whole of `pass/terrain.rs`,
+including 25A-1's depth prepass, which the visibility pass now makes redundant.
+
+**Verified**: 36 469 terrain pixels in the visibility buffer at 1280×720, albedo
+0.139 (a real grass/rock value, so the bindless layer maps resolve), shadow
+factor 0.9995, plausible shading normals. 208 tests green, and shader modules
+are now naga-validated in `cargo test` — WGSL previously only compiled at
+device-creation time, so a mistake surfaced as a first-frame crash and nowhere
+else.
+
+**Three bugs found on the way, none of them in terrain:**
+
+1. **`ShadingPass::resize` rebuilt its bind group from stale texture views.** It
+   took only the new visibility view and reused the GTAO, depth and ReSTIR
+   clones captured at construction — all of which are recreated on resize. So
+   after the first window resize (the demo does three during startup) `gtao.a`
+   read 0, which zeroes `surface.occlusion`, which zeroes *both* terms of
+   `evaluate_ibl`: **no surface in the scene received any indirect light**,
+   contact shadows marched a dead depth buffer, and ReSTIR visibility read as
+   "not run". This had been the state of every session since 24I.
+2. **TLAS instances were written at the draw-queue index, not densely.** The two
+   were the same number while every draw had a BLAS; terrain chunks have none
+   until 25B, so the moment one is skipped the writes go sparse while the
+   stale-slot clear loop assumes density. The symptom was not a missing shadow
+   but an *unstable* one — two runs of one build had the terrain fully lit and
+   fully shadowed.
+3. **GTAO occludes a grazing surface with its own tangent plane.** Terrain read
+   **0.029** visibility on open ground, which is what made it render near-black
+   the first time it consumed GTAO. A sample lying in the surface's own plane is
+   the surface, not an occluder; requiring one to sit measurably above it took
+   terrain to 0.548. This is a 24I defect that terrain merely exposed — it is
+   the first large surface in the scene seen at a grazing angle.
+
+**Measurement tooling** (`capture.rs`): `SOMNIUM_CAPTURE=<file>` writes the HDR
+target back at a fixed frame index — before tone mapping, exposure and TAA — and
+labels every pixel terrain / mesh / sky from the visibility buffer.
+`SOMNIUM_CAPTURE_COMPARE=<file>` diffs against one and reports mean absolute
+luminance and changed-pixel counts *per class*. This exists because §26.4 is
+right that screen-grabbed frame deltas are unusable, and because "the image
+changed" is not the same claim as "terrain changed". `SOMNIUM_GTAO=0` is the
+switch the acceptance test always named and which did not exist; it is seeded
+into `PostProcessComponent`, not `GtaoPass`, because the component is copied
+into the pass every frame and a pass-side default never survives to frame one.
+`SOMNIUM_SHADOW_DEBUG` gained 8 = occlusion, 9 = albedo, 10 = shading normal,
+11 = terrain flag.
+
+4. **Terrain chunk winding was backwards, and `cull_mode: None` had been hiding
+   it since Phase 14.** The block-fan ring is built +X then +Z, which traces
+   *clockwise* in the XZ plane seen from above, so emitting `[center, a, b]`
+   made every terrain triangle a back face. The old terrain pass drew with
+   culling off — its comment said the winding was "uniform but unverified" —
+   so a fully back-facing surface still rendered. The visibility pass back-face
+   culls, and the moment terrain moved into it **a flat terrain rendered zero
+   pixels** and a sculpted one showed only the slopes whose underside faced the
+   camera. This is what "Create > Terrain draws nothing" was. Wound the other
+   way, with a test that takes the cross product of every emitted triangle at
+   every LOD and stitch mask and asserts `n.y > 0`.
+
+   Two process notes, because both cost real time. The bug was invisible in the
+   `SOMNIUM_TERRAIN=1` smoke test, whose sculpted hill happens to be seen from
+   beneath — so `SOMNIUM_TERRAIN=flat` now reproduces **Create > Terrain**
+   exactly (default 16×16 descriptor, no sculpting, spawned at y = 0) and is the
+   variant to verify against. And the first run after the fix still reported
+   zero, because `cargo test` builds the *test* profile: the binary
+   `Start-Process` launches is only rebuilt by `cargo build`.
+
+**Acceptance test: passing.** On the flat terrain, `SOMNIUM_GTAO=0` against
+`SOMNIUM_GTAO` unset, same build, same frame index:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 843 729 | **27.88** | **329 792 (39%)** |
+| mesh | 16 431 | 0.0000 | 0 |
+| sky | 61 440 | 0.0000 | 0 |
+
+Both runs render the identical view (843 729 terrain pixels either side), and
+sky and mesh come back bit-identical — sky is the control, since GTAO cannot
+touch it, and the helmet carries its own `occlusionTexture`, which overwrites
+the screen-space term. Only terrain moves, which is the thing 25A-1 could not
+make happen. Terrain pixels also appear in the visibility buffer, the plan's
+other clause. Sun-versus-ambient dominance is answered by the same measurement
+rather than by `SOMNIUM_SHADOW_DEBUG=7`: terrain reads 2813 cd/m², against the
+~150 that ambient alone would give at `ibl_intensity` 0.35, so the material
+survived the move sun-dominant.
+
+The earlier nondeterminism in this A/B was the TLAS slot bug above, compounded
+by a terrain that filled 4% of the frame; with both fixed the pair repeats to
+the digit.
+
+### 25.3d 25B — terrain chunks in the TLAS
+
+25A-2 already put terrain chunks in the draw queue the acceleration-structure
+build reads, so they arrived at the TLAS loop and were skipped for having no
+BLAS. 25B registers one.
+
+**The architecture came from the reference, and it is the part that mattered.**
+`bevy_solari/src/scene/blas.rs` builds a bottom-level structure only for meshes
+that were *added or modified*, and `binder.rs` then rebuilds the **top** level
+alone each frame with an empty BLAS slice. Somnium had been reissuing **every**
+BLAS every frame — affordable with a handful of meshes, and not once a terrain
+contributes 256 chunks of 8 192 triangles. `RaytracePass` now keeps a
+`pending_blas` list, `register_mesh` stores the size descriptor and offsets it
+was built with so a rebuild needs no caller state, and `mark_geometry_dirty`
+covers the case Bevy has no equivalent for: terrain chunk *contents* changing
+under a stable allocation when sculpted. `rt_geometry` is gone.
+
+**Always the full-detail, unstitched `(lod 0, mask 0)` geometry**, never the
+frame's LOD. A BLAS is sized once at creation, so its index range cannot follow
+a per-frame LOD — and it should not: a traced shadow whose shape changed as
+chunks swapped LOD would be worse than one slightly finer than what is drawn.
+`ensure_index_blocks` therefore reserves `(0, 0)` unconditionally. Chunks
+register on the frame their heights are first written and re-dirty on every
+sculpt, which is exactly the set `rebuild_dirty_chunks` now reports.
+
+**Verification.** `SOMNIUM_RT_TERRAIN=0` holds terrain out of the acceleration
+structures and changes nothing else, which isolates what the sub-phase added:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 791 798 | **17.998** | **6 945** |
+| mesh | 27 186 | 0.0000 | 0 |
+| sky | 102 616 | 0.0000 | 0 |
+
+TLAS instances go 1 → 17 (sixteen chunks plus the helmet). About 0.9% of terrain
+pixels move — the hill's shadowed strip and its contact areas, which is what a
+low sun over a mostly convex hill should change — while the helmet, already in
+the TLAS, and the sky come back bit-identical. **Only terrain changed, and the
+only new occluder is terrain**, so this is terrain shadowing terrain: the 24K
+acceptance test, which is why 24K moves to ✅ with it.
+
+The `SOMNIUM_RT_DEBUG=1` view remains the qualitative check, but it is not the
+evidence here — it writes into the HDR target after the frame capture point, and
+a screen grab of it depends on window focus. The A/B above is the measurement.
+
 **25B is unchanged** and depends only on 25A-1: once terrain depth is in the
 frame before the acceleration-structure build, terrain chunk geometry can be
 added as BLAS entries at the committed LOD, rebuilt on sculpt.
@@ -1413,17 +1570,269 @@ added as BLAS entries at the committed LOD, rebuilt on sculpt.
 **First check either way** — `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
 it cannot today.
 
+### 25.3e 25F — hex-tiling, and why it ships switched off
+
+Ported from `example_repo/bgfx-master/examples/49-hextile/fs_hextile.sc`
+(Mikkelsen's hextile-demo, after Heitz & Neyret) into `shaders/hextile.wgsl`:
+skew UV into a simplex grid, give each grid vertex a hashed offset, sample three
+times and blend by barycentric weight. `terrain_material.wgsl` uses it for the
+layer albedo and normal maps.
+
+Three things the port had to get right, and one the reference does not cover:
+
+- **`textureSampleGrad` with per-tap derivatives.** Each tap reads a different
+  part of the texture, so implicit derivatives would be taken across a
+  discontinuity and collapse mip selection into noise. The derivatives of world
+  position are taken in `shading.wgsl` where control flow is uniform and scaled
+  per layer.
+- **Sharp weights and luminance modulation**, which are what stop the blend
+  reading as a wash.
+- **Not passing textures across function boundaries.** Pulling a
+  `texture_2d<f32>` out of the binding array into a local and passing it as a
+  parameter is legal WGSL and **segfaults naga's SPIR-V backend** — the process
+  dies during pipeline creation with no diagnostic whatsoever. `hex_sample`
+  takes a bindless *index*, like every other sampling site in the engine.
+- **Normals need counter-rotating** (not in the reference, which tiles colour
+  only). A normal map stores its vector in the texture's UV frame, and each tap
+  read that texture through a different rotation; blending the raw samples
+  averages three normals that disagree about which way "along U" points.
+
+**The measurement says do not enable it yet.** Rendered side by side on the flat
+terrain, the plain path shows *no findable grid*, and the hex-tiled path shows
+its own lattice faintly. The cause is content, not code: the four layers are
+**procedural, tileable, low-contrast noise** generated in `textures.rs`, so there
+is no repetition to remove, while the technique's own tile boundaries do shift
+each patch's mean slightly. Two rounds of tuning improved but did not remove
+that — first dropping rotation to the reference's own default (`hextile.cpp`
+ships `m_tileRotationStrength = 0.0f`; at 1.0 the simplex lattice was plainly
+visible as hard triangular seams), then softening the weight exponent, gain and
+luminance bias.
+
+So it is implemented, cited, validated and **off by default**, behind
+`SOMNIUM_HEXTILE=1`. The A/B confirms it is wired correctly: 805 993 of 845 018
+terrain pixels change with mesh and sky bit-identical, and mean terrain
+luminance moves 0.08% (2815.9 → 2813.6) — the blend redistributes detail without
+raising the mean, which is the check that the luminance modulation is not
+washing the texture out. Turn it on when the layers are photographed rather than
+generated; **25D**'s detail clipmap and **25J**'s file-based layers are what
+bring that, and 25F should be re-judged then.
+
+### 25.5 17E remainder — status
+
+- **Transmission reaching foliage: already done**, in 24S rather than in a
+  separate change, and the 17E note above is stale on this point. `load_gltf`
+  infers `transmission = 0.5` when a sibling `*_alpha_*` cutout mask exists
+  (`somnium_asset/src/lib.rs`), `upload_scene` carries it into `GpuMaterial`, and
+  `shading.wgsl`'s `transmitted_light` consumes it. The chain is complete.
+- **Hemispherical leaf normals: not done.** The cheap form — blending the
+  geometric normal toward the direction from the instance origin to the hit
+  point, which needs no new data since `instance.model` is already in the shader
+  — was left unwritten deliberately: the demo has no way to *show* foliage
+  without painting it by hand in the editor, so the change could not be
+  verified, and an unverifiable shader change to foliage is exactly what this
+  phase has been paying for. It needs either a scripted foliage scene (the
+  natural companion to `SOMNIUM_TERRAIN=flat`) or the editor.
+- **Bark roughness: not done**, same reason.
+
+### 25.6 25K — photographed terrain materials
+
+Content, not code, was the blocker. 25F had nothing to fix and 25E had no height
+map, because the four layers were procedural tileable noise generated in
+`textures.rs`.
+
+**Eight CC0 materials from Poly Haven** (`aerial_grass_rock`, `leafy_grass`,
+`forrest_ground_01`, `brown_mud`, `aerial_rocks_04`, `snow_02`,
+`coast_sand_rocks_02`, `gravel_floor`) at 4K, fetched by
+`tools/fetch_terrain_textures.sh` and channel-packed by
+`somnium_asset --example pack_terrain`. `aerial_rocks_04` is deliberately the
+texture the bgfx hex-tile example ships with, so 25F can be judged against the
+material its own reference was tuned on.
+
+**Four source maps become two textures**, which is the decision everything else
+follows from:
+
+| packed texture  | R        | G        | B         | A      |
+|-----------------|----------|----------|-----------|--------|
+| `*_albedo.png`  | albedo R | albedo G | albedo B  | height |
+| `*_surface.png` | normal X | normal Y | roughness | AO     |
+
+Memory is the obvious reason — a 4K RGBA8 array with mips is ~350 MB, and two
+arrays is half of four. The one that matters more is **sample count**: the
+terrain shader samples every layer for every pixel, and 25F triples whatever it
+samples. Normal Z is reconstructed as `sqrt(1 - x² - y²)`, exact for a unit
+normal and what BC5 would force anyway; metalness is dropped because terrain
+layers are dielectric.
+
+Three things came out of the O3DE reference (`Gems/Terrain/Assets/Shaders/`):
+`DetailMaterialData`'s shape of per-map bindless indices plus per-map factors;
+`AppendHeightToWeight`, which is 25E and needs the real height map this phase
+delivers; and **`MaxAnisotropy = 16`** on its detail sampler — ground is the one
+surface always seen at a grazing angle, where an isotropic mip is chosen for the
+shorter axis and smears everything along the longer one. That is now on the
+shading sampler and is a large part of why detail survives to the horizon.
+
+Also here: the layer arrays are built **with a mip chain**. They were
+`mip_level_count: 1`, which was survivable for smooth noise and is pure aliasing
+for photographed detail. The mip filter is a plain box, deliberately *not* the
+alpha-weighted one `renderer.rs` uses for glTF — alpha there is cutout coverage,
+alpha here is a height map, and weighting albedo by it would darken every layer
+toward its own crevices.
+
+**Load resolution defaults to 2K** (`SOMNIUM_TERRAIN_RES=4096` for full detail):
+4K across two arrays is ~700 MB of VRAM. The committed assets are 4K so the
+detail is there when BC compression makes it affordable. Codec crates are pinned
+to `opt-level = 3` in the dev profile — `image` in debug is ~2 orders slower and
+decoding the layers exceeded a 90-second timeout before that.
+
+`assets/terrain/_source/` is git-ignored and re-derivable; only the packed result
+is committed. The procedural generator is kept as a fallback, because a clone
+without ~650 MB of assets must still start.
+
+**This settled 25F.** With procedural layers there was no repetition to remove
+and hex-tiling only showed its own lattice, so it shipped off. With photographed
+layers the tiling grid is immediately visible as bands marching to the horizon,
+and hex-tiling removes them. Same code, same parameters, opposite verdict,
+decided entirely by the content — so **25F is now on by default**.
+
+**Not done:** the eight materials are loaded and packed but only **four are
+wired**, because the splatmap is RGBA8 and hard-caps the layer count. Going to
+eight needs a second splatmap and touches `Splatmap`, the paint brush,
+`auto_splat`, the `TerrainEditCmd` undo payloads in `somnium_core`, foliage layer
+filtering and the inspector — a change across three crates that wants the editor
+to verify, so it is its own step rather than a rushed tail on this one.
+
+### 25.7 25L — eight layers, and a real heightmap
+
+**Eight materials, two splatmaps.** Fyrox gives every layer its own mask texture
+(`scene/terrain/mod.rs`, `Layer::mask_property_name`), which has no ceiling at
+all; packing four masks per RGBA texture is the same idea at a quarter of the
+bindings, and two textures is where the cost stops being free. All eight of
+25K's materials are now wired: grass, forest floor, rock, snow, meadow, mud,
+sand, gravel.
+
+The splat texel became a named type — `textures::SplatTexel` — because it
+crosses a crate boundary: the editor's `TerrainEditCmd` undo payloads carry
+blocks of them, and a bare `[u8; 4]` in `somnium_core` is exactly the kind of
+thing that silently disagrees after a widening. The `.somnium` terrain sidecar
+gained a version check for the same reason; a v1 file's splat block is a
+different size and is now refused rather than misread.
+
+**Layers are weight-gated, so eight are cheaper than four were.** Splat weights
+are sparse — two or three materials meet at any texel and the rest are zero — so
+`LAYER_WEIGHT_EPSILON` skips sampling a layer that cannot change the result. A
+fixed 16 samples (48 with hex-tiling) becomes the four or six that contribute.
+This is only legal because the terrain path samples with explicit derivatives
+throughout: `textureSampleGrad` has no uniformity requirement where
+`textureSample` inside that branch would be undefined.
+
+**Auto-splat assigns all eight** from altitude, slope and a low-frequency noise.
+The noise is what keeps the two grasses and the forest floor from laying down as
+horizontal altitude bands — a real hillside does not change species on a contour
+line.
+
+**Heightmaps load.** `terrain/heightmap.rs` reads 16-bit PNG, any other image
+the engine decodes, and CDLOD's `.tbmp`; `SOMNIUM_HEIGHTMAP=<path>` in the demo,
+with procedural FBM relief as the default so terrain is landscape rather than a
+plain even with no asset. Terrain has had a heightmap field since Phase 14 and
+no way to fill it except the sculpt brush.
+
+Two bugs found on the way, both in the same function, and both worth recording:
+
+1. **The resample point-sampled.** CDLOD's dataset is 4096×2048 against a 1025²
+   grid, so bilinear taps landed four source texels apart. That is the same
+   mistake as a texture without mips and far more destructive on a heightmap,
+   because the aliasing becomes *geometry*. Now area-averaged over the footprint
+   each destination vertex owns.
+2. **`.tbmp` is a *tiled* bitmap, and I decoded it as linear rows.** The header
+   is `[pixelFormat, width, height, version, blockDim]`; word 4 is 256, and
+   `256 + 4096 × 2048 × 2` happens to equal the file length exactly, so "word 4
+   is the header size" fitted the evidence perfectly and was wrong — it is
+   `blockDim`, and the header is always 256 bytes. The file stores 256×256
+   tiles (`TiledBitmap::GetBlockStartPos`). Read row-wise it produced regular
+   horizontal terraces separated by black walls. **A size check is not a format
+   check**, and the answer was in `TiledBitmap.cpp` the whole time — the name of
+   the class was the warning.
+
+The procedural-relief render is what isolated it: same mesh, LOD and material
+path, smooth landscape, so the fault had to be in the loader rather than
+anywhere downstream.
+
+**Known artefact:** the CDLOD render carries small black speckles across the
+surface — most likely shadow acne, since terrain began casting shadows in 25A-2
+and this dataset has metre-scale relief that the cascades cannot resolve.
+`SOMNIUM_SHADOW_DEBUG=1` will confirm or rule it out in one run; it does not
+appear on the smoother FBM relief.
+
+### 25.8 Terrain self-shadowing — three causes, only one of them the shadow map
+
+The CDLOD render came out stippled with black patches. `SOMNIUM_SHADOW_DEBUG=1`
+confirmed they were `shadow_factor` reaching zero, and the obvious reading —
+shadow acne — was wrong twice over.
+
+**The shadow map was not the source.** A normal-offset bias was added first,
+fixing the recovery 24H got wrong: `ndc.x` is `dot(row0, world)`, so the
+world-per-NDC scale is the reciprocal of **row** 0's length, where the earlier
+attempts took *column* 0 of `proj * view`, which mixes the x, y and depth
+scales. That is a real correction and it is kept — but pushing the offset to 24
+texels, far past peter-panning, changed the image **not at all**, which is what
+proved the shadow map innocent.
+
+The two actual causes were both surfaces intersecting themselves, and both
+reached terrain for the first time in 25A-2:
+
+1. **ReSTIR's shadow ray started inside the terrain.** Its origin is
+   reconstructed from the depth buffer and its `t_min` was a flat 5 cm — far
+   below the world footprint of a pixel at any distance, so the ray re-hit the
+   surface it left. `t_min` now scales with that footprint, measured by
+   reconstructing the neighbouring pixel, which needs no new uniforms and is
+   exactly the scale of both the reconstruction error and the slope offset.
+   This is what the large elongated patches were; disabling ReSTIR removed them
+   and left something different behind, which is how the two were separated.
+2. **The contact-shadow march started on the surface.** Its first steps sit
+   within `CONTACT_THICKNESS` of the depth buffer's own value on ground seen at
+   a grazing angle, so terrain shadowed itself as a fine stipple everywhere.
+   The march now starts one step along the surface normal.
+
+Worth recording as a method point: three plausible mechanisms, and the fix for
+the most plausible one was ruled out by making it absurdly large and seeing
+nothing change. Toggling ReSTIR was what actually split the remaining two.
+
+### 25.9 The default scene
+
+**Create > Terrain** builds the same thing: a new terrain arrives with relief
+and its eight materials already assigned, rather than as a flat plain that has
+to be sculpted before it looks like anything. The source of that relief lives in
+`TerrainData::apply_default_relief` — env override, then the shipped CDLOD
+dataset, then procedural FBM — and **not** in either caller, because a fallback
+chain written twice across two crates is one that will disagree. Choosing a
+heightmap at creation is a UI-phase job; this is the default that dialog will
+start from.
+
+`hello_engine` now spawns terrain **by default** — the editor's own
+Create > Terrain geometry, with `assets/terrain/heightmap.tbmp` (CDLOD's
+dataset, MIT, attributed in `assets/LICENSE.md`) and all eight materials
+auto-splatted by altitude and slope. `SOMNIUM_TERRAIN` selects a variant rather
+than enabling it: `1` is the legacy sculpted 4x4 smoke test that exercises the
+brush paths, `0`/`none` disables terrain. `SOMNIUM_HEIGHTMAP` overrides the
+file, and procedural FBM relief is the fallback when it is missing, so a clone
+without assets still gets landscape rather than a plain.
+
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:
 
-- **25A** — the same scene with `SOMNIUM_GTAO=0/1` must differ *on terrain*, which
-  it cannot today. Terrain pixels appear in the visibility buffer debug view.
-- **25B** — `SOMNIUM_RT_DEBUG=1` shows a terrain hill's shadow cast across terrain.
-  This is the 24K acceptance test; 24K stays 🟡 until it passes.
+- **25A** — ✅ passing. `SOMNIUM_GTAO=0/1` on `SOMNIUM_TERRAIN=flat`: terrain
+  moves by 27.88 mean absolute luminance over 843 729 pixels (39% of them past
+  the 1% threshold) while sky and mesh come back bit-identical. See §25.3c.
+- **25B** — ✅ passing. `SOMNIUM_RT_TERRAIN=0/1` moves 6 945 terrain pixels by
+  17.998 mean absolute luminance while mesh and sky stay bit-identical, with the
+  TLAS going 1 → 17 instances. The only new occluder is terrain, so this is
+  terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
+  See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
 - **25F** — a flat plain from a high camera: the tiling grid must not be findable.
-- Every sub-phase keeps `cargo test --workspace` green, currently 198 tests.
+- Every sub-phase keeps `cargo test --workspace` green, currently 209 tests.
 
 ---
 

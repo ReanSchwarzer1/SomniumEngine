@@ -56,7 +56,7 @@ struct TerrainStroke {
     terrain_id:    u32,
     is_paint:      bool,
     start_heights: Vec<f32>,
-    start_texels:  Vec<[u8; 4]>,
+    start_texels:  Vec<somnium_renderer::terrain::textures::SplatTexel>,
     /// Union of all touched (vertex or texel) regions, inclusive.
     region:        Option<(u32, u32, u32, u32)>,
 }
@@ -1148,7 +1148,7 @@ impl<G: GameApp> Engine<G> {
         let (x0, z0, x1, z1) = region;
         let cmd: Box<dyn crate::editor_commands::EditorCommand> = if stroke.is_paint {
             let row_w = terrain.splatmap.width;
-            let extract = |data: &[[u8; 4]]| -> Vec<[u8; 4]> {
+            let extract = |data: &[somnium_renderer::terrain::textures::SplatTexel]| -> Vec<somnium_renderer::terrain::textures::SplatTexel> {
                 let mut out = Vec::with_capacity(((x1 - x0 + 1) * (z1 - z0 + 1)) as usize);
                 for z in z0..=z1 {
                     let start = (z * row_w + x0) as usize;
@@ -1774,6 +1774,20 @@ impl<G: GameApp> Engine<G> {
                 let terrain_id = renderer.create_terrain(render_ctx, desc);
                 let [wx, wz] = desc.world_size();
 
+                // Phase 25L: a new terrain arrives with relief and materials
+                // already on it, rather than as a flat plain the user has to
+                // sculpt before it looks like anything. The heightmap is fixed
+                // for now; choosing one at creation is a UI-phase job, which is
+                // why the source lives behind `apply_default_relief` rather
+                // than being spelled out here.
+                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                    let amplitude = somnium_renderer::terrain::DEFAULT_RELIEF_METRES;
+                    let source = terrain.apply_default_relief(amplitude);
+                    // Assigns all eight materials by altitude and slope.
+                    somnium_renderer::terrain::brush::auto_splat(terrain, amplitude * 0.62);
+                    info!("Created terrain ({wx}x{wz} m, heightmap: {source})");
+                }
+
                 let snapshot = EntitySnapshot {
                     // Center the terrain footprint on the world origin.
                     transform: Some(Transform::from_translation(glam::Vec3::new(
@@ -1865,7 +1879,8 @@ impl<G: GameApp> Engine<G> {
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
                                 },
                             );
                             self.default_material_id = Some(id);

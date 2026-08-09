@@ -268,7 +268,8 @@ impl VoxelTerrain {
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
             },
         );
 
@@ -593,17 +594,62 @@ impl GameApp for HelloGame {
         // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
         // meshing, LODs, sculpt brushes, and auto-splat without editor input.
         // Normally terrain is created via Create > Terrain in the editor.
-        if std::env::var("SOMNIUM_TERRAIN").is_ok() {
+        // `SOMNIUM_TERRAIN=flat` reproduces **Create > Terrain** instead: the
+        // default 16x16-chunk descriptor, no sculpting, spawned at y = 0. The
+        // sculpted 4x4 variant is not a substitute — it was the only thing
+        // 25A-2 was verified against, and the editor-created terrain turned out
+        // not to render even though that one did.
+        // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
+        // now selects a variant rather than enabling it:
+        //   unset / "flat" — the editor's own **Create > Terrain** geometry: the
+        //       default 16x16-chunk descriptor at y = 0, with a heightmap and
+        //       all eight materials auto-splatted by altitude and slope.
+        //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
+        //       is what exercises the brush paths without editor input.
+        //   "0" / "none"   — no terrain, for isolating everything else.
+        //
+        // The sculpted variant is deliberately not the default: it was the only
+        // thing 25A-2 was verified against, and the editor-created terrain
+        // turned out not to render at all even though that one did.
+        let terrain_mode = std::env::var("SOMNIUM_TERRAIN").unwrap_or_default();
+        let flat_terrain = terrain_mode != "1";
+        if terrain_mode != "0" && terrain_mode != "none" {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                 use somnium_renderer::terrain::{brush, TerrainDescriptor};
-                let desc = TerrainDescriptor {
-                    grid_size: [4, 4],
-                    ..Default::default()
+                let desc = if flat_terrain {
+                    TerrainDescriptor::default()
+                } else {
+                    TerrainDescriptor { grid_size: [4, 4], ..Default::default() }
                 };
                 let terrain_id = renderer.create_terrain(render_ctx, desc);
                 let [wx, wz] = desc.world_size();
 
-                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                // Phase 25L: real relief, so the eight materials have altitudes
+                // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
+                // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
+                // terrain gets procedural FBM hills, which is still landscape
+                // rather than the flat plain every earlier test scene used.
+                if flat_terrain {
+                    let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(somnium_renderer::terrain::DEFAULT_RELIEF_METRES);
+                    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                        // The same path Create > Terrain takes, so the demo
+                        // scene and an editor-created terrain cannot diverge.
+                        terrain.apply_default_relief(amplitude);
+                        // Assign all eight materials by altitude and slope.
+                        brush::auto_splat(terrain, amplitude * 0.62);
+                    }
+                    // The default camera sits at y = 2, which is now inside a
+                    // hillside rather than above a plain. Put it over the
+                    // terrain looking down the slope.
+                    self.camera.position = Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45);
+                    self.camera.yaw = -90.0;
+                    self.camera.pitch = -22.0;
+                }
+
+                if let Some(terrain) = renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain) {
                     // Sculpt a hill and a valley to exercise the brush paths.
                     let raise = brush::TerrainBrush {
                         mode: brush::BrushMode::Raise,
@@ -625,7 +671,11 @@ impl GameApp for HelloGame {
                 }
 
                 ctx.world.spawn((
-                    Transform::from_translation(Vec3::new(-wx * 0.5, -6.0, -wz * 0.5)),
+                    Transform::from_translation(Vec3::new(
+                        -wx * 0.5,
+                        if flat_terrain { 0.0 } else { -6.0 },
+                        -wz * 0.5,
+                    )),
                     Name::new("Terrain"),
                     WorldTransform::identity(),
                     somnium_core::TerrainComponent {
@@ -951,7 +1001,8 @@ impl GameApp for HelloGame {
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
                     },
                 );
 
@@ -1234,7 +1285,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -1248,7 +1300,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
         },
     );
 
@@ -1306,7 +1359,8 @@ fn spawn_procedural_scene(ctx: &mut EngineContext) -> (u32, somnium_renderer::ge
                 transmission: 0.0,
                 emissive: [0.0; 3],
                 emissive_map: -1,
-                _pad: [0.0; 3],
+                terrain_index: -1,
+                _pad: [0.0; 2],
             },
         )
     };

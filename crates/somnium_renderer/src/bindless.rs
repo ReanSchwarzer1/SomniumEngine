@@ -41,6 +41,8 @@ pub struct GlobalResourcePool {
     pub material_buffer: wgpu::Buffer,
     /// Directional light buffer (binding 6) — 320 bytes, `GpuDirectionalLight`.
     pub light_buffer: wgpu::Buffer,
+    /// Phase 25A-2: `array<GpuTerrainMaterial>` (binding 11).
+    pub terrain_material_buffer: wgpu::Buffer,
 
     /// Phase 13C: Cluster grid buffers (bindings 7–10).
     pub cluster_grid: ClusterGrid,
@@ -58,6 +60,7 @@ impl GlobalResourcePool {
         view_proj_buffer: &wgpu::Buffer,
         material_buffer: &wgpu::Buffer,
         light_buffer: &wgpu::Buffer,
+        terrain_material_buffer: &wgpu::Buffer,
     ) -> Self {
         let cluster_grid = ClusterGrid::new(device);
 
@@ -180,6 +183,19 @@ impl GlobalResourcePool {
                     },
                     count: None,
                 },
+                // Phase 25A-2, binding 11: array<GpuTerrainMaterial>. Terrain
+                // shades in `shading.wgsl` now, and its splat/layer parameters
+                // are too large to fit in `Material`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -248,6 +264,10 @@ impl GlobalResourcePool {
                     binding: 10,
                     resource: cluster_grid.params_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: terrain_material_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -260,6 +280,7 @@ impl GlobalResourcePool {
             view_proj_buffer: view_proj_buffer.clone(),
             material_buffer: material_buffer.clone(),
             light_buffer: light_buffer.clone(),
+            terrain_material_buffer: terrain_material_buffer.clone(),
             cluster_grid,
             texture_views: (0..MAX_BINDLESS_TEXTURES).map(|_| dummy_view.clone()).collect(),
         }
@@ -315,6 +336,10 @@ impl GlobalResourcePool {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: self.cluster_grid.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.terrain_material_buffer.as_entire_binding(),
                 },
             ],
         });

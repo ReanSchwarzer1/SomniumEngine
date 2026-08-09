@@ -995,6 +995,44 @@ Modules that Phase 24 draws on:
 | 24R area lights (LTC) | `bevy_pbr/src/ltc/` |
 | 24S transmission / SSS | `bevy_pbr/src/transmission/`, `medium.rs` |
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
+| 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
+
+**25L heightmaps and layer masks.** `CDLOD-master/source/BasicCDLOD/TiledBitmap/
+TiledBitmap.{h,cpp}` was read for Phase 25L and supplied the `.tbmp` header
+layout and tiled block ordering that `terrain/heightmap.rs` decodes
+(`TiledBitmap::Open`, `GetBlockStartPos`). MIT, © 2010 Filip Strugar — the same
+reference the chunked LOD scheme came from in Phase 14. Its
+`TestData/maintestdata/heightmap.tbmp` is the dataset the loader was verified
+against; the file is read from `example_repo` and is not redistributed here.
+`fyrox-impl/src/scene/terrain/mod.rs` (`Layer`) supplied the per-layer mask
+model that the two-splatmap, eight-layer arrangement packs.
+
+**25F hex-tiling.** `bgfx-master/examples/49-hextile/fs_hextile.sc` and
+`hextile.cpp` were read for Phase 25F and ported into
+`crates/somnium_renderer/src/shaders/hextile.wgsl` — the simplex triangle grid,
+`LoadRot2x2`, `MakeCenST`, the hash, `Gain3`, and the luminance-modulated weight
+blend. bgfx is BSD-2-Clause and the example is itself a port of Mikkelsen's
+`hextile-demo`, after Heitz & Neyret's paper, which is the technique's real
+citation. `ProduceHexWeights` is not ported (it only colours a debug view), and
+`hex_sample_normal` has no counterpart there: the reference tiles colour only,
+so it never has to counter-rotate a tangent-space normal. `hextile.cpp` also
+supplied the default rotation strength of **0**, which turned out to matter more
+than any other parameter.
+
+**25B note.** `bevy_solari/src/scene/blas.rs` was read directly for Phase 25B and
+settled the architecture rather than a detail. Its `prepare_raytracing_blas`
+builds a bottom-level structure only for meshes that were *added or modified*,
+keying them in a `BlasManager` map, and `binder.rs` then rebuilds the **top**
+level alone each frame with an empty BLAS slice
+(`build_acceleration_structures(&[], [&tlas])`). Somnium had been reissuing every
+BLAS every frame, which was invisible with a handful of meshes and becomes
+untenable the moment a terrain contributes 256 chunks. Somnium's version keys on
+`vertex_offset` rather than an asset id — it has no asset system — and adds an
+explicit `mark_geometry_dirty` for terrain, whose chunk *contents* change under a
+stable allocation when sculpted; Bevy has no equivalent because a modified mesh
+there is a new allocation. Its BLAS **compaction** queue
+(`compact_raytracing_blas`) is deliberately not ported: it is a memory
+optimisation, and the right time to take it is when memory is the problem.
 
 Rules for using it, consistent with the `example_repo/` policy at the end of this file:
 

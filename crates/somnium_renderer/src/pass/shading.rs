@@ -146,6 +146,13 @@ impl ShadingPass {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            // Phase 25K. O3DE's terrain detail sampler runs at MaxAnisotropy 16
+            // (`TerrainMaterialSrg.azsli`) and the reason is terrain-shaped:
+            // ground is the one surface always seen at a grazing angle, where
+            // an isotropic mip is chosen for the *shorter* axis and smears
+            // everything along the longer one. Trilinear alone turns a
+            // photographed layer to mush a few metres out.
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
@@ -164,13 +171,19 @@ impl ShadingPass {
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../shaders/brdf.wgsl"),
             // Phase 24G: Vogel disk and gradient noise, used by PCSS.
             include_str!("../shaders/sampling.wgsl"),
             // Phase 24C: the background samples the atmosphere-generated
             // cubemap and adds sharp sky detail analytically.
             include_str!("../shaders/atmosphere.wgsl"),
+            // Phase 25F: stochastic hex-tiling, used by the terrain material
+            // below to break the visible repetition of a tiled layer.
+            include_str!("../shaders/hextile.wgsl"),
+            // Phase 25A-2: terrain's splat/triplanar material, which is all
+            // that survives of the separate terrain pass.
+            include_str!("../shaders/terrain_material.wgsl"),
             include_str!("../shaders/shading.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -290,7 +303,32 @@ impl ShadingPass {
         })
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, visibility_view: &wgpu::TextureView) {
+    /// Rebuild the bind group after a resize.
+    ///
+    /// **Every resolution-dependent view has to be passed in again.** This used
+    /// to take only the visibility view and rebuild the rest from the clones
+    /// captured at construction — but GTAO, the depth buffer and the ReSTIR
+    /// target all recreate their textures on resize, so those clones pointed at
+    /// textures nothing wrote to any more.
+    ///
+    /// The result was silent and total: `gtao.a` read 0, which zeroes
+    /// `surface.occlusion`, which zeroes both terms of `evaluate_ibl` — so
+    /// after the first window resize *no surface in the scene received any
+    /// indirect light*, contact shadows marched a dead depth buffer, and ReSTIR
+    /// visibility read as "not run". The demo resizes three times during
+    /// startup, so this was the state in every session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        visibility_view: &wgpu::TextureView,
+        gtao_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        restir_view: &wgpu::TextureView,
+    ) {
+        self.gtao_view = gtao_view.clone();
+        self.depth_view = depth_view.clone();
+        self.restir_view = restir_view.clone();
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,

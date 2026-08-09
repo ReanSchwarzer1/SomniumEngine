@@ -12,6 +12,7 @@
 //! mark the touched chunks (or splat rows) dirty; the renderer re-uploads on
 //! the next frame.
 
+use super::textures::TERRAIN_LAYER_COUNT;
 use super::TerrainData;
 
 /// What the brush does (Phase 14D-1).
@@ -213,8 +214,11 @@ pub fn apply_paint(
             touched = true;
             let texel = &mut terrain.splatmap.data[(zi * sw + xi) as usize];
             let add = (brush.strength * falloff * dt * 510.0) as i32;
-            let mut w = [texel[0] as i32, texel[1] as i32, texel[2] as i32, texel[3] as i32];
-            w[layer] = (w[layer] + add).min(255 * 4);
+            let mut w: [i32; TERRAIN_LAYER_COUNT as usize] =
+                std::array::from_fn(|i| texel[i] as i32);
+            // Headroom so a held brush keeps pulling weight toward this layer
+            // after normalisation instead of saturating against the others.
+            w[layer] = (w[layer] + add).min(255 * TERRAIN_LAYER_COUNT as i32);
             // Renormalize to sum 255 (Phase 14E-1 step 2).
             let sum: i32 = w.iter().sum::<i32>().max(1);
             for (out, wi) in texel.iter_mut().zip(w) {
@@ -250,20 +254,33 @@ pub fn auto_splat(terrain: &mut TerrainData, snow_height: f32) {
             // Surface slope angle from the gradient magnitude.
             let slope_deg = ((hx * hx + hz * hz).sqrt() / (2.0 * e)).atan().to_degrees();
 
-            // Weights: rock ramps in over 30–50°, snow over height, dirt in
-            // the 20–35° transition, grass takes the remainder.
-            let rock = smoothstep(30.0, 50.0, slope_deg);
-            let snow = smoothstep(snow_height - 2.0, snow_height + 2.0, h) * (1.0 - rock);
-            let dirt = smoothstep(15.0, 30.0, slope_deg) * (1.0 - rock) * (1.0 - snow);
-            let grass = (1.0 - rock - snow - dirt).max(0.0);
+            // Phase 25L: eight materials assigned from altitude, slope and a
+            // low-frequency noise. The noise is what keeps the two grasses and
+            // the forest floor from laying down as horizontal altitude bands —
+            // a real hillside does not change species on a contour line.
+            let n = super::heightmap::value_noise(px * 0.01, pz * 0.01, 4242);
+            let n2 = super::heightmap::value_noise(px * 0.023, pz * 0.023, 991);
 
-            let sum = (grass + dirt + rock + snow).max(0.001);
-            terrain.splatmap.data[(zi * sw + xi) as usize] = [
-                (grass / sum * 255.0) as u8,
-                (dirt / sum * 255.0) as u8,
-                (rock / sum * 255.0) as u8,
-                (snow / sum * 255.0) as u8,
-            ];
+            let rock = smoothstep(32.0, 52.0, slope_deg);
+            let gravel = smoothstep(16.0, 32.0, slope_deg) * (1.0 - rock);
+            let snow = smoothstep(snow_height - 3.0, snow_height + 3.0, h) * (1.0 - rock);
+            // Beaches and wet ground sit at the bottom of the range.
+            let low = 1.0 - smoothstep(1.0, 6.0, h);
+            let sand = low * (1.0 - gravel) * (1.0 - rock) * smoothstep(0.35, 0.65, n);
+            let mud = low * (1.0 - gravel) * (1.0 - rock) * (1.0 - smoothstep(0.35, 0.65, n));
+
+            // Whatever the special cases leave behind is ground cover, split
+            // between two grasses and forest floor by the noise.
+            let cover = (1.0 - rock - gravel - snow - sand - mud).max(0.0);
+            let forest = cover * smoothstep(0.55, 0.8, n2);
+            let grass = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * (1.0 - n);
+            let meadow = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * n;
+
+            // Order must match LAYER_NAMES / LAYER_MATERIALS.
+            let weights = [grass, forest, rock, snow, meadow, mud, sand, gravel];
+            let sum: f32 = weights.iter().sum::<f32>().max(0.001);
+            terrain.splatmap.data[(zi * sw + xi) as usize] =
+                std::array::from_fn(|i| (weights[i] / sum * 255.0) as u8);
         }
     }
     terrain.splatmap.mark_dirty(0, 0, sw - 1, sh - 1);

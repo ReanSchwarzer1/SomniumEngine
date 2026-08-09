@@ -111,15 +111,27 @@ fn sample_sun_direction(seed: ptr<function, u32>) -> vec3<f32> {
     return normalize(dir + tangent * (r * cos(theta)) + bitangent * (r * sin(theta)));
 }
 
+/// How many pixel-footprints to push the ray start away from the surface.
+///
+/// Phase 25L. The origin is reconstructed from the depth buffer, so it carries
+/// that buffer's precision error *and* sits wherever the pixel's centre lands on
+/// a surface that may be nearly edge-on. A fixed 5 cm `t_min` is far below both
+/// once the surface is more than a few metres away: the ray restarts inside the
+/// geometry it came from and reports itself as its own occluder. On terrain that
+/// showed as elongated black patches following the slopes — the artefact was in
+/// the traced visibility, not in the shadow map, which is why no amount of
+/// shadow-map bias touched it.
+const RAY_BIAS_FOOTPRINTS: f32 = 6.0;
+
 /// Trace a shadow ray. True when something blocks it.
-fn occluded(origin: vec3<f32>, dir: vec3<f32>) -> bool {
+fn occluded(origin: vec3<f32>, dir: vec3<f32>, t_min: f32) -> bool {
     var rq: ray_query;
     rayQueryInitialize(
         &rq,
         accel,
         // Terminate on first hit: a shadow ray only needs to know whether
         // anything is in the way, not what or how far.
-        RayDesc(0x4u, 0xffu, 0.05, 10000.0, origin, dir),
+        RayDesc(0x4u, 0xffu, t_min, 10000.0, origin, dir),
     );
     rayQueryProceed(&rq);
     return rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE;
@@ -158,6 +170,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world = params.inv_view_proj * ndc;
     let origin = world.xyz / world.w;
 
+    // World size of one pixel at this depth: reconstruct the neighbour and
+    // measure. That is the scale of both the reconstruction error and of how
+    // far the true surface can sit from this point on a grazing slope, so it is
+    // the right unit for the ray's start offset — and it needs no extra
+    // uniforms, unlike a camera position or a per-pixel normal.
+    let uv_dx = (vec2<f32>(coord) + vec2<f32>(1.5, 0.5)) * params.inv_resolution;
+    let ndc_dx = vec4<f32>(uv_dx.x * 2.0 - 1.0, 1.0 - uv_dx.y * 2.0, depth, 1.0);
+    let world_dx = params.inv_view_proj * ndc_dx;
+    let footprint = length(world_dx.xyz / world_dx.w - origin);
+    let ray_t_min = max(0.05, footprint * RAY_BIAS_FOOTPRINTS);
+
     var seed = index * 9781u + params.frame * 6271u;
 
     // ── Initial candidates ──────────────────────────────────────────────────
@@ -182,7 +205,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ── Visibility ──────────────────────────────────────────────────────────
     // One ray, for the sample that survived resampling.
-    if r.w > 0.0 && occluded(origin, r.sample_dir) {
+    if r.w > 0.0 && occluded(origin, r.sample_dir, ray_t_min) {
         // The running total has to go with the weight. Zeroing `w` alone left
         // `w_sum` holding the candidates' contribution, and the temporal
         // combine below recomputes `w = w_sum / (m * p_hat)` from it — which

@@ -24,12 +24,26 @@ struct MeshBlas {
     blas: wgpu::Blas,
     /// Kept so the TLAS build can be skipped when nothing references it.
     index_count: u32,
+    /// The geometry this BLAS was sized for, so a rebuild can reissue it
+    /// without the caller having to remember (Phase 25B).
+    size: wgpu::BlasTriangleGeometrySizeDescriptor,
+    vertex_offset: u32,
+    index_offset: u32,
 }
 
 pub struct RaytracePass {
     /// `None` when the device did not grant ray query.
     tlas: Option<wgpu::Tlas>,
     blas: HashMap<u32, MeshBlas>,
+    /// Bottom-level structures whose geometry changed and must be (re)built.
+    ///
+    /// Phase 25B. `build` used to reissue **every** BLAS every frame, which was
+    /// affordable only because the scene held a handful of meshes; terrain adds
+    /// 256 chunks of 8 192 triangles each and it stops being affordable
+    /// immediately. Bevy's `BlasManager` builds only meshes that were added or
+    /// modified and rebuilds the top level alone per frame
+    /// (`bevy_solari/src/scene/blas.rs`, `binder.rs`), which is what this is.
+    pending_blas: Vec<u32>,
     layout: Option<wgpu::BindGroupLayout>,
     bind_group: Option<wgpu::BindGroup>,
     supported: bool,
@@ -51,6 +65,7 @@ impl RaytracePass {
             return Self {
                 tlas: None,
                 blas: HashMap::new(),
+                pending_blas: Vec::new(),
                 layout: None,
                 bind_group: None,
                 supported: false,
@@ -80,6 +95,7 @@ impl RaytracePass {
         Self {
             tlas: Some(tlas),
             blas: HashMap::new(),
+            pending_blas: Vec::new(),
             layout: Some(layout),
             bind_group: None,
             supported: true,
@@ -135,27 +151,49 @@ impl RaytracePass {
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
             wgpu::BlasGeometrySizeDescriptors::Triangles {
-                descriptors: vec![size],
+                descriptors: vec![size.clone()],
             },
         );
 
-        let _ = index_offset;
-        self.blas.insert(vertex_offset, MeshBlas { blas, index_count });
+        self.blas.insert(
+            vertex_offset,
+            MeshBlas { blas, index_count, size, vertex_offset, index_offset },
+        );
+        self.pending_blas.push(vertex_offset);
     }
 
-    /// Build every registered BLAS, and a TLAS from `instances`.
+    /// Mark an already-registered BLAS as needing a rebuild (Phase 25B).
+    ///
+    /// Terrain is the first geometry in the engine whose *contents* change
+    /// without its allocation changing: a sculpt stroke rewrites a chunk's
+    /// heights in place, keeping the same `vertex_offset`, vertex count and
+    /// index range. The BLAS is still correctly sized, so it needs rebuilding
+    /// rather than recreating — which is also why the chunk spans are stable
+    /// (see the note in `geometry.rs`).
+    pub fn mark_geometry_dirty(&mut self, vertex_offset: u32) {
+        if self.supported
+            && self.blas.contains_key(&vertex_offset)
+            && !self.pending_blas.contains(&vertex_offset)
+        {
+            self.pending_blas.push(vertex_offset);
+        }
+    }
+
+    /// Build any BLAS whose geometry changed, and a TLAS from `instances`.
     ///
     /// `instances` is `(vertex_offset, model matrix)`, matching what the draw
     /// queue already carries, so the traced scene and the rasterised one cannot
     /// drift apart.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The bottom level is rebuilt **only for geometry that changed** — see
+    /// `pending_blas`. Reissuing every BLAS per frame was affordable with a
+    /// handful of meshes and is not with a terrain's worth of chunks.
     pub fn build(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
-        geometry: &[(u32, u32, u32, u32)],
         instances: &[(u32, glam::Mat4)],
     ) {
         if !self.supported {
@@ -166,57 +204,49 @@ impl RaytracePass {
         };
 
         // ── Bottom level ────────────────────────────────────────────────────
-        // Every geometry entry is (vertex_offset, vertex_count, index_offset,
-        // index_count) into the shared pool. Both buffers are the engine's
-        // single global pools, so a BLAS is described by offsets rather than by
-        // owning any memory of its own.
-        let mut entries = Vec::new();
-        let mut sizes = Vec::new();
-        for &(vertex_offset, vertex_count, index_offset, index_count) in geometry {
-            if !self.blas.contains_key(&vertex_offset) {
-                continue;
-            }
-            sizes.push((
-                vertex_offset,
-                wgpu::BlasTriangleGeometrySizeDescriptor {
-                    vertex_format: wgpu::VertexFormat::Float32x3,
-                    vertex_count,
-                    index_format: Some(wgpu::IndexFormat::Uint32),
-                    index_count: Some(index_count),
-                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                },
-                index_offset,
-            ));
-        }
-
-        for (vertex_offset, size, index_offset) in &sizes {
-            let Some(mesh) = self.blas.get(vertex_offset) else {
-                continue;
-            };
-            entries.push(wgpu::BlasBuildEntry {
+        // A BLAS is described by offsets into the engine's single global
+        // vertex and index pools rather than owning any memory of its own, so
+        // rebuilding one is just re-reading the range it was registered with.
+        let pending = std::mem::take(&mut self.pending_blas);
+        let entries: Vec<wgpu::BlasBuildEntry> = pending
+            .iter()
+            .filter_map(|offset| self.blas.get(offset))
+            .map(|mesh| wgpu::BlasBuildEntry {
                 blas: &mesh.blas,
                 geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
                     wgpu::BlasTriangleGeometry {
-                        size,
+                        size: &mesh.size,
                         vertex_buffer,
                         // Positions are the first 12 bytes of the 32-byte
                         // vertex, so the whole interleaved pool can be used
                         // directly — no separate position-only copy.
-                        first_vertex: *vertex_offset,
+                        first_vertex: mesh.vertex_offset,
                         vertex_stride: std::mem::size_of::<somnium_asset::Vertex>() as u64,
                         index_buffer: Some(index_buffer),
-                        first_index: Some(*index_offset),
+                        first_index: Some(mesh.index_offset),
                         transform_buffer: None,
                         transform_buffer_offset: None,
                     },
                 ]),
-            });
-        }
+            })
+            .collect();
 
         // ── Top level ───────────────────────────────────────────────────────
+        // Slots are filled densely, by `count` rather than by the draw's index
+        // in the queue. Those were the same number while every draw had a BLAS;
+        // Phase 25A-2 put terrain chunks in the draw queue, and they have none
+        // until 25B, so the two diverge the moment one is skipped.
+        //
+        // Writing at the queue index instead left holes and, worse, put live
+        // instances beyond `count` — which the clear loop below then treats as
+        // leftovers and wipes, or misses entirely on a shorter frame. The
+        // symptom was not a missing shadow but an *unstable* one: two runs of
+        // the same build had the terrain fully lit and fully shadowed, because
+        // whether the helmet survived into the TLAS depended on how many
+        // terrain chunks sorted ahead of it.
         let mut count = 0u32;
-        for (slot, (vertex_offset, model)) in instances.iter().enumerate() {
-            if slot as u32 >= MAX_TLAS_INSTANCES {
+        for (vertex_offset, model) in instances.iter() {
+            if count >= MAX_TLAS_INSTANCES {
                 break;
             }
             let Some(mesh) = self.blas.get(vertex_offset) else {
@@ -236,7 +266,7 @@ impl RaytracePass {
                 m[2], m[6], m[10], m[14],
             ];
 
-            tlas[slot] = Some(wgpu::TlasInstance::new(
+            tlas[count as usize] = Some(wgpu::TlasInstance::new(
                 &mesh.blas,
                 transform,
                 // Custom data carries the mesh identity, so a hit can find its

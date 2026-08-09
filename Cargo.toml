@@ -99,3 +99,21 @@ rfd = "0.15"
 
 # -- Utilities ---------------------------------------------------------------
 rand = "0.8"
+
+# Phase 25K: decode image codecs at full optimisation even in a debug build.
+#
+# The engine runs in debug for development, and `image` in debug is roughly two
+# orders of magnitude slower — decoding the terrain layers took longer than a
+# 90-second timeout, and the glTF demo scene already spent ~7 s here. These are
+# third-party leaf crates nobody steps through, so optimising them costs no
+# debuggability at all.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
