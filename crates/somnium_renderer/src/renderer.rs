@@ -553,7 +553,30 @@ impl SomniumRenderer {
         scene: &somnium_asset::LoadedScene,
     ) -> Vec<UploadedNode> {
         // 1. Textures --------------------------------------------------------
-        let texture_indices: Vec<Option<i32>> = scene.textures.iter().map(|tex| {
+        //
+        // **Only colour maps are sRGB** (Phase 17E remainder). Every imported
+        // texture used to be uploaded as `Rgba8UnormSrgb`, including normal,
+        // metallic-roughness/ARM and occlusion maps — none of which are colour.
+        // The sRGB decode then bent all of them: an authored roughness of 0.5
+        // arrives as ~0.21, so *every imported material read glossier than it
+        // was made*, which is what the 17E note recorded as "bark roughness";
+        // normal maps were skewed the same way, weakening all surface detail.
+        //
+        // Usage comes from the materials rather than from the file, because
+        // glTF images carry no colour-space flag — how a texture is referenced
+        // is the only thing that says what it means.
+        let mut is_colour = vec![false; scene.textures.len()];
+        for m in &scene.materials {
+            for slot in [m.albedo_map, m.emissive_map] {
+                if let Some(i) = slot {
+                    if let Some(flag) = is_colour.get_mut(i) {
+                        *flag = true;
+                    }
+                }
+            }
+        }
+
+        let texture_indices: Vec<Option<i32>> = scene.textures.iter().enumerate().map(|(tex_index, tex)| {
             // Full mip chain. Without it, minified textures alias badly — the
             // sampler asks for trilinear filtering but a single level leaves
             // nothing to filter between, so detailed materials shimmer at
@@ -569,7 +592,11 @@ impl SomniumRenderer {
                 mip_level_count,
                 sample_count:     1,
                 dimension:        wgpu::TextureDimension::D2,
-                format:           wgpu::TextureFormat::Rgba8UnormSrgb,
+                format:           if is_colour.get(tex_index).copied().unwrap_or(true) {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
                 usage:            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats:     &[],
             });
@@ -642,6 +669,10 @@ impl SomniumRenderer {
                 ),
                 flags: if mat.double_sided {
                     crate::material::pool::MATERIAL_FLAG_DOUBLE_SIDED
+                } else {
+                    0
+                } | if mat.foliage {
+                    crate::material::pool::MATERIAL_FLAG_FOLIAGE
                 } else {
                     0
                 },

@@ -56,6 +56,13 @@ pub struct GpuMaterial {
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
 pub const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 1;
 
+/// `GpuMaterial::flags` bit 1 — vegetation (Phase 17E).
+///
+/// Deliberately separate from `transmission`, which glass carries too: only a
+/// leaf should get the curved-card normal treatment in `shading.wgsl`. The
+/// shader tests `(flags & 2u)`.
+pub const MATERIAL_FLAG_FOLIAGE: u32 = 1 << 1;
+
 /// Manages a pool of materials in a GPU storage buffer.
 pub struct MaterialPool {
     pub buffer: wgpu::Buffer,

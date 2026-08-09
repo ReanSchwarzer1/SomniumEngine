@@ -997,6 +997,15 @@ Modules that Phase 24 draws on:
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
 | 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
 
+**17E foliage curved normals.** `SpartanEngine-master/data/shaders/g_buffer.hlsl`
+was read for the 17E remainder and supplied the curved-card normal treatment in
+`shading.wgsl` — rotating the shading normal about the along-card axis by an
+angle taken from the position across the card's width. MIT. Spartan drives it
+from a `width_percent` vertex attribute and applies it to grass blades and
+flowers by material type; Somnium takes the angle from `uv.x`, which on a
+foliage card is the same quantity, and gates it on a material flag set at
+import. Its vegetation *colour* variation is not ported.
+
 **25L heightmaps and layer masks.** `CDLOD-master/source/BasicCDLOD/TiledBitmap/
 TiledBitmap.{h,cpp}` was read for Phase 25L and supplied the `.tbmp` header
 layout and tiled block ordering that `terrain/heightmap.rs` decodes

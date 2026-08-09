@@ -1818,6 +1818,55 @@ file, and procedural FBM relief is the fallback when it is missing, so a clone
 without assets still gets landscape rather than a plain.
 
 
+### 25.10 17E remainder — closed
+
+Three items were outstanding. **Two were already done and the note was stale**,
+which is worth recording as a pattern: transmission reached foliage back in 24S
+via the `*_alpha_*` sidecar inference, and bark roughness is data-driven —
+every Poly Haven foliage material wires its ARM map as
+`metallicRoughnessTexture`, so roughness has always come from the green
+channel. Checking the glTF JSON took a minute and saved implementing both.
+
+But checking *why* bark still looked wrong found a real bug, and a much larger
+one than bark:
+
+**Every imported glTF texture was uploaded as `Rgba8UnormSrgb`** — including
+normal, metallic-roughness/ARM and occlusion maps, none of which are colour.
+The sRGB decode bent all of them: an authored roughness of 0.5 arrives as
+~0.21, so *every imported material in the engine read glossier than it was
+made*, and normal maps were skewed the same way, weakening all surface detail.
+That is what the 17E note recorded as "bark roughness", and it applied equally
+to the helmet and to every model imported since Phase 10. Texture usage is now
+collected from the materials — glTF images carry no colour-space flag, so how a
+texture is *referenced* is the only thing that says what it means — and only
+albedo and emissive are sRGB.
+
+**Hemispherical leaf normals** are ported from
+`SpartanEngine-master/data/shaders/g_buffer.hlsl` ("foliage curved normals"):
+rotate the normal about the axis running along the card, by an angle taken from
+how far across the card's width the pixel sits, so a flat leaf shades as a
+curved one instead of a flat plate. Spartan carries a `width_percent` vertex
+attribute for this; Somnium needs no such attribute, because on a foliage card
+`uv.x` **is** the distance across the blade. Gated on a new
+`MATERIAL_FLAG_FOLIAGE` rather than on `transmission`, since glass is
+transmissive too and must not be bent into a leaf.
+
+**`SOMNIUM_FOLIAGE=1` scatters foliage without the editor**, which is what
+unblocked the whole item. Painting by hand was the only way to get a plant on
+screen, so the foliage shading work could not be seen, let alone measured — the
+reason this sat open across two sessions. Strokes are deterministic, so an A/B
+of a foliage shading change is now like-for-like. The scene also needs an
+enabled `FoliageComponent` on the terrain entity and a camera at eye level:
+foliage is culled past 120 m (17G) and a tuft is sub-pixel from the landscape
+camera, which is why the first two attempts scattered 25 733 instances and
+showed nothing.
+
+**Honest limit:** the curved normals are implemented, flagged and active, but
+their visual delta at tuft scale is subtle and was not isolated with an A/B —
+there is no runtime toggle for them. The sRGB fix is the change with the
+objectively verifiable mechanism.
+
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:

@@ -828,6 +828,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
     }
 
+    // ── Foliage: curved card normals (Phase 17E) ─────────────────────────────
+    //
+    // A leaf or blade is modelled as a flat card, so every pixel across it
+    // shares one normal and the whole card lights as a flat plate — the tell
+    // that vegetation is cardboard rather than a plant. Real leaves are curved,
+    // and a curved surface fans its normals across its width.
+    //
+    // Ported from `SpartanEngine-master/data/shaders/g_buffer.hlsl`, its
+    // "foliage curved normals": rotate the normal about the axis running along
+    // the card by an angle taken from how far across the card's *width* the
+    // pixel sits. Spartan carries a `width_percent` vertex attribute for this;
+    // Somnium has no such attribute and does not need one — on a foliage card
+    // `uv.x` **is** the distance across the blade, which is what makes this
+    // free here.
+    //
+    // Gated on `MATERIAL_FLAG_FOLIAGE` rather than on `transmission`, because
+    // glass is transmissive too and must not be bent into a leaf.
+    if (material.flags & 2u) != 0u {
+        // ±60° across the card, matching the reference's 120° span.
+        let curve = clamp((uv.x - 0.5) * 2.0943951, -1.5707963, 1.5707963);
+        // The axis along the card's length: perpendicular to both the face
+        // normal and the direction the UV's x runs in.
+        let axis = normalize(cross(surface.normal, tangent));
+        let c = cos(curve);
+        let s = sin(curve);
+        // Rodrigues' rotation of the normal about that axis.
+        surface.normal = normalize(
+            surface.normal * c
+            + cross(axis, surface.normal) * s
+            + axis * dot(axis, surface.normal) * (1.0 - c)
+        );
+    }
+
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
     //
     // The only material branch terrain needs. Everything above it — decoding
