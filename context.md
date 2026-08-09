@@ -1435,6 +1435,89 @@ currently matched inline in `hello_engine`), string tables with runtime locale
 switching, and video playback for cutscenes. References: Flax `Input`,
 `Localization`, `Video`.
 
+### 26.2b Second pass — O3DE, Falco, NeoAxis, Overload
+
+The first pass leaned on Flax and Wicked and only skimmed these four. Going back
+through them changes the plan in three places and adds five systems that were
+missed entirely.
+
+**O3DE is the richest reference of all of them, and was under-used.** Its ~80
+Gems are a catalogue of what a full engine contains, and several are systems
+Somnium has no equivalent of and that were absent from the first plan:
+
+| Gem | What it covers |
+|---|---|
+| `EMotionFX` + `MotionMatching` | Production animation, including **motion matching** — well beyond a blend tree |
+| `Prefab` | **Prefabs / nested instancing.** Somnium has no prefab concept at all |
+| `Maestro` | **Cinematics and a sequencer** — track view, keyframed properties |
+| `Vegetation` + `GradientSignal` + `SurfaceData` + `LandscapeCanvas` | **Rule-driven procedural scattering.** Far past Phase 17's brush: gradients, surface tags, exclusion, a node graph to author it |
+| `NvCloth`, `AtomTressFX` | **Cloth and hair/fur simulation** |
+| `ScriptCanvas` + `ScriptEvents` + `GraphCanvas` + `GraphModel` | Visual scripting, and a reusable node-graph editor framework |
+| `LyShine` + `UiBasics` + `TextureAtlas` | Runtime UI with atlasing |
+| `RecastNavigation`, `Multiplayer`, `Profiler`, `Streamer` | Confirm Phases 30, 32, 29, 28 |
+| `WhiteBox` | Level blockout modelling in-editor |
+| `SaveData`, `LocalUser`, `GameState` | The game-framework layer — save slots, profiles, state stack |
+| `DiffuseProbeGrid`, `Meshlets`, `SkyAtmosphere`, `Stars` | Already covered by Phase 24 |
+
+**Falco** is a complete worked example of the thing Phase 16 has been vague
+about: a **C# scripting API over a C++ engine**. `FalcoEngine/API/` mirrors the
+engine as managed `Components`, `Assets`, `Input`, `Math`, `UI`, `PostProcessing`
+namespaces, and `FalcoEngine/Editor/` carries a matching `*Editor2.cpp` per
+component type. It is Unity's architecture, small enough to read end to end —
+worth studying for the binding boundary and the per-component inspector pattern
+rather than for any single feature.
+
+**NeoAxis** ships `RoslynPad`, meaning **C# compiled and hot-reloaded inside the
+editor**, plus a component/property model driving generated UI. The relevant idea
+for Somnium is the reflection-driven inspector: properties declare themselves and
+the editor draws them, instead of every component needing hand-written panel code
+the way Somnium's inspector does today.
+
+**Overload** is the smallest and cleanest of the eight — `OvRendering`,
+`OvCore`, `OvUI`, `OvWindowing`, `OvPhysics`, `OvAudio`, `OvTools`, `OvDebug`,
+`OvEditor`, `OvGame`, `OvMaths`. No standout feature; its value is as a model of
+**module boundaries** for an engine this size, which is a fair comparison point
+for how Somnium's nine crates are drawn.
+
+### 26.2c Revisions to the plan
+
+Three changes, and five additions:
+
+- **Phase 26 (UI) gains a reflection-driven inspector.** From NeoAxis and Falco:
+  components describe their own properties and the editor generates panels. This
+  is not cosmetic — every new component in Somnium currently needs inspector
+  code written by hand, which is why the Foliage panel ended up with a cycler
+  rather than a popup in 17G.
+- **Phase 27 (animation) gains motion matching** as a later sub-phase, from
+  O3DE `MotionMatching`. EMotionFX joins Esoterica as the primary reference.
+- **Phase 30** is confirmed as Recast/Detour-based by three independent engines.
+
+**New phases:**
+
+- **Phase 34 — Prefabs and scene composition.** Nested prefab instances,
+  overrides, propagation. Somnium can save a flat scene and nothing else. This is
+  arguably more urgent than several planned phases: without it there is no way to
+  reuse anything built in the editor. Reference: O3DE `Prefab`.
+- **Phase 35 — Procedural scattering, rule-driven.** Replaces the brush-only
+  model of 17A/17F with gradients, surface tags, slope and altitude rules, and
+  exclusion volumes. Reference: O3DE `Vegetation` + `GradientSignal` +
+  `SurfaceData`, authored through `LandscapeCanvas`. Pairs naturally with
+  Phase 25 terrain.
+- **Phase 36 — Cinematics and sequencer.** Keyframed properties, camera cuts,
+  event tracks. Reference: O3DE `Maestro`.
+- **Phase 37 — Cloth and hair.** Reference: O3DE `NvCloth`, `AtomTressFX`,
+  Wicked `wiHairParticle`.
+- **Phase 38 — Game framework.** Save slots, user profiles, a game state
+  stack. Small, and the difference between an engine and a tech demo. Reference:
+  O3DE `SaveData`, `LocalUser`, `GameState`.
+
+**Revised order:** 26 (UI, now including the reflection-driven inspector), 29
+(profiler), **34 (prefabs)**, 27 (animation), 28 (asset pipeline), 35
+(scattering, alongside Phase 25), then 31, 30, 36, 37, 38, 33, with 32 last.
+
+Prefabs move early on the same reasoning as UI: both decide whether the engine
+can be *used* to build something, as opposed to what it can display.
+
 ### 26.3 Renderer items still worth taking from Flax
 
 Four things Flax has that Phase 24 does not, all in deferred-GI territory:
