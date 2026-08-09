@@ -123,8 +123,6 @@ pub struct SomniumRenderer {
     pub raytrace_pass: crate::pass::raytrace::RaytracePass,
     rt_debug_pass: crate::pass::raytrace::RtDebugPass,
     pub restir_pass: crate::pass::restir::RestirPass,
-    /// Geometry registered for tracing: (vertex_offset, vertex_count, index_offset, index_count).
-    rt_geometry: Vec<(u32, u32, u32, u32)>,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -476,7 +474,6 @@ impl SomniumRenderer {
             raytrace_pass,
             rt_debug_pass,
             restir_pass,
-            rt_geometry: Vec::new(),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -677,12 +674,6 @@ impl SomniumRenderer {
                     alloc.index_offset,
                     alloc.index_count,
                 );
-                self.rt_geometry.push((
-                    alloc.vertex_offset,
-                    mesh.vertices.len() as u32,
-                    alloc.index_offset,
-                    alloc.index_count,
-                ));
                 alloc
             })
             .collect();
@@ -1313,14 +1304,49 @@ impl SomniumRenderer {
         // same shadow pass — which is also the first time terrain casts a
         // shadow — and the same visibility buffer, where `shading.wgsl` picks
         // it up. There is no terrain pass left to run at the end of the frame.
+        let mut rebuilt_chunks: Vec<u32> = Vec::new();
         for &(id, model) in &self.terrain_queue {
             let terrain = &mut self.terrains[id as usize];
             terrain.model = model;
             let local_cam = model.inverse().transform_point3(self.camera_pos);
             terrain.select_lods(local_cam);
-            terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry);
+            rebuilt_chunks.clear();
+            terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut rebuilt_chunks);
             terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
             terrain.splatmap.upload_dirty(&ctx.queue);
+
+            // Phase 25B: terrain enters the ray-traced scene. A chunk's BLAS is
+            // registered the first time its heights are written and rebuilt
+            // whenever they change, which is exactly the set the rebuild above
+            // just reported — so a sculpt stroke moves the traced surface with
+            // the drawn one instead of leaving a shadow of the old ground.
+            //
+            // Always the full-detail, unstitched geometry, never the frame's
+            // LOD: a BLAS is sized once, and a traced shadow that changed shape
+            // as chunks swapped LOD would be worse than one slightly finer than
+            // what is drawn.
+            // `SOMNIUM_RT_TERRAIN=0` keeps terrain out of the acceleration
+            // structures while changing nothing else, which is the A/B that
+            // isolates what 25B added: with it, terrain both casts and receives
+            // traced shadows; without it, the TLAS holds the same scene 24J saw.
+            if self.raytrace_pass.supported()
+                && !rebuilt_chunks.is_empty()
+                && std::env::var("SOMNIUM_RT_TERRAIN").as_deref() != Ok("0")
+            {
+                if let Some((rt_index_offset, rt_index_count)) = terrain.rt_index_block() {
+                    let vertex_count = terrain.chunk_vertex_capacity();
+                    for &vertex_offset in &rebuilt_chunks {
+                        self.raytrace_pass.register_mesh(
+                            &ctx.device,
+                            vertex_offset,
+                            vertex_count,
+                            rt_index_offset,
+                            rt_index_count,
+                        );
+                        self.raytrace_pass.mark_geometry_dirty(vertex_offset);
+                    }
+                }
+            }
             self.terrain_materials
                 .write(&ctx.queue, terrain.terrain_index, &terrain.gpu_material());
 
@@ -1573,24 +1599,23 @@ impl SomniumRenderer {
         // second time, from whatever LOD state the previous frame left behind.
 
         // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
-        // Rebuilt each frame from the same draw queue the raster path uses, so
-        // the traced scene and the drawn one cannot drift apart.
+        // The top level is rebuilt each frame from the same draw queue the
+        // raster path uses, so the traced scene and the drawn one cannot drift
+        // apart. Bottom-level structures are rebuilt only where the geometry
+        // changed — a sculpt stroke, or a mesh's first frame (Phase 25B).
         if self.raytrace_pass.supported() {
             let instances: Vec<(u32, glam::Mat4)> = self
                 .draw_queue
                 .iter()
                 .map(|cmd| (cmd.vertex_offset, cmd.transform))
                 .collect();
-            let geometry = std::mem::take(&mut self.rt_geometry);
             self.raytrace_pass.build(
                 &ctx.device,
                 &mut encoder,
                 &self.geometry.vertex_buffer,
                 &self.geometry.index_buffer,
-                &geometry,
                 &instances,
             );
-            self.rt_geometry = geometry;
 
             // Phase 24K: traced direct lighting. Here because it needs the TLAS
             // built above and the depth the visibility pass filled, and because
@@ -1686,8 +1711,9 @@ impl SomniumRenderer {
             if let Some(d) = terrain_draws.first() {
                 let aabb = self.geometry.mesh_aabb(d.vertex_offset);
                 tracing::info!(
-                    "CAPTURE-TERRAIN draws={} first: v_off={} i_off={} i_count={} origin={:?} aabb={:?}",
+                    "CAPTURE-TERRAIN draws={} tlas_instances={} first: v_off={} i_off={} i_count={} origin={:?} aabb={:?}",
                     terrain_draws.len(),
+                    self.raytrace_pass.instance_count(),
                     d.vertex_offset,
                     d.index_offset,
                     d.index_count,

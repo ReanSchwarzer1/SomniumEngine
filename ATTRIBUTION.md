@@ -995,6 +995,22 @@ Modules that Phase 24 draws on:
 | 24R area lights (LTC) | `bevy_pbr/src/ltc/` |
 | 24S transmission / SSS | `bevy_pbr/src/transmission/`, `medium.rs` |
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
+| 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
+
+**25B note.** `bevy_solari/src/scene/blas.rs` was read directly for Phase 25B and
+settled the architecture rather than a detail. Its `prepare_raytracing_blas`
+builds a bottom-level structure only for meshes that were *added or modified*,
+keying them in a `BlasManager` map, and `binder.rs` then rebuilds the **top**
+level alone each frame with an empty BLAS slice
+(`build_acceleration_structures(&[], [&tlas])`). Somnium had been reissuing every
+BLAS every frame, which was invisible with a handful of meshes and becomes
+untenable the moment a terrain contributes 256 chunks. Somnium's version keys on
+`vertex_offset` rather than an asset id — it has no asset system — and adds an
+explicit `mark_geometry_dirty` for terrain, whose chunk *contents* change under a
+stable allocation when sculpted; Bevy has no equivalent because a modified mesh
+there is a new allocation. Its BLAS **compaction** queue
+(`compact_raytracing_blas`) is deliberately not ported: it is a memory
+optimisation, and the right time to take it is when memory is the problem.
 
 Rules for using it, consistent with the `example_repo/` policy at the end of this file:
 

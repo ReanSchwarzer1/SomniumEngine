@@ -507,16 +507,22 @@ impl TerrainData {
 
     /// Regenerate vertices for dirty chunks and rewrite their pool spans
     /// (Phase 14B-1, moved into the global pool by 25A-2).
+    /// `rewritten` collects the pool vertex offset of every chunk this call
+    /// touched, so the caller can rebuild whatever else depends on the
+    /// geometry — in Phase 25B, the chunk's bottom-level acceleration
+    /// structure, which is otherwise built once and never notices a sculpt.
     pub fn rebuild_dirty_chunks(
         &mut self,
         queue: &wgpu::Queue,
         pool: &mut crate::geometry::GeometryPool,
+        rewritten: &mut Vec<u32>,
     ) {
         let desc = self.desc;
         for chunk in &mut self.chunks {
             if !chunk.dirty || chunk.vertex_offset == UNALLOCATED {
                 continue;
             }
+            rewritten.push(chunk.vertex_offset);
             let vertices = mesh::build_chunk_vertices(
                 &self.heightmap,
                 desc.total_vertices_x(),
@@ -553,8 +559,16 @@ impl TerrainData {
         pool: &mut crate::geometry::GeometryPool,
     ) {
         let cells = self.desc.chunk_cells;
-        for i in 0..self.chunks.len() {
-            let key = (self.chunks[i].lod, self.chunks[i].edge_mask);
+        // `(0, 0)` unconditionally: it is the geometry the ray-tracing BLAS is
+        // built from (Phase 25B), and it must exist whether or not any chunk
+        // happens to be drawing at full detail with no stitching this frame.
+        // A BLAS is sized once at creation, so its index range cannot follow
+        // the per-frame LOD — and it should not: traced shadows that popped
+        // with LOD would be worse than ones that are slightly too detailed.
+        let keys: Vec<(u8, u8)> = std::iter::once((0u8, 0u8))
+            .chain(self.chunks.iter().map(|c| (c.lod, c.edge_mask)))
+            .collect();
+        for key in keys {
             if self.index_blocks.contains_key(&key) {
                 continue;
             }
@@ -570,6 +584,17 @@ impl TerrainData {
     /// Read-only lookup of the `(index_offset, index_count)` for a `(lod, mask)`.
     pub fn index_block(&self, lod: u8, mask: u8) -> Option<(u32, u32)> {
         self.index_blocks.get(&(lod, mask)).copied()
+    }
+
+    /// The geometry every chunk's ray-tracing BLAS is built from (Phase 25B):
+    /// full detail, no edge stitching, identical for every chunk.
+    pub fn rt_index_block(&self) -> Option<(u32, u32)> {
+        self.index_block(0, 0)
+    }
+
+    /// Vertices in one chunk's grid — what a chunk BLAS is sized for.
+    pub fn chunk_vertex_capacity(&self) -> u32 {
+        self.chunk_vertex_capacity
     }
 
     // ── Raycast (Phase 14D-2 step 1) ─────────────────────────────────────────

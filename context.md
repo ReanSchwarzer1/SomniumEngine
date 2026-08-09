@@ -1215,7 +1215,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
 | 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
-| 25B | ⬜ Planned | **Terrain chunks in the TLAS.** 24J keys a BLAS per mesh by `vertex_offset`; terrain chunks never enter the draw queue it builds from, so terrain neither casts nor receives ray-traced shadows. Add committed chunk geometry as BLAS entries at the current LOD, rebuilt on sculpt. Together with 25A this is the whole of the 24K verification: a hill casting a soft traced shadow onto the valley beside it is a test that cannot pass by accident. |
+| 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
@@ -1518,6 +1518,51 @@ The earlier nondeterminism in this A/B was the TLAS slot bug above, compounded
 by a terrain that filled 4% of the frame; with both fixed the pair repeats to
 the digit.
 
+### 25.3d 25B — terrain chunks in the TLAS
+
+25A-2 already put terrain chunks in the draw queue the acceleration-structure
+build reads, so they arrived at the TLAS loop and were skipped for having no
+BLAS. 25B registers one.
+
+**The architecture came from the reference, and it is the part that mattered.**
+`bevy_solari/src/scene/blas.rs` builds a bottom-level structure only for meshes
+that were *added or modified*, and `binder.rs` then rebuilds the **top** level
+alone each frame with an empty BLAS slice. Somnium had been reissuing **every**
+BLAS every frame — affordable with a handful of meshes, and not once a terrain
+contributes 256 chunks of 8 192 triangles. `RaytracePass` now keeps a
+`pending_blas` list, `register_mesh` stores the size descriptor and offsets it
+was built with so a rebuild needs no caller state, and `mark_geometry_dirty`
+covers the case Bevy has no equivalent for: terrain chunk *contents* changing
+under a stable allocation when sculpted. `rt_geometry` is gone.
+
+**Always the full-detail, unstitched `(lod 0, mask 0)` geometry**, never the
+frame's LOD. A BLAS is sized once at creation, so its index range cannot follow
+a per-frame LOD — and it should not: a traced shadow whose shape changed as
+chunks swapped LOD would be worse than one slightly finer than what is drawn.
+`ensure_index_blocks` therefore reserves `(0, 0)` unconditionally. Chunks
+register on the frame their heights are first written and re-dirty on every
+sculpt, which is exactly the set `rebuild_dirty_chunks` now reports.
+
+**Verification.** `SOMNIUM_RT_TERRAIN=0` holds terrain out of the acceleration
+structures and changes nothing else, which isolates what the sub-phase added:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 791 798 | **17.998** | **6 945** |
+| mesh | 27 186 | 0.0000 | 0 |
+| sky | 102 616 | 0.0000 | 0 |
+
+TLAS instances go 1 → 17 (sixteen chunks plus the helmet). About 0.9% of terrain
+pixels move — the hill's shadowed strip and its contact areas, which is what a
+low sun over a mostly convex hill should change — while the helmet, already in
+the TLAS, and the sky come back bit-identical. **Only terrain changed, and the
+only new occluder is terrain**, so this is terrain shadowing terrain: the 24K
+acceptance test, which is why 24K moves to ✅ with it.
+
+The `SOMNIUM_RT_DEBUG=1` view remains the qualitative check, but it is not the
+evidence here — it writes into the HDR target after the frame capture point, and
+a screen grab of it depends on window focus. The A/B above is the measurement.
+
 **25B is unchanged** and depends only on 25A-1: once terrain depth is in the
 frame before the acceleration-structure build, terrain chunk geometry can be
 added as BLAS entries at the committed LOD, rebuilt on sculpt.
@@ -1532,8 +1577,11 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 - **25A** — ✅ passing. `SOMNIUM_GTAO=0/1` on `SOMNIUM_TERRAIN=flat`: terrain
   moves by 27.88 mean absolute luminance over 843 729 pixels (39% of them past
   the 1% threshold) while sky and mesh come back bit-identical. See §25.3c.
-- **25B** — `SOMNIUM_RT_DEBUG=1` shows a terrain hill's shadow cast across terrain.
-  This is the 24K acceptance test; 24K stays 🟡 until it passes.
+- **25B** — ✅ passing. `SOMNIUM_RT_TERRAIN=0/1` moves 6 945 terrain pixels by
+  17.998 mean absolute luminance while mesh and sky stay bit-identical, with the
+  TLAS going 1 → 17 instances. The only new occluder is terrain, so this is
+  terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
+  See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
 - **25F** — a flat plain from a high camera: the tiling grid must not be findable.
 - Every sub-phase keeps `cargo test --workspace` green, currently 209 tests.
