@@ -1774,6 +1774,20 @@ impl<G: GameApp> Engine<G> {
                 let terrain_id = renderer.create_terrain(render_ctx, desc);
                 let [wx, wz] = desc.world_size();
 
+                // Phase 25L: a new terrain arrives with relief and materials
+                // already on it, rather than as a flat plain the user has to
+                // sculpt before it looks like anything. The heightmap is fixed
+                // for now; choosing one at creation is a UI-phase job, which is
+                // why the source lives behind `apply_default_relief` rather
+                // than being spelled out here.
+                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                    let amplitude = somnium_renderer::terrain::DEFAULT_RELIEF_METRES;
+                    let source = terrain.apply_default_relief(amplitude);
+                    // Assigns all eight materials by altitude and slope.
+                    somnium_renderer::terrain::brush::auto_splat(terrain, amplitude * 0.62);
+                    info!("Created terrain ({wx}x{wz} m, heightmap: {source})");
+                }
+
                 let snapshot = EntitySnapshot {
                     // Center the terrain footprint on the world origin.
                     transform: Some(Transform::from_translation(glam::Vec3::new(

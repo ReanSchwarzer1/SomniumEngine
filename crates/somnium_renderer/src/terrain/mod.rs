@@ -101,6 +101,17 @@ pub struct TerrainChunk {
 /// Offset value meaning "this chunk has no pool space".
 pub const UNALLOCATED: u32 = u32::MAX;
 
+/// Heightmap a new terrain loads unless told otherwise (Phase 25L).
+pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/heightmap.tbmp";
+
+/// Metres of relief the default heightmap's full range maps to.
+///
+/// 90 m over the default 1024 m terrain is a gentle range of hills rather than
+/// alpine — enough for the eight materials to separate by altitude and for
+/// slopes to reach the angles that put rock and gravel on the ground, without
+/// walls the camera cannot see over.
+pub const DEFAULT_RELIEF_METRES: f32 = 90.0;
+
 /// A material layer (Phase 14A-2). Texture data lives in the shared
 /// `TerrainLayerTextures` arrays; this carries the per-layer parameters.
 pub struct TerrainLayer {
@@ -386,6 +397,29 @@ impl TerrainData {
             image.height,
         );
         Ok(())
+    }
+
+    /// Default relief for a newly created terrain (Phase 25L).
+    ///
+    /// `SOMNIUM_HEIGHTMAP` overrides the file; otherwise the shipped CDLOD
+    /// dataset; otherwise procedural FBM, so a clone with no assets still gets
+    /// landscape rather than a plain. Returns what it used, for logging.
+    ///
+    /// Lives here rather than in the demo because **Create > Terrain** needs the
+    /// same behaviour, and a fallback chain defined twice in two crates is one
+    /// that will disagree. When the UI phase lets a heightmap be chosen at
+    /// creation, this becomes the default that dialog starts from.
+    pub fn apply_default_relief(&mut self, amplitude: f32) -> String {
+        let path = std::env::var("SOMNIUM_HEIGHTMAP")
+            .unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
+        match self.load_heightmap_file(&path, amplitude) {
+            Ok(()) => path,
+            Err(e) => {
+                tracing::info!("terrain: heightmap unavailable ({e}); procedural relief");
+                self.generate_relief(1337, amplitude);
+                "procedural".to_string()
+            }
+        }
     }
 
     /// Fill the heightmap with procedural FBM relief (Phase 25L).

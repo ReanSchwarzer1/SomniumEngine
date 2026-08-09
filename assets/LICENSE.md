@@ -62,3 +62,21 @@ Pass `2k` to both steps for a quarter of the size at terrain viewing distances.
 
 Normal Z is reconstructed in the shader; metalness is dropped because terrain
 layers are dielectric.
+
+## assets/terrain/heightmap.tbmp — terrain heightmap (Phase 25L)
+
+**Asset:** `TestData/maintestdata/heightmap.tbmp` (4096×2048, 16-bit)
+**Author:** Filip Strugar
+**License:** MIT — Copyright (c) 2010 Filip Strugar
+**Source:** [CDLOD](https://github.com/fstrugar/CDLOD)
+
+The demo scene loads this by default. MIT requires the copyright notice above to
+travel with the file, which is why it is recorded here rather than the asset
+being dropped in unattributed.
+
+CDLOD is also the reference the terrain's chunked LOD scheme came from in
+Phase 14 and the `.tbmp` decoder in Phase 25L — see ATTRIBUTION.md.
+
+Override with `SOMNIUM_HEIGHTMAP=<path>` (16-bit PNG, any decodable image, or
+another `.tbmp`). With the file absent the engine generates procedural FBM
+relief instead, so the scene still has landscape.

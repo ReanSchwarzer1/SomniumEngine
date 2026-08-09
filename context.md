@@ -1763,6 +1763,61 @@ and this dataset has metre-scale relief that the cascades cannot resolve.
 `SOMNIUM_SHADOW_DEBUG=1` will confirm or rule it out in one run; it does not
 appear on the smoother FBM relief.
 
+### 25.8 Terrain self-shadowing — three causes, only one of them the shadow map
+
+The CDLOD render came out stippled with black patches. `SOMNIUM_SHADOW_DEBUG=1`
+confirmed they were `shadow_factor` reaching zero, and the obvious reading —
+shadow acne — was wrong twice over.
+
+**The shadow map was not the source.** A normal-offset bias was added first,
+fixing the recovery 24H got wrong: `ndc.x` is `dot(row0, world)`, so the
+world-per-NDC scale is the reciprocal of **row** 0's length, where the earlier
+attempts took *column* 0 of `proj * view`, which mixes the x, y and depth
+scales. That is a real correction and it is kept — but pushing the offset to 24
+texels, far past peter-panning, changed the image **not at all**, which is what
+proved the shadow map innocent.
+
+The two actual causes were both surfaces intersecting themselves, and both
+reached terrain for the first time in 25A-2:
+
+1. **ReSTIR's shadow ray started inside the terrain.** Its origin is
+   reconstructed from the depth buffer and its `t_min` was a flat 5 cm — far
+   below the world footprint of a pixel at any distance, so the ray re-hit the
+   surface it left. `t_min` now scales with that footprint, measured by
+   reconstructing the neighbouring pixel, which needs no new uniforms and is
+   exactly the scale of both the reconstruction error and the slope offset.
+   This is what the large elongated patches were; disabling ReSTIR removed them
+   and left something different behind, which is how the two were separated.
+2. **The contact-shadow march started on the surface.** Its first steps sit
+   within `CONTACT_THICKNESS` of the depth buffer's own value on ground seen at
+   a grazing angle, so terrain shadowed itself as a fine stipple everywhere.
+   The march now starts one step along the surface normal.
+
+Worth recording as a method point: three plausible mechanisms, and the fix for
+the most plausible one was ruled out by making it absurdly large and seeing
+nothing change. Toggling ReSTIR was what actually split the remaining two.
+
+### 25.9 The default scene
+
+**Create > Terrain** builds the same thing: a new terrain arrives with relief
+and its eight materials already assigned, rather than as a flat plain that has
+to be sculpted before it looks like anything. The source of that relief lives in
+`TerrainData::apply_default_relief` — env override, then the shipped CDLOD
+dataset, then procedural FBM — and **not** in either caller, because a fallback
+chain written twice across two crates is one that will disagree. Choosing a
+heightmap at creation is a UI-phase job; this is the default that dialog will
+start from.
+
+`hello_engine` now spawns terrain **by default** — the editor's own
+Create > Terrain geometry, with `assets/terrain/heightmap.tbmp` (CDLOD's
+dataset, MIT, attributed in `assets/LICENSE.md`) and all eight materials
+auto-splatted by altitude and slope. `SOMNIUM_TERRAIN` selects a variant rather
+than enabling it: `1` is the legacy sculpted 4x4 smoke test that exercises the
+brush paths, `0`/`none` disables terrain. `SOMNIUM_HEIGHTMAP` overrides the
+file, and procedural FBM relief is the fallback when it is missing, so a clone
+without assets still gets landscape rather than a plain.
+
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:

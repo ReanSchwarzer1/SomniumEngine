@@ -298,6 +298,13 @@ fn atlas_uv(cascade: u32, uv: vec2<f32>) -> vec2<f32> {
 /// The search can afford to be coarser: it only needs an average depth, while
 /// the filter's samples are visible as noise if too few.
 const SHADOW_BLOCKER_SAMPLES: i32 = 16;
+/// Shadow texels to push the sample along the surface normal (Phase 25L).
+///
+/// Tunable in one place because it is the whole acne/peter-panning trade: too
+/// small and a heightfield stipples itself black, too large and shadows detach
+/// from what casts them. `SOMNIUM_SHADOW_OFFSET` overrides it at runtime for
+/// finding the knee.
+const SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.5;
 const SHADOW_FILTER_SAMPLES: i32 = 24;
 
 /// Average depth of occluders above this point, or -1 if there are none.
@@ -363,16 +370,46 @@ fn sample_shadow_cascade(
     // the shadow map holds the caster and reports occlusion correctly at the
     // un-offset position — it was only ever the offset that lost it.
     //
-    // Comparing at the fragment's own position with a small depth epsilon,
-    // widened at grazing angles where a texel spans more depth, is both simpler
-    // and what the probe that found this actually did.
-    let offset_pos = world_pos;
+    // **Phase 25L: the recovery was taking the wrong vector.** A depth epsilon
+    // alone is a constant in NDC, and a cascade's NDC-to-world scale varies by
+    // orders of magnitude across the four — so an epsilon tuned to stop acne in
+    // cascade 3 detaches shadows in cascade 0, and one tuned for cascade 0 does
+    // nothing further out. On the CDLOD dataset, whose relief is metre-scale
+    // against a shadow texel covering several metres, that showed as the surface
+    // stippled black wherever a texel's stored depth belonged to a neighbouring
+    // ridge rather than to this fragment.
+    //
+    // The fix the earlier attempts wanted is a **world-space** offset of one
+    // shadow texel, and it needs the cascade's world-per-NDC scale. `ndc.x` is
+    // `dot(row0, world)`, so the gradient of NDC with respect to world position
+    // is **row** 0 of the matrix, and world units per NDC unit is the reciprocal
+    // of its length. The previous attempts took *column* 0, which for
+    // `proj * view` mixes the x, y and depth scales and is not that gradient —
+    // which is exactly why the offset came out far enough to walk the sample
+    // out of the shadow.
+    //
+    // glam is column-major, so row 0 is the `.x` of each of the first three
+    // columns.
+    let m = light.view_proj[cascade];
+    let row0 = vec3<f32>(m[0].x, m[1].x, m[2].x);
+    let world_per_ndc = 1.0 / max(length(row0), 1e-9);
+    // Each cascade occupies one quadrant of the atlas, so its own resolution is
+    // half the atlas dimension, spanning 2 NDC units.
+    let texel_world = 2.0 * world_per_ndc / (light.shadow_map_size * 0.5);
+
+    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
+    // Offset along the surface normal, widened at grazing angles where one
+    // texel spans more depth. Offsetting in the plane of the surface rather
+    // than along depth is what avoids the acne/peter-panning trade entirely.
+    let offset_pos = world_pos
+        + normal * texel_world * (1.0 + 2.0 * (1.0 - n_dot_l)) * SHADOW_NORMAL_OFFSET_TEXELS;
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    let n_dot_l = saturate(dot(normal, normalize(light.direction)));
-    let compare_depth = ndc.z - (0.0005 + 0.0025 * (1.0 - n_dot_l));
+    // A much smaller residual epsilon: the normal offset now does the work, and
+    // a large depth bias on top of it is what detaches a shadow from its caster.
+    let compare_depth = ndc.z - 0.0002;
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
@@ -441,8 +478,23 @@ const CONTACT_LENGTH: f32 = 0.35;
 /// a wall extending away from the camera.
 const CONTACT_THICKNESS: f32 = 0.05;
 
-fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, pixel: vec2<f32>) -> f32 {
+fn contact_shadow(
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    light_dir: vec3<f32>,
+    pixel: vec2<f32>,
+) -> f32 {
     let step_world = CONTACT_LENGTH / f32(CONTACT_STEPS);
+
+    // Phase 25L: start the march off the surface, along the normal.
+    //
+    // The march compares its own depth against the depth buffer, and its first
+    // steps are still *on* the surface it started from. On ground seen at a
+    // grazing angle — which terrain always is — those steps land within
+    // `CONTACT_THICKNESS` of the stored depth, so the surface shadows itself as
+    // a fine stipple over everything. Offsetting by one step's worth of world
+    // space is below the scale this term exists to resolve and costs nothing.
+    let start = world_pos + normal * step_world;
 
     // Jitter the start so the march's step pattern becomes noise rather than
     // visible banding; TAA then resolves it.
@@ -451,7 +503,7 @@ fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, pixel: vec2<f32>) 
     var occluded = 0.0;
     for (var i = 1; i <= CONTACT_STEPS; i = i + 1) {
         let t = (f32(i) + jitter) * step_world;
-        let sample_pos = world_pos + light_dir * t;
+        let sample_pos = start + light_dir * t;
 
         let clip = view.view_proj * vec4<f32>(sample_pos, 1.0);
         if clip.w <= 0.0 {
@@ -498,7 +550,7 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
     // Contact shadows only ever darken. The shadow map is authoritative for
     // everything at its own scale; this fills in below that scale.
-    shadow = min(shadow, contact_shadow(world_pos, normalize(light.direction), pixel));
+    shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
 
     // Blend over the last 10% of the cascade's range.
     //

@@ -599,8 +599,21 @@ impl GameApp for HelloGame {
         // sculpted 4x4 variant is not a substitute — it was the only thing
         // 25A-2 was verified against, and the editor-created terrain turned out
         // not to render even though that one did.
-        let flat_terrain = std::env::var("SOMNIUM_TERRAIN").as_deref() == Ok("flat");
-        if std::env::var("SOMNIUM_TERRAIN").is_ok() {
+        // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
+        // now selects a variant rather than enabling it:
+        //   unset / "flat" — the editor's own **Create > Terrain** geometry: the
+        //       default 16x16-chunk descriptor at y = 0, with a heightmap and
+        //       all eight materials auto-splatted by altitude and slope.
+        //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
+        //       is what exercises the brush paths without editor input.
+        //   "0" / "none"   — no terrain, for isolating everything else.
+        //
+        // The sculpted variant is deliberately not the default: it was the only
+        // thing 25A-2 was verified against, and the editor-created terrain
+        // turned out not to render at all even though that one did.
+        let terrain_mode = std::env::var("SOMNIUM_TERRAIN").unwrap_or_default();
+        let flat_terrain = terrain_mode != "1";
+        if terrain_mode != "0" && terrain_mode != "none" {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                 use somnium_renderer::terrain::{brush, TerrainDescriptor};
                 let desc = if flat_terrain {
@@ -620,17 +633,11 @@ impl GameApp for HelloGame {
                     let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
                         .ok()
                         .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(90.0);
+                        .unwrap_or(somnium_renderer::terrain::DEFAULT_RELIEF_METRES);
                     if let Some(terrain) = renderer.terrain_mut(terrain_id) {
-                        match std::env::var("SOMNIUM_HEIGHTMAP") {
-                            Ok(path) => {
-                                if let Err(e) = terrain.load_heightmap_file(&path, amplitude) {
-                                    info!("heightmap load failed ({e}); using procedural relief");
-                                    terrain.generate_relief(1337, amplitude);
-                                }
-                            }
-                            Err(_) => terrain.generate_relief(1337, amplitude),
-                        }
+                        // The same path Create > Terrain takes, so the demo
+                        // scene and an editor-created terrain cannot diverge.
+                        terrain.apply_default_relief(amplitude);
                         // Assign all eight materials by altitude and slope.
                         brush::auto_splat(terrain, amplitude * 0.62);
                     }
