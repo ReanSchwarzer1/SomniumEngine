@@ -423,7 +423,7 @@ pub enum TerrainRestoreOp {
     Splat {
         terrain_id: u32,
         region: (u32, u32, u32, u32),
-        texels: Vec<[u8; 4]>,
+        texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
     },
 }
 
@@ -440,8 +440,8 @@ pub struct TerrainEditCmd {
     region: (u32, u32, u32, u32),
     old_heights: Vec<f32>,
     new_heights: Vec<f32>,
-    old_texels: Vec<[u8; 4]>,
-    new_texels: Vec<[u8; 4]>,
+    old_texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
+    new_texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
     queue: TerrainRestoreQueue,
     is_paint: bool,
 }
@@ -464,8 +464,8 @@ impl TerrainEditCmd {
     pub fn paint(
         terrain_id: u32,
         region: (u32, u32, u32, u32),
-        old_texels: Vec<[u8; 4]>,
-        new_texels: Vec<[u8; 4]>,
+        old_texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
+        new_texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
         queue: TerrainRestoreQueue,
     ) -> Self {
         Self {

@@ -21,6 +21,7 @@ pub mod brush;
 pub mod collider;
 pub mod foliage;
 pub mod foliage_paint;
+pub mod heightmap;
 pub mod mesh;
 pub mod textures;
 
@@ -124,42 +125,47 @@ pub struct TerrainLayer {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTerrainMaterial {
-    /// UV repeats per metre, one per layer.                    offset 0
-    pub layer_tiling: [f32; 4],
+    /// UV repeats per metre, one per layer.                    offset 0  (32)
+    pub layer_tiling: [f32; 8],
     /// xy = brush world XZ, z = radius, w = mode
-    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 16
+    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 32
     pub brush: [f32; 4],
-    /// Bindless index of each layer's albedo+height map.       offset 32
-    pub albedo_maps: [i32; 4],
+    /// Bindless index of each layer's albedo+height map.       offset 48 (32)
+    pub albedo_maps: [i32; 8],
     /// Bindless index of each layer's packed surface map
-    /// (normal XY, roughness, occlusion).                      offset 48
-    pub surface_maps: [i32; 4],
-    /// Free since Phase 25K folded three maps into two.        offset 64
-    pub _reserved_maps: [i32; 4],
-    /// World XZ of terrain-local (0, 0).                       offset 80
+    /// (normal XY, roughness, occlusion).                      offset 80 (32)
+    pub surface_maps: [i32; 8],
+    /// World XZ of terrain-local (0, 0).                       offset 112
     pub terrain_origin: [f32; 2],
-    /// 1 / world size, for the splat lookup.                   offset 88
+    /// 1 / world size, for the splat lookup.                   offset 120
     pub inv_world_size: [f32; 2],
-    /// Bindless index of this terrain's splatmap.              offset 96
+    /// Bindless index of the layer 0-3 weights.                offset 128
     pub splat_map: i32,
+    /// Bindless index of the layer 4-7 weights (Phase 25L).    offset 132
+    pub splat_map_hi: i32,
     /// Layer index used for triplanar cliff projection (rock = 2).
     pub cliff_layer: u32,
     /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
     pub hex_tiling: u32,
-    pub _pad: u32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainTextureIds {
     pub splat_map: i32,
-    pub albedo: [i32; 4],
-    pub surface: [i32; 4],
+    pub splat_map_hi: i32,
+    pub albedo: [i32; TERRAIN_LAYER_COUNT as usize],
+    pub surface: [i32; TERRAIN_LAYER_COUNT as usize],
 }
 
 impl Default for TerrainTextureIds {
     fn default() -> Self {
-        Self { splat_map: -1, albedo: [-1; 4], surface: [-1; 4] }
+        Self {
+            splat_map: -1,
+            splat_map_hi: -1,
+            albedo: [-1; TERRAIN_LAYER_COUNT as usize],
+            surface: [-1; TERRAIN_LAYER_COUNT as usize],
+        }
     }
 }
 
@@ -315,22 +321,18 @@ impl TerrainData {
         let [wx, wz] = self.desc.world_size();
         let origin = self.model.w_axis;
         GpuTerrainMaterial {
-            layer_tiling: [
-                self.layers.first().map_or(0.25, |l| l.tiling),
-                self.layers.get(1).map_or(0.25, |l| l.tiling),
-                self.layers.get(2).map_or(0.25, |l| l.tiling),
-                self.layers.get(3).map_or(0.25, |l| l.tiling),
-            ],
+            layer_tiling: std::array::from_fn(|i| {
+                self.layers.get(i).map_or(0.25, |l| l.tiling)
+            }),
             brush: self.brush_cursor,
             albedo_maps: self.texture_ids.albedo,
             surface_maps: self.texture_ids.surface,
-            _reserved_maps: [-1; 4],
             terrain_origin: [origin.x, origin.z],
             inv_world_size: [1.0 / wx, 1.0 / wz],
             splat_map: self.texture_ids.splat_map,
+            splat_map_hi: self.texture_ids.splat_map_hi,
             cliff_layer: 2,
             hex_tiling: u32::from(self.hex_tiling),
-            _pad: 0,
         }
     }
 
@@ -366,6 +368,39 @@ impl TerrainData {
             for cx in x0..=x1 {
                 self.chunks[(cz * self.desc.grid_size[0] + cx) as usize].dirty = true;
             }
+        }
+    }
+
+    /// Replace the whole heightmap from a file (Phase 25L).
+    ///
+    /// `amplitude` is the metres of relief the source's full `0..=1` range maps
+    /// to, before `height_scale`.
+    pub fn load_heightmap_file(&mut self, path: &str, amplitude: f32) -> Result<(), String> {
+        let image = heightmap::load(path)?;
+        let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
+        self.heightmap = image.resample(tx, tz, amplitude);
+        self.mark_all_dirty();
+        tracing::info!(
+            "terrain: heightmap {path} ({}x{}) resampled to {tx}x{tz}, {amplitude} m of relief",
+            image.width,
+            image.height,
+        );
+        Ok(())
+    }
+
+    /// Fill the heightmap with procedural FBM relief (Phase 25L).
+    pub fn generate_relief(&mut self, seed: u32, amplitude: f32) {
+        let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
+        self.heightmap = heightmap::fbm_relief(tx, tz, seed, amplitude);
+        self.mark_all_dirty();
+    }
+
+    /// Mark every chunk for rebuild, and bump the edit revision so foliage and
+    /// the collider notice.
+    pub fn mark_all_dirty(&mut self) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        for chunk in &mut self.chunks {
+            chunk.dirty = true;
         }
     }
 
@@ -422,7 +457,7 @@ impl TerrainData {
     /// like — foliage stopping exactly where the paint stops.
     pub fn layer_weight_at(&self, local_x: f32, local_z: f32, layer: u8) -> f32 {
         let [wx, wz] = self.desc.world_size();
-        if wx <= 0.0 || wz <= 0.0 || layer as usize >= 4 {
+        if wx <= 0.0 || wz <= 0.0 || u32::from(layer) >= TERRAIN_LAYER_COUNT {
             return 0.0;
         }
         let sm = &self.splatmap;
@@ -689,13 +724,18 @@ impl TerrainData {
     pub fn save_binary(&self, path: &str) -> std::io::Result<()> {
         let mut out: Vec<u8> = Vec::with_capacity(self.heightmap.len() * 4 + 24);
         out.extend(Self::SIDECAR_MAGIC.to_le_bytes());
-        out.extend(1u32.to_le_bytes()); // version
+        // Version 2: Phase 25L widened a splat texel from 4 weights to
+        // TERRAIN_LAYER_COUNT. A v1 sidecar's splat block is a different size,
+        // so it is refused rather than read as if it matched.
+        out.extend(2u32.to_le_bytes()); // version
         out.extend(self.desc.total_vertices_x().to_le_bytes());
         out.extend(self.desc.total_vertices_z().to_le_bytes());
         out.extend(self.splatmap.width.to_le_bytes());
         out.extend(self.splatmap.height.to_le_bytes());
         out.extend(bytemuck::cast_slice::<f32, u8>(&self.heightmap));
-        out.extend(bytemuck::cast_slice::<[u8; 4], u8>(&self.splatmap.data));
+        out.extend(bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(
+            &self.splatmap.data,
+        ));
         std::fs::write(path, out)
     }
 
@@ -712,6 +752,13 @@ impl TerrainData {
         if u32_at(0)? != Self::SIDECAR_MAGIC {
             return Err("not a terrain sidecar file".into());
         }
+        let version = u32_at(4)?;
+        if version != 2 {
+            return Err(format!(
+                "terrain sidecar is version {version}; this build writes 2                  (Phase 25L widened splat texels from 4 layers to {})",
+                TERRAIN_LAYER_COUNT,
+            ));
+        }
         let (tx, tz) = (u32_at(8)?, u32_at(12)?);
         let (sw, sh) = (u32_at(16)?, u32_at(20)?);
         if tx != self.desc.total_vertices_x()
@@ -722,7 +769,7 @@ impl TerrainData {
             return Err("terrain sidecar dimensions do not match descriptor".into());
         }
         let h_bytes = (tx * tz) as usize * 4;
-        let s_bytes = (sw * sh) as usize * 4;
+        let s_bytes = (sw * sh) as usize * TERRAIN_LAYER_COUNT as usize;
         let body = bytes
             .get(24..24 + h_bytes + s_bytes)
             .ok_or("truncated terrain sidecar")?;

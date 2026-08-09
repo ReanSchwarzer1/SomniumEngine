@@ -20,20 +20,40 @@
 // Mirrors `terrain::GpuTerrainMaterial` (112 bytes). Every vec4 sits on a
 // 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
-    layer_tiling: vec4<f32>,
+    // Phase 25L: eight layers. Arrays of vec4 rather than a flat array, so the
+    // WGSL layout matches Rust's `repr(C)` packing without per-element padding
+    // — WGSL gives a bare `array<f32, 8>` a 16-byte stride.
+    layer_tiling: array<vec4<f32>, 2>,
     // xy = brush world XZ, z = radius, w = mode
     // (0 off, 1 sculpt, 2 layer paint, 3 foliage).
     brush: vec4<f32>,
-    albedo_maps: vec4<i32>,
-    surface_maps: vec4<i32>,
-    _reserved_maps: vec4<i32>,
+    albedo_maps: array<vec4<i32>, 2>,
+    surface_maps: array<vec4<i32>, 2>,
     terrain_origin: vec2<f32>,
     inv_world_size: vec2<f32>,
     splat_map: i32,
+    splat_map_hi: i32,
     cliff_layer: u32,
     /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
     hex_tiling: u32,
-    _pad1: u32,
+}
+
+/// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
+const TERRAIN_LAYERS: u32 = 8u;
+
+/// Below this weight a layer cannot change the result, so it is not sampled.
+///
+/// This is what makes eight layers cheaper than the four used to be. Splat
+/// weights are sparse — two or three materials meet at any given texel and the
+/// rest are zero — so gating turns a fixed 16 samples (and 48 with hex-tiling)
+/// into the four or six that actually contribute. It is only legal because the
+/// terrain path samples with explicit derivatives throughout: `textureSampleGrad`
+/// has no uniformity requirement, where `textureSample` inside this branch
+/// would be undefined.
+const LAYER_WEIGHT_EPSILON: f32 = 0.002;
+
+fn terrain_layer_tiling(tm: TerrainMaterial, layer: u32) -> f32 {
+    return tm.layer_tiling[layer / 4u][layer % 4u];
 }
 
 @group(0) @binding(11) var<storage, read> terrain_materials: array<TerrainMaterial>;
@@ -75,8 +95,8 @@ fn terrain_sample_layer(
     ddy: vec2<f32>,
 ) -> TerrainLayerSample {
     var s: TerrainLayerSample;
-    let albedo_map = tm.albedo_maps[layer];
-    let surface_map = tm.surface_maps[layer];
+    let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
+    let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
 
     var a: vec4<f32>;
     var surf: vec4<f32>;
@@ -125,7 +145,7 @@ fn terrain_triplanar_albedo(
 ) -> vec3<f32> {
     var w = pow(abs(n), vec3(4.0));
     w = w / (w.x + w.y + w.z);
-    let map = textures[tm.albedo_maps[layer]];
+    let map = textures[tm.albedo_maps[layer / 4u][layer % 4u]];
     let cx = textureSample(map, default_sampler, world_pos.zy * tiling).rgb;
     let cy = textureSample(map, default_sampler, world_pos.xz * tiling).rgb;
     let cz = textureSample(map, default_sampler, world_pos.xy * tiling).rgb;
@@ -153,36 +173,68 @@ fn evaluate_terrain_material(
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
 
-    var weights = textureSample(textures[tm.splat_map], default_sampler, splat_uv);
-    weights = weights / max(weights.x + weights.y + weights.z + weights.w, 0.0001);
-
-    // All four layers are sampled unconditionally: a texture fetch behind a
-    // per-pixel branch has no uniform derivative to work with.
-    let local_xz = world_pos.xz - tm.terrain_origin;
-    let s0 = terrain_sample_layer(
-        tm, 0u, local_xz * tm.layer_tiling.x,
-        world_ddx * tm.layer_tiling.x, world_ddy * tm.layer_tiling.x);
-    let s1 = terrain_sample_layer(
-        tm, 1u, local_xz * tm.layer_tiling.y,
-        world_ddx * tm.layer_tiling.y, world_ddy * tm.layer_tiling.y);
-    let s2 = terrain_sample_layer(
-        tm, 2u, local_xz * tm.layer_tiling.z,
-        world_ddx * tm.layer_tiling.z, world_ddy * tm.layer_tiling.z);
-    let s3 = terrain_sample_layer(
-        tm, 3u, local_xz * tm.layer_tiling.w,
-        world_ddx * tm.layer_tiling.w, world_ddy * tm.layer_tiling.w);
-
-    let w = terrain_height_blend(
-        weights, vec4(s0.height, s1.height, s2.height, s3.height));
-
-    var albedo = s0.albedo * w.x + s1.albedo * w.y + s2.albedo * w.z + s3.albedo * w.w;
-    let normal_ts = normalize(
-        s0.normal_ts * w.x + s1.normal_ts * w.y + s2.normal_ts * w.z + s3.normal_ts * w.w,
+    // Eight weights from two RGBA splatmaps, normalised together.
+    let w_lo = textureSample(textures[tm.splat_map], default_sampler, splat_uv);
+    let w_hi = textureSample(textures[tm.splat_map_hi], default_sampler, splat_uv);
+    let total = max(
+        w_lo.x + w_lo.y + w_lo.z + w_lo.w + w_hi.x + w_hi.y + w_hi.z + w_hi.w,
+        0.0001,
     );
-    var roughness =
-        s0.roughness * w.x + s1.roughness * w.y + s2.roughness * w.z + s3.roughness * w.w;
-    let occlusion =
-        s0.occlusion * w.x + s1.occlusion * w.y + s2.occlusion * w.z + s3.occlusion * w.w;
+    var weight = array<f32, 8>(
+        w_lo.x / total, w_lo.y / total, w_lo.z / total, w_lo.w / total,
+        w_hi.x / total, w_hi.y / total, w_hi.z / total, w_hi.w / total,
+    );
+
+    let local_xz = world_pos.xz - tm.terrain_origin;
+
+    // Two passes, because the height blend needs every contributing layer's
+    // height before any of them can be weighted (Phase 14C-3). Only layers with
+    // a meaningful weight are sampled at all — see LAYER_WEIGHT_EPSILON.
+    var samples: array<TerrainLayerSample, 8>;
+    var adjusted: array<f32, 8>;
+    var max_adjusted = 0.0;
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        if weight[i] < LAYER_WEIGHT_EPSILON {
+            adjusted[i] = 0.0;
+            continue;
+        }
+        let tiling = terrain_layer_tiling(tm, i);
+        samples[i] = terrain_sample_layer(
+            tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling);
+        adjusted[i] = samples[i].height * 0.4 + weight[i];
+        max_adjusted = max(max_adjusted, adjusted[i]);
+    }
+
+    // Height-based sharpening: the material standing proudest at this texel
+    // takes the pixel outright instead of soft-mixing across the transition.
+    let threshold = max_adjusted - 0.25;
+    var blend: array<f32, 8>;
+    var blend_sum = 0.0;
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        var b = 0.0;
+        if weight[i] >= LAYER_WEIGHT_EPSILON {
+            b = max(adjusted[i] - threshold, 0.0);
+        }
+        blend[i] = b;
+        blend_sum += b;
+    }
+    blend_sum = max(blend_sum, 0.0001);
+
+    var albedo = vec3<f32>(0.0);
+    var normal_acc = vec3<f32>(0.0);
+    var roughness = 0.0;
+    var occlusion = 0.0;
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        let b = blend[i] / blend_sum;
+        if b <= 0.0 {
+            continue;
+        }
+        albedo += samples[i].albedo * b;
+        normal_acc += samples[i].normal_ts * b;
+        roughness += samples[i].roughness * b;
+        occlusion += samples[i].occlusion * b;
+    }
+    let normal_ts = normalize(normal_acc);
 
     // Triplanar cliff projection on steep slopes (Phase 14C step 4).
     let steepness = 1.0 - abs(geo_normal.y);
@@ -192,7 +244,7 @@ fn evaluate_terrain_material(
         tm.cliff_layer,
         world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y),
         geo_normal,
-        tm.layer_tiling[tm.cliff_layer],
+        terrain_layer_tiling(tm, tm.cliff_layer),
     );
     albedo = mix(albedo, cliff, cliff_blend);
     roughness = mix(roughness, 0.8, cliff_blend);

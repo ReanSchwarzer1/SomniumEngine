@@ -225,26 +225,32 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_112_byte_shader_layout() {
+    fn the_terrain_material_is_the_144_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
         // that cost a whole session when `emissive` was a vec3.
+        //
+        // Phase 25L took this from 112 to 144 bytes by widening the per-layer
+        // arrays from four entries to eight. The eight-element arrays are
+        // `array<vec4<_>, 2>` on the WGSL side for the same reason: a bare
+        // `array<f32, 8>` there has a 16-byte stride and would not match.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 112);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 144);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
         let base = &m as *const _ as usize;
         let offset = |p: *const u8| p as usize - base;
         assert_eq!(offset(m.layer_tiling.as_ptr() as *const u8), 0);
-        assert_eq!(offset(m.brush.as_ptr() as *const u8), 16);
-        assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 32);
-        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 48);
-        assert_eq!(offset(m._reserved_maps.as_ptr() as *const u8), 64);
-        assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 80);
-        assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 88);
-        assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 96);
-        assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 100);
+        assert_eq!(offset(m.brush.as_ptr() as *const u8), 32);
+        assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 48);
+        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 80);
+        assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 112);
+        assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 120);
+        assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 128);
+        assert_eq!(offset(&m.splat_map_hi as *const i32 as *const u8), 132);
+        assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 136);
+        assert_eq!(offset(&m.hex_tiling as *const u32 as *const u8), 140);
     }
 }

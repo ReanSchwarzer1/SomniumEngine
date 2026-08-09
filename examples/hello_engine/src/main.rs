@@ -611,6 +611,37 @@ impl GameApp for HelloGame {
                 let terrain_id = renderer.create_terrain(render_ctx, desc);
                 let [wx, wz] = desc.world_size();
 
+                // Phase 25L: real relief, so the eight materials have altitudes
+                // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
+                // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
+                // terrain gets procedural FBM hills, which is still landscape
+                // rather than the flat plain every earlier test scene used.
+                if flat_terrain {
+                    let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(90.0);
+                    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                        match std::env::var("SOMNIUM_HEIGHTMAP") {
+                            Ok(path) => {
+                                if let Err(e) = terrain.load_heightmap_file(&path, amplitude) {
+                                    info!("heightmap load failed ({e}); using procedural relief");
+                                    terrain.generate_relief(1337, amplitude);
+                                }
+                            }
+                            Err(_) => terrain.generate_relief(1337, amplitude),
+                        }
+                        // Assign all eight materials by altitude and slope.
+                        brush::auto_splat(terrain, amplitude * 0.62);
+                    }
+                    // The default camera sits at y = 2, which is now inside a
+                    // hillside rather than above a plain. Put it over the
+                    // terrain looking down the slope.
+                    self.camera.position = Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45);
+                    self.camera.yaw = -90.0;
+                    self.camera.pitch = -22.0;
+                }
+
                 if let Some(terrain) = renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain) {
                     // Sculpt a hill and a valley to exercise the brush paths.
                     let raise = brush::TerrainBrush {

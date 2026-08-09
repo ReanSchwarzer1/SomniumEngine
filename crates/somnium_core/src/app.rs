@@ -56,7 +56,7 @@ struct TerrainStroke {
     terrain_id:    u32,
     is_paint:      bool,
     start_heights: Vec<f32>,
-    start_texels:  Vec<[u8; 4]>,
+    start_texels:  Vec<somnium_renderer::terrain::textures::SplatTexel>,
     /// Union of all touched (vertex or texel) regions, inclusive.
     region:        Option<(u32, u32, u32, u32)>,
 }
@@ -1148,7 +1148,7 @@ impl<G: GameApp> Engine<G> {
         let (x0, z0, x1, z1) = region;
         let cmd: Box<dyn crate::editor_commands::EditorCommand> = if stroke.is_paint {
             let row_w = terrain.splatmap.width;
-            let extract = |data: &[[u8; 4]]| -> Vec<[u8; 4]> {
+            let extract = |data: &[somnium_renderer::terrain::textures::SplatTexel]| -> Vec<somnium_renderer::terrain::textures::SplatTexel> {
                 let mut out = Vec::with_capacity(((x1 - x0 + 1) * (z1 - z0 + 1)) as usize);
                 for z in z0..=z1 {
                     let start = (z * row_w + x0) as usize;

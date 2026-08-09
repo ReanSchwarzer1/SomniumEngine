@@ -1139,6 +1139,7 @@ impl SomniumRenderer {
         };
         let mut ids = crate::terrain::TerrainTextureIds::default();
         ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
+        ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
         for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
