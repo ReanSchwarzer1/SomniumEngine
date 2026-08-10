@@ -583,6 +583,8 @@ pub struct PostProcessComponent {
     /// Shutter fraction: how much of the frame interval the shutter is open.
     /// 0.5 is a 180 degree shutter, the film default.
     pub motion_blur_shutter: f32,
+    /// Strength of the traced indirect diffuse (Phase 24L).
+    pub restir_gi_intensity: f32,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -677,6 +679,7 @@ impl Default for PostProcessComponent {
             cas_strength: 1.0,
             motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
             motion_blur_shutter: 0.5,
+            restir_gi_intensity: 1.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: true,
             fog_density: 0.0008,

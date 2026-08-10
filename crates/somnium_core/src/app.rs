@@ -830,6 +830,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.cas_sharpness,
                         pp.cas_strength,
                         pp.motion_blur_shutter,
+                        pp.restir_gi_intensity,
                     ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
@@ -1411,6 +1412,7 @@ impl<G: GameApp> Engine<G> {
             r.cas_pass.strength = pp.cas_strength;
             r.motion_blur_pass.enabled = pp.motion_blur_enabled;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
+            r.restir_gi_pass.intensity = pp.restir_gi_intensity;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled;
@@ -2094,6 +2096,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostCasSharpness
                         | IF::PostCasStrength
                         | IF::PostMotionBlurShutter
+                        | IF::PostGiIntensity
                         | IF::PostFogDensity
                         | IF::PostFogHeight
                         | IF::PostFogAsymmetry
@@ -2138,6 +2141,9 @@ impl<G: GameApp> Engine<G> {
                             IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
                             IF::PostMotionBlurShutter => {
                                 pp.motion_blur_shutter = value.clamp(0.0, 1.0);
+                            }
+                            IF::PostGiIntensity => {
+                                pp.restir_gi_intensity = value.clamp(0.0, 4.0);
                             }
                             IF::PostContrast => pp.contrast = value.max(0.0),
                             IF::PostSaturation => pp.saturation = value.max(0.0),

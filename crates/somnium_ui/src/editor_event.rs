@@ -93,6 +93,9 @@ pub enum InspectorField {
     /// Shutter fraction for motion blur (Phase 24Z). 0.5 is a 180 degree
     /// shutter, the film default.
     PostMotionBlurShutter,
+    /// Strength of the traced indirect diffuse (Phase 24L). Every other effect
+    /// has an amount dial; this one was the odd toggle out.
+    PostGiIntensity,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.

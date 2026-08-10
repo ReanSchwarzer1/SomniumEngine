@@ -118,6 +118,7 @@ struct InspectorHandles {
     post_mb_toggle:     NodeHandle,
     post_mb_label:      NodeHandle,
     post_mb_shutter:    NodeHandle,
+    post_gi_intensity:  NodeHandle,
     post_cas_label:     NodeHandle,
     post_cas_sharp:     NodeHandle,
     post_cas_strength:  NodeHandle,
@@ -181,7 +182,7 @@ pub struct PostInspectorState {
     /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
     /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
     /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
-    pub extras: [f32; 21],
+    pub extras: [f32; 22],
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -662,6 +663,7 @@ impl UiManager {
                     (h.post_cas_sharp, v.extras[18]),
                     (h.post_cas_strength, v.extras[19]),
                     (h.post_mb_shutter, v.extras[20]),
+                    (h.post_gi_intensity, v.extras[21]),
                 ] {
                     self.native_ui.send(NumericFieldMessage::set_value(field, value));
                 }
@@ -827,6 +829,7 @@ impl UiManager {
             (h.post_cas_sharp,  IF::PostCasSharpness),
             (h.post_cas_strength, IF::PostCasStrength),
             (h.post_mb_shutter, IF::PostMotionBlurShutter),
+            (h.post_gi_intensity, IF::PostGiIntensity),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -1764,6 +1767,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // other half of the same traced solution and they read as a pair.
     let (post_restir_gi_toggle, post_restir_gi_label) =
         make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
+    // Phase 24L. Directly under its toggle, matching every other effect that
+    // pairs a switch with an amount.
+    let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
     let post_bloom_amt  = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
     let (post_dof_toggle, post_dof_label)     = make_toggle(ui, "Depth of Field", font_id, post_section);
@@ -1876,7 +1882,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_cel_toggle, post_cel_label,
         post_taa_toggle, post_taa_label, post_gtao_toggle, post_gtao_label,
         post_restir_toggle, post_restir_label, post_bloom_toggle, post_bloom_label,
-        post_restir_gi_toggle, post_restir_gi_label,
+        post_restir_gi_toggle, post_restir_gi_label, post_gi_intensity,
         post_bloom_amt, post_dof_toggle, post_dof_label, post_dof_focus,
         post_temperature, post_contrast, post_saturation, post_grain,
         post_vol_toggle, post_vol_label, post_shafts_toggle, post_shafts_label,
