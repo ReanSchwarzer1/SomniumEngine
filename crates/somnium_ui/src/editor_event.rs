@@ -116,6 +116,9 @@ pub enum InspectorField {
     TerrainTile1,
     TerrainTile2,
     TerrainTile3,
+    /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
+    /// parallax occlusion off.
+    TerrainRelief,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,

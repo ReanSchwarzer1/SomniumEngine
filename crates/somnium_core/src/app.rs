@@ -844,6 +844,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 Some([
                     self.terrain_brush.paint_layer as f32,
                     tile(0), tile(1), tile(2), tile(3),
+                    t.parallax_scale,
                 ])
             });
             let brush = self.foliage_brush;
@@ -2167,10 +2168,28 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainTile1
                         | IF::TerrainTile2
                         | IF::TerrainTile3
+                        | IF::TerrainRelief
                 ) {
                     if field == IF::TerrainPaintLayer {
                         self.terrain_brush.paint_layer =
                             (value.round().max(0.0) as usize).min(3);
+                        return;
+                    }
+                    // Phase 25H: a terrain-wide multiplier, not a per-layer
+                    // value — the layers already author their own relief and
+                    // this scales all of them together.
+                    if field == IF::TerrainRelief {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied()
+                        else {
+                            return;
+                        };
+                        if let Some(t) = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.terrain_mut(tc.terrain_id))
+                        {
+                            t.parallax_scale = value.clamp(0.0, 4.0);
+                        }
                         return;
                     }
                     let slot = match field {

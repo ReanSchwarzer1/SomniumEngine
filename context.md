@@ -1222,7 +1222,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
-| 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
+| 25H | ✅ Complete | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 
@@ -2087,6 +2087,10 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **25H** — ✅ passing. `SOMNIUM_TERRAIN_PARALLAX=0/1` at eye level: 1729.8
+  mean absolute luminance over 921 600 terrain pixels, mean luminance moving
+  only −0.4% — detail redistributed, not darkened. Shading 0.898 → 1.022 ms.
+  See §17.15.
 - **24AC (SPD)** — ✅ passing. Hi-Z 0.045 → 0.029 ms with the frame
   **bit-identical** (`mean_abs = 0.0000, changed = 0`), which is the real
   acceptance test for something feeding occlusion culling. See §17.14.
@@ -2779,6 +2783,77 @@ which is the A/B.
 level per pass. The reduction there is a filtered average rather than a max, so
 it needs a second variant of the shader; the pyramid was the one with eleven
 barriers in it.
+
+---
+
+## 17.15 Phase 25H — parallax occlusion on terrain
+
+Terrain is the surface most often seen at a grazing angle, and that is exactly
+where a normal map stops working. It shades a flat plane as though it had
+relief, but the relief never *moves* against the surface, so the ground reads as
+a photograph lying on glass. Parallax fixes the one thing a normal map cannot:
+it displaces where each texel appears, so a pebble occludes the crack behind it
+and the surface gains depth as the camera moves.
+
+**Marching in metres, not UV.** The textbook formulation walks tangent-space UV.
+Somnium's terrain has a world-aligned tangent frame and **eight layers with
+different tiling**, so a UV offset would mean something different for each of
+them. Marching in world XZ metres gives one offset that is correct for all
+eight: every layer converts it with its own tiling exactly as it converts the
+position. It also means `LayerBlend::parallax_depth` is authored in metres and
+does not silently change meaning when a layer's tiling is edited.
+
+**One height field, not eight.** Marching a *blended* height would mean sampling
+every contributing layer at every step — eight times the cost of the most
+expensive loop in the frame. The march runs against the dominant layer's height
+map and the resulting offset is shared, which is right: the layers are all lying
+on the same piece of ground. O3DE's `MultilayerParallaxDepth.azsli` does blend
+per step; that is the more correct answer and it is not worth eight times the
+taps here.
+
+**References.** `bevy/crates/bevy_pbr/src/render/parallax_mapping.wgsl` for steep
+parallax plus the single-lookup POM refinement — and for the reason every fetch
+is `textureSampleLevel`: a `textureSample` inside a loop needs derivatives,
+which forces the compiler to unroll a loop whose bound is dynamic.
+`o3de/.../ParallaxMapping.azsli`'s `AdvancedParallaxMapping` for the second
+half.
+
+**That second half is what sells it: parallax self-shadowing.** From the point
+the view ray actually hit, march *toward the sun* through the same height field;
+every step that ends up under the surface darkens the result, weighted by how
+far along the march it is so a nearby occluder casts a harder edge than a
+distant one. Without it a pebble moves correctly and is still lit as though
+nothing were beside it. It is folded into `shadow_factor`, not into `occlusion`,
+because that is what it is — a second occluder between the point and the sun,
+one far too small for the shadow map to have ever resolved. Occlusion is an
+indirect quantity and mixing them would darken the sky's contribution with a
+shadow the sun casts.
+
+**It rides 25D's budget.** The step count is `parallax_steps * (1 - fade)`,
+using the distance fade Phase 25D already computes, so parallax reaches zero at
+the same range the layer count does — one budget, not two. The self-shadow fades
+with it, or it would pop off at the distance the steps run out.
+
+**Measured** at eye level, `SOMNIUM_TERRAIN_PARALLAX=0/1`: **1729.8** mean
+absolute luminance over 921 600 terrain pixels, 898 589 of them past the 1%
+threshold. Mean luminance moves only 4475.3 → 4458.9 (−0.4%), which is the
+useful part of that pair: the effect *redistributes* detail rather than
+darkening the frame, which is what displacement should do and what a
+self-shadow term applied too broadly would not.
+
+**Cost:** shading **0.898 → 1.022 ms** (+14%) at eye level, where nothing is
+faded out. GTAO is identical to the millisecond either way, which is the control.
+
+**Controls.** `Relief` in the Terrain inspector multiplies every layer's
+authored depth, so one dial covers the terrain without flattening the difference
+between gravel and mud; 0 switches it off. `SOMNIUM_TERRAIN_PARALLAX=0` is the
+same switch for the A/B.
+
+**Not done:** silhouette clipping. The march displaces texture but the geometry's
+edge is still the mesh's edge, so relief does not break the outline of a ridge
+against the sky. O3DE handles that with a pixel depth offset written from the
+parallax result (`CalcPixelDepthOffset`), which needs the depth output of the
+visibility pass to move — a change to a pass every other feature reads.
 
 ---
 

@@ -89,7 +89,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 400, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 448, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -118,6 +118,8 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("detail_fade_start"), 256);
     assert_eq!(offset("detail_fade_end"), 260);
     assert_eq!(offset("layer_albedo"), 272);
+    assert_eq!(offset("layer_parallax"), 400);
+    assert_eq!(offset("parallax_steps"), 432);
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass

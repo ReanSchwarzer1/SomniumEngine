@@ -58,6 +58,16 @@ pub struct LayerBlend {
     /// nobody painted would appear in the middle of a field. O3DE authors this
     /// as a threshold and uploads its reciprocal; so do we.
     pub min_weight: f32,
+    /// Phase 25H: how deep this material's relief is, in **metres**.
+    ///
+    /// The displacement parallax occlusion mapping walks through. Authored per
+    /// material for the same reason the blend parameters are: it describes what
+    /// the surface physically is. Gravel is centimetres of loose stone; wet mud
+    /// is nearly flat and a large value there would only make it swim.
+    ///
+    /// Metres rather than a UV fraction, so it does not silently change meaning
+    /// when a layer's tiling is edited.
+    pub parallax_depth: f32,
 }
 
 /// Per-layer blend parameters, keyed to `textures::LAYER_MATERIALS`.
@@ -67,23 +77,23 @@ pub struct LayerBlend {
 /// relief; snow and mud are soft and nearly flat.
 pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     // 0 aerial_grass_rock — grass over stone; some relief, ordinary edge.
-    LayerBlend { height_scale: 0.5, blend_width: 0.50, min_weight: 0.10 },
+    LayerBlend { height_scale: 0.5, blend_width: 0.50, min_weight: 0.10, parallax_depth: 0.020 },
     // 1 forrest_ground_01 — leaf litter sits in real layers.
-    LayerBlend { height_scale: 0.7, blend_width: 0.35, min_weight: 0.10 },
+    LayerBlend { height_scale: 0.7, blend_width: 0.35, min_weight: 0.10, parallax_depth: 0.035 },
     // 2 aerial_rocks_04 — deep crevices, and the edge of a rock is an edge.
-    LayerBlend { height_scale: 1.0, blend_width: 0.15, min_weight: 0.08 },
+    LayerBlend { height_scale: 1.0, blend_width: 0.15, min_weight: 0.08, parallax_depth: 0.060 },
     // 3 snow_02 — drifts. Soft boundary, and its own micro-relief should not
     //   be what decides where the snow line falls.
-    LayerBlend { height_scale: 0.35, blend_width: 0.60, min_weight: 0.15 },
+    LayerBlend { height_scale: 0.35, blend_width: 0.60, min_weight: 0.15, parallax_depth: 0.015 },
     // 4 leafy_grass — coarser than layer 0, so a little more relief.
-    LayerBlend { height_scale: 0.6, blend_width: 0.45, min_weight: 0.10 },
+    LayerBlend { height_scale: 0.6, blend_width: 0.45, min_weight: 0.10, parallax_depth: 0.025 },
     // 5 brown_mud — wet and smooth; nothing to interlock with.
-    LayerBlend { height_scale: 0.3, blend_width: 0.55, min_weight: 0.10 },
+    LayerBlend { height_scale: 0.3, blend_width: 0.55, min_weight: 0.10, parallax_depth: 0.008 },
     // 6 coast_sand_rocks_02 — sand fills, pebbles poke through.
-    LayerBlend { height_scale: 0.5, blend_width: 0.35, min_weight: 0.10 },
+    LayerBlend { height_scale: 0.5, blend_width: 0.35, min_weight: 0.10, parallax_depth: 0.020 },
     // 7 gravel_floor — the case this phase exists for: gravel settling into
     //   the cracks of whatever it meets.
-    LayerBlend { height_scale: 0.9, blend_width: 0.15, min_weight: 0.08 },
+    LayerBlend { height_scale: 0.9, blend_width: 0.15, min_weight: 0.08, parallax_depth: 0.050 },
 ];
 
 /// Reciprocal of `min_weight`, which is the form the shader multiplies by.
@@ -163,7 +173,7 @@ mod tests {
     const N: usize = TERRAIN_LAYER_COUNT as usize;
 
     fn uniform(scale: f32, width: f32, min_weight: f32) -> [LayerBlend; N] {
-        [LayerBlend { height_scale: scale, blend_width: width, min_weight }; N]
+        [LayerBlend { height_scale: scale, blend_width: width, min_weight, parallax_depth: 0.02 }; N]
     }
 
     fn sum(w: &[f32; N]) -> f32 {
@@ -278,6 +288,27 @@ mod tests {
         let out = blend_weights(&weights, &heights, &LAYER_BLENDS);
         assert_eq!(out[5], 0.0, "{out:?}");
         assert!((out[0] - 1.0).abs() < 1e-5, "{out:?}");
+    }
+
+    #[test]
+    fn every_layer_has_a_plausible_parallax_depth() {
+        // Metres of relief. Anything above a few centimetres on ground detail
+        // stops reading as a surface and starts swimming as the camera moves,
+        // and zero would silently disable the effect for that material.
+        for (i, p) in LAYER_BLENDS.iter().enumerate() {
+            assert!(
+                p.parallax_depth > 0.0 && p.parallax_depth <= 0.1,
+                "layer {i} parallax depth {} is not a believable relief",
+                p.parallax_depth
+            );
+        }
+    }
+
+    #[test]
+    fn the_smoothest_material_has_the_least_relief() {
+        // Wet mud (5) against gravel (7): the parameters have to describe the
+        // materials, or this is just a global displacement with extra steps.
+        assert!(LAYER_BLENDS[5].parallax_depth < LAYER_BLENDS[7].parallax_depth);
     }
 
     #[test]

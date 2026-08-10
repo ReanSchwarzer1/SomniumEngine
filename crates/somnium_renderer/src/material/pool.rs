@@ -232,7 +232,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_400_byte_shader_layout() {
+    fn the_terrain_material_is_the_448_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
@@ -247,7 +247,7 @@ mod material_flag_tests {
         // struct up to its alignment and Rust does not. Phase 25D took it to
         // 272 with the macro tier and the detail-fade range.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 400);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 448);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
@@ -273,5 +273,7 @@ mod material_flag_tests {
         assert_eq!(offset(&m.detail_fade_start as *const f32 as *const u8), 256);
         assert_eq!(offset(&m.detail_fade_end as *const f32 as *const u8), 260);
         assert_eq!(offset(m.layer_albedo.as_ptr() as *const u8), 272);
+        assert_eq!(offset(m.layer_parallax.as_ptr() as *const u8), 400);
+        assert_eq!(offset(&m.parallax_steps as *const u32 as *const u8), 432);
     }
 }

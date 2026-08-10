@@ -82,6 +82,7 @@ struct InspectorHandles {
     terrain_section: NodeHandle,
     terrain_layer:   NodeHandle,
     terrain_tile:    [NodeHandle; 4],
+    terrain_relief:  NodeHandle,
     foliage_section: NodeHandle,
     foliage_toggle:  NodeHandle,
     foliage_label:   NodeHandle,
@@ -713,10 +714,11 @@ impl UiManager {
 
     /// Show or hide the Terrain section and refresh it (Phase 17C).
     ///
-    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3]`.
-    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 5]>) {
+    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3, relief]`.
+    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 6]>) {
         let h = &self.inspector_handles;
         let (section, layer, tiles) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
+        let relief = h.terrain_relief;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
@@ -724,6 +726,7 @@ impl UiManager {
                 for (i, t) in tiles.iter().enumerate() {
                     self.native_ui.send(NumericFieldMessage::set_value(*t, v[i + 1]));
                 }
+                self.native_ui.send(NumericFieldMessage::set_value(relief, v[5]));
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -838,6 +841,7 @@ impl UiManager {
             (h.terrain_tile[1], IF::TerrainTile1),
             (h.terrain_tile[2], IF::TerrainTile2),
             (h.terrain_tile[3], IF::TerrainTile3),
+            (h.terrain_relief,  IF::TerrainRelief),
             (h.foliage_density, IF::FoliageDensity),
             (h.foliage_seed,    IF::FoliageSeed),
             (h.foliage_slope,   IF::FoliageSlope),
@@ -1858,6 +1862,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
         make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
     ];
+    // Phase 25H: multiplies the relief depth every layer authors for itself, so
+    // one dial covers the whole terrain without flattening the differences
+    // between gravel and mud. 0 switches parallax off.
+    let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
     ui.set_visibility(terrain_section, false);
 
 
@@ -1866,7 +1874,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_section, light_intensity, light_range, light_inner, light_outer,
         light_col_r, light_col_g, light_col_b, light_temp_k,
         light_range_row, light_inner_row, light_outer_row,
-        terrain_section, terrain_layer, terrain_tile,
+        terrain_section, terrain_layer, terrain_tile, terrain_relief,
         foliage_section, foliage_toggle, foliage_label,
         foliage_paint_toggle, foliage_paint_label,
         foliage_erase_toggle, foliage_erase_label,
