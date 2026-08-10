@@ -689,6 +689,20 @@ impl GameApp for HelloGame {
                             let ground = terrain.world_height_at(lx, lz);
                             foliage_camera = Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
                         }
+
+                        // The same eye-level stance without the foliage, for
+                        // judging the ground itself. Every terrain texturing
+                        // phase since 25F has had to be judged on a hillside a
+                        // kilometre away, where a material transition is a few
+                        // pixels wide and a height blend is invisible — the
+                        // features live at metres and the demo camera does not.
+                        if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
+                            let [wx, wz] = desc.world_size();
+                            let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
+                            let ground = terrain.world_height_at(lx, lz);
+                            foliage_camera =
+                                Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                        }
                     }
                     // The default camera sits at y = 2, which is now inside a
                     // hillside rather than above a plain. Put it over the

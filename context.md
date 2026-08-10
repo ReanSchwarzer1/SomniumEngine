@@ -1217,8 +1217,8 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
-| 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
-| 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
+| 25D | ✅ Complete (macro tier + detail budget; no toroidal clipmap — see §25.13) | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
+| 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
@@ -1931,6 +1931,143 @@ not. Also absent: temporal reprojection of the volume, which is what lets the
 step count come down without the fog crawling.
 
 
+### 25.12 25E — height-weighted material blending
+
+Splat weights say how much of each material is at a texel. They say nothing
+about which one is **on top**, and normalising them cross-fades: at a seam every
+pixel is half of each, which is a colour that exists in neither material. The
+gravel in the demo scene was the proof — pale, low-contrast, its pebbles ghosted
+into the grass beside it, because most of the gravel's screen area was being
+averaged with something else.
+
+Ported from O3DE's `TerrainDetailHelpers.azsli` (`AppendHeightToWeight` and the
+depth-blend loop in `GetDetailSurface`), which is a two-part algorithm:
+
+1. **Height into weight**, clamped by coverage:
+   `w += h * min(1, (1/min_weight) * w)`. The clamp is the part that is easy to
+   drop and load-bearing — without it a 4% sliver of a material with a tall
+   height map out-ranks the 96% material that is actually painted there, and the
+   height map becomes a second splatmap nobody authored. `blend.rs` has that as
+   a pair of tests: one asserting the sliver loses, one asserting it *wins* when
+   the clamp is removed, so the parameter cannot quietly stop mattering.
+2. **Depth blend**: only materials within their own `blend_width` of the winner
+   contribute, renormalised across that band. Because the band is measured on
+   weights that already carry each layer's relief, the boundary follows the
+   rock's crevices instead of a contour of the splatmap.
+
+**The parameters are per layer, and that is the point.** A single global
+sharpness makes every transition the same transition. `blend::LAYER_BLENDS`
+authors `height_scale` / `blend_width` / `min_weight` against what each of the
+eight photographed materials physically is: rock and gravel deep-relief and
+hard-edged (`0.15` bands), snow and wet mud shallow and soft (`0.55`–`0.60`).
+O3DE's own defaults are `heightBlendFactor 0.5` / `heightWeightClampFactor 0.1`,
+and it uploads the reciprocal of the second — so do we, in `blend::weight_clamp`.
+
+Also here, from the same reference: **albedo is blended in an approximately
+perceptual space** (`sqrt` in, squared out). A weighted mean of *linear* albedo
+between two materials of different luminance sits below both once it is read
+through the display transform, which is why a seam that should be a texture
+boundary showed as a dark band along it.
+
+**Measured**, `SOMNIUM_TERRAIN_HEIGHT_BLEND=0` vs `1`, eye level over the
+gravel/grass boundary: **776.8** mean absolute luminance over 921 600 terrain
+pixels, 319 812 of them past the 1% threshold, with mesh and sky bit-identical.
+From the landscape camera the same change is 135.0 over 302 041 pixels — real
+but nearly invisible, which is the finding as much as the number is.
+
+**`SOMNIUM_TERRAIN_EYE=1`** came out of that. Every terrain texturing phase
+since 25F has been judged on a hillside a kilometre away, where a material
+transition is a few pixels wide; the features live at metres and the demo camera
+did not. It is the foliage phase's eye-level stance without the foliage, and
+25H's parallax will need it too.
+
+**Two tests were added that would have caught real bugs.** `blend.rs` mirrors
+the algorithm in Rust and pins its properties — sums to one, degrades to a plain
+blend when heights are equal, relief flips two evenly-matched materials both
+ways. And `shaders_validate.rs` now asks naga for the WGSL layout of
+`TerrainMaterial` and compares it to `GpuTerrainMaterial`'s `repr(C)` offsets;
+`material/pool.rs` had only ever proved the Rust half, with the WGSL half left
+as a comment. It caught this phase's own trailing `vec3<u32>` pad, which aligns
+to 16 in WGSL and to 4 in Rust and would have given the struct a 272-byte stride
+against Rust's 256 — invisible with one terrain, silent corruption with two.
+
+### 25.13 25D — the macro tier, and the clipmap that was not built
+
+**Scope decision first, because it is most of the phase.** O3DE's answer to the
+resolution ceiling is two toroidally-addressed clipmap stacks: a macro pair and
+seven detail arrays, generated by compute into rings centred on the camera,
+sampled trilinearly across levels, with incremental region updates as the centre
+moves (`ClipmapBounds.h`, `TerrainDetailClipmapGenerationPass.azsl`,
+`ClipmapComputeHelpers.azsli`). The **detail** half of that is a cache: it
+composites the layered PBR once per clipmap texel instead of once per pixel.
+
+Somnium composites per pixel, at full rate, with explicit derivatives. Caching
+that into a clipmap would **lower** close-range quality — the innermost ring
+would have to hold millimetre texels to match what 25K and 25E just bought, and
+it cannot — in exchange for a cost win on a 1 km bounded heightfield that is not
+the streamed, unbounded world the machinery exists for. So the detail clipmap is
+deliberately **not** built, and the phase delivers the two things it was actually
+for:
+
+**1. The macro tier.** Eight materials describe a texel of ground but not a
+landscape: every patch of grass is the same patch of grass, and at distance the
+layers converge to their own mean and the terrain goes uniform. O3DE's macro
+material is authored imagery over the terrain with the detail composited on top
+(`TerrainMacroHelpers.azsli`). Somnium has nothing to author with, so
+`terrain/macro_map.rs` **derives** it from the landform — altitude, macro-scale
+grade, how much of a hollow a point sits in, and two octaves of large-scale
+noise — which is better than an authored map would have been at this stage,
+because the variation then *correlates* with the terrain instead of floating
+over it. Ridges come out drier and paler, hollows darker and greener.
+
+The composite is O3DE's `ApplyTextureBlend`, all four modes, defaulting to
+**overlay** so the detail keeps its own light and dark structure and takes only
+the macro's colour and level. It happens **between 25E's `sqrt` and its
+squaring** — O3DE performs overlay and linear-light in a display-referred space
+for the same reason, and it is what makes a macro texel of 0.5 the exact
+identity. That in turn is what makes "no macro map bound" and "strength 0" the
+same picture, which `a_flat_terrain_stays_near_the_neutral_value` pins.
+
+**2. A detail budget that scales with screen area.** The per-pixel layer gate
+rises with camera distance, from `LAYER_WEIGHT_EPSILON` to `FAR_LAYER_EPSILON`
+(0.2, which admits at most four layers and in practice one or two). Not higher:
+at 0.5 only one layer can ever survive, so a genuine 51/49 boundary snaps and
+the seam crawls as the camera moves.
+
+**Measured.** Debug mode 12 writes layer taps as a fraction of the 48-tap worst
+case straight to the HDR target before exposure, so the capture harness's mean
+terrain luminance × 48 *is* the mean taps per pixel:
+
+| view | fade off | fade on |
+|---|---|---|
+| landscape camera | 16.74 taps/px | **11.44** (−32%) |
+| eye level (`SOMNIUM_TERRAIN_EYE=1`) | 12.00 taps/px | 12.00 (unchanged) |
+
+Close up it costs exactly nothing, which is the property that matters: the
+budget only ever removes layers a pixel could not resolve.
+
+Macro tier A/B (`SOMNIUM_TERRAIN_MACRO=0/1`): **127.5** mean absolute luminance
+over 784 523 terrain pixels, 601 598 of them past the 1% threshold, sky
+bit-identical. At eye level the same switch moves 18.5 (0.4%) and **zero** pixels
+past the threshold — not a failure but the definition of the tier: a
+hundreds-of-metres signal is nearly constant across a 30 m view.
+
+**The thing that did not work, and why it is worth recording.** The budget first
+dropped **hex-tiling** past the fade as well, on the reasoning that three taps
+per map exist to hide a repetition already below a pixel at that range. That
+measured beautifully — 16.74 → 6.20 taps, −63% — and put a hard lattice across
+the entire mid-ground, visible in both sides of the macro A/B, which is what
+gave it away. At distance a 4 m tile is a *few pixels* wide, so the repetition
+does not vanish; it beats against the pixel grid and becomes **more** visible
+than it is close up. Hex-tiling earns its taps furthest away, which is the
+opposite of the intuition. The layer gate was doing nearly all of the saving
+anyway, and −32% artefact-free is the number that ships.
+
+**Still open from the original row:** a macro *normal* map (Somnium's terrain
+mesh is one vertex per metre, so the geometric normal already carries that
+frequency), authored macro imagery in place of the derived map, and the detail
+clipmap itself, which stays unbuilt on purpose.
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:
@@ -1944,6 +2081,13 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **25D** — ✅ passing. Debug mode 12 (`SOMNIUM_SHADOW_DEBUG=12`) reports mean
+  layer taps per pixel: 16.74 → 11.44 with the detail budget on, unchanged at
+  eye level. `SOMNIUM_TERRAIN_MACRO=0/1` moves 127.5 over 784 523 terrain
+  pixels with sky bit-identical. See §25.13.
+- **25E** — ✅ passing. `SOMNIUM_TERRAIN_HEIGHT_BLEND=0/1` with
+  `SOMNIUM_TERRAIN_EYE=1`: 776.8 mean absolute luminance over 921 600 terrain
+  pixels, mesh and sky bit-identical. See §25.12.
 - **25F** — a flat plain from a high camera: the tiling grid must not be findable.
 - Every sub-phase keeps `cargo test --workspace` green, currently 209 tests.
 

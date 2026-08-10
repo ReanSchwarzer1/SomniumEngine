@@ -893,6 +893,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // term the same way a glTF occlusion map is — the two know different
         // things, and GTAO cannot see detail below a pixel.
         surface.occlusion = surface.occlusion * terrain.occlusion;
+        terrain_taps = terrain.taps;
     }
 
 
@@ -937,6 +938,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // GTAO's answer or a texture nobody had written.
     if light._pad2_z > 7.5 && light._pad2_z < 8.5 {
         return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
+    }
+
+    // 12 = terrain layer taps as a fraction of the 48-tap worst case
+    // (Phase 25D). Written straight to the HDR target before exposure, so the
+    // capture harness's mean terrain luminance times 48 *is* the mean taps per
+    // pixel — which is how the detail budget gets a number instead of a claim.
+    if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
+        return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.

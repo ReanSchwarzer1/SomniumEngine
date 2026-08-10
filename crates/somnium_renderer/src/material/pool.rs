@@ -232,7 +232,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_144_byte_shader_layout() {
+    fn the_terrain_material_is_the_272_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
@@ -242,8 +242,12 @@ mod material_flag_tests {
         // arrays from four entries to eight. The eight-element arrays are
         // `array<vec4<_>, 2>` on the WGSL side for the same reason: a bare
         // `array<f32, 8>` there has a 16-byte stride and would not match.
+        // Phase 25E took it to 256 with three more per-layer arrays plus the
+        // height-blend flag; the trailing `_pad` is there because WGSL rounds a
+        // struct up to its alignment and Rust does not. Phase 25D took it to
+        // 272 with the macro tier and the detail-fade range.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 144);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 272);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
@@ -259,5 +263,14 @@ mod material_flag_tests {
         assert_eq!(offset(&m.splat_map_hi as *const i32 as *const u8), 132);
         assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 136);
         assert_eq!(offset(&m.hex_tiling as *const u32 as *const u8), 140);
+        assert_eq!(offset(m.layer_height_scale.as_ptr() as *const u8), 144);
+        assert_eq!(offset(m.layer_blend_width.as_ptr() as *const u8), 176);
+        assert_eq!(offset(m.layer_weight_clamp.as_ptr() as *const u8), 208);
+        assert_eq!(offset(&m.height_blend as *const u32 as *const u8), 240);
+        assert_eq!(offset(&m.macro_map as *const i32 as *const u8), 244);
+        assert_eq!(offset(&m.macro_mode as *const u32 as *const u8), 248);
+        assert_eq!(offset(&m.macro_strength as *const f32 as *const u8), 252);
+        assert_eq!(offset(&m.detail_fade_start as *const f32 as *const u8), 256);
+        assert_eq!(offset(&m.detail_fade_end as *const f32 as *const u8), 260);
     }
 }
