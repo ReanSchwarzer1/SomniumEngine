@@ -546,6 +546,12 @@ pub struct PostProcessComponent {
     /// falls back to the shadow map otherwise, so the toggle is safe to leave
     /// on regardless of hardware.
     pub restir_enabled: bool,
+    /// Ray-traced indirect diffuse (Phase 24L).
+    ///
+    /// Replaces the environment map's *diffuse* half with a traced one-bounce
+    /// solution; the specular lobe still comes from the cubemap. Off means the
+    /// constant ambient term the engine has always had.
+    pub restir_gi_enabled: bool,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -634,6 +640,7 @@ impl Default for PostProcessComponent {
             // Phases 24U/25I. On by default: aerial perspective is physics, not
             // a look — a kilometre of air between the camera and a hill is
             // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
+            restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: true,
             fog_density: 0.0008,

@@ -11,6 +11,8 @@
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
+const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
+const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
@@ -46,7 +48,7 @@ fn the_shading_module_validates() {
     // are order-independent, and this is what proves it rather than assuming.
     check(
         "shading",
-        &format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
+        &format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
     );
 }
 
@@ -70,7 +72,7 @@ fn the_volumetric_module_validates() {
 #[test]
 fn the_terrain_material_struct_matches_the_rust_layout() {
     let source =
-        format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}");
+        format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}");
     let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
 
     let (_, ty) = module
@@ -83,7 +85,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 272, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 400, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -111,6 +113,24 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("macro_strength"), 252);
     assert_eq!(offset("detail_fade_start"), 256);
     assert_eq!(offset("detail_fade_end"), 260);
+    assert_eq!(offset("layer_albedo"), 272);
+}
+
+/// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
+/// does, which is the point: a ray hit and a visibility-buffer hit resolve
+/// through one description of the scene, not two that could drift apart.
+#[test]
+fn the_restir_gi_module_validates() {
+    check(
+        "restir_gi",
+        // GI first, because `enable wgpu_ray_query;` is a directive and
+        // directives must precede every declaration in the module. Declarations
+        // themselves are order-independent, which is what lets the pool it
+        // depends on be concatenated after it.
+        &format!(
+            "{RESTIR_GI}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
+        ),
+    );
 }
 
 #[test]

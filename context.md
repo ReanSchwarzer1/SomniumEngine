@@ -2046,6 +2046,11 @@ terrain luminance × 48 *is* the mean taps per pixel:
 Close up it costs exactly nothing, which is the property that matters: the
 budget only ever removes layers a pixel could not resolve.
 
+**Re-measured in milliseconds once Phase 29's profiler existed:** the shading
+pass goes **0.973 → 0.883 ms**, −9.2%, with every other pass identical to the
+third decimal. So −32% of the texture reads buys −9.2% of the pass — reads were
+not the whole of its cost. See §29.1.
+
 Macro tier A/B (`SOMNIUM_TERRAIN_MACRO=0/1`): **127.5** mean absolute luminance
 over 784 523 terrain pixels, 601 598 of them past the 1% threshold, sky
 bit-identical. At eye level the same switch moves 18.5 (0.4%) and **zero** pixels
@@ -2158,7 +2163,7 @@ hashing, a runtime streaming budget with LOD residency, and hot reload.
 References: Flax `Content` / `ContentImporters` / `Streaming`, Stride
 `Stride.Assets`.
 
-**Phase 29 — Profiler and debug tooling.** There is no way to answer "why is
+**Phase 29 — Profiler and debug tooling. ✅ Complete (GPU half; see §29.1).** There is no way to answer "why is
 this frame slow" beyond guessing. That cost real time in 17G, where a 51x
 draw-call regression was found by reasoning rather than measurement. Needs CPU
 zones, GPU timestamp queries per pass, a frame graph view, and counters for
@@ -2300,6 +2305,89 @@ would not have done that.
 
 Then **27 (animation)** and **28 (asset pipeline)**, which are what a real
 project hits first. Then 31, 30, 33, with 32 last.
+
+---
+
+## 17.7 Phase 29 — the profiler
+
+**What it is.** One `wgpu::QuerySet` of timestamps, written from the encoder
+*around* each pass, so no pass had to be modified to become measurable. Results
+are read one or more frames later through a three-deep ring of mapped readback
+buffers and smoothed over thirty frames. `crates/somnium_renderer/src/profiler.rs`.
+
+Two things came out of reading the references rather than from the phase
+description:
+
+- **Wicked `wiProfiler.cpp`** — the deferred readback is the whole design.
+  Waiting on a resolve would make the profiler the most expensive thing in the
+  frame and change the number it exists to report. Its guard against nonsense
+  timestamps is ported too: one frame of driver garbage would otherwise poison a
+  thirty-frame window, and `end - begin` the wrong way round on `u64` is not a
+  small error, it is roughly six centuries.
+- **Flax `ProfilerGPU.h` / `RenderStats.h`** — events carry a **depth**, which
+  is what turns a list of passes into a frame graph, and the timings travel with
+  **counters** (draws, triangles, instances, TLAS instances). A pass time says
+  how long something took and never why; "why" is nearly always one of the
+  counters.
+
+**`TIMESTAMP_QUERY_INSIDE_ENCODERS`, not just `TIMESTAMP_QUERY`.** The plain
+feature only permits timestamps declared in a pass descriptor's
+`timestamp_writes`, which would have meant threading query indices through every
+pass in the engine. The encoder form lets the profiler bracket a pass from
+outside. Detected, never demanded — the same pattern as GPU-driven rendering and
+ray tracing; an adapter without it still runs, with counters and no timings.
+
+**The bug that made it silent.** Nothing in the engine polls the device per
+frame — the only two `poll` calls are blocking waits for a specific readback —
+so `map_async` callbacks never fired, `ready` never flipped, and the profiler
+reported nothing at all while looking entirely healthy. `after_submit` now polls
+with `PollType::Poll`. Worth recording because the failure mode is *no output*,
+not a wrong number, and there is nothing in the code to point at.
+
+**What it says about this scene** (debug build, 1280×720, terrain scene):
+
+```
+Frame                  2.354 ms
+  Shadows              0.324    Visibility (phase 1) 0.053    Hi-Z    0.044
+  GTAO                 0.214    Volumetrics          0.105    Shading 0.869
+  Water                0.012    Transparent          0.001    TAA     0.133
+  Bloom                0.231    Post + present       0.050
+unattributed           0.317 ms
+257 draws / 288 460 tris / 256 terrain chunks / 257 TLAS instances
+```
+
+`unattributed` is printed instead of a total, which would only repeat the `Frame`
+row. It is the passes not yet bracketed — culling, the second visibility phase,
+ReSTIR, IBL, the editor overlays — and it is the honest statement of how much of
+the frame the profiler still cannot see.
+
+**Its first real job was 25D**, which had to express its cost win in *texture
+reads* through a debug shader because there was no clock on the GPU.
+`SOMNIUM_TERRAIN_DETAIL_FADE=0/1`, same viewpoint:
+
+| pass | fade off | fade on |
+|---|---|---|
+| Shading | 0.973 ms | **0.883 ms** (−9.2%) |
+| Shadows | 0.324 | 0.324 |
+| GTAO | 0.214 | 0.215 |
+| unattributed | 0.317 | 0.316 |
+
+Every pass the change should not touch is identical to the third decimal, which
+is the control. So 25D's −32% in texture reads buys −9.2% of the shading pass —
+texture reads were not the whole cost of it, and that is a thing the tap counter
+could not have said.
+
+**In the editor**: a `[x] Profiler` toggle on the viewport toolbar and an
+overlay panel pinned to the top-left of the viewport, showing the same tree with
+live numbers. The toggle drives collection as well as visibility — a hidden
+profiler that keeps writing timestamps is paying for a measurement nobody reads.
+Headless, `SOMNIUM_PROFILE=1` prints the table every `SOMNIUM_PROFILE_EVERY`
+frames (default 120), which is how the 25D table above was produced.
+
+**Not done, from the phase description:** CPU zones (only GPU work is timed),
+memory counters, and a frame-graph *view* beyond the indented tree. 24AB's
+lighting debug views were absorbed into the phase and already exist as
+`SOMNIUM_SHADOW_DEBUG` modes 1–12.
 
 ---
 

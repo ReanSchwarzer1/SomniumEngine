@@ -188,6 +188,12 @@ pub struct GpuTerrainMaterial {
     /// Pads to 272. WGSL would insert this itself and Rust would not, which is
     /// the disagreement that mis-decodes the whole struct.
     pub _pad: [u32; 2],
+    /// Phase 24L: mean linear albedo per layer.               offset 272 (128)
+    ///
+    /// What an indirect ray picks up when it bounces off the ground. See
+    /// `TerrainLayerTextures::mean_albedo` for why it is a mean rather than the
+    /// real composite.
+    pub layer_albedo: [[f32; 4]; 8],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -467,6 +473,7 @@ impl TerrainData {
             detail_fade_start: self.detail_fade_start,
             detail_fade_end: self.detail_fade_end.max(self.detail_fade_start + 1.0),
             _pad: [0; 2],
+            layer_albedo: self.layer_textures.mean_albedo,
         }
     }
 

@@ -17,7 +17,7 @@ use crate::{
     editor_event::InspectorField as IF,
     message::{MessageDirection, NodeHandle, TextMessage, UiMessage},
     pass::UiPass,
-    types::Thickness,
+    types::{HorizontalAlignment, Thickness, VerticalAlignment},
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{
@@ -112,6 +112,8 @@ struct InspectorHandles {
     post_gtao_toggle:   NodeHandle,
     post_gtao_label:    NodeHandle,
     post_restir_toggle: NodeHandle,
+    post_restir_gi_toggle: NodeHandle,
+    post_restir_gi_label: NodeHandle,
     post_restir_label:  NodeHandle,
     post_bloom_toggle:  NodeHandle,
     post_bloom_label:   NodeHandle,
@@ -155,6 +157,8 @@ pub struct PostInspectorState {
     pub taa: bool,
     pub gtao: bool,
     pub restir: bool,
+    /// Phase 24L: ray-traced indirect diffuse.
+    pub restir_gi: bool,
     pub bloom: bool,
     pub dof: bool,
     /// Phases 24U/25I.
@@ -169,6 +173,22 @@ pub struct PostInspectorState {
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
+
+/// One line of the profiler overlay (Phase 29).
+///
+/// Split into label and value rather than one pre-formatted string because the
+/// editor font is proportional: padding a name to a fixed character count lines
+/// the numbers up in a log and not on screen. Two columns lay out properly.
+#[derive(Clone, Debug)]
+pub struct ProfilerRow {
+    pub label: String,
+    pub value: String,
+    /// Nesting depth, drawn as indentation.
+    pub depth: u8,
+}
+
+/// Rows the overlay can show before it starts dropping them.
+pub const PROFILER_ROWS: usize = 20;
 
 /// Names shown in the foliage picker (Phase 17F).
 ///
@@ -201,6 +221,12 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, u8)>,
     inspector_handles:  InspectorHandles,
     viewport_handle:    NodeHandle,
+    /// Phase 29 profiler overlay.
+    profiler_panel:     NodeHandle,
+    profiler_toggle:    NodeHandle,
+    profiler_toggle_lbl: NodeHandle,
+    profiler_names:     Vec<NodeHandle>,
+    profiler_values:    Vec<NodeHandle>,
     outer_grid:         NodeHandle,
     menu_bar_h:         NodeHandle,
     inner_h:            NodeHandle,
@@ -251,6 +277,11 @@ pub struct UiManager {
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle:     NodeHandle,
+    profiler_panel:      NodeHandle,
+    profiler_toggle:     NodeHandle,
+    profiler_toggle_lbl: NodeHandle,
+    profiler_names:      Vec<NodeHandle>,
+    profiler_values:     Vec<NodeHandle>,
     last_outliner_state: Option<(Vec<(u32, String)>, Option<u32>)>,
     outer_grid:          NodeHandle,
     menu_bar_h:          NodeHandle,
@@ -320,6 +351,11 @@ impl UiManager {
             inspector_handles:  layout.inspector_handles,
             editor_events:      VecDeque::new(),
             viewport_handle:    layout.viewport_handle,
+            profiler_panel:     layout.profiler_panel,
+            profiler_toggle:    layout.profiler_toggle,
+            profiler_toggle_lbl: layout.profiler_toggle_lbl,
+            profiler_names:     layout.profiler_names,
+            profiler_values:    layout.profiler_values,
             last_outliner_state: None,
             outer_grid:         layout.outer_grid,
             menu_bar_h:         layout.menu_bar_h,
@@ -579,6 +615,7 @@ impl UiManager {
                     (h.post_taa_label, v.taa, "TAA"),
                     (h.post_gtao_label, v.gtao, "GTAO"),
                     (h.post_restir_label, v.restir, "RT Direct Light"),
+                    (h.post_restir_gi_label, v.restir_gi, "RT Indirect (GI)"),
                     (h.post_bloom_label, v.bloom, "Bloom"),
                     (h.post_dof_label, v.dof, "Depth of Field"),
                     (h.post_vol_label, v.volumetrics, "Volumetrics"),
@@ -613,6 +650,45 @@ impl UiManager {
                 }
             }
             None => self.native_ui.set_visibility(section, false),
+        }
+    }
+
+    /// Refresh the profiler overlay (Phase 29).
+    ///
+    /// `None` hides it. Rows past [`PROFILER_ROWS`] are dropped rather than
+    /// grown into: the overlay is a glance at the frame, and a panel that
+    /// resizes itself every time a pass appears is harder to read than one that
+    /// stays put.
+    pub fn update_profiler(&mut self, rows: Option<&[ProfilerRow]>) {
+        let panel = self.profiler_panel;
+        let Some(rows) = rows else {
+            self.native_ui.set_visibility(panel, false);
+            self.native_ui.send(TextMessage::set_text(
+                self.profiler_toggle_lbl,
+                "[ ] Profiler".to_string(),
+            ));
+            return;
+        };
+        self.native_ui.set_visibility(panel, true);
+        self.native_ui.send(TextMessage::set_text(
+            self.profiler_toggle_lbl,
+            "[x] Profiler".to_string(),
+        ));
+
+        let names = self.profiler_names.clone();
+        let values = self.profiler_values.clone();
+        for i in 0..names.len() {
+            let (label, value) = match rows.get(i) {
+                Some(r) => (
+                    format!("{}{}", "   ".repeat(r.depth as usize), r.label),
+                    r.value.clone(),
+                ),
+                // Blanked rather than hidden: hiding a row would reflow the
+                // panel every frame a pass drops out of the list.
+                None => (String::new(), String::new()),
+            };
+            self.native_ui.send(TextMessage::set_text(names[i], label));
+            self.native_ui.send(TextMessage::set_text(values[i], value));
         }
     }
 
@@ -781,6 +857,7 @@ impl UiManager {
                     (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
                     (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
                     (self.inspector_handles.post_restir_toggle, PostFxToggle::Restir),
+                    (self.inspector_handles.post_restir_gi_toggle, PostFxToggle::RestirGi),
                     (self.inspector_handles.post_bloom_toggle, PostFxToggle::Bloom),
                     (self.inspector_handles.post_dof_toggle, PostFxToggle::DepthOfField),
                     (self.inspector_handles.post_vol_toggle, PostFxToggle::Volumetrics),
@@ -791,6 +868,10 @@ impl UiManager {
                         self.editor_events.push_back(EditorEvent::TogglePostFx(which));
                         break;
                     }
+                }
+                if msg.destination == self.profiler_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
+                    continue;
                 }
                 if msg.destination == self.inspector_handles.post_cel_toggle {
                     self.editor_events
@@ -1092,6 +1173,26 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
 
+    // Phase 29: the profiler switch lives on the viewport toolbar rather than
+    // in a menu, because it is a thing you flick on and off while looking at
+    // the scene — the same reason UE5 puts its stat toggles there.
+    let prof_btn = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(20.0)
+            .with_margin(Thickness { left: 12.0, top: 3.0, right: 6.0, bottom: 0.0 }),
+    )
+    .build();
+    let profiler_toggle = ui.add_node(prof_btn, vp_stack_h);
+    let prof_lbl = TextBuilder::new(
+        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 3.0)),
+    )
+    .with_text("[ ] Profiler")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let profiler_toggle_lbl = ui.add_node(prof_lbl, profiler_toggle);
+
     let hint = TextBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness { left: 4.0, top: 6.0, right: 0.0, bottom: 0.0 }),
@@ -1183,6 +1284,81 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .with_stroke_thickness(Thickness::ZERO)
     .build();
     let viewport_handle = ui.add_node(viewport_border, inner_h);
+
+    // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
+    // A child of the viewport, pinned top-left, so it floats over the render
+    // instead of stealing layout from it. Rows are built once and rewritten
+    // each frame: allocating twenty text nodes per frame to display a frame
+    // timing would be its own entry in the table.
+    let prof_panel = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(300.0)
+            .with_margin(Thickness { left: 10.0, top: 10.0, right: 0.0, bottom: 0.0 })
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_background(theme::BG_DARK)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(1.0))
+    .build();
+    let profiler_panel = ui.add_node(prof_panel, viewport_handle);
+
+    let prof_stack = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let prof_stack_h = ui.add_node(prof_stack, profiler_panel);
+
+    let prof_hdr = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_height(18.0)
+            .with_margin(Thickness { left: 8.0, top: 4.0, right: 0.0, bottom: 2.0 }),
+    )
+    .with_text("GPU PROFILER")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_SECONDARY)
+    .build();
+    ui.add_node(prof_hdr, prof_stack_h);
+
+    let mut profiler_names = Vec::with_capacity(PROFILER_ROWS);
+    let mut profiler_values = Vec::with_capacity(PROFILER_ROWS);
+    for _ in 0..PROFILER_ROWS {
+        let row = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_height(15.0)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build();
+        let row_h = ui.add_node(row, prof_stack_h);
+
+        let name = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_width(190.0)
+                .with_margin(Thickness { left: 8.0, top: 1.0, right: 0.0, bottom: 0.0 }),
+        )
+        .with_text("")
+        .with_font_size(11.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_SECONDARY)
+        .build();
+        profiler_names.push(ui.add_node(name, row_h));
+
+        let value = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_width(92.0)
+                .with_margin(Thickness { left: 0.0, top: 1.0, right: 0.0, bottom: 0.0 }),
+        )
+        .with_text("")
+        .with_font_size(11.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_PRIMARY)
+        .build();
+        profiler_values.push(ui.add_node(value, row_h));
+    }
+    ui.set_visibility(profiler_panel, false);
 
     // Right panel: two sections (outliner top, inspector bottom)
     let right_border = BorderBuilder::new(
@@ -1365,6 +1541,11 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
+        profiler_panel,
+        profiler_toggle,
+        profiler_toggle_lbl,
+        profiler_names,
+        profiler_values,
         outer_grid: outer_h,
         menu_bar_h,
         inner_h,
@@ -1546,6 +1727,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_ao_intensity = make_row_step(ui, "AO Amt", 34.0, font_id, post_section, 0.02);
     let (post_restir_toggle, post_restir_label) =
         make_toggle(ui, "RT Direct Light", font_id, post_section);
+    // Phase 24L. Directly under the direct-light switch, because it is the
+    // other half of the same traced solution and they read as a pair.
+    let (post_restir_gi_toggle, post_restir_gi_label) =
+        make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
     let post_bloom_amt  = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
     let (post_dof_toggle, post_dof_label)     = make_toggle(ui, "Depth of Field", font_id, post_section);
@@ -1653,6 +1838,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_cel_toggle, post_cel_label,
         post_taa_toggle, post_taa_label, post_gtao_toggle, post_gtao_label,
         post_restir_toggle, post_restir_label, post_bloom_toggle, post_bloom_label,
+        post_restir_gi_toggle, post_restir_gi_label,
         post_bloom_amt, post_dof_toggle, post_dof_label, post_dof_focus,
         post_temperature, post_contrast, post_saturation, post_grain,
         post_vol_toggle, post_vol_label, post_shafts_toggle, post_shafts_label,

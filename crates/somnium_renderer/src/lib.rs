@@ -22,6 +22,7 @@ pub mod instance;
 pub mod material;
 pub mod meshlet;
 pub mod pass;
+pub mod profiler;
 pub mod renderer;
 pub mod shadow;
 pub mod terrain;

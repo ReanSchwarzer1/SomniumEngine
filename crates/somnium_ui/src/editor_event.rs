@@ -135,6 +135,8 @@ pub enum PostFxToggle {
     Taa,
     /// Ray-traced direct lighting (Phase 24K).
     Restir,
+    /// Ray-traced indirect diffuse (Phase 24L).
+    RestirGi,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     Volumetrics,
     /// Shadow-test the fog per froxel, which is what draws light shafts.
@@ -182,6 +184,10 @@ pub enum EditorEvent {
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
     /// (the engine maps it exponentially to a world speed).
     SetCameraSpeed(f32),
+    /// Show or hide the profiler overlay (Phase 29). Also starts and stops the
+    /// GPU timestamp collection, because a profiler nobody is looking at should
+    /// not be spending queries.
+    ToggleProfiler,
     /// File > Import Model — opens a native file picker and imports a glTF/GLB
     /// model into the scene at the world origin (Phase 19B).
     ImportModel,

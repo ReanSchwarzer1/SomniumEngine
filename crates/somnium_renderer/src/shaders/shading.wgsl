@@ -1,124 +1,6 @@
 // Somnium Engine — Visibility Buffer Shading Pass
 // Phase 12: Clustered Local Lights + Cel-Shading Mode
 
-// ─── Shared structs ─────────────────────────────────────────────────────────
-
-struct Vertex {
-    pos_x: f32, pos_y: f32, pos_z: f32,
-    norm_x: f32, norm_y: f32, norm_z: f32,
-    u: f32, v: f32,
-}
-
-struct Instance {
-    model: mat4x4<f32>,
-    material_id: u32,
-    vertex_offset: u32,
-    index_offset: u32,
-    _padding: u32,
-}
-
-struct Material {
-    base_color: vec4<f32>,
-    roughness: f32,
-    metallic: f32,
-    albedo_map: i32,
-    normal_map: i32,
-    metallic_roughness_map: i32,
-    alpha_cutoff: f32,
-    flags: u32,
-    occlusion_map: i32,
-    transmission: f32,
-    // Three scalars, not a vec3.
-    //
-    // WGSL gives vec3<f32> a 16-byte alignment, so `emissive: vec3<f32>` here
-    // sat at offset 64 and rounded the struct to 96 bytes, while Rust's
-    // repr(C) packs [f32; 3] at offset 52 for a total of 80. Every material
-    // past index 0 was therefore read from the wrong offset: `metallic` came
-    // back as garbage, and a metallic reading of ~1 zeroes kD, so the sun's
-    // diffuse term vanished on those materials and only IBL remained. That is
-    // why primitives looked flat and showed no shadow (there was no sun term
-    // left to darken), and why foliage rendered with wrong colours -- one bug,
-    // scaling with material index.
-    emissive_r: f32,
-    emissive_g: f32,
-    emissive_b: f32,
-    emissive_map: i32,
-    // Phase 25A-2: slot in the terrain-material array, or -1.
-    terrain_index: i32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
-// Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).
-// visibility.wgsl's shorter View struct still reads only view_proj at offset 0 — no change needed there.
-struct View {
-    view_proj:     mat4x4<f32>,   // offset   0  (64 bytes)
-    inv_view_proj: mat4x4<f32>,   // offset  64  (64 bytes)
-    view:          mat4x4<f32>,   // offset 128  (64 bytes)  ← Phase 11D
-    camera_pos:    vec3<f32>,     // offset 192  (12 bytes)
-    _padding:      f32,           // offset 204  ( 4 bytes)
-    // debug_flags at offset 208 would need buffer expansion; instead we repurpose _padding:
-    // bit 0 of _padding (reinterpreted as u32) = cascade debug overlay enable.
-    // We use a separate f32 field below for clarity.
-}
-
-// GpuDirectionalLight (320 bytes) — matches shadow/mod.rs::GpuDirectionalLight.
-struct DirectionalLight {
-    direction:       vec3<f32>,               // offset   0
-    _pad0:           f32,                     // offset  12
-    color:           vec3<f32>,               // offset  16  pre-multiplied by intensity
-    _pad1:           f32,                     // offset  28
-    view_proj:       array<mat4x4<f32>, 4>,   // offset  32  (256 bytes)
-    cascade_splits:  vec4<f32>,               // offset 288  view-space far Z per cascade
-    shadow_map_size: f32,                     // offset 304  total atlas texels (4096)
-    ibl_intensity:   f32,                     // offset 308  Phase 22C: editable indirect strength
-    sun_angular_radius: f32,                  // offset 312  Phase 24E
-    _pad2_z:         f32,                     // offset 316
-}
-
-struct GpuLocalLight {
-    position_ws: vec3<f32>,
-    range: f32,
-    color: vec3<f32>,
-    light_type: u32,
-    direction_ws: vec3<f32>,
-    spot_cos_outer: f32,
-    spot_cos_inner: f32,
-    radius: f32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
-struct ClusterOffset {
-    offset: u32,
-    count: u32,
-}
-
-struct ClusterParams {
-    grid_width: u32,
-    grid_height: u32,
-    num_slices: u32,
-    tile_size: u32,
-    near: f32,
-    far: f32,
-    shading_mode: u32,
-    num_local_lights: u32,
-}
-
-// ─── Bindings ────────────────────────────────────────────────────────────────
-
-@group(0) @binding(0) var<storage, read> vertices:  array<Vertex>;
-@group(0) @binding(1) var<storage, read> indices:   array<u32>;
-@group(0) @binding(2) var<storage, read> instances: array<Instance>;
-@group(0) @binding(3) var<storage, read> view:      View;
-@group(0) @binding(4) var textures:                 binding_array<texture_2d<f32>>;
-@group(0) @binding(5) var<storage, read> materials: array<Material>;
-@group(0) @binding(6) var<storage, read> light:     DirectionalLight;
-@group(0) @binding(7) var<storage, read> local_lights: array<GpuLocalLight>;
-@group(0) @binding(8) var<storage, read> light_index_list: array<u32>;
-@group(0) @binding(9) var<storage, read> cluster_offsets: array<ClusterOffset>;
-@group(0) @binding(10) var<storage, read> cluster_params: ClusterParams;
-
 @group(1) @binding(0) var vis_buffer:      texture_2d<u32>;
 @group(1) @binding(1) var default_sampler: sampler;
 @group(1) @binding(2) var shadow_atlas:    texture_depth_2d;
@@ -140,6 +22,12 @@ struct ClusterParams {
 @group(1) @binding(10) var volumetric_sampler: sampler;
 // Metres the volume spans; 0 when volumetrics are switched off.
 @group(1) @binding(11) var<uniform> volumetric_range: vec4<f32>;
+// Phase 24L: traced indirect diffuse. `rgb` is incoming irradiance — the GI
+// pass does not know this surface's albedo and must not, or it would be applied
+// twice — and `a` is the "a traced result exists" flag, on the convention 24K
+// established. Alpha 0 is what an unsupported device and a switched-off pass
+// both produce, and it is what sends `evaluate_ibl` back to the cubemap.
+@group(1) @binding(12) var restir_gi: texture_2d<f32>;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -223,7 +111,11 @@ fn specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
 }
 
 /// Image-based ambient: diffuse irradiance + split-sum specular.
-fn evaluate_ibl(surface: Surface) -> vec3<f32> {
+/// Phase 24L: `traced_diffuse` replaces the diffuse half when the GI pass has a
+/// result for this pixel. Only the diffuse half — the specular lobe still comes
+/// from the environment cubemap, because ReSTIR GI resolves *diffuse* indirect
+/// and a mirror needs a sharp reflection this pass cannot give it.
+fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
     let v = surface.view_dir;
     let n_dot_v = max(dot(n, v), 1e-4);
@@ -238,7 +130,15 @@ fn evaluate_ibl(surface: Surface) -> vec3<f32> {
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
     let irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
     let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
-    let diffuse = irradiance * surface.albedo * kd;
+    var diffuse = irradiance * surface.albedo * kd;
+    if traced_diffuse.a > 0.5 {
+        // The traced term is irradiance, so the albedo and the dielectric
+        // fraction still belong here. Applying them in the shading pass rather
+        // than in the GI pass keeps one definition of what a surface's colour
+        // is — the GI pass only ever sees the *bounce* surface's albedo, never
+        // this one's, and applying both would square it.
+        diffuse = traced_diffuse.rgb * surface.albedo * kd;
+    }
 
     // Specular: prefiltered radiance along the reflection vector, weighted by
     // the analytic BRDF term.
@@ -1078,7 +978,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface, light_dir, light_color, material.transmission);
         // Phase 19: real environment lighting instead of a flat 3% fudge —
         // this is what lets metals reflect the sky.
-        let ambient = evaluate_ibl(surface);
+        // Phase 24L: one texel of traced indirect, or alpha 0 when the pass is
+        // off or unsupported — in which case `evaluate_ibl` keeps the
+        // environment-map diffuse it always used.
+        let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
+        let ambient = evaluate_ibl(surface, gi_texel);
 
         // Local lights (clustered)
         var local_light_contrib = vec3<f32>(0.0);

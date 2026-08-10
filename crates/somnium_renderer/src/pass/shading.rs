@@ -23,6 +23,8 @@ pub struct ShadingPass {
     depth_view: wgpu::TextureView,
     /// Phase 24K: traced sun visibility.
     restir_view: wgpu::TextureView,
+    /// Phase 24L: traced indirect diffuse.
+    restir_gi_view: wgpu::TextureView,
     /// Phases 24U/25I: froxel volume, its sampler, and the range uniform.
     volumetric_view: wgpu::TextureView,
     volumetric_sampler: wgpu::Sampler,
@@ -42,6 +44,7 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
         volumetric_view: &wgpu::TextureView,
         volumetric_sampler: &wgpu::Sampler,
     ) -> Self {
@@ -107,6 +110,18 @@ impl ShadingPass {
                     // map when ReSTIR is active.
                     wgpu::BindGroupLayoutEntry {
                         binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Phase 24L: traced indirect diffuse, replacing the
+                    // environment map's diffuse half when GI is active.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -220,13 +235,17 @@ impl ShadingPass {
             gtao_view,
             depth_view,
             restir_view,
+            restir_gi_view,
             volumetric_view,
             volumetric_sampler,
             &volumetric_range,
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            // Phase 24L: the scene bindings, shared with the GI pass so a
+            // traced surface and a rasterised one resolve identically.
+            include_str!("../shaders/global_pool.wgsl"),
             include_str!("../shaders/brdf.wgsl"),
             // Phase 24G: Vogel disk and gradient noise, used by PCSS.
             include_str!("../shaders/sampling.wgsl"),
@@ -298,6 +317,7 @@ impl ShadingPass {
             gtao_view: gtao_view.clone(),
             depth_view: depth_view.clone(),
             restir_view: restir_view.clone(),
+            restir_gi_view: restir_gi_view.clone(),
             volumetric_view: volumetric_view.clone(),
             volumetric_sampler: volumetric_sampler.clone(),
             volumetric_range,
@@ -316,6 +336,7 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
         volumetric_view: &wgpu::TextureView,
         volumetric_sampler: &wgpu::Sampler,
         volumetric_range: &wgpu::Buffer,
@@ -361,6 +382,10 @@ impl ShadingPass {
                     resource: wgpu::BindingResource::TextureView(restir_view),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(restir_gi_view),
+                },
+                wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(volumetric_view),
                 },
@@ -398,10 +423,12 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
     ) {
         self.gtao_view = gtao_view.clone();
         self.depth_view = depth_view.clone();
         self.restir_view = restir_view.clone();
+        self.restir_gi_view = restir_gi_view.clone();
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,
@@ -414,6 +441,7 @@ impl ShadingPass {
             &self.gtao_view,
             &self.depth_view,
             &self.restir_view,
+            &self.restir_gi_view,
             &self.volumetric_view,
             &self.volumetric_sampler,
             &self.volumetric_range,

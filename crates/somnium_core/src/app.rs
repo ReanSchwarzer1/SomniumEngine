@@ -799,6 +799,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     taa: pp.taa_enabled,
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
+                    restir_gi: pp.restir_gi_enabled,
                     bloom: pp.bloom_enabled,
                     dof: pp.dof_enabled,
                     volumetrics: pp.volumetrics_enabled,
@@ -887,6 +888,61 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
+            }
+        }
+
+        // Phase 29: the overlay is refreshed every frame rather than on
+        // selection changes like the inspectors above it — the numbers move
+        // whether or not anything was clicked.
+        {
+            let rows = self.renderer.as_ref().filter(|r| r.profiler.enabled()).map(|r| {
+                let p = &r.profiler;
+                let mut rows: Vec<somnium_ui::ProfilerRow> = p
+                    .results()
+                    .iter()
+                    .map(|s| somnium_ui::ProfilerRow {
+                        label: s.name.to_string(),
+                        value: format!("{:.3} ms", s.ms),
+                        depth: s.depth,
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "collecting…".to_string(),
+                        value: String::new(),
+                        depth: 0,
+                    });
+                }
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "unattributed".to_string(),
+                    value: format!("{:.3} ms", p.unattributed_ms()),
+                    depth: 0,
+                });
+                let c = p.last_counters;
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "draws".to_string(),
+                    value: c.draw_calls.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "triangles".to_string(),
+                    value: c.triangles.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "terrain chunks".to_string(),
+                    value: c.terrain_chunks.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "TLAS instances".to_string(),
+                    value: c.tlas_instances.to_string(),
+                    depth: 0,
+                });
+                rows
+            });
+            if let Some(ui) = &mut self.ui_manager {
+                ui.update_profiler(rows.as_deref());
             }
         }
 
@@ -1338,6 +1394,7 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
+            r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled;
@@ -2352,6 +2409,21 @@ impl<G: GameApp> Engine<G> {
                 self.import_model();
             }
 
+            // Phase 29. The toggle drives collection as well as visibility: a
+            // hidden profiler that keeps writing timestamps is paying for a
+            // measurement nobody reads.
+            EditorEvent::ToggleProfiler => {
+                if let Some(r) = self.renderer.as_mut() {
+                    if r.profiler.available() {
+                        r.profiler.toggle();
+                    } else {
+                        tracing::warn!(
+                            "profiler: GPU timestamps unavailable on this adapter"
+                        );
+                    }
+                }
+            }
+
             EditorEvent::ToggleFoliage => {
                 if let Some(entity) = self.selected_entity {
                     if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
@@ -2437,6 +2509,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::LightShafts => {
                             pp.light_shafts = !pp.light_shafts;
                             pp.light_shafts
+                        }
+                        PostFxToggle::RestirGi => {
+                            pp.restir_gi_enabled = !pp.restir_gi_enabled;
+                            pp.restir_gi_enabled
                         }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;

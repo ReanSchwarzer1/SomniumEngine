@@ -56,6 +56,8 @@ struct TerrainMaterial {
     // words. Same trap as the one the header warns about, one field further on.
     _pad0: u32,
     _pad1: u32,
+    /// Phase 24L: mean linear albedo per layer, for indirect bounces.
+    layer_albedo: array<vec4<f32>, 8>,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
