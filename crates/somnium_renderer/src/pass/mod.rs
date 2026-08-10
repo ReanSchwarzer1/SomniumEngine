@@ -14,6 +14,7 @@ pub mod outline;
 pub mod particle;
 pub mod postprocess;
 pub mod raytrace;
+pub mod cas;
 pub mod restir;
 pub mod restir_gi;
 pub mod shading;

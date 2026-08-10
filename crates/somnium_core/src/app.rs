@@ -800,6 +800,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
+                    cas: pp.cas_enabled,
                     bloom: pp.bloom_enabled,
                     dof: pp.dof_enabled,
                     volumetrics: pp.volumetrics_enabled,
@@ -825,6 +826,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.sensitivity_iso,
                         pp.gtao_radius,
                         pp.gtao_intensity,
+                        pp.cas_sharpness,
+                        pp.cas_strength,
                     ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
@@ -1401,6 +1404,9 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
             r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
+            r.cas_pass.enabled = pp.cas_enabled;
+            r.cas_pass.sharpness = pp.cas_sharpness;
+            r.cas_pass.strength = pp.cas_strength;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled;
@@ -2081,6 +2087,8 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostIso
                         | IF::PostAoRadius
                         | IF::PostAoIntensity
+                        | IF::PostCasSharpness
+                        | IF::PostCasStrength
                         | IF::PostFogDensity
                         | IF::PostFogHeight
                         | IF::PostFogAsymmetry
@@ -2121,6 +2129,8 @@ impl<G: GameApp> Engine<G> {
                             IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
                             IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
                             IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
+                            IF::PostCasSharpness => pp.cas_sharpness = value.clamp(0.0, 1.0),
+                            IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
                             IF::PostContrast => pp.contrast = value.max(0.0),
                             IF::PostSaturation => pp.saturation = value.max(0.0),
                             IF::PostGrain => pp.grain = value.max(0.0),
@@ -2540,6 +2550,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::LightShafts => {
                             pp.light_shafts = !pp.light_shafts;
                             pp.light_shafts
+                        }
+                        PostFxToggle::Cas => {
+                            pp.cas_enabled = !pp.cas_enabled;
+                            pp.cas_enabled
                         }
                         PostFxToggle::RestirGi => {
                             pp.restir_gi_enabled = !pp.restir_gi_enabled;

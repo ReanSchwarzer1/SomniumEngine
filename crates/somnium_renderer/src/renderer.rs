@@ -125,6 +125,8 @@ pub struct SomniumRenderer {
     pub restir_pass: crate::pass::restir::RestirPass,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
+    /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
+    pub cas_pass: crate::pass::cas::CasPass,
     /// Phase 24AE: minimum projected screen radius for a shadow caster.
     ///
     /// Unreal ships 0.01 as `r.Shadow.RadiusThreshold`. Zero disables the test,
@@ -505,6 +507,12 @@ impl SomniumRenderer {
             rt_debug_pass,
             restir_pass,
             restir_gi_pass,
+            cas_pass: crate::pass::cas::CasPass::new(
+                &ctx.device,
+                ctx.config.format,
+                ctx.config.width,
+                ctx.config.height,
+            ),
             shadow_radius_threshold: std::env::var("SOMNIUM_SHADOW_RADIUS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1116,6 +1124,7 @@ impl SomniumRenderer {
                 &self.vis_pass.depth_view,
             );
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
+            self.cas_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
             self.hiz_pass.resize(&ctx.device, width, height, &self.vis_pass.depth_view);
@@ -2102,12 +2111,28 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Post + present");
         let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled();
+        // Phase 24AC: when CAS is running it owns the swapchain, and whatever
+        // would have written there writes into its input instead. Placed here
+        // rather than at the very end of the frame on purpose — the gizmos, the
+        // outline and the UI draw into the surface *after* this, and sharpening
+        // a 1-pixel gizmo line or a font glyph would only ring it.
+        let cas_active = self.cas_pass.active();
+        let ldr_target: &wgpu::TextureView = if cas_active {
+            self.cas_pass.input_view()
+        } else {
+            &surface_view
+        };
         if fxaa_active {
             self.fxaa_pass.update(&ctx.queue, ctx.config.width, ctx.config.height);
             self.postprocess_pass.record(&mut encoder, &self.fxaa_pass.ldr_view);
-            self.fxaa_pass.record(&mut encoder, &surface_view);
+            self.fxaa_pass.record(&mut encoder, ldr_target);
         } else {
-            self.postprocess_pass.record(&mut encoder, &surface_view);
+            self.postprocess_pass.record(&mut encoder, ldr_target);
+        }
+        if cas_active {
+            self.profiler.begin(&mut encoder, "CAS");
+            self.cas_pass.record(&ctx.queue, &mut encoder, &surface_view);
+            self.profiler.end(&mut encoder);
         }
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
