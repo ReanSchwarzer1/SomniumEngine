@@ -86,6 +86,10 @@ pub enum InspectorField {
     PostFogHeight,
     /// Henyey-Greenstein asymmetry; positive scatters forward toward the sun.
     PostFogAsymmetry,
+    /// CAS (Phase 24AC): 0 = least ringing, 1 = maximum.
+    PostCasSharpness,
+    /// How far the sharpened image is blended in. 0 is off.
+    PostCasStrength,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.
@@ -140,6 +144,8 @@ pub enum PostFxToggle {
     Restir,
     /// Ray-traced indirect diffuse (Phase 24L).
     RestirGi,
+    /// Contrast adaptive sharpening (Phase 24AC).
+    Cas,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     Volumetrics,
     /// Shadow-test the fog per froxel, which is what draws light shafts.

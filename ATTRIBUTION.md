@@ -873,6 +873,18 @@ engine is only the shape of the solution.
 | Flax `ProfilerGPU::Event::Depth` | Events carry a nesting depth, which is what makes the report a tree | `ScopeResult::depth` |
 | Flax `RenderStatsData` | Counters belong beside the timings | `FrameCounters` |
 
+### 13B.5 AMD FidelityFX CAS via SpartanEngine (Phase 24AC)
+
+**Copyright:** AMD FidelityFX (MIT); Spartan wrapper (c) Panos Karabelas, MIT.
+**Source:** `example_repo/SpartanEngine-master/data/shaders/amd_fidelity_fx/`
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `ffx_cas.h`, `CasFilter` no-scaling path | 3x3 cross soft min/max, relative headroom, `sqrt` shaping, negative-lobe kernel | `shaders/cas.wgsl` |
+| `CasSetup` | `peak = -1 / lerp(8, 5, sharpness)` | same, computed in the shader |
+| `cas.hlsl` (no `CAS_BETTER_DIAGONALS` / `CAS_SLOW`) | AMD default: cross-only contrast, green weight for all channels | same configuration |
+| `APrxLoRcpF1` / `APrxLoSqrtF1` | Deliberately **not** ported: approximations for slow-rcp hardware; exact forms are AMD’s own `CAS_GO_SLOWER` | exact `sqrt` and division, plus a `max(mx, 1e-5)` NaN guard |
+
 ### 13B.4 O3DE — terrain material blending (Phases 25D, 25E)
 
 **Source:** `example_repo/o3de-development/.../Gems/Terrain/`

@@ -568,6 +568,16 @@ pub struct PostProcessComponent {
     /// solution; the specular lobe still comes from the cubemap. Off means the
     /// constant ambient term the engine has always had.
     pub restir_gi_enabled: bool,
+    /// Contrast adaptive sharpening (Phase 24AC).
+    ///
+    /// Recovers the high frequencies TAA averages away, by an amount derived
+    /// per pixel from the local contrast — so it does not halo the way a
+    /// fixed-strength unsharp mask does.
+    pub cas_enabled: bool,
+    /// 0 = least ringing, 1 = maximum. AMD's own knob.
+    pub cas_sharpness: f32,
+    /// How far the sharpened image is blended in.
+    pub cas_strength: f32,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -657,6 +667,9 @@ impl Default for PostProcessComponent {
             // a look — a kilometre of air between the camera and a hill is
             // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
             restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
+            cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
+            cas_sharpness: 0.5,
+            cas_strength: 1.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: true,
             fog_density: 0.0008,

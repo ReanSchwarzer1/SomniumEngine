@@ -1181,7 +1181,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24Z | 🟡 Partial | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur is not included** — it needs the velocity buffer from 24AD, which does not exist yet. |
 | 24AA | ⏸ Deferred | **Cloud shadows.** A scrolling noise mask over the sun's contribution. Cheap, and one of the strongest cues that an outdoor scene is a place rather than a render, because it puts the sky in motion without any volumetric cost. Reference: Spartan's `cloud_shadow.hlsl`. |
 | 24AB | ⏸ Deferred | **Lighting debug views.** Per-light-type heatmaps, cluster occupancy, exposure histogram readout, a luminance false-colour view. GI is nearly impossible to debug by eye, and every engine surveyed ships these. Reference: O3DE's `LightCullingHeatmap.azsl`, UE's Lumen visualisation modes. |
-| 24AC | ⬜ Planned | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
+| 24AC | 🟨 CAS complete, SPD open | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
 | 24E | ✅ Complete | **Sun as a physical disc.** 0.53° angular diameter drives `evaluate_brdf_area`, which widens the specular lobe by the source's angular radius and normalises its energy (Karis' sphere-light approximation). A point source gives a one-pixel highlight on anything smooth, which is among the clearest tells that an image is rendered. The correction is **specular-only** — a first attempt scaled the whole BRDF and would have darkened every lit surface, since diffuse does not care how large a source is. Lights also gained **colour temperature in Kelvin**, one physically meaningful dial replacing three coupled RGB channels; the Planckian fit is sRGB and is decoded to linear before use, which left warm lights far too saturated when skipped. `sun_angular_radius` rides in the light buffer's remaining padding. |
 | 24F | ✅ Complete | **Temporal anti-aliasing + specular AA** (absorbs the old Phase 18). Halton-jittered projection; depth-based reprojection; 9-tap Catmull-Rom history sampling (bilinear compounds and goes visibly soft over ~100 frames); Playdead `clip_aabb` neighbourhood clipping with Salvi variance clipping. Blending happens in a **tone-mapped space** — averaging HDR directly lets one bright sample dominate, so a glint flickers rather than resolving, which is the artefact the pass exists to remove. History buffers ping-pong because wgpu forbids binding one texture as both read and write. **Limitation:** reprojection is depth-based, so it handles camera motion exactly but objects that move while the camera is still will ghost until a velocity buffer exists (24AD). Specular AA folds Toksvig normal-map variance back into roughness so mipped detail widens the lobe rather than aliasing. |
 | 24G | ✅ Complete | **Sampling infrastructure.** Interleaved gradient noise, Vogel disk (chosen over Poisson tables, which must be shipped and indexed, and over grids, which alias into rings), cosine-weighted hemisphere with Frisvad's branchless basis, R2 and Halton sequences. Shared so the patterns are chosen once — white noise clumps, and clumps survive filtering as blotches. |
@@ -2087,6 +2087,9 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **24AC (CAS)** — ✅ passing. `SOMNIUM_CAS=0/1` on the swapchain: mean absolute
+  difference 13.6 of 765 across the viewport, max 210, 64.5% of pixels changed;
+  cost 0.018 ms. The HDR capture harness cannot see it — see §17.10.
 - **24L** — ✅ passing. `SOMNIUM_RESTIR_GI=0/1` at eye level: 51.2 mean
   absolute luminance over 921 600 terrain pixels, 342 748 past the 1% threshold.
   Cost 0.788 ms on the profiler. See §17.8.
@@ -2516,6 +2519,79 @@ every draw with another mesh's transform.
 
 **Not done:** per-cascade frustum culling of casters (a caster is in or out for
 all four cascades), and a fade rather than a hard cut at the foliage distance.
+
+---
+
+## 17.10 Phase 24AC (CAS half) — contrast adaptive sharpening
+
+TAA resolves a jittered history into a stable image and charges softness for it:
+every frame is a weighted average of several sub-pixel offsets, so the highest
+frequencies the renderer produced are exactly the ones it loses. An unsharp mask
+gives them back and gives the noise back with them, haloing every high-contrast
+edge on the way.
+
+CAS is AMD's answer: sharpen by an amount **derived per pixel from the local
+contrast**. Where the neighbourhood already spans most of the available range
+there is nothing safe to add, so it adds nothing; where it is flat there is
+headroom, so it sharpens hard. Detail without ringing, which no fixed-strength
+filter achieves at any setting.
+
+Ported from `SpartanEngine-master/data/shaders/amd_fidelity_fx/` — `cas.hlsl`
+and the `CasFilter` no-scaling path in `ffx_cas.h`. Spartan compiles it with
+neither `CAS_BETTER_DIAGONALS` nor `CAS_SLOW`, so `shaders/cas.wgsl` follows the
+same configuration: a cross-shaped soft min/max and the green channel's weight
+applied to all three, which is AMD's own default. The kernel is
+
+```
+0 A 0
+A 1 A     A = sqrt(headroom) · peak,   peak = -1 / lerp(8, 5, sharpness)
+0 A 0
+```
+
+`A` is **negative** — a ring of negative lobes around a centre of 1.0, divided
+by the sum of the weights.
+
+Three things came out of reading it rather than from the phase line:
+
+- **The headroom is relative**, divided by `mx`. A dark region and a bright one
+  with the same contrast *ratio* get the same treatment, which is what stops CAS
+  over-sharpening shadows.
+- **The `sqrt` shaping matters.** The raw ratio falls away too fast and leaves
+  mid-contrast detail — most of an image — barely touched.
+- **`APrxLoRcpF1` / `APrxLoSqrtF1` are deliberately not ported.** They are
+  bit-trick approximations for hardware where reciprocal and square root are
+  slow; the exact forms are what AMD's own `CAS_GO_SLOWER` selects, and this is
+  one full-screen pass at the end of the frame. The approximate reciprocal also
+  hides a trap: exact `1/0` on a fully black neighbourhood is infinity, and
+  `0 * inf` is NaN. `max(mx, 1e-5)` guards it, and a test pins it.
+
+**Where it runs.** On the tone-mapped LDR image, immediately after
+post-processing (or after FXAA when that is active), writing the swapchain —
+the same handoff `FxaaPass` uses, so the two chain without either knowing about
+the other. CAS measures headroom before clipping, which only means anything once
+the signal is in the 0..1 range it will be displayed in.
+
+Placed **before** the gizmo, outline and UI passes on purpose. Those draw into
+the surface afterwards, and sharpening a one-pixel gizmo line or a font glyph
+would only ring it.
+
+**Measured.** Cost **0.018 ms** at 1280×720, reported by the Phase 29 profiler
+as a nested scope under `Post + present`. Effect, from two swapchain grabs of
+the same static view with `SOMNIUM_CAS=0/1`: mean absolute difference **13.6 of
+765** (1.8%) across the viewport, **max 210**, **64.5%** of pixels changed by
+more than 2/255 — a small mean with large peaks at edges, which is the signature
+of a sharpening filter rather than a level shift.
+
+**Caveat on that measurement:** the capture harness reads the HDR target
+*before* tone mapping, so it is blind to CAS by construction and reports a
+bit-identical frame. The numbers above come from desktop grabs of the swapchain
+instead, which means they carry whatever frame-to-frame variation a converged
+TAA image still has. The cost figure and the unit tests are exact; the pixel
+diff is indicative.
+
+**Not done:** the SPD half of 24AC — single-pass downsample for the Hi-Z pyramid
+and the bloom chain. `ffx_spd.h` and `spd.hlsl` are the reference and the phase
+row stays open for it.
 
 ---
 
