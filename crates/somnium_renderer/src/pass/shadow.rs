@@ -28,6 +28,36 @@ pub struct ShadowPass {
     _cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES],
 }
 
+/// One draw that survived shadow-caster culling (Phase 24AE).
+///
+/// The instance index is carried rather than recomputed from the filtered
+/// list's position: it indexes the global instance buffer the vertex shader
+/// reads the model matrix from, and renumbering would pair every draw with
+/// another mesh's transform.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowCaster {
+    pub instance_index: u32,
+    pub index_count: u32,
+}
+
+/// Is this caster large enough on screen to be worth a shadow?
+///
+/// Unreal's `r.Shadow.RadiusThreshold` test, from `ShadowSetup.cpp`:
+/// `radius² > threshold² · distance²`, which is `radius / distance > threshold`
+/// — the caster's projected screen radius. Written squared, as UE writes it, so
+/// there is no square root and no division by a distance that is zero when the
+/// camera sits inside the bounds.
+///
+/// `dist_sq` is measured from the **camera**, not the light: the question is
+/// whether anyone would see the shadow, and that is a screen-space question.
+#[must_use]
+pub fn casts_shadow(radius: f32, dist_sq: f32, threshold: f32) -> bool {
+    if threshold <= 0.0 {
+        return true;
+    }
+    radius * radius > threshold * threshold * dist_sq
+}
+
 impl ShadowPass {
     pub fn new(
         device: &wgpu::Device,
@@ -180,13 +210,20 @@ impl ShadowPass {
 
     /// Record shadow draw calls for all 4 cascades into `encoder`.
     ///
-    /// One render pass clears the full atlas then draws geometry 4× with different viewports.
+    /// One render pass clears the full atlas then draws geometry 4× with
+    /// different viewports.
+    ///
+    /// `casters` is the *filtered* list, not the draw queue: `instance_index`
+    /// still indexes the global instance buffer, because the vertex shader
+    /// reads the model matrix from there. Filtering into a new `Vec<DrawCommand>`
+    /// instead would renumber the instances and pair every draw with another
+    /// mesh's transform.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         atlas_view: &wgpu::TextureView,
         global_bind_group: &wgpu::BindGroup,
-        draw_queue: &[crate::command::DrawCommand],
+        casters: &[ShadowCaster],
     ) {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Shadow Pass"),
@@ -213,9 +250,61 @@ impl ShadowPass {
             rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[]);
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
-            for (inst_id, cmd) in draw_queue.iter().enumerate() {
-                rpass.draw(0..cmd.index_count, inst_id as u32..(inst_id as u32 + 1));
+            for c in casters {
+                rpass.draw(0..c.index_count, c.instance_index..(c.instance_index + 1));
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::casts_shadow;
+
+    /// Unreal's default for `r.Shadow.RadiusThreshold`.
+    const T: f32 = 0.01;
+
+    #[test]
+    fn a_grass_tuft_stops_casting_once_it_is_far_enough() {
+        // 15 cm radius. Near the camera it still casts; across the field it
+        // does not, and this is the case that was costing 24 ms a frame.
+        let r = 0.15;
+        assert!(casts_shadow(r, 5.0 * 5.0, T), "grass at 5 m should cast");
+        assert!(!casts_shadow(r, 60.0 * 60.0, T), "grass at 60 m should not");
+    }
+
+    #[test]
+    fn a_tree_keeps_casting_where_the_grass_stopped() {
+        // The property that makes this a *size* test rather than a distance
+        // cut: at the same range the tree survives and the tuft does not, with
+        // one rule and no per-asset tuning.
+        let far = 120.0 * 120.0;
+        assert!(casts_shadow(6.0, far, T), "a 6 m tree at 120 m should cast");
+        assert!(!casts_shadow(0.15, far, T), "a 15 cm tuft at 120 m should not");
+    }
+
+    #[test]
+    fn the_threshold_is_a_ratio_not_a_distance() {
+        // Doubling both radius and distance leaves the projected size alone, so
+        // the verdict must not move. This is what stops the rule from becoming
+        // a disguised draw-distance that scales wrongly with world size.
+        assert_eq!(
+            casts_shadow(1.0, 50.0 * 50.0, T),
+            casts_shadow(2.0, 100.0 * 100.0, T)
+        );
+    }
+
+    #[test]
+    fn a_zero_threshold_keeps_everything() {
+        // The A/B path, and the safe default if the value is ever misconfigured.
+        assert!(casts_shadow(0.001, 10_000.0 * 10_000.0, 0.0));
+    }
+
+    #[test]
+    fn a_camera_inside_the_bounds_still_casts() {
+        // dist_sq of 0 would be a division by zero in the ratio form. The
+        // squared comparison returns true instead of NaN.
+        assert!(casts_shadow(1.0, 0.0, T));
     }
 }

@@ -84,6 +84,9 @@ pub struct FrameCounters {
     pub terrain_chunks: u32,
     /// Instances in the ray-tracing top-level acceleration structure.
     pub tlas_instances: u32,
+    /// Draws that survived shadow-caster culling (Phase 24AE). Next to
+    /// `draw_calls` because the pair is the whole story of the shadow pass.
+    pub shadow_casters: u32,
 }
 
 /// A scope opened this frame, before its timestamps have been read back.
@@ -585,6 +588,13 @@ impl GpuProfiler {
         out.push(format!(
             "{:<26} {} inst / {} chunks / {} tlas",
             "scene", c.instances, c.terrain_chunks, c.tlas_instances
+        ));
+        // Phase 24AE. Beside the draw count on purpose: the ratio is the whole
+        // story of the shadow pass, and a `Shadows` row that suddenly costs
+        // more is nearly always this number having grown.
+        out.push(format!(
+            "{:<26} {} of {} draws",
+            "shadow casters", c.shadow_casters, c.draw_calls
         ));
         out
     }

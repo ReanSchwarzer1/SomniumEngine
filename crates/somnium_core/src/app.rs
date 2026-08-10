@@ -939,6 +939,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     value: c.tlas_instances.to_string(),
                     depth: 0,
                 });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "shadow casters".to_string(),
+                    value: format!("{} / {}", c.shadow_casters, c.draw_calls),
+                    depth: 0,
+                });
                 rows
             });
             if let Some(ui) = &mut self.ui_manager {

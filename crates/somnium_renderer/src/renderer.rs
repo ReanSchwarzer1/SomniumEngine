@@ -125,6 +125,11 @@ pub struct SomniumRenderer {
     pub restir_pass: crate::pass::restir::RestirPass,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
+    /// Phase 24AE: minimum projected screen radius for a shadow caster.
+    ///
+    /// Unreal ships 0.01 as `r.Shadow.RadiusThreshold`. Zero disables the test,
+    /// which is the A/B. Public so the editor can scrub it.
+    pub shadow_radius_threshold: f32,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -500,6 +505,10 @@ impl SomniumRenderer {
             rt_debug_pass,
             restir_pass,
             restir_gi_pass,
+            shadow_radius_threshold: std::env::var("SOMNIUM_SHADOW_RADIUS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.01),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -1616,12 +1625,18 @@ impl SomniumRenderer {
         }
 
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
+        //
+        // Phase 24AE: cull casters too small to be worth a shadow before any of
+        // them reach the atlas. See `shadow_casters`.
+        let casters = self.shadow_casters();
+        self.profiler.counters.shadow_casters =
+            u32::try_from(casters.len()).unwrap_or(u32::MAX);
         self.profiler.begin(&mut encoder, "Shadows");
         self.shadow_pass.record(
             &mut encoder,
             &self.shadow_resources.atlas_view,
             &self.global_pool.bind_group,
-            &self.draw_queue,
+            &casters,
         );
         self.profiler.end(&mut encoder);
 
@@ -2180,6 +2195,76 @@ impl SomniumRenderer {
     ///
     /// Must run on *every* path out of `render`, including the ones that bail
     /// before drawing.
+    /// Which draws are worth rendering into the shadow atlas this frame.
+    ///
+    /// # Why this exists
+    ///
+    /// The shadow pass issued every draw in the queue, four times, once per
+    /// cascade. With foliage painted across a hillside that is 8 599 draws and
+    /// 52.9 million triangles per cascade, and the profiler put it at **24.5 ms
+    /// of a 42 ms frame** — more than half the frame spent drawing depth for
+    /// grass whose shadow is a sub-pixel speckle. The main view already stops
+    /// drawing distant foliage (17G); the shadow pass never learned to.
+    ///
+    /// # The test
+    ///
+    /// Unreal's `r.Shadow.RadiusThreshold`, from `ShadowSetup.cpp`:
+    ///
+    /// ```text
+    /// draw = radius² > threshold² · distance²
+    /// ```
+    ///
+    /// which is `radius / distance > threshold` — the caster's **projected
+    /// screen radius**. Two things about it are worth stating because they are
+    /// easy to get wrong:
+    ///
+    /// - The distance is from the **camera**, not from the light. The question
+    ///   is not "is this near the sun" but "would anyone see the shadow it
+    ///   casts", and that is a screen-space question.
+    /// - It is a size test, not a distance cut. A tree keeps casting at 200 m
+    ///   because its radius is metres; a grass tuft stops at 30 m because its
+    ///   radius is centimetres. One rule, and it scales itself to the object —
+    ///   which is why UE uses it in place of a per-asset shadow distance.
+    ///
+    /// UE applies it to whole-scene (CSM) shadows only and skips it for virtual
+    /// shadow maps, which need the draw for GPU-side caching. Somnium has only
+    /// the cascade path, so it applies everywhere.
+    fn shadow_casters(&self) -> Vec<crate::pass::shadow::ShadowCaster> {
+        let threshold = self.shadow_radius_threshold;
+        let mut out = Vec::with_capacity(self.draw_queue.len());
+        for (i, cmd) in self.draw_queue.iter().enumerate() {
+            let instance_index = u32::try_from(i).unwrap_or(0);
+            let caster = crate::pass::shadow::ShadowCaster {
+                instance_index,
+                index_count: cmd.index_count,
+            };
+            if threshold <= 0.0 {
+                out.push(caster);
+                continue;
+            }
+            // No recorded bounds means no basis to reject it. Keeping it is the
+            // safe direction: a missing shadow is a visible bug, an extra draw
+            // is only slow.
+            let Some((min, max)) = self.geometry.mesh_aabb(cmd.vertex_offset) else {
+                out.push(caster);
+                continue;
+            };
+            let min = glam::Vec3::from(min);
+            let max = glam::Vec3::from(max);
+            // Local half-extent scaled by the transform. `transform_vector3`
+            // rather than a length of the scale row, so a non-uniform or
+            // rotated instance still gets a radius that bounds it.
+            let half = cmd.transform.transform_vector3((max - min) * 0.5);
+            let radius = half.length();
+            let centre = cmd.transform.transform_point3((min + max) * 0.5);
+            let dist_sq = (centre - self.camera_pos).length_squared();
+            if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
+                out.push(caster);
+            }
+        }
+        out
+    }
+
     fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
         self.water_queue.clear();
