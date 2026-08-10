@@ -1189,7 +1189,8 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24I | ✅ Complete | **GTAO with bent normals.** `pass/gtao.rs` + `gtao.wgsl`. Phase 17I applied only *baked* occlusion, so terrain, procedural meshes and all foliage received sky light unattenuated — the reason contact points stayed flat and shaded bark read sky-blue. GTAO (Jimenez 2016) rather than classic SSAO: it searches each screen-space slice for its **horizon angles** and integrates the visible arc analytically, producing a real visibility fraction rather than a darkening heuristic — which matters because this term will later feed the GI gather, not just tint the image. Normals are reconstructed from depth, taking the *closer* neighbour per axis: a naive central difference straddles silhouettes and yields normals facing nowhere real. Two slices with per-pixel and per-frame rotation, then a depth-weighted denoise; the residual noise is what TAA is for, which is precisely why 24F was its prerequisite. The **bent normal** is the part that changes indirect light's colour rather than only its amount — the irradiance gather uses it, so a surface in a crevice collects light from the opening rather than from the wall beside it. Screen-space AO **multiplies** the baked term rather than replacing it: the two know different things, and taking the minimum would discard whichever is more informative. Reference: Spartan's `ssao.hlsl`. |
 | 24J | ✅ Complete | **Ray-tracing scene: BLAS/TLAS via wgpu acceleration structures.** A bottom-level structure per uploaded mesh and a top-level structure rebuilt each frame from the *same draw queue the raster path uses*, so the traced scene and the drawn one cannot drift apart. Positions are the first 12 bytes of the 32-byte vertex, so `BLAS_INPUT` on the existing pools lets the build read geometry in place — no second copy. The plan's claim held: **the feature gap really was just ray query**, since the binding arrays and non-uniform indexing Solari also needs were already mandatory for the bindless pool. Four things beyond the feature bit were needed and none are obvious: an `unsafe` **experimental-features token** (wgpu asks the caller to acknowledge that these APIs may contain soundness bugs), the `max_blas_*`/`max_tlas_instance_count` **limits**, the `max_acceleration_structures_per_shader_stage` **binding limit** — all three default to zero — and `enable wgpu_ray_query` in the shader. Ships with a ray-traced shadow **acceptance test** (`SOMNIUM_RT_DEBUG=1`), because a correctly built acceleration structure and a silently broken one look identical until something traces against it; it showed the helmet self-shadowing, which is what confirmed the build. Degrades cleanly: every entry point checks whether the device granted ray query. |
 | 24K | ✅ Complete | **ReSTIR DI — resampled direct lighting.** The shadow ray from 24J plus the thing that makes rays affordable: *resampling*. Eight unshadowed candidates are drawn across the sun's disc, one is kept in proportion to its contribution by weighted reservoir sampling, and the single expensive ray confirms only that one — the estimator stays unbiased because the kept sample carries the weight of everyone it beat. **Temporal reuse** then combines each pixel's reservoir with its own history, capped at `M_CAP` so a reservoir keeps responding to change rather than fossilising (an uncapped `m` keeps a switched-off light visible for as long as the history has been accumulating). Sampling across the sun's angular disc gives a **real penumbra** rather than PCSS's filtered approximation of one, with no cascades, no depth bias and no peter-panning. Enabled by `SOMNIUM_RESTIR=1`; shading prefers the traced result and falls back to the shadow map when alpha is 0, which is also what an unsupported device produces since wgpu zero-fills the target. **Remaining: spatial reuse** (neighbour reservoirs) and a **multi-light set** — the target function currently evaluates only the sun, where a full implementation would weigh every light's intensity and falloff. **On by default.** Verified against the shadow map on a cube over a plane: 3.0 against 3.1 in shadow, 110.9 lit either way. It was switched off for a while on the reading that it "returned lit" and erased shadows — that was wrong. The missing shadows were the `GpuMaterial` layout bug, which zeroed the sun term so nothing could darken whether traced or mapped. **Remaining, moved to 24L's scope:** spatial reuse and a multi-light target function. **Known limit:** it shadows only visibility-buffer geometry, because terrain and water write depth in their own later passes — Phase 25A/25B closes that. |
-| 24L | ⬜ Planned | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
+| 24L | ✅ Complete | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
+| 24AE | ✅ Complete | **Shadow caster culling.** The shadow pass issued every draw four times, once per cascade: 24.5 ms of a 42 ms frame, nearly all of it grass whose shadow is a sub-pixel speckle. Two independent cuts. Unreal's `r.Shadow.RadiusThreshold` (`ShadowSetup.cpp`) culls a caster when its **projected screen radius** falls below a threshold — a *size* test, not a distance cut, and measured from the camera rather than the light, so a tree keeps casting at 200 m where a tuft stops at 30. And an authored `FoliageComponent::foliage_shadow_distance` (**Sh Dst** in the Foliage inspector, default 40 m), because the size test only rescues you once the camera is far from the grass, which is not how anyone plays. **Measured** at eye level: casters 7 166 → 1 873, Shadows **23.769 → 6.158 ms**, frame 26.893 → 9.545 ms, with every other pass unchanged to the third decimal. See §17.9. |
 | 24M | ⬜ Planned | **World-space radiance cache for multi-bounce.** A hashed/clipmapped world cache that rays terminate into, so a single traced bounce still resolves to many bounces of energy across frames, and distant geometry costs a lookup instead of a long trace. Reference: `bevy_solari/src/realtime/world_cache_{query,update,compact}.wgsl`; UE's equivalent is `LumenRadianceCache.usf`. |
 | 24N | ⬜ Planned | **Ray-traced reflections with a denoiser.** Specular GI proper: screen-space trace first, ray traced where the screen has no answer, radiance cache beyond that, then spatial + temporal denoising — one bounce per pixel is far too noisy raw. Finally gives water something better than a single planar reflection. Reference: `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/`. |
 | 24O | ⬜ Planned | **Offline path tracer for validation.** A slow, unbiased, accumulate-over-many-frames reference renderer sharing the 24J scene bindings. Not shipped in the frame loop — its whole job is to be *ground truth*, so “does the real-time GI actually converge to the right answer” becomes a comparison rather than an opinion. Bevy ships exactly this alongside Solari and it is the single best idea taken from studying it. Reference: `bevy_solari/src/pathtracer/`. |
@@ -1198,7 +1199,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24R | ⬜ Planned | **Area lights (LTC).** Rect, disc and tube lights via Linearly Transformed Cosines — analytic, no sampling noise, correct soft shadows and elongated highlights. Softboxes, windows and strip lights are most of what makes an interior read as photographed rather than rendered, and no amount of point-light tuning substitutes. Reference: `bevy_pbr/src/ltc/`, `bevy_light/src/rect_light.rs`. |
 | 24S | ✅ Complete | **Transmission and subsurface scattering.** Frostbite's approximation (Barré-Brisebois & Bouchard) rather than a real subsurface solve: light leaving the *far* side of a thin surface, spread by scattering, brightest looking almost straight into the source through the material. **This is what the foliage was missing all along.** Leaves lit only by reflection stay flat and dark regardless of how correct the albedo is — the symptom the grass has shown since Phase 17, and which no amount of albedo or occlusion work could have fixed. Transmitted light is tinted by albedo, which is why backlit foliage reads more saturated than the same leaf lit from the front, and it is deliberately **not** multiplied by the shadow factor: the entire point is light arriving through the surface from the side the shadow map calls dark. Materials take `transmissionFactor` from `KHR_materials_transmission` where present; foliage assets do not set it, so a sidecar cutout mask is taken as evidence of thin geometry and infers 0.5 — the same convention-over-metadata rule the alpha masks and ARM packing already use. `GpuMaterial` grew from 48 to 64 bytes (WGSL rounds the array stride to the 16-byte alignment `base_color` forces); the layout test caught this and was updated rather than deleted. |
 | 24T | ✅ Complete | **Emissive materials and physical bloom.** Materials carry `emissiveFactor` and an emissive texture from glTF, added to shading independently of every light in the scene — a screen is as bright in a dark room as a lit one. Bloom is **deliberately not threshold-based**: a threshold asks "which pixels count as bright?", a question with no physical answer whose meaning changes the moment exposure does — a scene metered for night would bloom everything, one metered for noon nothing. Real bloom is light scattering inside the lens, which happens to *all* light in proportion to how much there is. So a progressive 13-tap downsample builds a mip chain and a 9-tap tent upsample sums it back additively (Jimenez, SIGGRAPH 2014); bright regions dominate naturally because they carry more energy. Added **before** exposure and tone mapping, since it is scattering on the way to the sensor rather than a filter over the picture, and built **after** TAA, because a blur of unstable input broadcasts that instability everywhere it reaches. `GpuMaterial` grew 64 → 80 bytes; the layout test was updated again. |
-| 24U | ⬜ Planned | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
+| 24U | 🟡 Partial | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
 | 24V | ✅ Complete | **Local lights in physical units, with source radius.** The photometric half landed with 24A-1 — point and spot lights carry lumens converted to candela, and `smooth_distance_attenuation` already divides by distance squared, so illuminance was correct. What was missing is that they were still **point** sources. Lights now carry a `source_radius` in metres (distinct from `range`, which is reach): a 5 cm bulb a metre away subtends a real angle, and feeding that through `evaluate_brdf_area` is what stops its highlight being a single pixel on anything polished. **IES profiles are not included** — that is an asset-pipeline job and is better as its own sub-phase than half-done here. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
@@ -1217,12 +1218,12 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
-| 25D | ⬜ Planned | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
-| 25E | ⬜ Planned | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
+| 25D | ✅ Complete (macro tier + detail budget; no toroidal clipmap — see §25.13) | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
+| 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
 | 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
-| 25I | ⬜ Planned | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
+| 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 
 ---
@@ -1818,6 +1819,261 @@ file, and procedural FBM relief is the fallback when it is missing, so a clone
 without assets still gets landscape rather than a plain.
 
 
+### 25.10 17E remainder — closed
+
+Three items were outstanding. **Two were already done and the note was stale**,
+which is worth recording as a pattern: transmission reached foliage back in 24S
+via the `*_alpha_*` sidecar inference, and bark roughness is data-driven —
+every Poly Haven foliage material wires its ARM map as
+`metallicRoughnessTexture`, so roughness has always come from the green
+channel. Checking the glTF JSON took a minute and saved implementing both.
+
+But checking *why* bark still looked wrong found a real bug, and a much larger
+one than bark:
+
+**Every imported glTF texture was uploaded as `Rgba8UnormSrgb`** — including
+normal, metallic-roughness/ARM and occlusion maps, none of which are colour.
+The sRGB decode bent all of them: an authored roughness of 0.5 arrives as
+~0.21, so *every imported material in the engine read glossier than it was
+made*, and normal maps were skewed the same way, weakening all surface detail.
+That is what the 17E note recorded as "bark roughness", and it applied equally
+to the helmet and to every model imported since Phase 10. Texture usage is now
+collected from the materials — glTF images carry no colour-space flag, so how a
+texture is *referenced* is the only thing that says what it means — and only
+albedo and emissive are sRGB.
+
+**Hemispherical leaf normals** are ported from
+`SpartanEngine-master/data/shaders/g_buffer.hlsl` ("foliage curved normals"):
+rotate the normal about the axis running along the card, by an angle taken from
+how far across the card's width the pixel sits, so a flat leaf shades as a
+curved one instead of a flat plate. Spartan carries a `width_percent` vertex
+attribute for this; Somnium needs no such attribute, because on a foliage card
+`uv.x` **is** the distance across the blade. Gated on a new
+`MATERIAL_FLAG_FOLIAGE` rather than on `transmission`, since glass is
+transmissive too and must not be bent into a leaf.
+
+**`SOMNIUM_FOLIAGE=1` scatters foliage without the editor**, which is what
+unblocked the whole item. Painting by hand was the only way to get a plant on
+screen, so the foliage shading work could not be seen, let alone measured — the
+reason this sat open across two sessions. Strokes are deterministic, so an A/B
+of a foliage shading change is now like-for-like. The scene also needs an
+enabled `FoliageComponent` on the terrain entity and a camera at eye level:
+foliage is culled past 120 m (17G) and a tuft is sub-pixel from the landscape
+camera, which is why the first two attempts scattered 25 733 instances and
+showed nothing.
+
+**Honest limit:** the curved normals are implemented, flagged and active, but
+their visual delta at tuft scale is subtle and was not isolated with an A/B —
+there is no runtime toggle for them. The sRGB fix is the change with the
+objectively verifiable mechanism.
+
+
+### 25.11 24U + 25I — one froxel volume for aerial perspective and fog
+
+Taken together because they are the same integral. A 3-D table indexed by
+(screen x, screen y, distance) holds the light scattered *into* the view ray up
+to that distance and the transmittance surviving it; shading applies both with
+one fetch:
+
+    colour = colour * transmittance + inscattering
+
+They differ only in what scatters — the atmosphere's Rayleigh and Mie terms, or
+a fog medium — and in whether the sun is shadow-tested per step. Bevy keeps
+them apart (a 3-D LUT for aerial perspective, a screen-space march for fog);
+folding them into one volume means distant hills desaturate and a shaft crosses
+a valley by the same code, and there is no second definition of what the air is
+made of. That is the same argument 25A-2 made for terrain shading.
+
+**The plan assumed a LUT that did not exist.** 24U was written as "fed by 24C's
+aerial-perspective LUT" — 24C built transmittance and multiple-scattering
+tables and a sky march, and no aerial LUT. Building it was most of this work.
+
+Details taken from `bevy_pbr/src/atmosphere/aerial_view_lut.wgsl` that are easy
+to drop and visible when dropped: **log-space storage**, so hardware filtering
+between slices interpolates an exponential correctly; the **half-slice offset**
+when sampling, because each texel is the integral over its whole slice; and a
+**linear fade over the first slice**, without which the full first slice of
+scattering is applied at zero distance and fog appears on the lens.
+
+Two things worth recording:
+
+- **Units.** The atmosphere model is in kilometres — extinction km⁻¹, scale
+  heights of 8 km and 1.2 km — and the scene marches in metres. The air terms
+  are converted per-metre at the sample; without that the air is a thousand
+  times denser and reads as fog going opaque a metre from the camera.
+- **The shadow lookup is deliberately not the surface one.** `shading.wgsl`'s
+  PCSS exists to make a shadow *edge* look right and costs 40 taps; a froxel
+  needs a yes/no answer at a thirtieth of the screen's resolution and the
+  volume's own filtering smooths it. Reusing the surface path here would be
+  slower and wrong — a different algorithm for a different job, not a copy.
+
+**Verification.** `SOMNIUM_VOLUMETRICS=0/1` on the default scene:
+
+| class | pixels | mean abs Δ luminance | changed |
+|---|---|---|---|
+| **terrain** | 784 523 | **279.74** | **694 948 (89%)** |
+| sky | 137 077 | 0.0000 | 0 |
+
+Mean terrain luminance falls 4554.7 → 4313.2, which is the correct *sign*: at
+this sun angle extinction removes more than in-scattering adds, so distant
+ground loses contrast toward the sky rather than brightening. **Sky comes back
+bit-identical**, which is the control that matters — the sky's radiance already
+comes from a full march through the same atmosphere, and applying the volume to
+it as well would count the air twice.
+
+**Status.** 25I is complete: aerial perspective reaches terrain, meshes and
+foliage alike, because it is applied once at the end of the shared shading path
+— the 25A-2 payoff again. 24U is **partial**: the froxel volume, the fog medium
+with height falloff and a Henyey-Greenstein phase, and the per-froxel shadow
+test for shafts are all implemented and on by default, but **light shafts have
+not been visually confirmed** — that needs a low sun behind an occluder, which
+the current scene does not have. The code path is exercised; the picture is
+not. Also absent: temporal reprojection of the volume, which is what lets the
+step count come down without the fog crawling.
+
+
+### 25.12 25E — height-weighted material blending
+
+Splat weights say how much of each material is at a texel. They say nothing
+about which one is **on top**, and normalising them cross-fades: at a seam every
+pixel is half of each, which is a colour that exists in neither material. The
+gravel in the demo scene was the proof — pale, low-contrast, its pebbles ghosted
+into the grass beside it, because most of the gravel's screen area was being
+averaged with something else.
+
+Ported from O3DE's `TerrainDetailHelpers.azsli` (`AppendHeightToWeight` and the
+depth-blend loop in `GetDetailSurface`), which is a two-part algorithm:
+
+1. **Height into weight**, clamped by coverage:
+   `w += h * min(1, (1/min_weight) * w)`. The clamp is the part that is easy to
+   drop and load-bearing — without it a 4% sliver of a material with a tall
+   height map out-ranks the 96% material that is actually painted there, and the
+   height map becomes a second splatmap nobody authored. `blend.rs` has that as
+   a pair of tests: one asserting the sliver loses, one asserting it *wins* when
+   the clamp is removed, so the parameter cannot quietly stop mattering.
+2. **Depth blend**: only materials within their own `blend_width` of the winner
+   contribute, renormalised across that band. Because the band is measured on
+   weights that already carry each layer's relief, the boundary follows the
+   rock's crevices instead of a contour of the splatmap.
+
+**The parameters are per layer, and that is the point.** A single global
+sharpness makes every transition the same transition. `blend::LAYER_BLENDS`
+authors `height_scale` / `blend_width` / `min_weight` against what each of the
+eight photographed materials physically is: rock and gravel deep-relief and
+hard-edged (`0.15` bands), snow and wet mud shallow and soft (`0.55`–`0.60`).
+O3DE's own defaults are `heightBlendFactor 0.5` / `heightWeightClampFactor 0.1`,
+and it uploads the reciprocal of the second — so do we, in `blend::weight_clamp`.
+
+Also here, from the same reference: **albedo is blended in an approximately
+perceptual space** (`sqrt` in, squared out). A weighted mean of *linear* albedo
+between two materials of different luminance sits below both once it is read
+through the display transform, which is why a seam that should be a texture
+boundary showed as a dark band along it.
+
+**Measured**, `SOMNIUM_TERRAIN_HEIGHT_BLEND=0` vs `1`, eye level over the
+gravel/grass boundary: **776.8** mean absolute luminance over 921 600 terrain
+pixels, 319 812 of them past the 1% threshold, with mesh and sky bit-identical.
+From the landscape camera the same change is 135.0 over 302 041 pixels — real
+but nearly invisible, which is the finding as much as the number is.
+
+**`SOMNIUM_TERRAIN_EYE=1`** came out of that. Every terrain texturing phase
+since 25F has been judged on a hillside a kilometre away, where a material
+transition is a few pixels wide; the features live at metres and the demo camera
+did not. It is the foliage phase's eye-level stance without the foliage, and
+25H's parallax will need it too.
+
+**Two tests were added that would have caught real bugs.** `blend.rs` mirrors
+the algorithm in Rust and pins its properties — sums to one, degrades to a plain
+blend when heights are equal, relief flips two evenly-matched materials both
+ways. And `shaders_validate.rs` now asks naga for the WGSL layout of
+`TerrainMaterial` and compares it to `GpuTerrainMaterial`'s `repr(C)` offsets;
+`material/pool.rs` had only ever proved the Rust half, with the WGSL half left
+as a comment. It caught this phase's own trailing `vec3<u32>` pad, which aligns
+to 16 in WGSL and to 4 in Rust and would have given the struct a 272-byte stride
+against Rust's 256 — invisible with one terrain, silent corruption with two.
+
+### 25.13 25D — the macro tier, and the clipmap that was not built
+
+**Scope decision first, because it is most of the phase.** O3DE's answer to the
+resolution ceiling is two toroidally-addressed clipmap stacks: a macro pair and
+seven detail arrays, generated by compute into rings centred on the camera,
+sampled trilinearly across levels, with incremental region updates as the centre
+moves (`ClipmapBounds.h`, `TerrainDetailClipmapGenerationPass.azsl`,
+`ClipmapComputeHelpers.azsli`). The **detail** half of that is a cache: it
+composites the layered PBR once per clipmap texel instead of once per pixel.
+
+Somnium composites per pixel, at full rate, with explicit derivatives. Caching
+that into a clipmap would **lower** close-range quality — the innermost ring
+would have to hold millimetre texels to match what 25K and 25E just bought, and
+it cannot — in exchange for a cost win on a 1 km bounded heightfield that is not
+the streamed, unbounded world the machinery exists for. So the detail clipmap is
+deliberately **not** built, and the phase delivers the two things it was actually
+for:
+
+**1. The macro tier.** Eight materials describe a texel of ground but not a
+landscape: every patch of grass is the same patch of grass, and at distance the
+layers converge to their own mean and the terrain goes uniform. O3DE's macro
+material is authored imagery over the terrain with the detail composited on top
+(`TerrainMacroHelpers.azsli`). Somnium has nothing to author with, so
+`terrain/macro_map.rs` **derives** it from the landform — altitude, macro-scale
+grade, how much of a hollow a point sits in, and two octaves of large-scale
+noise — which is better than an authored map would have been at this stage,
+because the variation then *correlates* with the terrain instead of floating
+over it. Ridges come out drier and paler, hollows darker and greener.
+
+The composite is O3DE's `ApplyTextureBlend`, all four modes, defaulting to
+**overlay** so the detail keeps its own light and dark structure and takes only
+the macro's colour and level. It happens **between 25E's `sqrt` and its
+squaring** — O3DE performs overlay and linear-light in a display-referred space
+for the same reason, and it is what makes a macro texel of 0.5 the exact
+identity. That in turn is what makes "no macro map bound" and "strength 0" the
+same picture, which `a_flat_terrain_stays_near_the_neutral_value` pins.
+
+**2. A detail budget that scales with screen area.** The per-pixel layer gate
+rises with camera distance, from `LAYER_WEIGHT_EPSILON` to `FAR_LAYER_EPSILON`
+(0.2, which admits at most four layers and in practice one or two). Not higher:
+at 0.5 only one layer can ever survive, so a genuine 51/49 boundary snaps and
+the seam crawls as the camera moves.
+
+**Measured.** Debug mode 12 writes layer taps as a fraction of the 48-tap worst
+case straight to the HDR target before exposure, so the capture harness's mean
+terrain luminance × 48 *is* the mean taps per pixel:
+
+| view | fade off | fade on |
+|---|---|---|
+| landscape camera | 16.74 taps/px | **11.44** (−32%) |
+| eye level (`SOMNIUM_TERRAIN_EYE=1`) | 12.00 taps/px | 12.00 (unchanged) |
+
+Close up it costs exactly nothing, which is the property that matters: the
+budget only ever removes layers a pixel could not resolve.
+
+**Re-measured in milliseconds once Phase 29's profiler existed:** the shading
+pass goes **0.973 → 0.883 ms**, −9.2%, with every other pass identical to the
+third decimal. So −32% of the texture reads buys −9.2% of the pass — reads were
+not the whole of its cost. See §29.1.
+
+Macro tier A/B (`SOMNIUM_TERRAIN_MACRO=0/1`): **127.5** mean absolute luminance
+over 784 523 terrain pixels, 601 598 of them past the 1% threshold, sky
+bit-identical. At eye level the same switch moves 18.5 (0.4%) and **zero** pixels
+past the threshold — not a failure but the definition of the tier: a
+hundreds-of-metres signal is nearly constant across a 30 m view.
+
+**The thing that did not work, and why it is worth recording.** The budget first
+dropped **hex-tiling** past the fade as well, on the reasoning that three taps
+per map exist to hide a repetition already below a pixel at that range. That
+measured beautifully — 16.74 → 6.20 taps, −63% — and put a hard lattice across
+the entire mid-ground, visible in both sides of the macro A/B, which is what
+gave it away. At distance a 4 m tile is a *few pixels* wide, so the repetition
+does not vanish; it beats against the pixel grid and becomes **more** visible
+than it is close up. Hex-tiling earns its taps furthest away, which is the
+opposite of the intuition. The layer gate was doing nearly all of the saving
+anyway, and −32% artefact-free is the number that ships.
+
+**Still open from the original row:** a macro *normal* map (Somnium's terrain
+mesh is one vertex per metre, so the geometric normal already carries that
+frequency), authored macro imagery in place of the derived map, and the detail
+clipmap itself, which stays unbuilt on purpose.
+
 ### 25.4 Verification plan
 
 Terrain makes the lighting work testable, so each sub-phase states its own check:
@@ -1831,6 +2087,19 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **24L** — ✅ passing. `SOMNIUM_RESTIR_GI=0/1` at eye level: 51.2 mean
+  absolute luminance over 921 600 terrain pixels, 342 748 past the 1% threshold.
+  Cost 0.788 ms on the profiler. See §17.8.
+- **24AE** — ✅ passing. Eye-level foliage camera: casters 7 166 → 1 873 and
+  Shadows 23.769 → 6.158 ms, with every other pass unchanged to the third
+  decimal. See §17.9.
+- **25D** — ✅ passing. Debug mode 12 (`SOMNIUM_SHADOW_DEBUG=12`) reports mean
+  layer taps per pixel: 16.74 → 11.44 with the detail budget on, unchanged at
+  eye level. `SOMNIUM_TERRAIN_MACRO=0/1` moves 127.5 over 784 523 terrain
+  pixels with sky bit-identical. See §25.13.
+- **25E** — ✅ passing. `SOMNIUM_TERRAIN_HEIGHT_BLEND=0/1` with
+  `SOMNIUM_TERRAIN_EYE=1`: 776.8 mean absolute luminance over 921 600 terrain
+  pixels, mesh and sky bit-identical. See §25.12.
 - **25F** — a flat plain from a high camera: the tiling grid must not be findable.
 - Every sub-phase keeps `cargo test --workspace` green, currently 209 tests.
 
@@ -1901,7 +2170,7 @@ hashing, a runtime streaming budget with LOD residency, and hot reload.
 References: Flax `Content` / `ContentImporters` / `Streaming`, Stride
 `Stride.Assets`.
 
-**Phase 29 — Profiler and debug tooling.** There is no way to answer "why is
+**Phase 29 — Profiler and debug tooling. ✅ Complete (GPU half; see §29.1).** There is no way to answer "why is
 this frame slow" beyond guessing. That cost real time in 17G, where a 51x
 draw-call regression was found by reasoning rather than measurement. Needs CPU
 zones, GPU timestamp queries per pass, a frame graph view, and counters for
@@ -2043,6 +2312,210 @@ would not have done that.
 
 Then **27 (animation)** and **28 (asset pipeline)**, which are what a real
 project hits first. Then 31, 30, 33, with 32 last.
+
+---
+
+## 17.7 Phase 29 — the profiler
+
+**What it is.** One `wgpu::QuerySet` of timestamps, written from the encoder
+*around* each pass, so no pass had to be modified to become measurable. Results
+are read one or more frames later through a three-deep ring of mapped readback
+buffers and smoothed over thirty frames. `crates/somnium_renderer/src/profiler.rs`.
+
+Two things came out of reading the references rather than from the phase
+description:
+
+- **Wicked `wiProfiler.cpp`** — the deferred readback is the whole design.
+  Waiting on a resolve would make the profiler the most expensive thing in the
+  frame and change the number it exists to report. Its guard against nonsense
+  timestamps is ported too: one frame of driver garbage would otherwise poison a
+  thirty-frame window, and `end - begin` the wrong way round on `u64` is not a
+  small error, it is roughly six centuries.
+- **Flax `ProfilerGPU.h` / `RenderStats.h`** — events carry a **depth**, which
+  is what turns a list of passes into a frame graph, and the timings travel with
+  **counters** (draws, triangles, instances, TLAS instances). A pass time says
+  how long something took and never why; "why" is nearly always one of the
+  counters.
+
+**`TIMESTAMP_QUERY_INSIDE_ENCODERS`, not just `TIMESTAMP_QUERY`.** The plain
+feature only permits timestamps declared in a pass descriptor's
+`timestamp_writes`, which would have meant threading query indices through every
+pass in the engine. The encoder form lets the profiler bracket a pass from
+outside. Detected, never demanded — the same pattern as GPU-driven rendering and
+ray tracing; an adapter without it still runs, with counters and no timings.
+
+**The bug that made it silent.** Nothing in the engine polls the device per
+frame — the only two `poll` calls are blocking waits for a specific readback —
+so `map_async` callbacks never fired, `ready` never flipped, and the profiler
+reported nothing at all while looking entirely healthy. `after_submit` now polls
+with `PollType::Poll`. Worth recording because the failure mode is *no output*,
+not a wrong number, and there is nothing in the code to point at.
+
+**What it says about this scene** (debug build, 1280×720, terrain scene):
+
+```
+Frame                  2.354 ms
+  Shadows              0.324    Visibility (phase 1) 0.053    Hi-Z    0.044
+  GTAO                 0.214    Volumetrics          0.105    Shading 0.869
+  Water                0.012    Transparent          0.001    TAA     0.133
+  Bloom                0.231    Post + present       0.050
+unattributed           0.317 ms
+257 draws / 288 460 tris / 256 terrain chunks / 257 TLAS instances
+```
+
+`unattributed` is printed instead of a total, which would only repeat the `Frame`
+row. It is the passes not yet bracketed — culling, the second visibility phase,
+ReSTIR, IBL, the editor overlays — and it is the honest statement of how much of
+the frame the profiler still cannot see.
+
+**Its first real job was 25D**, which had to express its cost win in *texture
+reads* through a debug shader because there was no clock on the GPU.
+`SOMNIUM_TERRAIN_DETAIL_FADE=0/1`, same viewpoint:
+
+| pass | fade off | fade on |
+|---|---|---|
+| Shading | 0.973 ms | **0.883 ms** (−9.2%) |
+| Shadows | 0.324 | 0.324 |
+| GTAO | 0.214 | 0.215 |
+| unattributed | 0.317 | 0.316 |
+
+Every pass the change should not touch is identical to the third decimal, which
+is the control. So 25D's −32% in texture reads buys −9.2% of the shading pass —
+texture reads were not the whole cost of it, and that is a thing the tap counter
+could not have said.
+
+**In the editor**: a `[x] Profiler` toggle on the viewport toolbar and an
+overlay panel pinned to the top-left of the viewport, showing the same tree with
+live numbers. The toggle drives collection as well as visibility — a hidden
+profiler that keeps writing timestamps is paying for a measurement nobody reads.
+Headless, `SOMNIUM_PROFILE=1` prints the table every `SOMNIUM_PROFILE_EVERY`
+frames (default 120), which is how the 25D table above was produced.
+
+**Not done, from the phase description:** CPU zones (only GPU work is timed),
+memory counters, and a frame-graph *view* beyond the indented tree. 24AB's
+lighting debug views were absorbed into the phase and already exist as
+`SOMNIUM_SHADOW_DEBUG` modes 1–12.
+
+---
+
+## 17.8 Phase 24L — ReSTIR GI
+
+24K resampled *direct* light: which of the sun's samples a pixel can see. 24L
+resamples the other half of the rendering equation — light that arrived by
+bouncing off something else. The estimator is the same; the sample space is not.
+**A DI reservoir holds a direction to a light; a GI reservoir holds a point in
+the world** — where the ray landed, its normal, and the radiance leaving it
+toward us. That difference is the whole of ReSTIR GI, and it is what makes a
+neighbour's sample reusable: two pixels a few centimetres apart see the same lit
+patch from slightly different angles, and a Jacobian converts between them.
+
+Ported from `bevy_solari/src/realtime/restir_gi.wgsl`. Three things came out of
+reading it that were not in the phase description:
+
+- **The reconnection-shift Jacobian and its rejection threshold.** Reusing a
+  neighbour's *point* means looking at the same patch from a different position;
+  the solid angle it subtends and the cosine at its surface both change, and the
+  estimator is only unbiased if that is divided out. Bevy rejects above 1.2 —
+  past it the shift is a bad approximation and the sample adds variance instead
+  of removing it.
+- **Fixed buffer roles, not a ping-pong.** The spatial pass reads its
+  *neighbours'* reservoirs, so reading and writing one buffer would be a data
+  race and a double-count at once. `gi_a` is the previous frame's finished set,
+  `gi_b` the handoff between the two dispatches.
+- Bevy's `NO_WORLD_CACHE` path lights the sample point directly, which is what
+  Somnium does — there is no world cache here.
+
+**`global_pool.wgsl`** came out of this phase and matters beyond it. The
+`@group(0)` scene bindings used to live at the top of `shading.wgsl`; they are
+now their own module, concatenated into both passes. A **ray hit resolves through
+the same `instances` array a visibility-buffer hit does** — one description of
+the scene, not two that could disagree. The TLAS's `instance_custom_data`
+changed from `vertex_offset` to the instance-buffer index to make that lookup
+exact: `instance_index` on an intersection is the TLAS *slot*, and instances
+without a BLAS are skipped during the build, so the two drift apart the moment
+one mesh is missing.
+
+**Terrain bounce albedo.** A ray landing on terrain would otherwise take
+`base_color`, which is white, and the ground would bounce colourless light into
+everything above it. Evaluating the real eight-layer composite per bounce is out
+of the question, so `GpuTerrainMaterial::layer_albedo` carries each layer's
+**mean linear albedo** and the hit blends them by the splat weights — two
+texture reads. Averaged in linear space, because the mean of sRGB bytes is not
+the sRGB of the mean.
+
+**Measured.** `SOMNIUM_RESTIR_GI=0/1` at eye level: **51.2** mean absolute
+luminance over 921 600 terrain pixels, 342 748 past the 1% threshold, mean
+luminance 4527 → 4476 — slightly *darker*, which is the right direction for
+replacing a constant ambient with a real occluded bounce. Cost, from the Phase 29
+profiler: **0.788 ms** for two full-res dispatches at 1280×720.
+
+**Honest limit:** the effect is conservative in the demo scene, an open hillside
+under a bright sky where a constant ambient and a real bounce largely agree. GI
+earns its keep in enclosed and occluded geometry, and the scene has none. That
+is a scene limitation, not a pass limitation.
+
+**Not done:** specular GI (the cubemap still supplies the specular lobe), a
+world cache, a denoiser, and multi-bounce — the sample point is lit by the sun
+directly, so this is a one-bounce solution.
+
+---
+
+## 17.9 Phase 24AE — shadow caster culling
+
+The profiler's first real finding on a working scene: **Shadows at 24.5 ms of a
+42 ms frame**, with 8 599 draws and 52.9 million triangles issued *four times*,
+once per cascade. Most of it was grass whose shadow is a sub-pixel speckle. The
+main view has stopped drawing distant foliage since 17G; the shadow pass never
+learned to.
+
+**Two cuts, deliberately independent.**
+
+**1. Projected screen radius** — Unreal's `r.Shadow.RadiusThreshold`
+(`ShadowSetup.cpp`):
+
+```
+draw = radius² > threshold² · distance²        i.e.  radius / distance > threshold
+```
+
+Two things about it are easy to get wrong. The distance is from the **camera**,
+not the light — the question is whether anyone would see the shadow, which is a
+screen-space question. And it is a **size** test, not a distance cut: a tree
+keeps casting at 200 m because its radius is metres, a tuft stops at 30 m
+because its radius is centimetres. One rule that scales itself to the object,
+which is why UE uses it in place of a per-asset shadow distance. `casts_shadow`
+in `pass/shadow.rs`, five tests, `SOMNIUM_SHADOW_RADIUS` to tune (UE ships 0.01;
+0 disables).
+
+**2. An authored foliage shadow distance** — `FoliageComponent::foliage_shadow_distance`,
+default 40 m, editable as **Sh Dst** in the Foliage inspector. The size test is
+the right general rule but only rescues you once the *camera* is far from the
+grass, which is not how anyone plays. At eye level the field fills the frame and
+every tuft is still large enough to pass the radius test. This is the dial for
+that case, and it is nearer than the draw distance on purpose.
+
+**Measured** (eye-level foliage camera, `SOMNIUM_FOLIAGE=1`):
+
+| | casters | Shadows | Frame |
+|---|---|---|---|
+| neither cut | 7 166 / 7 166 | 23.769 ms | 26.893 ms |
+| both | 1 873 / 7 166 | **6.158 ms** | **9.545 ms** |
+
+Every other pass is unchanged to the third decimal — Visibility 0.042/0.045,
+GTAO 0.482/0.478, Shading 0.895/0.902 — which is the control. From a distant
+camera the radius test alone takes it further: 362 of 1 069 casters, Shadows
+0.669 ms.
+
+`shadow casters N of M draws` is now a profiler row and an overlay row, because
+a `Shadows` time that has grown is nearly always this ratio having grown.
+
+**One structural change:** `ShadowPass::record` takes
+`&[ShadowCaster { instance_index, index_count }]` rather than the draw queue.
+The pass used a draw's *position in the queue* as its instance index, so
+filtering into a new `Vec<DrawCommand>` would have renumbered them and paired
+every draw with another mesh's transform.
+
+**Not done:** per-cascade frustum culling of casters (a caster is in or out for
+all four cascades), and a fade rather than a hard cut at the foliage distance.
 
 ---
 

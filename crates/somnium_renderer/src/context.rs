@@ -59,6 +59,16 @@ pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_I
 /// without it must still start.
 pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
 
+/// Phase 29: GPU timestamps for the profiler.
+///
+/// `TIMESTAMP_QUERY` alone only permits timestamps written by a pass
+/// descriptor's `timestamp_writes`, which would mean editing every pass in the
+/// engine to hand it query indices. `TIMESTAMP_QUERY_INSIDE_ENCODERS` allows
+/// them on the encoder between passes, so the profiler brackets a pass from
+/// outside and the passes themselves stay unaware they are being measured.
+pub const PROFILER_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
     ///
@@ -136,6 +146,20 @@ impl RenderContext {
         }
         let required_features = if ray_tracing {
             required_features | RAY_TRACING_FEATURES
+        } else {
+            required_features
+        };
+
+        // Phase 29: detect, do not demand — same as the two above. A GPU
+        // without timestamps still runs; it just has no profiler.
+        let timestamps = available_features.contains(PROFILER_FEATURES);
+        if timestamps {
+            info!("GPU timestamp queries available (profiler)");
+        } else {
+            info!("GPU timestamp queries unavailable — the profiler will show counters only");
+        }
+        let required_features = if timestamps {
+            required_features | PROFILER_FEATURES
         } else {
             required_features
         };

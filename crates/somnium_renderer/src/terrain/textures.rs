@@ -236,6 +236,45 @@ pub struct TerrainLayerTextures {
     /// False when the packed assets were missing and the procedural fallback
     /// was generated instead.
     pub from_assets: bool,
+    /// Mean **linear** albedo of each layer (Phase 24L).
+    ///
+    /// A ray that bounces off the ground has to pick up the ground's colour,
+    /// and there is no affordable way to evaluate the full eight-layer
+    /// composite at a ray hit — that is a splatmap fetch, eight texture reads
+    /// and a height blend, per bounce, per pixel. One mean colour per layer
+    /// blended by the splat weights costs two texture reads and is right to
+    /// within the layer's own variation, which is far below what a single
+    /// diffuse bounce can carry.
+    pub mean_albedo: [[f32; 4]; TERRAIN_LAYER_COUNT as usize],
+}
+
+/// Mean linear-space colour of an sRGB-encoded RGBA8 image.
+///
+/// Decoded before averaging, not after: the mean of sRGB bytes is not the sRGB
+/// of the mean, and a bounce computed from the former comes out visibly too
+/// bright — the error is in the same direction as the gamma curve's bow.
+fn mean_linear_albedo(texels: &[u8]) -> [f32; 4] {
+    if texels.is_empty() {
+        return [0.5, 0.5, 0.5, 1.0];
+    }
+    let srgb_to_linear = |c: u8| {
+        let s = f32::from(c) / 255.0;
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    let mut sum = [0.0f64; 3];
+    let n = texels.len() / 4;
+    for t in texels.chunks_exact(4) {
+        for c in 0..3 {
+            sum[c] += f64::from(srgb_to_linear(t[c]));
+        }
+    }
+    let inv = 1.0 / n as f64;
+    [
+        (sum[0] * inv) as f32,
+        (sum[1] * inv) as f32,
+        (sum[2] * inv) as f32,
+        1.0,
+    ]
 }
 
 /// Packed materials the four layers load, in the layer order the rest of the
@@ -364,7 +403,17 @@ impl TerrainLayerTextures {
             device, queue, "Terrain Surface Array",
             wgpu::TextureFormat::Rgba8Unorm, size, &surfaces,
         );
-        Ok(Self { albedo, albedo_view, surface, surface_view, from_assets: true })
+        let mean_albedo = std::array::from_fn(|i| {
+            albedos.get(i).map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+        });
+        Ok(Self {
+            albedo,
+            albedo_view,
+            surface,
+            surface_view,
+            from_assets: true,
+            mean_albedo,
+        })
     }
 
     /// Generate the four default procedural layers and upload them.
@@ -391,7 +440,17 @@ impl TerrainLayerTextures {
             device, queue, "Terrain Surface Array",
             wgpu::TextureFormat::Rgba8Unorm, LAYER_TEXTURE_SIZE, &surfaces,
         );
-        Self { albedo, albedo_view, surface, surface_view, from_assets: false }
+        let mean_albedo = std::array::from_fn(|i| {
+            albedos.get(i).map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+        });
+        Self {
+            albedo,
+            albedo_view,
+            surface,
+            surface_view,
+            from_assets: false,
+            mean_albedo,
+        }
     }
 }
 

@@ -17,11 +17,13 @@
 //! shadows, traced visibility, IBL and correct TAA, and what retires the
 //! duplicated shadow and cluster code the old terrain pass carried.
 
+pub mod blend;
 pub mod brush;
 pub mod collider;
 pub mod foliage;
 pub mod foliage_paint;
 pub mod heightmap;
+pub mod macro_map;
 pub mod mesh;
 pub mod textures;
 
@@ -118,10 +120,13 @@ pub struct TerrainLayer {
     pub name: String,
     /// UV repeats per metre when sampling this layer's textures.
     pub tiling: f32,
+    /// Phase 25E: how this layer's own relief decides where it wins against
+    /// its neighbours. See [`blend::LayerBlend`].
+    pub blend: blend::LayerBlend,
 }
 
 /// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
-/// `TerrainMaterial` in `terrain_material.wgsl` (112 bytes).
+/// `TerrainMaterial` in `terrain_material.wgsl` (256 bytes).
 ///
 /// Phase 25A-2 moved this out of a per-terrain uniform and into a storage-buffer
 /// array indexed by `Material::terrain_index`, because terrain now shades in the
@@ -158,6 +163,37 @@ pub struct GpuTerrainMaterial {
     pub cliff_layer: u32,
     /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
     pub hex_tiling: u32,
+    /// Phase 25E, per layer. How much of the layer's height map is added to
+    /// its splat weight.                                       offset 144 (32)
+    pub layer_height_scale: [f32; 8],
+    /// Width of the layer's transition band.                   offset 176 (32)
+    pub layer_blend_width: [f32; 8],
+    /// Reciprocal of the layer's minimum weight, which is the form the shader
+    /// multiplies by — see `blend::weight_clamp`.              offset 208 (32)
+    pub layer_weight_clamp: [f32; 8],
+    /// Non-zero runs the height-weighted blend; zero normalises the splat
+    /// weights and nothing else, which is the A/B.             offset 240
+    pub height_blend: u32,
+    /// Phase 25D. Bindless index of the macro colour map, -1 for none.
+    ///                                                        offset 244
+    pub macro_map: i32,
+    /// `macro_map::MacroBlendMode`.                            offset 248
+    pub macro_mode: u32,
+    /// Blend factor; 0 leaves the detail untouched.            offset 252
+    pub macro_strength: f32,
+    /// Metres at which the layer budget starts falling.        offset 256
+    pub detail_fade_start: f32,
+    /// Metres at which only the dominant layers survive.       offset 260
+    pub detail_fade_end: f32,
+    /// Pads to 272. WGSL would insert this itself and Rust would not, which is
+    /// the disagreement that mis-decodes the whole struct.
+    pub _pad: [u32; 2],
+    /// Phase 24L: mean linear albedo per layer.               offset 272 (128)
+    ///
+    /// What an indirect ray picks up when it bounces off the ground. See
+    /// `TerrainLayerTextures::mean_albedo` for why it is a mean rather than the
+    /// real composite.
+    pub layer_albedo: [[f32; 4]; 8],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -165,6 +201,8 @@ pub struct GpuTerrainMaterial {
 pub struct TerrainTextureIds {
     pub splat_map: i32,
     pub splat_map_hi: i32,
+    /// Phase 25D: the whole-terrain macro colour map.
+    pub macro_map: i32,
     pub albedo: [i32; TERRAIN_LAYER_COUNT as usize],
     pub surface: [i32; TERRAIN_LAYER_COUNT as usize],
 }
@@ -174,6 +212,7 @@ impl Default for TerrainTextureIds {
         Self {
             splat_map: -1,
             splat_map_hi: -1,
+            macro_map: -1,
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
         }
@@ -192,6 +231,10 @@ pub struct TerrainData {
     pub layers: Vec<TerrainLayer>,
     pub splatmap: Splatmap,
     pub layer_textures: TerrainLayerTextures,
+    /// Phase 25D: the macro tier. Rewritten in place when the heightfield
+    /// changes wholesale, so its bindless index is stable.
+    pub macro_texture: wgpu::Texture,
+    pub macro_view: wgpu::TextureView,
 
     /// Shared LOD index spans in the global index pool, keyed by
     /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
@@ -223,6 +266,26 @@ pub struct TerrainData {
     /// the same code, the same parameters, opposite verdict, decided by the
     /// content. `SOMNIUM_HEXTILE=0` turns it off.
     pub hex_tiling: bool,
+    /// Phase 25D: the macro tier's blend against the detail composite.
+    pub macro_mode: macro_map::MacroBlendMode,
+    /// Phase 25D. `SOMNIUM_TERRAIN_MACRO=0` sets this to zero, which is the
+    /// A/B — a strength of zero is exactly "no macro tier".
+    pub macro_strength: f32,
+    /// Phase 25D: metres over which the per-pixel layer budget falls away.
+    pub detail_fade_start: f32,
+    pub detail_fade_end: f32,
+    /// The macro map is derived from the heightfield, so a wholesale change to
+    /// the terrain invalidates it. Set by `mark_all_dirty` and consumed in
+    /// `rebuild_dirty_chunks`, which is where a queue is already in hand.
+    ///
+    /// Deliberately *not* set by sculpting: the macro tier is a hundreds-of-
+    /// metres signal and regenerating 512² texels per brush dab would cost far
+    /// more than the frequencies it would recover.
+    macro_dirty: bool,
+    /// Phase 25E. `SOMNIUM_TERRAIN_HEIGHT_BLEND=0` falls back to plain
+    /// normalised splat weights, which is the only way to see what the height
+    /// blend is actually doing.
+    pub height_blend: bool,
 
     /// Model matrix submitted for the current frame.
     pub model: glam::Mat4,
@@ -278,7 +341,12 @@ impl TerrainData {
 
         let layers = LAYER_NAMES
             .iter()
-            .map(|name| TerrainLayer { name: (*name).to_string(), tiling: 0.25 })
+            .enumerate()
+            .map(|(i, name)| TerrainLayer {
+                name: (*name).to_string(),
+                tiling: 0.25,
+                blend: blend::LAYER_BLENDS[i],
+            })
             .collect();
 
         // One splat texel per heightmap cell; rows stay 256-byte aligned
@@ -291,7 +359,26 @@ impl TerrainData {
         );
         let layer_textures = TerrainLayerTextures::load_or_generate(device, queue);
 
+        // Generated flat here and regenerated once relief lands (see
+        // `macro_dirty`). Creating it now rather than on first use is what lets
+        // `create_terrain` register one bindless index for the terrain's life —
+        // the texels are rewritten in place, the view never changes.
+        let (macro_texture, macro_view) = macro_map::upload(
+            device,
+            queue,
+            &macro_map::generate(
+                &heightmap,
+                desc.total_vertices_x(),
+                desc.total_vertices_z(),
+                desc.cell_size,
+                desc.height_scale,
+                0,
+            ),
+        );
+
         Self {
+            macro_texture,
+            macro_view,
             desc,
             heightmap,
             chunks,
@@ -304,6 +391,30 @@ impl TerrainData {
             material_id: 0,
             terrain_index: 0,
             hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
+            macro_mode: macro_map::MacroBlendMode::Overlay,
+            macro_strength: if std::env::var("SOMNIUM_TERRAIN_MACRO").as_deref() == Ok("0") {
+                0.0
+            } else {
+                macro_map::DEFAULT_MACRO_STRENGTH
+            },
+            // Roughly: full detail out to the far edge of LOD 0, then a fall
+            // to the dominant layers over the next few hundred metres. Past
+            // `end` a pixel covers metres of ground and the layers it is
+            // averaging are indistinguishable.
+            // `SOMNIUM_TERRAIN_DETAIL_FADE=0` pushes the fade past any real
+            // view distance, which is the A/B for the budget: the shader keeps
+            // its distance term and simply never reaches it.
+            detail_fade_start: if std::env::var("SOMNIUM_TERRAIN_DETAIL_FADE").as_deref()
+                == Ok("0")
+            {
+                1.0e9
+            } else {
+                60.0
+            },
+            detail_fade_end: 400.0,
+            macro_dirty: true,
+            height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref()
+                != Ok("0"),
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
@@ -344,6 +455,25 @@ impl TerrainData {
             splat_map_hi: self.texture_ids.splat_map_hi,
             cliff_layer: 2,
             hex_tiling: u32::from(self.hex_tiling),
+            layer_height_scale: std::array::from_fn(|i| {
+                self.layers.get(i).map_or(0.0, |l| l.blend.height_scale)
+            }),
+            layer_blend_width: std::array::from_fn(|i| {
+                self.layers.get(i).map_or(0.5, |l| l.blend.blend_width)
+            }),
+            layer_weight_clamp: std::array::from_fn(|i| {
+                self.layers
+                    .get(i)
+                    .map_or(10.0, |l| blend::weight_clamp(l.blend.min_weight))
+            }),
+            height_blend: u32::from(self.height_blend),
+            macro_map: self.texture_ids.macro_map,
+            macro_mode: self.macro_mode as u32,
+            macro_strength: self.macro_strength,
+            detail_fade_start: self.detail_fade_start,
+            detail_fade_end: self.detail_fade_end.max(self.detail_fade_start + 1.0),
+            _pad: [0; 2],
+            layer_albedo: self.layer_textures.mean_albedo,
         }
     }
 
@@ -433,6 +563,7 @@ impl TerrainData {
     /// the collider notice.
     pub fn mark_all_dirty(&mut self) {
         self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.macro_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }
@@ -601,6 +732,36 @@ impl TerrainData {
         pool: &mut crate::geometry::GeometryPool,
         rewritten: &mut Vec<u32>,
     ) {
+        if std::mem::take(&mut self.macro_dirty) {
+            let map = macro_map::generate(
+                &self.heightmap,
+                self.desc.total_vertices_x(),
+                self.desc.total_vertices_z(),
+                self.desc.cell_size,
+                self.desc.height_scale,
+                0,
+            );
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.macro_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &map.texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(map.size * 4),
+                    rows_per_image: Some(map.size),
+                },
+                wgpu::Extent3d {
+                    width: map.size,
+                    height: map.size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         let desc = self.desc;
         for chunk in &mut self.chunks {
             if !chunk.dirty || chunk.vertex_offset == UNALLOCATED {

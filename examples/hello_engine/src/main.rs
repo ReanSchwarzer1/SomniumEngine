@@ -339,6 +339,7 @@ impl VoxelTerrain {
             let Some(alloc) = entry else { continue };
             let origin = somnium_voxel::chunk_origin(*coord);
             renderer.submit(somnium_renderer::command::DrawCommand {
+                casts_shadow: true,
                 sort_key: somnium_renderer::command::SortKey::new(
                     0, self.material_id as u16, alloc.vertex_offset,
                 ),
@@ -629,6 +630,7 @@ impl GameApp for HelloGame {
                 // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
                 // terrain gets procedural FBM hills, which is still landscape
                 // rather than the flat plain every earlier test scene used.
+                let mut foliage_camera: Option<Vec3> = None;
                 if flat_terrain {
                     let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
                         .ok()
@@ -640,13 +642,77 @@ impl GameApp for HelloGame {
                         terrain.apply_default_relief(amplitude);
                         // Assign all eight materials by altitude and slope.
                         brush::auto_splat(terrain, amplitude * 0.62);
+
+                        // `SOMNIUM_FOLIAGE=1` scatters foliage without the
+                        // editor (Phase 17E). Painting by hand was the only way
+                        // to get a plant on screen, which meant the foliage
+                        // shading work could not be *seen*, let alone measured
+                        // — the reason the 17E remainder sat open. Strokes are
+                        // deterministic, so an A/B of a shading change is a
+                        // like-for-like comparison.
+                        if std::env::var("SOMNIUM_FOLIAGE").as_deref() == Ok("1") {
+                            use somnium_renderer::terrain::foliage_paint::{self, FoliageBrush};
+                            let [wx, wz] = desc.world_size();
+                            let mut painted = std::mem::take(&mut terrain.painted_foliage);
+                            let mut stroke = 0u32;
+
+                            // Ground cover over a patch in front of the camera,
+                            // then a few trees standing in it.
+                            for (kind, radius, density, single, count) in
+                                [(0u8, 26.0f32, 2.5f32, false, 12), (1u8, 1.0, 1.0, true, 6)]
+                            {
+                                let brush = FoliageBrush {
+                                    kind,
+                                    radius,
+                                    density,
+                                    single,
+                                    max_slope_deg: 35.0,
+                                    ..Default::default()
+                                };
+                                for i in 0..count {
+                                    let t = i as f32 / count as f32;
+                                    let cx = wx * (0.34 + 0.30 * t);
+                                    let cz = wz * (0.40 + 0.16 * ((i % 4) as f32 / 4.0));
+                                    stroke += 1;
+                                    foliage_paint::paint(
+                                        &mut painted, &brush, [cx, cz], stroke,
+                                        |x, z| terrain.ground_sample(x, z),
+                                    );
+                                }
+                            }
+                            info!("Foliage scattered: {} instances", painted.len());
+                            terrain.painted_foliage = painted;
+
+                            // Stand in it. Foliage is culled past 120 m (17G)
+                            // and a tuft is sub-pixel from the landscape camera,
+                            // so judging leaf shading needs eye level.
+                            let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
+                            let ground = terrain.world_height_at(lx, lz);
+                            foliage_camera = Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                        }
+
+                        // The same eye-level stance without the foliage, for
+                        // judging the ground itself. Every terrain texturing
+                        // phase since 25F has had to be judged on a hillside a
+                        // kilometre away, where a material transition is a few
+                        // pixels wide and a height blend is invisible — the
+                        // features live at metres and the demo camera does not.
+                        if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
+                            let [wx, wz] = desc.world_size();
+                            let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
+                            let ground = terrain.world_height_at(lx, lz);
+                            foliage_camera =
+                                Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                        }
                     }
                     // The default camera sits at y = 2, which is now inside a
                     // hillside rather than above a plain. Put it over the
                     // terrain looking down the slope.
-                    self.camera.position = Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45);
+                    self.camera.position = foliage_camera.unwrap_or_else(|| {
+                        Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45)
+                    });
                     self.camera.yaw = -90.0;
-                    self.camera.pitch = -22.0;
+                    self.camera.pitch = if foliage_camera.is_some() { -6.0 } else { -22.0 };
                 }
 
                 if let Some(terrain) = renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain) {
@@ -685,6 +751,12 @@ impl GameApp for HelloGame {
                         grid_z: desc.grid_size[1],
                         cell_size: desc.cell_size,
                         height_scale: desc.height_scale,
+                    },
+                    // Phase 17E: painted foliage only submits when the
+                    // terrain entity carries an enabled FoliageComponent.
+                    somnium_core::FoliageComponent {
+                        enabled: foliage_camera.is_some(),
+                        ..Default::default()
                     },
                 ));
                 info!("Heightmap terrain smoke test active ({}x{} m)", wx, wz);
@@ -1067,6 +1139,7 @@ impl GameApp for HelloGame {
                     let material = unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity   = archetype.entities()[row];
                     renderer.submit(somnium_renderer::command::DrawCommand {
+                        casts_shadow: true,
                         sort_key:     somnium_renderer::command::SortKey::new(0, material.id as u16, entity.index()),
                         vertex_offset: mesh.vertex_offset,
                         index_offset:  mesh.index_offset,

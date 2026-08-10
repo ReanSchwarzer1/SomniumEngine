@@ -831,6 +831,62 @@ separately because Poly Haven's glTF exports do not reference them.
 **Files:** `somnium_renderer/src/pass/ibl.rs`, `somnium_renderer/src/shaders/ibl_gen.wgsl`,
 `somnium_renderer/src/shaders/shading.wgsl` (`evaluate_ibl`)
 
+## 13B. Phases 24L / 24AE / 25D / 25E / 29 (this session)
+
+Every entry below is **architecture studied, not code copied**. Where a technique
+has a published derivation, the paper is the implementation reference and the
+engine is only the shape of the solution.
+
+### 13B.1 bevy_solari — ReSTIR GI (Phase 24L)
+
+**Copyright:** © Bevy contributors. **License:** MIT / Apache-2.0.
+**Source:** `example_repo/bevy/bevy-main/crates/bevy_solari/`
+
+| Bevy source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `realtime/restir_gi.wgsl` | A GI reservoir holds a **world-space sample point**, not a light direction | `GiReservoir { sample_pos, sample_normal, radiance, w, w_sum, m }` |
+| `jacobian()` + its 1.2 rejection | Reconnection-shift Jacobian converting a neighbour's view of a patch, rejected when large | `gi_jacobian` / the same threshold in `gi_merge` |
+| `initial_and_temporal` / `spatial_and_shade` | Two dispatches with **fixed buffer roles**, so the spatial pass never reads a buffer it is writing | `gi_a` / `gi_b` in `restir_gi.wgsl` |
+| `NO_WORLD_CACHE` path | Light the sample point directly instead of querying a world cache | `gi_direct_at` — Somnium has no world cache |
+
+### 13B.2 Unreal Engine 5 — shadow caster culling (Phase 24AE)
+
+**Copyright:** © Epic Games, Inc. **Studied only; never adapted or translated.**
+**Source:** `example_repo/UnrealEngine-release/.../Renderer/Private/ShadowSetup.cpp`
+
+| UE source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `r.Shadow.RadiusThreshold`, `GMinScreenRadiusForShadowCaster` | Cull a caster when its **projected screen radius** falls below a threshold — a size test, not a distance cut | `pass::shadow::casts_shadow` |
+| `radius² > threshold² · distanceSq · LODScale²` | Squared form, distance from the **camera** rather than the light | same, minus the LOD scale Somnium has no equivalent for |
+| Applied to CSM, skipped for VSM | The cull belongs to the cascade path specifically | Somnium has only the cascade path |
+
+### 13B.3 Wicked Engine + Flax — the profiler (Phase 29)
+
+**Wicked:** © Turánszki János, MIT. `New_Engines/WickedEngine-master/WickedEngine/wiProfiler.cpp`
+**Flax:** © Wojciech Figat. `New_Engines/FlaxEngine-master/Source/Engine/Profiler/`
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `wiProfiler::BeginFrame` | Read the *previous* frame's timestamps before handing out new queries — never stall | `GpuProfiler::collect` over a 3-deep readback ring |
+| `wiProfiler` rolling `times[20]` | Average per range, keyed by name | `Smoother`, keyed by name **and depth** |
+| Wicked's huge-value guard | Discard implausible timings rather than poison the window | `IMPLAUSIBLE_MS` |
+| Flax `ProfilerGPU::Event::Depth` | Events carry a nesting depth, which is what makes the report a tree | `ScopeResult::depth` |
+| Flax `RenderStatsData` | Counters belong beside the timings | `FrameCounters` |
+
+### 13B.4 O3DE — terrain material blending (Phases 25D, 25E)
+
+**Source:** `example_repo/o3de-development/.../Gems/Terrain/`
+
+| O3DE source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `TerrainDetailHelpers.azsli` — `AppendHeightToWeight` | Fold each material's height into its splat weight, **clamped by coverage** | `terrain_append_height`, mirrored in `terrain/blend.rs` |
+| the same file's depth-blend loop | Only materials within their own band of the winner contribute | the `min_depth` / `local_min` block in `evaluate_terrain_material` |
+| `TerrainMacroHelpers.azsli` | A macro tier carrying frequencies no tiling texture reaches | `terrain/macro_map.rs`, derived from the landform rather than authored |
+| `BlendUtility.azsli` — `ApplyTextureBlend` | Multiply / lerp / linear-light / overlay, performed in a display-referred space | `terrain_macro_blend` |
+| `MaxAnisotropy = 16` on the detail sampler | Ground is always seen at a grazing angle | `anisotropy_clamp: 16` on the shading sampler |
+
+---
+
 ## 14. Pattern Index
 
 Cross-reference: which Somnium file implements which reference pattern.
@@ -996,6 +1052,25 @@ Modules that Phase 24 draws on:
 | 24S transmission / SSS | `bevy_pbr/src/transmission/`, `medium.rs` |
 | 24U volumetric fog | `bevy_pbr/src/volumetric_fog/` |
 | 25B incremental BLAS builds | `bevy_solari/src/scene/blas.rs` (`BlasManager`, `prepare_raytracing_blas`), `binder.rs` |
+
+**24U/25I froxel volumetrics.** `bevy_pbr/src/atmosphere/aerial_view_lut.wgsl`
+supplied the 3-D LUT layout, the log-space storage, the half-slice sampling
+offset and the analytic per-segment integration;
+`bevy_pbr/src/volumetric_fog/volumetric_fog.wgsl` supplied the shadow-sampled
+in-scattering for shafts and the Henyey-Greenstein asymmetry parameter. Bevy
+keeps the two as separate features; Somnium folds them into one volume, because
+they are the same integral over the same ray and a second definition of the
+medium is the duplication Phase 25A-2 was spent removing. Bevy's temporal
+reprojection of the volume is not ported.
+
+**17E foliage curved normals.** `SpartanEngine-master/data/shaders/g_buffer.hlsl`
+was read for the 17E remainder and supplied the curved-card normal treatment in
+`shading.wgsl` — rotating the shading normal about the along-card axis by an
+angle taken from the position across the card's width. MIT. Spartan drives it
+from a `width_percent` vertex attribute and applies it to grass blades and
+flowers by material type; Somnium takes the angle from `uv.x`, which on a
+foliage card is the same quantity, and gates it on a material flag set at
+import. Its vegetation *colour* variation is not ported.
 
 **25L heightmaps and layer masks.** `CDLOD-master/source/BasicCDLOD/TiledBitmap/
 TiledBitmap.{h,cpp}` was read for Phase 25L and supplied the `.tbmp` header

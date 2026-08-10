@@ -23,6 +23,12 @@ pub struct ShadingPass {
     depth_view: wgpu::TextureView,
     /// Phase 24K: traced sun visibility.
     restir_view: wgpu::TextureView,
+    /// Phase 24L: traced indirect diffuse.
+    restir_gi_view: wgpu::TextureView,
+    /// Phases 24U/25I: froxel volume, its sampler, and the range uniform.
+    volumetric_view: wgpu::TextureView,
+    volumetric_sampler: wgpu::Sampler,
+    volumetric_range: wgpu::Buffer,
 }
 
 impl ShadingPass {
@@ -38,6 +44,9 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
+        volumetric_view: &wgpu::TextureView,
+        volumetric_sampler: &wgpu::Sampler,
     ) -> Self {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -109,6 +118,18 @@ impl ShadingPass {
                         },
                         count: None,
                     },
+                    // Phase 24L: traced indirect diffuse, replacing the
+                    // environment map's diffuse half when GI is active.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                     // Phase 24X: scene depth, for the contact-shadow march.
                     wgpu::BindGroupLayoutEntry {
                         binding: 7,
@@ -117,6 +138,34 @@ impl ShadingPass {
                             sample_type: wgpu::TextureSampleType::Depth,
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Phases 24U/25I: the froxel volume, its sampler, and the
+                    // distance it spans (0 when volumetrics are off).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -156,6 +205,24 @@ impl ShadingPass {
             ..Default::default()
         });
 
+        // 16 bytes: `vec4` is the smallest uniform WGSL will align, and only
+        // x is used (the volume's range in metres, 0 when it is switched off).
+        let volumetric_range = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Volumetric Range"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 16 bytes: `vec4` is the smallest uniform WGSL will align, and only x
+        // is used — the volume's range in metres, 0 when it is switched off.
+        let volumetric_range = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Volumetric Range"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let bind_group = Self::make_bind_group(
             device,
             &bind_group_layout,
@@ -168,10 +235,17 @@ impl ShadingPass {
             gtao_view,
             depth_view,
             restir_view,
+            restir_gi_view,
+            volumetric_view,
+            volumetric_sampler,
+            &volumetric_range,
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            // Phase 24L: the scene bindings, shared with the GI pass so a
+            // traced surface and a rasterised one resolve identically.
+            include_str!("../shaders/global_pool.wgsl"),
             include_str!("../shaders/brdf.wgsl"),
             // Phase 24G: Vogel disk and gradient noise, used by PCSS.
             include_str!("../shaders/sampling.wgsl"),
@@ -243,6 +317,10 @@ impl ShadingPass {
             gtao_view: gtao_view.clone(),
             depth_view: depth_view.clone(),
             restir_view: restir_view.clone(),
+            restir_gi_view: restir_gi_view.clone(),
+            volumetric_view: volumetric_view.clone(),
+            volumetric_sampler: volumetric_sampler.clone(),
+            volumetric_range,
         }
     }
 
@@ -258,6 +336,10 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
+        volumetric_view: &wgpu::TextureView,
+        volumetric_sampler: &wgpu::Sampler,
+        volumetric_range: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -299,6 +381,22 @@ impl ShadingPass {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(restir_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(restir_gi_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(volumetric_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(volumetric_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: volumetric_range.as_entire_binding(),
+                },
             ],
         })
     }
@@ -325,10 +423,12 @@ impl ShadingPass {
         gtao_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
+        restir_gi_view: &wgpu::TextureView,
     ) {
         self.gtao_view = gtao_view.clone();
         self.depth_view = depth_view.clone();
         self.restir_view = restir_view.clone();
+        self.restir_gi_view = restir_gi_view.clone();
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,
@@ -341,6 +441,16 @@ impl ShadingPass {
             &self.gtao_view,
             &self.depth_view,
             &self.restir_view,
+            &self.restir_gi_view,
+            &self.volumetric_view,
+            &self.volumetric_sampler,
+            &self.volumetric_range,
         );
+    }
+
+    /// Publish the volume's range for this frame. 0 disables the lookup.
+    pub fn set_volumetric_range(&self, queue: &wgpu::Queue, range: f32) {
+        queue.write_buffer(
+            &self.volumetric_range, 0, bytemuck::bytes_of(&[range, 0.0, 0.0, 0.0]));
     }
 }

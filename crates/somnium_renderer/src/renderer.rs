@@ -123,6 +123,13 @@ pub struct SomniumRenderer {
     pub raytrace_pass: crate::pass::raytrace::RaytracePass,
     rt_debug_pass: crate::pass::raytrace::RtDebugPass,
     pub restir_pass: crate::pass::restir::RestirPass,
+    /// Phase 24L: ray-traced indirect diffuse.
+    pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
+    /// Phase 24AE: minimum projected screen radius for a shadow caster.
+    ///
+    /// Unreal ships 0.01 as `r.Shadow.RadiusThreshold`. Zero disables the test,
+    /// which is the A/B. Public so the editor can scrub it.
+    pub shadow_radius_threshold: f32,
     /// Exposure multiplier applied before ACES tone mapping (default 1.0).
     pub exposure: f32,
     /// Meter the frame and adapt exposure to it, rather than using `exposure`.
@@ -191,6 +198,9 @@ pub struct SomniumRenderer {
     /// Deterministic HDR frame readback for A/B measurement. Inert unless
     /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
     capture: crate::capture::FrameCapture,
+    /// Phase 29. Public because the editor drives its toggle and reads its
+    /// report; there is nothing to encapsulate behind an accessor pair.
+    pub profiler: crate::profiler::GpuProfiler,
     /// Material ids belonging to a terrain, so a capture can label its pixels.
     terrain_material_ids: std::collections::HashSet<u32>,
     /// All created terrains, indexed by terrain id (`TerrainComponent::terrain_id`).
@@ -208,6 +218,8 @@ pub struct SomniumRenderer {
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
+    /// Phases 24U/25I: froxel volume carrying aerial perspective and fog.
+    pub volumetric_pass: crate::pass::volumetric::VolumetricPass,
 
     /// Phase 15E: Hi-Z depth pyramid, rebuilt from the visibility depth buffer
     /// each frame and consumed by the two-phase occlusion cull.
@@ -323,6 +335,17 @@ impl SomniumRenderer {
             ctx.config.height,
         );
 
+        // Phase 24L: indirect diffuse on the same acceleration structures.
+        // Takes the global pool's layout because it resolves a ray hit through
+        // the same scene bindings the shading pass rasterises through.
+        let restir_gi_pass = crate::pass::restir_gi::RestirGiPass::new(
+            &ctx.device,
+            &global_pool.layout,
+            raytrace_pass.supported(),
+            ctx.config.width,
+            ctx.config.height,
+        );
+
         let rt_debug_pass =
             crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
 
@@ -406,6 +429,8 @@ impl SomniumRenderer {
         let hiz_pass = crate::pass::hiz::HiZPass::new(
             &ctx.device, ctx.config.width, ctx.config.height, &vis_pass.depth_view,
         );
+        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
+
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
@@ -420,6 +445,11 @@ impl SomniumRenderer {
             restir_pass
                 .visibility_view()
                 .expect("ReSTIR always allocates its visibility target"),
+            restir_gi_pass
+                .radiance_view()
+                .expect("ReSTIR GI always allocates its radiance target"),
+            &volumetric_pass.view,
+            &volumetric_pass.sampler,
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -474,6 +504,11 @@ impl SomniumRenderer {
             raytrace_pass,
             rt_debug_pass,
             restir_pass,
+            restir_gi_pass,
+            shadow_radius_threshold: std::env::var("SOMNIUM_SHADOW_RADIUS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.01),
             // EV100 15 (direct sunlight): 1 / (1.2 * 2^15). The renderer cannot
             // call into somnium_core for this — core depends on the renderer,
             // not the other way round — so the value is inlined.
@@ -510,6 +545,7 @@ impl SomniumRenderer {
             material_double_sided: Vec::new(),
             single_sided_args: 0,
             ibl_pass,
+            volumetric_pass,
             hiz_pass,
             hiz_ready: false,
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
@@ -527,6 +563,7 @@ impl SomniumRenderer {
             water_queue: Vec::new(),
             terrain_materials,
             capture: crate::capture::FrameCapture::from_env(),
+            profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
             terrain_queue: Vec::new(),
@@ -553,7 +590,30 @@ impl SomniumRenderer {
         scene: &somnium_asset::LoadedScene,
     ) -> Vec<UploadedNode> {
         // 1. Textures --------------------------------------------------------
-        let texture_indices: Vec<Option<i32>> = scene.textures.iter().map(|tex| {
+        //
+        // **Only colour maps are sRGB** (Phase 17E remainder). Every imported
+        // texture used to be uploaded as `Rgba8UnormSrgb`, including normal,
+        // metallic-roughness/ARM and occlusion maps — none of which are colour.
+        // The sRGB decode then bent all of them: an authored roughness of 0.5
+        // arrives as ~0.21, so *every imported material read glossier than it
+        // was made*, which is what the 17E note recorded as "bark roughness";
+        // normal maps were skewed the same way, weakening all surface detail.
+        //
+        // Usage comes from the materials rather than from the file, because
+        // glTF images carry no colour-space flag — how a texture is referenced
+        // is the only thing that says what it means.
+        let mut is_colour = vec![false; scene.textures.len()];
+        for m in &scene.materials {
+            for slot in [m.albedo_map, m.emissive_map] {
+                if let Some(i) = slot {
+                    if let Some(flag) = is_colour.get_mut(i) {
+                        *flag = true;
+                    }
+                }
+            }
+        }
+
+        let texture_indices: Vec<Option<i32>> = scene.textures.iter().enumerate().map(|(tex_index, tex)| {
             // Full mip chain. Without it, minified textures alias badly — the
             // sampler asks for trilinear filtering but a single level leaves
             // nothing to filter between, so detailed materials shimmer at
@@ -569,7 +629,11 @@ impl SomniumRenderer {
                 mip_level_count,
                 sample_count:     1,
                 dimension:        wgpu::TextureDimension::D2,
-                format:           wgpu::TextureFormat::Rgba8UnormSrgb,
+                format:           if is_colour.get(tex_index).copied().unwrap_or(true) {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
                 usage:            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats:     &[],
             });
@@ -642,6 +706,10 @@ impl SomniumRenderer {
                 ),
                 flags: if mat.double_sided {
                     crate::material::pool::MATERIAL_FLAG_DOUBLE_SIDED
+                } else {
+                    0
+                } | if mat.foliage {
+                    crate::material::pool::MATERIAL_FLAG_FOLIAGE
                 } else {
                     0
                 },
@@ -1025,6 +1093,7 @@ impl SomniumRenderer {
             self.dof_pass.resize(&ctx.device, width, height);
             self.rt_debug_pass.invalidate();
             self.restir_pass.resize(&ctx.device, width, height);
+            self.restir_gi_pass.resize(&ctx.device, width, height);
             // After every pass that owns a resolution-dependent texture, never
             // before: the shading bind group has to reference the views those
             // resizes just created, not the ones they replaced.
@@ -1036,6 +1105,9 @@ impl SomniumRenderer {
                 self.restir_pass
                     .visibility_view()
                     .expect("ReSTIR always allocates its visibility target"),
+                self.restir_gi_pass
+                    .radiance_view()
+                    .expect("ReSTIR GI always allocates its radiance target"),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.taa_pass.rebuild(
@@ -1140,6 +1212,7 @@ impl SomniumRenderer {
         let mut ids = crate::terrain::TerrainTextureIds::default();
         ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
         ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
+        ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
         for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
@@ -1206,6 +1279,11 @@ impl SomniumRenderer {
 
     /// Execute the rendering pipeline for the current frame.
     pub fn render(&mut self, ctx: &RenderContext, ui: &mut UiManager, window: &Window) {
+        // Phase 29: collects whatever timings have landed and picks this
+        // frame's query slot. Before any recording, and before the counters
+        // below start accumulating.
+        self.profiler.begin_frame();
+
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
@@ -1362,6 +1440,7 @@ impl SomniumRenderer {
                 // terrain's material is registered opaque, so the routing
                 // `submit` does would be a no-op anyway.
                 self.draw_queue.push(DrawCommand {
+                    casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
                         0,
                         material_id as u16,
@@ -1517,13 +1596,50 @@ impl SomniumRenderer {
             label: Some("Main Render Encoder"),
         });
 
+        // Phase 29: the profiler brackets each pass from outside, so no pass
+        // has to know it is being timed. Scopes nest — `end` closes the
+        // innermost — and the frame scope is what everything else indents under.
+        self.profiler.begin(&mut encoder, "Frame");
+
+        // Phase 29 counters, from Flax's `RenderStatsData`: a pass time says
+        // how long something took and never why, and "why" is nearly always one
+        // of these. Counted off the draw queue rather than the indirect buffer
+        // because the indirect counts are only known on the GPU — this is what
+        // was *submitted*, which is the number a regression shows up in first.
+        {
+            let c = &mut self.profiler.counters;
+            c.draw_calls = u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX);
+            c.instances = c.draw_calls;
+            c.triangles = self
+                .draw_queue
+                .iter()
+                .map(|d| d.index_count / 3)
+                .fold(0u32, u32::saturating_add);
+            c.terrain_chunks = u32::try_from(
+                self.draw_queue
+                    .iter()
+                    .filter(|d| self.terrain_material_ids.contains(&d.material_id))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+            c.tlas_instances = self.raytrace_pass.instance_count();
+        }
+
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
+        //
+        // Phase 24AE: cull casters too small to be worth a shadow before any of
+        // them reach the atlas. See `shadow_casters`.
+        let casters = self.shadow_casters();
+        self.profiler.counters.shadow_casters =
+            u32::try_from(casters.len()).unwrap_or(u32::MAX);
+        self.profiler.begin(&mut encoder, "Shadows");
         self.shadow_pass.record(
             &mut encoder,
             &self.shadow_resources.atlas_view,
             &self.global_pool.bind_group,
-            &self.draw_queue,
+            &casters,
         );
+        self.profiler.end(&mut encoder);
 
         // ── 5.5 Phase 15B/15E2: two-phase GPU instance culling ───────────────
         //
@@ -1556,10 +1672,14 @@ impl SomniumRenderer {
         }
 
         // ── 6. Visibility Pass (phase 1) ─────────────────────────────────────
+        self.profiler.begin(&mut encoder, "Visibility (phase 1)");
         self.record_visibility(&mut encoder, true);
+        self.profiler.end(&mut encoder);
 
         // ── 6.5 Hi-Z pyramid from phase 1 depth ──────────────────────────────
+        self.profiler.begin(&mut encoder, "Hi-Z");
         self.hiz_pass.record(&mut encoder);
+        self.profiler.end(&mut encoder);
 
         if cull_active {
             // ── 6.7 Cull phase 2 ─────────────────────────────────────────────
@@ -1601,10 +1721,13 @@ impl SomniumRenderer {
         // apart. Bottom-level structures are rebuilt only where the geometry
         // changed — a sculpt stroke, or a mesh's first frame (Phase 25B).
         if self.raytrace_pass.supported() {
-            let instances: Vec<(u32, glam::Mat4)> = self
+            let instances: Vec<(u32, u32, glam::Mat4)> = self
                 .draw_queue
                 .iter()
-                .map(|cmd| (cmd.vertex_offset, cmd.transform))
+                .enumerate()
+                .map(|(i, cmd)| {
+                    (u32::try_from(i).unwrap_or(0), cmd.vertex_offset, cmd.transform)
+                })
                 .collect();
             self.raytrace_pass.build(
                 &ctx.device,
@@ -1630,6 +1753,25 @@ impl SomniumRenderer {
                     ctx.config.width,
                     ctx.config.height,
                 );
+
+                // Phase 24L. After the DI pass, and for the same reasons: the
+                // TLAS is built and the visibility pass has filled depth and
+                // the id buffer this reads its primary normals from.
+                self.profiler.begin(&mut encoder, "ReSTIR GI");
+                self.restir_gi_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.global_pool.bind_group,
+                    tlas,
+                    &self.vis_pass.depth_view,
+                    &self.vis_pass.view,
+                    self.view_proj,
+                    self.camera_pos,
+                    ctx.config.width,
+                    ctx.config.height,
+                );
+                self.profiler.end(&mut encoder);
             }
         }
 
@@ -1637,11 +1779,13 @@ impl SomniumRenderer {
         // still owns a stale target, and that is exactly the case that needs
         // clearing.
         self.restir_pass.clear_if_inactive(&mut encoder);
+        self.restir_gi_pass.clear_if_inactive(&mut encoder);
 
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
             .ensure_bind_groups(&ctx.device, &self.vis_pass.depth_view);
+        self.profiler.begin(&mut encoder, "GTAO");
         self.gtao_pass.record(
             &mut encoder,
             &ctx.queue,
@@ -1651,7 +1795,35 @@ impl SomniumRenderer {
             0.1,
         );
 
+        // ── 6.95 Froxel volumetrics (Phases 24U, 25I) ────────────────────────
+        //
+        // After the shadow pass, whose atlas it samples for light shafts, and
+        // before shading, which consumes the volume. The atmosphere LUTs are
+        // already built by `ensure_built` above.
+        self.volumetric_pass.ensure_bind_group(
+            &ctx.device,
+            self.atmosphere_pass.transmittance_view(),
+            self.atmosphere_pass.multiscatter_view(),
+            self.atmosphere_pass.sampler(),
+            &self.global_pool.light_buffer,
+            &self.shadow_resources.atlas_depth_view,
+        );
+        self.profiler.end(&mut encoder);
+        self.profiler.begin(&mut encoder, "Volumetrics");
+        self.volumetric_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.view_proj_unjittered.inverse(),
+            self.camera_pos,
+            self.light_direction,
+            self.light_color,
+        );
+        self.profiler.end(&mut encoder);
+        self.shading_pass
+            .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
+
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
+        self.profiler.begin(&mut encoder, "Shading");
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shading Pass"),
@@ -1675,6 +1847,7 @@ impl SomniumRenderer {
             rpass.set_bind_group(1, &self.shading_pass.bind_group, &[]);
             rpass.draw(0..3, 0..1);
         }
+        self.profiler.end(&mut encoder);
 
         // ── 7.35 Frame capture, if one was asked for ─────────────────────────
         //
@@ -1749,6 +1922,7 @@ impl SomniumRenderer {
                 self.postprocess_pass.hdr_texture.size(),
             );
 
+            self.profiler.begin(&mut encoder, "Water");
             self.water_pass.record(
                 &ctx.device,
                 &ctx.queue,
@@ -1768,12 +1942,14 @@ impl SomniumRenderer {
                 self.water_textures_bind_group.as_ref(),
                 &self.water_queue,
             );
+            self.profiler.end(&mut encoder);
         }
 
         // ── 7.6 Phase 21: blended geometry → HDR texture ─────────────────────
         // After opaque shading, terrain and water have filled the target, so
         // blended surfaces composite over a complete image. Depth-tested
         // against the opaque depth, never writing it.
+        self.profiler.begin(&mut encoder, "Transparent");
         self.transparent_pass.record(
             &mut encoder,
             &self.postprocess_pass.hdr_view,
@@ -1819,6 +1995,8 @@ impl SomniumRenderer {
         );
         // Both matrices: the jittered one matches the depth buffer this frame,
         // the unjittered one matches the resolved history. See `TaaPass::record`.
+        self.profiler.end(&mut encoder);
+        self.profiler.begin(&mut encoder, "TAA");
         if self.taa_pass.record(
             &mut encoder,
             &ctx.queue,
@@ -1882,6 +2060,8 @@ impl SomniumRenderer {
         // After TAA, so the chain is built from a resolved image rather than a
         // jittered one; a blur of unstable input broadcasts that instability
         // across everything it touches.
+        self.profiler.end(&mut encoder);
+        self.profiler.begin(&mut encoder, "Bloom");
         self.bloom_pass.record(
             &ctx.device,
             &ctx.queue,
@@ -1919,6 +2099,8 @@ impl SomniumRenderer {
         // FXAA blurs along whatever gradients remain, dragging dark pixels into
         // bright neighbours. That contributed to the rim around silhouettes,
         // and there is nothing left for FXAA to usefully do once TAA is on.
+        self.profiler.end(&mut encoder);
+        self.profiler.begin(&mut encoder, "Post + present");
         let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled();
         if fxaa_active {
             self.fxaa_pass.update(&ctx.queue, ctx.config.width, ctx.config.height);
@@ -1983,7 +2165,13 @@ impl SomniumRenderer {
         ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
 
         let stats_draws = if self.cull_stats { self.indirect.len() } else { 0 };
+        self.profiler.end(&mut encoder);  // Post + present
+        self.profiler.end(&mut encoder);  // Frame
+        self.profiler.end_frame(&mut encoder);
         ctx.queue.submit(std::iter::once(encoder.finish()));
+        // Must follow the submit: the map would otherwise race the copy that
+        // fills the buffer it is reading.
+        self.profiler.after_submit(&ctx.device);
         if stats_draws > 0 {
             self.report_cull_stats(ctx, stats_draws);
         }
@@ -2008,6 +2196,81 @@ impl SomniumRenderer {
     ///
     /// Must run on *every* path out of `render`, including the ones that bail
     /// before drawing.
+    /// Which draws are worth rendering into the shadow atlas this frame.
+    ///
+    /// # Why this exists
+    ///
+    /// The shadow pass issued every draw in the queue, four times, once per
+    /// cascade. With foliage painted across a hillside that is 8 599 draws and
+    /// 52.9 million triangles per cascade, and the profiler put it at **24.5 ms
+    /// of a 42 ms frame** — more than half the frame spent drawing depth for
+    /// grass whose shadow is a sub-pixel speckle. The main view already stops
+    /// drawing distant foliage (17G); the shadow pass never learned to.
+    ///
+    /// # The test
+    ///
+    /// Unreal's `r.Shadow.RadiusThreshold`, from `ShadowSetup.cpp`:
+    ///
+    /// ```text
+    /// draw = radius² > threshold² · distance²
+    /// ```
+    ///
+    /// which is `radius / distance > threshold` — the caster's **projected
+    /// screen radius**. Two things about it are worth stating because they are
+    /// easy to get wrong:
+    ///
+    /// - The distance is from the **camera**, not from the light. The question
+    ///   is not "is this near the sun" but "would anyone see the shadow it
+    ///   casts", and that is a screen-space question.
+    /// - It is a size test, not a distance cut. A tree keeps casting at 200 m
+    ///   because its radius is metres; a grass tuft stops at 30 m because its
+    ///   radius is centimetres. One rule, and it scales itself to the object —
+    ///   which is why UE uses it in place of a per-asset shadow distance.
+    ///
+    /// UE applies it to whole-scene (CSM) shadows only and skips it for virtual
+    /// shadow maps, which need the draw for GPU-side caching. Somnium has only
+    /// the cascade path, so it applies everywhere.
+    fn shadow_casters(&self) -> Vec<crate::pass::shadow::ShadowCaster> {
+        let threshold = self.shadow_radius_threshold;
+        let mut out = Vec::with_capacity(self.draw_queue.len());
+        for (i, cmd) in self.draw_queue.iter().enumerate() {
+            let instance_index = u32::try_from(i).unwrap_or(0);
+            let caster = crate::pass::shadow::ShadowCaster {
+                instance_index,
+                index_count: cmd.index_count,
+            };
+            // The authored opt-out comes first: foliage past its own shadow
+            // distance is out regardless of how large it is on screen.
+            if !cmd.casts_shadow {
+                continue;
+            }
+            if threshold <= 0.0 {
+                out.push(caster);
+                continue;
+            }
+            // No recorded bounds means no basis to reject it. Keeping it is the
+            // safe direction: a missing shadow is a visible bug, an extra draw
+            // is only slow.
+            let Some((min, max)) = self.geometry.mesh_aabb(cmd.vertex_offset) else {
+                out.push(caster);
+                continue;
+            };
+            let min = glam::Vec3::from(min);
+            let max = glam::Vec3::from(max);
+            // Local half-extent scaled by the transform. `transform_vector3`
+            // rather than a length of the scale row, so a non-uniform or
+            // rotated instance still gets a radius that bounds it.
+            let half = cmd.transform.transform_vector3((max - min) * 0.5);
+            let radius = half.length();
+            let centre = cmd.transform.transform_point3((min + max) * 0.5);
+            let dist_sq = (centre - self.camera_pos).length_squared();
+            if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
+                out.push(caster);
+            }
+        }
+        out
+    }
+
     fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
         self.water_queue.clear();

@@ -72,6 +72,12 @@ pub struct LoadedMaterial {
     /// viewer, which is why real foliage glows when backlit and looks flat and
     /// dead without it — no amount of correcting the albedo substitutes.
     pub transmission:          f32,
+    /// Phase 17E: this material is vegetation — a thin, cut-out card.
+    ///
+    /// Inferred from the same `*_alpha_*` sidecar convention that promotes it
+    /// to MASK. Kept separate from `transmission` because glass is transmissive
+    /// too and must not be treated as a leaf.
+    pub foliage:               bool,
     /// Light the surface emits on its own, linear RGB (Phase 24T).
     ///
     /// Carried in the same photometric scale as everything else since 24A, so
@@ -157,6 +163,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission:          mat
                 .transmission()
                 .map_or(0.0, |t| t.transmission_factor()),
+            // Set below, where the sidecar cutout mask identifies vegetation.
+            foliage:               false,
             emissive:              mat.emissive_factor(),
             emissive_map:          mat
                 .emissive_texture()
@@ -217,6 +225,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             alpha_mode:            AlphaMode::Opaque,
             alpha_cutoff:          0.5,
             transmission:          0.0,
+            foliage:          false,
             emissive:              [0.0; 3],
             emissive_map:          None,
             double_sided:          false,

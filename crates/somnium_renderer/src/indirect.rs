@@ -204,6 +204,7 @@ mod tests {
 
     fn draw(index_count: u32) -> DrawCommand {
         DrawCommand {
+            casts_shadow: true,
             sort_key: SortKey::new(0, 0, 0),
             vertex_offset: 0,
             index_offset: 0,

@@ -155,7 +155,7 @@ pub struct Engine<G: GameApp> {
     pub foliage_erase: bool,
     /// Scratch list for this frame's visible foliage, reused so a field of
     /// instances does not allocate a fresh vector every frame.
-    foliage_batch: Vec<(FoliagePart, glam::Mat4)>,
+    foliage_batch: Vec<(FoliagePart, glam::Mat4, bool)>,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -799,8 +799,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     taa: pp.taa_enabled,
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
+                    restir_gi: pp.restir_gi_enabled,
                     bloom: pp.bloom_enabled,
                     dof: pp.dof_enabled,
+                    volumetrics: pp.volumetrics_enabled,
+                    physical_camera: pp.use_physical_camera,
+                    shafts: pp.light_shafts,
                     extras: [
                         pp.bloom_intensity,
                         pp.dof_focus_distance,
@@ -808,6 +812,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.contrast,
                         pp.saturation,
                         pp.grain,
+                        pp.fog_density,
+                        pp.fog_height_falloff,
+                        pp.fog_asymmetry,
+                        pp.tint,
+                        pp.lift,
+                        pp.gamma,
+                        pp.gain,
+                        pp.aperture_f_stops,
+                        // Shown as the denominator: 0.01 s reads as 100.
+                        if pp.shutter_speed_s > 0.0 { 1.0 / pp.shutter_speed_s } else { 0.0 },
+                        pp.sensitivity_iso,
+                        pp.gtao_radius,
+                        pp.gtao_intensity,
                     ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
@@ -838,6 +855,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         f32::from(brush.kind),
                         brush.scale_min,
                         brush.scale_max,
+                        f.foliage_shadow_distance,
                     ],
                     [f.enabled, paint_on, erase_on, single_on],
                 ));
@@ -871,6 +889,66 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
+            }
+        }
+
+        // Phase 29: the overlay is refreshed every frame rather than on
+        // selection changes like the inspectors above it — the numbers move
+        // whether or not anything was clicked.
+        {
+            let rows = self.renderer.as_ref().filter(|r| r.profiler.enabled()).map(|r| {
+                let p = &r.profiler;
+                let mut rows: Vec<somnium_ui::ProfilerRow> = p
+                    .results()
+                    .iter()
+                    .map(|s| somnium_ui::ProfilerRow {
+                        label: s.name.to_string(),
+                        value: format!("{:.3} ms", s.ms),
+                        depth: s.depth,
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "collecting…".to_string(),
+                        value: String::new(),
+                        depth: 0,
+                    });
+                }
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "unattributed".to_string(),
+                    value: format!("{:.3} ms", p.unattributed_ms()),
+                    depth: 0,
+                });
+                let c = p.last_counters;
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "draws".to_string(),
+                    value: c.draw_calls.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "triangles".to_string(),
+                    value: c.triangles.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "terrain chunks".to_string(),
+                    value: c.terrain_chunks.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "TLAS instances".to_string(),
+                    value: c.tlas_instances.to_string(),
+                    depth: 0,
+                });
+                rows.push(somnium_ui::ProfilerRow {
+                    label: "shadow casters".to_string(),
+                    value: format!("{} / {}", c.shadow_casters, c.draw_calls),
+                    depth: 0,
+                });
+                rows
+            });
+            if let Some(ui) = &mut self.ui_manager {
+                ui.update_profiler(rows.as_deref());
             }
         }
 
@@ -1322,6 +1400,14 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
+            r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
+            r.gtao_pass.radius = pp.gtao_radius;
+            r.gtao_pass.intensity = pp.gtao_intensity;
+            r.volumetric_pass.enabled = pp.volumetrics_enabled;
+            r.volumetric_pass.fog.density = pp.fog_density;
+            r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
+            r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
+            r.volumetric_pass.fog.shafts = pp.light_shafts;
             r.grading = somnium_renderer::pass::postprocess::Grading {
                 temperature: pp.temperature,
                 tint: pp.tint,
@@ -1422,7 +1508,7 @@ impl<G: GameApp> Engine<G> {
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
         let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32)> = self
+        let terrains: Vec<(u32, glam::Mat4, f32, f32)> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -1435,11 +1521,11 @@ impl<G: GameApp> Engine<G> {
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model, fc.cull_distance))
+                Some((tc.terrain_id, model, fc.cull_distance, fc.foliage_shadow_distance))
             })
             .collect();
 
-        for (terrain_id, model, cull_distance) in terrains {
+        for (terrain_id, model, cull_distance, shadow_distance) in terrains {
             // Which palette entries this terrain actually uses, so nothing is
             // loaded for a kind that has never been painted.
             let kinds: Vec<u8> = {
@@ -1461,6 +1547,11 @@ impl<G: GameApp> Engine<G> {
             // Phase 17G: reject distant instances before they become draws.
             let camera_local = model.inverse().transform_point3(camera_ws);
             let cull_sq = if cull_distance > 0.0 { cull_distance * cull_distance } else { f32::MAX };
+            let shadow_sq = if shadow_distance > 0.0 {
+                shadow_distance * shadow_distance
+            } else {
+                f32::MAX
+            };
             self.foliage_batch.clear();
             for inst in &t.painted_foliage {
                 let d = inst.position - camera_local;
@@ -1479,13 +1570,18 @@ impl<G: GameApp> Engine<G> {
                     glam::Quat::from_rotation_y(inst.yaw),
                     inst.position,
                 );
+                // Horizontal, like the draw cull above and for the same
+                // reason: climbing a hill should not switch every shadow below
+                // you back on.
+                let casts = d.x * d.x + d.z * d.z <= shadow_sq;
                 for part in parts {
-                    self.foliage_batch.push((*part, model * placement * part.local));
+                    self.foliage_batch
+                        .push((*part, model * placement * part.local, casts));
                 }
             }
 
             if let Some(r) = self.renderer.as_mut() {
-                for (part, transform) in self.foliage_batch.drain(..) {
+                for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
                         vertex_offset: part.vertex_offset,
@@ -1493,6 +1589,7 @@ impl<G: GameApp> Engine<G> {
                         index_count: part.index_count,
                         material_id: part.material_id,
                         transform,
+                        casts_shadow,
                     });
                 }
             }
@@ -1975,6 +2072,18 @@ impl<G: GameApp> Engine<G> {
                     field,
                     IF::PostExposure
                         | IF::PostExposureCompensation
+                        | IF::PostTint
+                        | IF::PostLift
+                        | IF::PostGamma
+                        | IF::PostGain
+                        | IF::PostAperture
+                        | IF::PostShutter
+                        | IF::PostIso
+                        | IF::PostAoRadius
+                        | IF::PostAoIntensity
+                        | IF::PostFogDensity
+                        | IF::PostFogHeight
+                        | IF::PostFogAsymmetry
                         | IF::PostBloomIntensity
                         | IF::PostFocusDistance
                         | IF::PostTemperature
@@ -1989,9 +2098,29 @@ impl<G: GameApp> Engine<G> {
                         match field {
                             IF::PostExposure => pp.ev100 = value,
                             IF::PostExposureCompensation => pp.exposure_compensation = value,
+                            // Clamped hard: fog is an exponential, and a
+                            // density a couple of orders too high is an opaque
+                            // grey screen with no way back except undo.
+                            IF::PostFogDensity => pp.fog_density = value.clamp(0.0, 0.05),
+                            IF::PostFogHeight => pp.fog_height_falloff = value.max(0.0),
+                            IF::PostFogAsymmetry => pp.fog_asymmetry = value.clamp(-0.95, 0.95),
                             IF::PostBloomIntensity => pp.bloom_intensity = value.max(0.0),
                             IF::PostFocusDistance => pp.dof_focus_distance = value.max(0.01),
                             IF::PostTemperature => pp.temperature = value.clamp(-1.0, 1.0),
+                            IF::PostTint => pp.tint = value.clamp(-1.0, 1.0),
+                            IF::PostLift => pp.lift = value.clamp(-1.0, 1.0),
+                            // Gamma is a divisor in the grade, so zero would
+                            // blow the midtones out to infinity.
+                            IF::PostGamma => pp.gamma = value.clamp(0.05, 4.0),
+                            IF::PostGain => pp.gain = value.max(0.0),
+                            IF::PostAperture => pp.aperture_f_stops = value.clamp(0.7, 45.0),
+                            // The row is the denominator, so 100 means 1/100 s.
+                            IF::PostShutter => {
+                                pp.shutter_speed_s = 1.0 / value.clamp(1.0, 8000.0);
+                            }
+                            IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
+                            IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
+                            IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
                             IF::PostContrast => pp.contrast = value.max(0.0),
                             IF::PostSaturation => pp.saturation = value.max(0.0),
                             IF::PostGrain => pp.grain = value.max(0.0),
@@ -2053,6 +2182,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::FoliageLayer
                         | IF::FoliageScaleMin
                         | IF::FoliageScaleMax
+                        | IF::FoliageShadowDistance
                 ) {
                     // Phase 17F: these edit the brush, not a scatter. Foliage
                     // is painted now, so the settings that matter are the ones
@@ -2068,6 +2198,19 @@ impl<G: GameApp> Engine<G> {
                         }
                         IF::FoliageScaleMin => b.scale_min = value.max(0.01),
                         IF::FoliageScaleMax => b.scale_max = value.max(0.01),
+                        // Not a brush setting: this one lives on the component,
+                        // because it describes the foliage that already exists
+                        // rather than the next stroke.
+                        IF::FoliageShadowDistance => {
+                            if let Some(e) = self.selected_entity {
+                                if let Some(f) =
+                                    self.world.get_mut::<FoliageComponent>(e)
+                                {
+                                    f.foliage_shadow_distance =
+                                        value.clamp(0.0, 2000.0);
+                                }
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     return;
@@ -2297,6 +2440,21 @@ impl<G: GameApp> Engine<G> {
                 self.import_model();
             }
 
+            // Phase 29. The toggle drives collection as well as visibility: a
+            // hidden profiler that keeps writing timestamps is paying for a
+            // measurement nobody reads.
+            EditorEvent::ToggleProfiler => {
+                if let Some(r) = self.renderer.as_mut() {
+                    if r.profiler.available() {
+                        r.profiler.toggle();
+                    } else {
+                        tracing::warn!(
+                            "profiler: GPU timestamps unavailable on this adapter"
+                        );
+                    }
+                }
+            }
+
             EditorEvent::ToggleFoliage => {
                 if let Some(entity) = self.selected_entity {
                     if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
@@ -2370,6 +2528,22 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::Gtao => {
                             pp.gtao_enabled = !pp.gtao_enabled;
                             pp.gtao_enabled
+                        }
+                        PostFxToggle::PhysicalCamera => {
+                            pp.use_physical_camera = !pp.use_physical_camera;
+                            pp.use_physical_camera
+                        }
+                        PostFxToggle::Volumetrics => {
+                            pp.volumetrics_enabled = !pp.volumetrics_enabled;
+                            pp.volumetrics_enabled
+                        }
+                        PostFxToggle::LightShafts => {
+                            pp.light_shafts = !pp.light_shafts;
+                            pp.light_shafts
+                        }
+                        PostFxToggle::RestirGi => {
+                            pp.restir_gi_enabled = !pp.restir_gi_enabled;
+                            pp.restir_gi_enabled
                         }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;

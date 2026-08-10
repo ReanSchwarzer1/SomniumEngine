@@ -11,9 +11,12 @@
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
+const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
+const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
+const ATMOSPHERE_VOL: &str = include_str!("../src/shaders/volumetric.wgsl");
 const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
 const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
 const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
@@ -45,7 +48,88 @@ fn the_shading_module_validates() {
     // are order-independent, and this is what proves it rather than assuming.
     check(
         "shading",
-        &format!("{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
+        &format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
+    );
+}
+
+#[test]
+fn the_volumetric_module_validates() {
+    // The froxel volume for aerial perspective and fog (24U/25I), which is
+    // concatenated after the atmosphere so it can reuse its density, phase and
+    // LUT helpers rather than defining a second atmosphere.
+    check("volumetric", &format!("{ATMOSPHERE}
+{ATMOSPHERE_VOL}"));
+}
+
+/// The WGSL side of the CPU/GPU struct mirrors, checked against the Rust side.
+///
+/// `material/pool.rs` asserts `GpuTerrainMaterial`'s `repr(C)` offsets, which
+/// only ever proved half of the agreement — the WGSL half was a comment. This
+/// closes it: naga computes the same layout the GPU will, so a member whose
+/// alignment differs between the two languages fails here instead of silently
+/// decoding the wrong words. Phase 25E hit exactly that with a trailing
+/// `vec3<u32>` pad, which aligns to 16 in WGSL and to 4 in Rust.
+#[test]
+fn the_terrain_material_struct_matches_the_rust_layout() {
+    let source =
+        format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}");
+    let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
+
+    let (_, ty) = module
+        .types
+        .iter()
+        .find(|(_, t)| t.name.as_deref() == Some("TerrainMaterial"))
+        .expect("TerrainMaterial is declared");
+
+    let naga::TypeInner::Struct { members, span } = &ty.inner else {
+        panic!("TerrainMaterial is not a struct");
+    };
+
+    assert_eq!(*span, 400, "WGSL size disagrees with GpuTerrainMaterial");
+
+    // Only the members whose offsets the Rust test also pins. Checking every
+    // one would just restate the declaration; these are the ones where a
+    // vec2/vec3/array alignment rule could move something.
+    let offset = |name: &str| {
+        members
+            .iter()
+            .find(|m| m.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no member {name}"))
+            .offset
+    };
+    assert_eq!(offset("layer_tiling"), 0);
+    assert_eq!(offset("brush"), 32);
+    assert_eq!(offset("albedo_maps"), 48);
+    assert_eq!(offset("surface_maps"), 80);
+    assert_eq!(offset("terrain_origin"), 112);
+    assert_eq!(offset("inv_world_size"), 120);
+    assert_eq!(offset("splat_map"), 128);
+    assert_eq!(offset("hex_tiling"), 140);
+    assert_eq!(offset("layer_height_scale"), 144);
+    assert_eq!(offset("layer_blend_width"), 176);
+    assert_eq!(offset("layer_weight_clamp"), 208);
+    assert_eq!(offset("height_blend"), 240);
+    assert_eq!(offset("macro_map"), 244);
+    assert_eq!(offset("macro_strength"), 252);
+    assert_eq!(offset("detail_fade_start"), 256);
+    assert_eq!(offset("detail_fade_end"), 260);
+    assert_eq!(offset("layer_albedo"), 272);
+}
+
+/// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
+/// does, which is the point: a ray hit and a visibility-buffer hit resolve
+/// through one description of the scene, not two that could drift apart.
+#[test]
+fn the_restir_gi_module_validates() {
+    check(
+        "restir_gi",
+        // GI first, because `enable wgpu_ray_query;` is a directive and
+        // directives must precede every declaration in the module. Declarations
+        // themselves are order-independent, which is what lets the pool it
+        // depends on be concatenated after it.
+        &format!(
+            "{RESTIR_GI}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
+        ),
     );
 }
 

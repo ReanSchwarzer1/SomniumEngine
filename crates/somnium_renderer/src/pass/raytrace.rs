@@ -188,13 +188,22 @@ impl RaytracePass {
     /// The bottom level is rebuilt **only for geometry that changed** — see
     /// `pending_blas`. Reissuing every BLAS per frame was affordable with a
     /// handful of meshes and is not with a terrain's worth of chunks.
+    /// Build the acceleration structures for this frame.
+    ///
+    /// `instances` is `(instance_buffer_index, vertex_offset, model)`. The first
+    /// field is Phase 24L's requirement: `instance_index` on an intersection is
+    /// the TLAS *slot*, which is not the instance-buffer index — instances
+    /// without a BLAS are skipped below, so the two drift apart the moment one
+    /// mesh is missing. Carrying the real index in custom data makes
+    /// `instances[hit.instance_custom_data]` exact, and lets a ray hit resolve
+    /// through the same array the visibility buffer uses.
     pub fn build(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
-        instances: &[(u32, glam::Mat4)],
+        instances: &[(u32, u32, glam::Mat4)],
     ) {
         if !self.supported {
             return;
@@ -245,7 +254,7 @@ impl RaytracePass {
         // whether the helmet survived into the TLAS depended on how many
         // terrain chunks sorted ahead of it.
         let mut count = 0u32;
-        for (vertex_offset, model) in instances.iter() {
+        for (instance_index, vertex_offset, model) in instances.iter() {
             if count >= MAX_TLAS_INSTANCES {
                 break;
             }
@@ -269,9 +278,10 @@ impl RaytracePass {
             tlas[count as usize] = Some(wgpu::TlasInstance::new(
                 &mesh.blas,
                 transform,
-                // Custom data carries the mesh identity, so a hit can find its
-                // material without a separate lookup table.
-                *vertex_offset,
+                // Custom data carries the instance-buffer index, so a hit
+                // resolves to geometry and material through the same array the
+                // visibility buffer uses — one resolve path, not two.
+                *instance_index,
                 0xff,
             ));
             count += 1;

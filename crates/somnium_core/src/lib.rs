@@ -399,6 +399,18 @@ pub struct FoliageComponent {
     /// the indirect arguments entirely, which the GPU cull cannot do since the
     /// draw has to exist before it can be rejected.
     pub cull_distance: f32,
+    /// Phase 24AE: painted instances beyond this distance from the camera are
+    /// still drawn, but stop casting shadows.
+    ///
+    /// A separate, *nearer* cut than [`Self::cull_distance`], and the reason it
+    /// exists is what the profiler showed: a grass field fills the frame long
+    /// before it reaches the draw-distance cut, and every one of those tufts
+    /// was costing four cascades of depth for a shadow that reads as noise a
+    /// few metres out. The automatic screen-radius test only rescues you once
+    /// the *camera* is far away, which is not how anyone plays.
+    ///
+    /// `0` means "never stop", which is the A/B against the old behaviour.
+    pub foliage_shadow_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -419,6 +431,10 @@ impl Default for FoliageComponent {
             scale_max: 1.5,
             radius: 45.0,
             cull_distance: 120.0,
+            // A third of the draw distance. Grass shadows stop reading as
+            // individual blades within a few metres and as texture within a
+            // few tens; past that they are noise that costs four cascades.
+            foliage_shadow_distance: 40.0,
             max_instances: 18_000,
         }
     }
@@ -546,6 +562,32 @@ pub struct PostProcessComponent {
     /// falls back to the shadow map otherwise, so the toggle is safe to leave
     /// on regardless of hardware.
     pub restir_enabled: bool,
+    /// Ray-traced indirect diffuse (Phase 24L).
+    ///
+    /// Replaces the environment map's *diffuse* half with a traced one-bounce
+    /// solution; the specular lobe still comes from the cubemap. Off means the
+    /// constant ambient term the engine has always had.
+    pub restir_gi_enabled: bool,
+    /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
+    ///
+    /// Covers the whole volume. Aerial perspective is not separately optional —
+    /// the air between the camera and a distant hill is there whether or not
+    /// fog has been dialled in — so `fog_density` controls only the medium
+    /// layered on top of the atmosphere.
+    pub volumetrics_enabled: bool,
+    /// Shadow-test the fog per froxel, which is what draws light shafts.
+    pub light_shafts: bool,
+    /// Fog extinction per metre. ~1e-3 is a visible haze.
+    pub fog_density: f32,
+    /// Metres over which fog density falls to 1/e, so it pools in valleys.
+    pub fog_height_falloff: f32,
+    /// Henyey-Greenstein asymmetry; positive scatters forward toward the sun.
+    pub fog_asymmetry: f32,
+    /// GTAO sampling radius in metres (Phase 24I). Small values read as
+    /// contact darkening; large ones as a broad dirty smear.
+    pub gtao_radius: f32,
+    /// How hard GTAO is applied. 0 is the same as switching it off.
+    pub gtao_intensity: f32,
     /// Replace PBR shading with the banded cel look.
     ///
     /// Lived only behind the F5 key, which is easy to hit by accident and gave
@@ -611,6 +653,19 @@ impl Default for PostProcessComponent {
             // of exactly zero everywhere — which reads identically to a feature
             // that does not work.)
             gtao_enabled: std::env::var("SOMNIUM_GTAO").as_deref() != Ok("0"),
+            // Phases 24U/25I. On by default: aerial perspective is physics, not
+            // a look — a kilometre of air between the camera and a hill is
+            // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
+            restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
+            volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
+            light_shafts: true,
+            fog_density: 0.0008,
+            fog_height_falloff: 120.0,
+            fog_asymmetry: 0.6,
+            // Mirrors `GtaoPass::new`; the component overwrites the pass every
+            // frame, so these are the values that actually take effect.
+            gtao_radius: 1.0,
+            gtao_intensity: 1.0,
             dof_enabled: false,
             dof_focus_distance: 10.0,
             taa_enabled: true,
