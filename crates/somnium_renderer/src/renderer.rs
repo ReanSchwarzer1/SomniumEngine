@@ -127,6 +127,10 @@ pub struct SomniumRenderer {
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
     /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
     pub cas_pass: crate::pass::cas::CasPass,
+    /// Phase 24AD: screen-space motion, for motion blur and future object motion.
+    pub velocity_pass: crate::pass::velocity::VelocityPass,
+    /// Phase 24Z: motion blur, which waited on 24AD for its velocity.
+    pub motion_blur_pass: crate::pass::motion_blur::MotionBlurPass,
     /// Phase 24AE: minimum projected screen radius for a shadow caster.
     ///
     /// Unreal ships 0.01 as `r.Shadow.RadiusThreshold`. Zero disables the test,
@@ -472,6 +476,15 @@ impl SomniumRenderer {
 
         let water_pass = crate::pass::water::WaterPass::new(&ctx.device, HDR_FORMAT);
 
+        // Phase 24AD. Built here rather than inside the struct literal because
+        // it borrows the visibility pass's depth view, which the literal moves.
+        let velocity_pass = crate::pass::velocity::VelocityPass::new(
+            &ctx.device,
+            &vis_pass.depth_view,
+            ctx.config.width,
+            ctx.config.height,
+        );
+
         Self {
             global_pool,
             materials,
@@ -507,6 +520,13 @@ impl SomniumRenderer {
             rt_debug_pass,
             restir_pass,
             restir_gi_pass,
+            velocity_pass,
+            motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
+                &ctx.device,
+                HDR_FORMAT,
+                ctx.config.width,
+                ctx.config.height,
+            ),
             cas_pass: crate::pass::cas::CasPass::new(
                 &ctx.device,
                 ctx.config.format,
@@ -1125,6 +1145,9 @@ impl SomniumRenderer {
             );
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.cas_pass.resize(&ctx.device, ctx.config.format, width, height);
+            self.velocity_pass
+                .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
+            self.motion_blur_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
             self.hiz_pass.resize(&ctx.device, width, height, &self.vis_pass.depth_view);
@@ -1794,6 +1817,19 @@ impl SomniumRenderer {
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
             .ensure_bind_groups(&ctx.device, &self.vis_pass.depth_view);
+        // ── 6.8 Velocity (Phase 24AD) ────────────────────────────────────────
+        // After the visibility pass has finished writing depth and before
+        // anything that walks backwards through time reads it.
+        self.profiler.begin(&mut encoder, "Velocity");
+        self.velocity_pass.record(
+            &ctx.queue,
+            &mut encoder,
+            self.view_proj_unjittered,
+            ctx.config.width,
+            ctx.config.height,
+        );
+        self.profiler.end(&mut encoder);
+
         self.profiler.begin(&mut encoder, "GTAO");
         self.gtao_pass.record(
             &mut encoder,
@@ -1823,6 +1859,7 @@ impl SomniumRenderer {
             &mut encoder,
             &ctx.queue,
             self.view_proj_unjittered.inverse(),
+            self.view_proj_unjittered,
             self.camera_pos,
             self.light_direction,
             self.light_color,
@@ -2005,6 +2042,25 @@ impl SomniumRenderer {
         // Both matrices: the jittered one matches the depth buffer this frame,
         // the unjittered one matches the resolved history. See `TaaPass::record`.
         self.profiler.end(&mut encoder);
+
+        // ── 7.85 Motion blur (Phase 24Z) ─────────────────────────────────────
+        // Before TAA rather than after: TAA's history is what stabilises the
+        // gather's dither, and blurring the resolved image instead would smear
+        // a frame that has already been blended with its own past.
+        self.profiler.begin(&mut encoder, "Motion Blur");
+        self.motion_blur_pass.record(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &self.postprocess_pass.hdr_view,
+            &self.postprocess_pass.hdr_texture,
+            self.velocity_pass.view(),
+            &self.vis_pass.depth_view,
+            ctx.config.width,
+            ctx.config.height,
+        );
+        self.profiler.end(&mut encoder);
+
         self.profiler.begin(&mut encoder, "TAA");
         if self.taa_pass.record(
             &mut encoder,

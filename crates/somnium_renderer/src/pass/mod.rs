@@ -15,6 +15,8 @@ pub mod particle;
 pub mod postprocess;
 pub mod raytrace;
 pub mod cas;
+pub mod motion_blur;
+pub mod velocity;
 pub mod restir;
 pub mod restir_gi;
 pub mod shading;

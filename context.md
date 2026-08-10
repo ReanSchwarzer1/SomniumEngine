@@ -1174,11 +1174,11 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24B | ✅ Complete | **AgX tone mapping**, implemented analytically in `postprocess.wgsl` rather than as the 3-D LUT the reference ships — a closed-form curve does not justify shipping and binding a KTX2 asset. Rec.709→AgX inset matrix, log2 encode over [−12.474, +4.026] stops, sixth-order contrast sigmoid, outset matrix, then an inverse-sRGB step so AgX's display encoding does not compound with the sRGB target's own. The tone mapper is selectable (AgX / ACES / Reinhard) through `Tonemapper` on `PostProcessComponent`. ACES was fine while the sun was an arbitrary 3.0 and stops being fine at 100 000 lux: it pushes bright saturated light toward the primaries and clips, where AgX desaturates into the highlight the way film does. |
 | 24C | ✅ Complete | **Atmospheric scattering (Hillaire 2020).** `shaders/atmosphere.wgsl` + `pass/atmosphere.rs`. A transmittance LUT (256×128, Bruneton's horizon-concentrating parameterisation) and a multiple-scattering LUT (32×32, second order plus a geometric series for every remaining order) are built once at startup — neither depends on the sun or the camera. The sky is then a real ray-march through Rayleigh, Mie and ozone: 32 steps with analytic per-segment integration rather than a Riemann sum. **The three duplicated sky gradients are now one.** `ibl_gen.wgsl` marches the atmosphere into the environment cubemap, and `shading.wgsl`'s background samples that same cubemap, so background, ambient and reflections cannot disagree. Sharp features — sun disc with limb darkening, moon disc, stars — are drawn analytically over the background at screen resolution instead of being baked in: at 256² per face a texel spans ~0.35°, so a half-degree disc smeared into a blob (observed, then fixed). Keeping the sun disc out of the cubemap also removed a double-count, since the shading pass already computes its specular highlight from the analytic light. |
 | 24D | ✅ Complete | **Night sky.** Moon disc (0.53°, ~2 500 cd/m²) with a scattered halo, a procedural star field placed one-per-cell so density stays even, and an airglow floor so a moonless night is dark but never identically zero. Night fades in on the sun's **illuminance, not its elevation** — dimming a light and moving it below the horizon are different things, and intensity is the dial the inspector actually exposes; keying off elevation left a starless sky when the sun was turned down to moonlight (observed, then fixed). The environment cubemap already regenerates whenever the sun changes, so ambient tracks it for free. |
-| 24AD | ⬜ Planned | **Velocity buffer for TAA.** 24F reprojects from depth, which is exact for camera motion and wrong for moving objects: geometry that moves while the camera is still ghosts, limited only by the neighbourhood clip. Needs previous-frame per-instance transforms carried through the visibility pass and a velocity target written alongside. Also unlocks motion blur (24Z). |
+| 24AD | ✅ Complete | **Velocity buffer for TAA.** 24F reprojects from depth, which is exact for camera motion and wrong for moving objects: geometry that moves while the camera is still ghosts, limited only by the neighbourhood clip. Needs previous-frame per-instance transforms carried through the visibility pass and a velocity target written alongside. Also unlocks motion blur (24Z). |
 | 24W | ✅ Complete | **Water in physical units.** Two faults, both left over from before 24A. The sun was treated as a **point source**, which drives GGX toward a singularity on a near-mirror surface — an unbounded spike across a few pixels, which is what made sunlit water blow out; the lobe is now widened by the sun's angular radius so the spike becomes a glitter path, with an energy term keeping total reflected light unchanged. And a leftover `min(…, 40.0)` on the glint, written when the sun was an arbitrary ~5, was crushing it to nothing against a sky that now measures thousands of cd/m² — removed, since the disc widening bounds the peak on physical grounds instead of by an arbitrary ceiling. The diffuse and scatter terms also had hand-tuned 0.25/0.5 coefficients replaced by the actual Lambert normalisation. Output is clamped below `Rgba16Float`'s finite limit: water is the most mirror-like surface in the scene and therefore the likeliest to overshoot, and an Inf here would reach TAA's blend as NaN. |
 | 24X | ✅ Complete | **Screen-space contact shadows.** A shadow map cannot resolve contact: its texels cover centimetres at best, and 24H's normal-offset bias deliberately pushes samples off the surface, erasing precisely the darkening where two surfaces meet. A short ray marched through the depth buffer toward the light fills that gap — visible as grass tufts now sitting on the ground rather than floating on flat colour. A **thickness limit** is what makes it usable: without one every thin object casts an infinitely deep shadow volume behind itself, because the march cannot distinguish a leaf from a wall receding from the camera. The start offset is jittered per pixel so the step pattern becomes noise for TAA to resolve rather than visible banding, and the result only ever *darkens* the shadow-map term, which stays authoritative at its own scale. Parameters follow Bend Studio's screen-space shadows; their wavefront scheduling is **not** ported, only the sampling behaviour. |
 | 24Y | ✅ Complete | **Colour grading.** White balance on the orange–blue and green–magenta axes, ASC CDL (slope / offset / power — the standard film grades with), contrast pivoting around middle grey rather than black, and saturation. Applied **after** tone mapping, in display space: grading beforehand fights the curve, whose job is to fit scene luminance into a display's range. Exposure and the tone curve decide how bright the image is and how it rolls off; grading decides what it *feels* like, and no amount of the former substitutes. **File-based 3-D LUTs are not included** — that needs a `.cube` loader and an asset path, and is worth its own sub-phase rather than a stub here; the controls are the part that is usable today. |
-| 24Z | 🟡 Partial | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur is not included** — it needs the velocity buffer from 24AD, which does not exist yet. |
+| 24Z | ✅ Complete | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur landed with 24AD's velocity buffer** — Jimenez's depth and spread weights, Wicked's cheap configuration, before TAA and on HDR. See §17.12. |
 | 24AA | ⏸ Deferred | **Cloud shadows.** A scrolling noise mask over the sun's contribution. Cheap, and one of the strongest cues that an outdoor scene is a place rather than a render, because it puts the sky in motion without any volumetric cost. Reference: Spartan's `cloud_shadow.hlsl`. |
 | 24AB | ⏸ Deferred | **Lighting debug views.** Per-light-type heatmaps, cluster occupancy, exposure histogram readout, a luminance false-colour view. GI is nearly impossible to debug by eye, and every engine surveyed ships these. Reference: O3DE's `LightCullingHeatmap.azsl`, UE's Lumen visualisation modes. |
 | 24AC | 🟨 CAS complete, SPD open | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
@@ -1199,7 +1199,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24R | ⬜ Planned | **Area lights (LTC).** Rect, disc and tube lights via Linearly Transformed Cosines — analytic, no sampling noise, correct soft shadows and elongated highlights. Softboxes, windows and strip lights are most of what makes an interior read as photographed rather than rendered, and no amount of point-light tuning substitutes. Reference: `bevy_pbr/src/ltc/`, `bevy_light/src/rect_light.rs`. |
 | 24S | ✅ Complete | **Transmission and subsurface scattering.** Frostbite's approximation (Barré-Brisebois & Bouchard) rather than a real subsurface solve: light leaving the *far* side of a thin surface, spread by scattering, brightest looking almost straight into the source through the material. **This is what the foliage was missing all along.** Leaves lit only by reflection stay flat and dark regardless of how correct the albedo is — the symptom the grass has shown since Phase 17, and which no amount of albedo or occlusion work could have fixed. Transmitted light is tinted by albedo, which is why backlit foliage reads more saturated than the same leaf lit from the front, and it is deliberately **not** multiplied by the shadow factor: the entire point is light arriving through the surface from the side the shadow map calls dark. Materials take `transmissionFactor` from `KHR_materials_transmission` where present; foliage assets do not set it, so a sidecar cutout mask is taken as evidence of thin geometry and infers 0.5 — the same convention-over-metadata rule the alpha masks and ARM packing already use. `GpuMaterial` grew from 48 to 64 bytes (WGSL rounds the array stride to the 16-byte alignment `base_color` forces); the layout test caught this and was updated rather than deleted. |
 | 24T | ✅ Complete | **Emissive materials and physical bloom.** Materials carry `emissiveFactor` and an emissive texture from glTF, added to shading independently of every light in the scene — a screen is as bright in a dark room as a lit one. Bloom is **deliberately not threshold-based**: a threshold asks "which pixels count as bright?", a question with no physical answer whose meaning changes the moment exposure does — a scene metered for night would bloom everything, one metered for noon nothing. Real bloom is light scattering inside the lens, which happens to *all* light in proportion to how much there is. So a progressive 13-tap downsample builds a mip chain and a 9-tap tent upsample sums it back additively (Jimenez, SIGGRAPH 2014); bright regions dominate naturally because they carry more energy. Added **before** exposure and tone mapping, since it is scattering on the way to the sensor rather than a filter over the picture, and built **after** TAA, because a blur of unstable input broadcasts that instability everywhere it reaches. `GpuMaterial` grew 64 → 80 bytes; the layout test was updated again. |
-| 24U | 🟡 Partial | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
+| 24U | ✅ Complete (shafts still unseen) | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
 | 24V | ✅ Complete | **Local lights in physical units, with source radius.** The photometric half landed with 24A-1 — point and spot lights carry lumens converted to candela, and `smooth_distance_attenuation` already divides by distance squared, so illuminance was correct. What was missing is that they were still **point** sources. Lights now carry a `source_radius` in metres (distinct from `range`, which is reach): a 5 cm bulb a metre away subtends a real angle, and feeding that through `evaluate_brdf_area` is what stops its highlight being a single pixel on anything polished. **IES profiles are not included** — that is an asset-pipeline job and is better as its own sub-phase than half-done here. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
@@ -2087,6 +2087,12 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **24AD / 24Z** — ✅ passing. Both passes dispatch and are profiled:
+  Velocity 0.010 ms, Motion Blur 0.034 ms moving / 0.001 ms static.
+  See §17.11–17.12.
+- **24U** — 🟡 partial. Temporal reprojection and jitter land and cost
+  0.071 → 0.093 ms, but **light shafts have still not been seen** — the demo
+  scene has no low sun behind a hard occluder. See §17.13.
 - **24AC (CAS)** — ✅ passing. `SOMNIUM_CAS=0/1` on the swapchain: mean absolute
   difference 13.6 of 765 across the viewport, max 210, 64.5% of pixels changed;
   cost 0.018 ms. The HDR capture harness cannot see it — see §17.10.
@@ -2592,6 +2598,127 @@ diff is indicative.
 **Not done:** the SPD half of 24AC — single-pass downsample for the Hi-Z pyramid
 and the bloom chain. `ffx_spd.h` and `spd.hlsl` are the reference and the phase
 row stays open for it.
+
+---
+
+## 17.11 Phase 24AD — the velocity buffer
+
+Where each pixel was on the previous frame, in UV space, written once and read
+by anything that walks backwards through time. `shaders/velocity.wgsl`.
+
+Reconstructing the world position from this frame's depth and projecting it with
+the previous frame's matrix gives the exact motion of a **static** point under a
+**moving camera**. Two details from
+`WickedEngine-master/shaders/visibility_velocityCS.hlsl` are what make it usable
+rather than nearly right:
+
+- **The background gets a velocity too.** A pixel with no geometry is treated as
+  a point just inside the far plane along its own ray. Returning zero there
+  would leave the sky the one part of a whip pan that does not blur, which reads
+  as a hole punched through the motion. (Just *inside* 1.0, because exactly 1.0
+  un-projects to infinity and its previous-frame projection divides by ~0.)
+- **The result is clamped to ±1 screen.** A pixel that reprojects far off-screen
+  would otherwise hand motion blur a gather direction hundreds of screens long,
+  and every tap would read the same clamped edge texel.
+
+Wicked subtracts the TAA jitter from both ends; Somnium's matrices are
+un-jittered instead, which is the same correction one level up —
+`TaaPass::record` had already established that both ends of a reprojection must
+be un-jittered, having measured 51 000 of 51 000 pixels reprojecting wrongly
+with a still camera when they were not.
+
+**Not covered: objects that move on their own.** That needs the previous frame's
+model matrix to travel with the instance, and there is nowhere to put it — the
+draw queue is re-sorted every frame, so instance `i` is not the same object it
+was last frame, and there is no stable per-object id to key a history on.
+Nothing in the engine currently moves independently of the camera: there is no
+skinning, no wind, and rigid bodies do not write transforms. Phase 27 is when
+that changes. The note is in the shader so the gap is found by reading rather
+than by watching a smear stay still.
+
+**Cost: 0.010 ms.**
+
+---
+
+## 17.12 Phase 24Z — motion blur, and 24Z closed
+
+The half that had been waiting on 24AD since the phase was written. A real
+shutter is open for a slice of each frame and smears whatever moved during it; a
+renderer that samples one instant produces a sequence of sharp frames, which
+reads as strobing.
+
+From `WickedEngine-master/shaders/motionblurCS.hlsl` (Jimenez, *Next Generation
+Post Processing in Call of Duty: Advanced Warfare*, SIGGRAPH 2014), two weights
+are ported and one piece is deliberately not:
+
+- **`DepthCmp`** classifies each tap as in front of or behind the centre. A
+  moving foreground should bleed *over* a static background; a static foreground
+  must not be smeared by a background moving behind it. Without it a fast pan
+  drags the silhouette of everything static in the frame.
+- **`SpreadCmp`** asks whether the tap's own blur is long enough to reach the
+  centre at all, which stops a still object from picking up colour from a fast
+  one merely because it is nearby.
+- **Tile-max / neighbourhood-max is not ported.** Reducing velocity to tiles and
+  gathering along the tile maximum is what lets a fast *object* blur outside its
+  own silhouette. It costs two more reduction passes and only pays off for
+  object motion, which 24AD does not produce; under camera motion the whole
+  frame moves together and the centre velocity and the neighbourhood maximum
+  agree almost everywhere. This is Wicked's own `MOTIONBLUR_CHEAP`
+  configuration, taken for the reason it offers it.
+
+Also ported: the dithered start offset (a fixed one bands, because every pixel's
+taps land on the same grid) and the `sum.rgb + (1 - sum.a) * centre` fallback,
+so coverage no tap could legitimately account for keeps its own colour instead
+of fading toward black.
+
+**Placed before TAA and on the HDR image.** Before TAA because TAA's history is
+what stabilises the gather's dither, and blurring the resolved image would smear
+a frame already blended with its own past. On HDR because a blur after tone
+mapping smears clipped highlights as flat white — the difference between a
+headlight trail and a grey smudge.
+
+**Off by default** (`SOMNIUM_MOTION_BLUR=1`, or the inspector). It is the one
+effect that makes a still screenshot of a moving camera look broken rather than
+better. **Cost: 0.034 ms** with the camera moving; it early-outs below half a
+pixel of motion, so a static frame pays 0.001 ms.
+
+---
+
+## 17.13 Phase 24U — closed with temporal reprojection
+
+The froxel volume shipped in the earlier session with fog, height falloff, a
+Henyey-Greenstein phase and a per-froxel shadow test. What it lacked was the
+thing that makes a low step count affordable.
+
+**Two halves, and only together are they worth anything:**
+
+- **A per-frame jitter of the sample position within each step.** A fixed
+  midpoint samples the same points every frame, so a thin medium is either
+  always hit or always missed and the error is a *stationary* pattern — banding
+  that sits still while the camera moves, which is the most visible kind. The
+  offset is golden-ratio rather than random, because over a short window the
+  samples should spread evenly through the step and a random sequence clumps.
+- **Reprojection through world space.** The froxel grid is attached to the
+  camera, so a froxel does not keep its identity across a move; reprojecting the
+  froxel centre through the previous view-projection is what makes the history
+  mean the same piece of air. Blended at 0.05, about twenty frames — a third of
+  a second at 60 Hz, below where a fog change reads as lag.
+
+Jitter without reprojection is just noise; reprojection without jitter only
+smears the same bias. Together they turn the error into something the temporal
+filter can average away.
+
+**History is a copy, not a ping-pong.** 32×32×32 RGBA16F is 256 KB, so
+`copy_texture_to_texture` at the end of the pass costs less than the alternative
+— a ping-pong pair would force the shading pass to rebuild its bind group every
+frame, since it binds the volume by view.
+
+**Cost: 0.071 → 0.093 ms**, which is the copy and the extra fetch.
+
+**Still not visually confirmed: light shafts.** The code path is exercised every
+frame and the shadow test is in the integral, but the demo scene has no low sun
+behind a hard occluder, so nobody has *seen* a shaft. That needs a scene, not a
+change — and this note stays until someone has looked at one.
 
 ---
 

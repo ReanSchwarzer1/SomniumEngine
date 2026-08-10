@@ -50,6 +50,12 @@ struct VolumetricParams {
     fog_base_height: f32,
     shafts_enabled: u32,
     _pad: u32,
+    /// Phase 24U temporal reprojection.
+    prev_view_proj: [[f32; 4]; 4],
+    history_valid: f32,
+    jitter: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
 /// Artist-facing settings for the fog medium.
@@ -88,6 +94,15 @@ pub struct VolumetricPass {
     params: wgpu::Buffer,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
+    /// Phase 24U. A copy of the volume taken at the end of `record`, rather
+    /// than a ping-pong pair, so the view the shading pass binds never changes
+    /// and its bind group is built once.
+    texture: wgpu::Texture,
+    history: wgpu::Texture,
+    history_view: wgpu::TextureView,
+    prev_view_proj: glam::Mat4,
+    history_valid: bool,
+    frame: u32,
     pub enabled: bool,
     pub fog: FogSettings,
     pub max_distance: f32,
@@ -166,6 +181,23 @@ impl VolumetricPass {
                     },
                     count: None,
                 },
+                // Phase 24U: the previous frame's volume, sampled.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -190,10 +222,24 @@ impl VolumetricPass {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let history = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Volumetric History"),
+            size: VOLUME_SIZE,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Volumetric Sampler"),
@@ -219,6 +265,12 @@ impl VolumetricPass {
             }),
             view,
             sampler,
+            texture,
+            history,
+            history_view,
+            prev_view_proj: glam::Mat4::IDENTITY,
+            history_valid: false,
+            frame: 0,
             // `SOMNIUM_VOLUMETRICS=0` switches the whole volume off, which is
             // the A/B both sub-phases are judged by.
             enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
@@ -268,6 +320,14 @@ impl VolumetricPass {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(shadow_atlas),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.history_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         }));
     }
@@ -277,11 +337,13 @@ impl VolumetricPass {
         if self.enabled { self.max_distance } else { 0.0 }
     }
 
+    /// `view_proj` is the forward matrix, kept for next frame's reprojection.
     pub fn record(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
         inv_view_proj: glam::Mat4,
+        view_proj: glam::Mat4,
         camera_pos: glam::Vec3,
         sun_direction: glam::Vec3,
         sun_illuminance: glam::Vec3,
@@ -306,6 +368,15 @@ impl VolumetricPass {
                 fog_base_height: self.fog.base_height,
                 shafts_enabled: u32::from(self.fog.shafts),
                 _pad: 0,
+                prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
+                history_valid: f32::from(u8::from(self.history_valid)),
+                // A low-discrepancy offset rather than a random one: over any
+                // short window the samples should spread evenly through the
+                // step, and a random sequence clumps. The golden ratio is the
+                // cheapest generator with that property.
+                jitter: (self.frame as f32 * 0.618_034).fract(),
+                _pad2: 0.0,
+                _pad3: 0.0,
             }),
         );
 
@@ -319,5 +390,19 @@ impl VolumetricPass {
         // integral along a ray is sequential and sharing the throughput across
         // slices is what makes it one pass instead of 32.
         pass.dispatch_workgroups(VOLUME_SIZE.width.div_ceil(8), VOLUME_SIZE.height.div_ceil(8), 1);
+        drop(pass);
+
+        // Keep this frame for the next one. 32x32x32 RGBA16F is 256 KB, so the
+        // copy costs far less than the alternative: a ping-pong pair would make
+        // the shading pass rebuild its bind group every frame.
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            self.history.as_image_copy(),
+            VOLUME_SIZE,
+        );
+
+        self.prev_view_proj = view_proj;
+        self.history_valid = true;
+        self.frame = self.frame.wrapping_add(1);
     }
 }

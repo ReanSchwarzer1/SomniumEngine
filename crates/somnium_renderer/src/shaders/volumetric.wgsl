@@ -68,6 +68,15 @@ struct VolumetricParams {
     /// Non-zero shadow-tests each step, which is what draws light shafts.
     shafts_enabled: u32,
     _pad: u32,
+    /// Phase 24U temporal reprojection.
+    prev_view_proj: mat4x4<f32>,
+    /// Zero on the first frame or after a resize, where the history describes
+    /// a different volume.
+    history_valid: f32,
+    /// Per-frame offset of the sample position within each step.
+    jitter: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
 @group(0) @binding(0) var<uniform> vol: VolumetricParams;
@@ -77,6 +86,9 @@ struct VolumetricParams {
 @group(0) @binding(4) var volume_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(5) var<storage, read> vol_light: DirectionalLight;
 @group(0) @binding(6) var vol_shadow_atlas: texture_depth_2d;
+/// Phase 24U: the previous frame's volume, for temporal reprojection.
+@group(0) @binding(7) var vol_history: texture_3d<f32>;
+@group(0) @binding(8) var vol_history_sampler: sampler;
 
 /// Steps taken per slice. Each slice integrates its own segment, so total step
 /// count is this times the slice count.
@@ -169,8 +181,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var slice = 0u; slice < slices; slice = slice + 1u) {
         for (var step = 0u; step < VOL_STEPS_PER_SLICE; step = step + 1u) {
-            // Midpoint of this step within the slice.
-            let frac = (f32(step) + 0.5) / f32(VOL_STEPS_PER_SLICE);
+            // Position within the slice, offset by a per-frame jitter (24U).
+            //
+            // A fixed midpoint samples the same points every frame, so a thin
+            // medium is either always hit or always missed and the error is a
+            // *stationary* pattern — banding that sits still while the camera
+            // moves, which is the most visible kind. Moving the sample each
+            // frame turns that bias into noise, and the temporal blend below
+            // averages it away. This is the half of the technique that lets the
+            // step count come down; reprojection alone would only smear.
+            let frac = fract((f32(step) + 0.5) / f32(VOL_STEPS_PER_SLICE) + vol.jitter);
             let t = vol.max_distance * (f32(slice) + frac) / f32(slices);
             let dt = t - prev_t;
             prev_t = t;
@@ -234,10 +254,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // interpolates an exponential quantity correctly rather than cutting
         // the corner off every curve (bevy_solari's aerial LUT does the same).
         let mean_transmittance = dot(throughput, vec3<f32>(1.0 / 3.0));
+        var value = vec4<f32>(log(max(inscatter, vec3<f32>(1e-6))), mean_transmittance);
+
+        // ── Temporal reprojection (Phase 24U) ────────────────────────────────
+        // Where this froxel's centre was in the previous frame's volume. The
+        // froxel grid is attached to the camera, so a froxel does not keep its
+        // identity across a move — reprojecting through world space is what
+        // makes the history mean the same piece of air.
+        if vol.history_valid > 0.5 {
+            let slice_t = vol.max_distance * (f32(slice) + 0.5) / f32(slices);
+            let centre_ws = vol.camera_pos + ray_dir * slice_t;
+            let prev_clip = vol.prev_view_proj * vec4<f32>(centre_ws, 1.0);
+            if prev_clip.w > 0.0 {
+                let prev_ndc = prev_clip.xy / prev_clip.w;
+                let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+                let prev_w = slice_t / vol.max_distance;
+                if all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0))
+                    && prev_w <= 1.0 {
+                    let history = textureSampleLevel(
+                        vol_history, vol_history_sampler,
+                        vec3<f32>(prev_uv, prev_w), 0.0);
+                    // A small new-frame weight: the volume is cheap to be wrong
+                    // about for a frame and expensive to have crawl. 0.05 is
+                    // ~20 frames of accumulation, which at 60 Hz is a third of
+                    // a second — below the threshold where a fog change reads
+                    // as lag.
+                    value = mix(history, value, 0.05);
+                }
+            }
+        }
+
         textureStore(
             volume_out,
             vec3<i32>(i32(gid.x), i32(gid.y), i32(slice)),
-            vec4<f32>(log(max(inscatter, vec3<f32>(1e-6))), mean_transmittance),
+            value,
         );
     }
 }

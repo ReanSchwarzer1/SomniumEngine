@@ -578,6 +578,11 @@ pub struct PostProcessComponent {
     pub cas_sharpness: f32,
     /// How far the sharpened image is blended in.
     pub cas_strength: f32,
+    /// Motion blur (Phase 24Z), on 24AD's velocity buffer.
+    pub motion_blur_enabled: bool,
+    /// Shutter fraction: how much of the frame interval the shutter is open.
+    /// 0.5 is a 180 degree shutter, the film default.
+    pub motion_blur_shutter: f32,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -670,6 +675,8 @@ impl Default for PostProcessComponent {
             cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,
+            motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
+            motion_blur_shutter: 0.5,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: true,
             fog_density: 0.0008,

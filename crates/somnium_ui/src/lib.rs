@@ -115,6 +115,9 @@ struct InspectorHandles {
     post_restir_toggle: NodeHandle,
     post_restir_gi_toggle: NodeHandle,
     post_cas_toggle:    NodeHandle,
+    post_mb_toggle:     NodeHandle,
+    post_mb_label:      NodeHandle,
+    post_mb_shutter:    NodeHandle,
     post_cas_label:     NodeHandle,
     post_cas_sharp:     NodeHandle,
     post_cas_strength:  NodeHandle,
@@ -166,6 +169,8 @@ pub struct PostInspectorState {
     pub restir_gi: bool,
     /// Phase 24AC.
     pub cas: bool,
+    /// Phase 24Z.
+    pub motion_blur: bool,
     pub bloom: bool,
     pub dof: bool,
     /// Phases 24U/25I.
@@ -176,7 +181,7 @@ pub struct PostInspectorState {
     /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
     /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
     /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
-    pub extras: [f32; 20],
+    pub extras: [f32; 21],
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -624,6 +629,7 @@ impl UiManager {
                     (h.post_restir_label, v.restir, "RT Direct Light"),
                     (h.post_restir_gi_label, v.restir_gi, "RT Indirect (GI)"),
                     (h.post_cas_label, v.cas, "Sharpen (CAS)"),
+                    (h.post_mb_label, v.motion_blur, "Motion Blur"),
                     (h.post_bloom_label, v.bloom, "Bloom"),
                     (h.post_dof_label, v.dof, "Depth of Field"),
                     (h.post_vol_label, v.volumetrics, "Volumetrics"),
@@ -655,6 +661,7 @@ impl UiManager {
                     (h.post_ao_intensity, v.extras[17]),
                     (h.post_cas_sharp, v.extras[18]),
                     (h.post_cas_strength, v.extras[19]),
+                    (h.post_mb_shutter, v.extras[20]),
                 ] {
                     self.native_ui.send(NumericFieldMessage::set_value(field, value));
                 }
@@ -819,6 +826,7 @@ impl UiManager {
             (h.post_ao_intensity, IF::PostAoIntensity),
             (h.post_cas_sharp,  IF::PostCasSharpness),
             (h.post_cas_strength, IF::PostCasStrength),
+            (h.post_mb_shutter, IF::PostMotionBlurShutter),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -872,6 +880,7 @@ impl UiManager {
                     (self.inspector_handles.post_restir_toggle, PostFxToggle::Restir),
                     (self.inspector_handles.post_restir_gi_toggle, PostFxToggle::RestirGi),
                     (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
+                    (self.inspector_handles.post_mb_toggle, PostFxToggle::MotionBlur),
                     (self.inspector_handles.post_bloom_toggle, PostFxToggle::Bloom),
                     (self.inspector_handles.post_dof_toggle, PostFxToggle::DepthOfField),
                     (self.inspector_handles.post_vol_toggle, PostFxToggle::Volumetrics),
@@ -1734,6 +1743,11 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_cas_toggle, post_cas_label) = make_toggle(ui, "Sharpen (CAS)", font_id, post_section);
     let post_cas_sharp    = make_row_step(ui, "Sharp", 34.0, font_id, post_section, 0.01);
     let post_cas_strength = make_row_step(ui, "Amount", 34.0, font_id, post_section, 0.01);
+    // Phase 24Z. Below the two AA/sharpen filters because it is the other
+    // camera-motion effect, and its shutter is a photographic quantity like the
+    // exposure rows at the top.
+    let (post_mb_toggle, post_mb_label) = make_toggle(ui, "Motion Blur", font_id, post_section);
+    let post_mb_shutter = make_row_step(ui, "Shutter", 34.0, font_id, post_section, 0.01);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
 
     // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
@@ -1872,6 +1886,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_ao_radius, post_ao_intensity,
         post_fxaa_toggle, post_fxaa_label,
         post_cas_toggle, post_cas_label, post_cas_sharp, post_cas_strength,
+        post_mb_toggle, post_mb_label, post_mb_shutter,
     }
 }
 

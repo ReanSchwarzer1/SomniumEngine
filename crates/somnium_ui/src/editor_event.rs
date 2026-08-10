@@ -90,6 +90,9 @@ pub enum InspectorField {
     PostCasSharpness,
     /// How far the sharpened image is blended in. 0 is off.
     PostCasStrength,
+    /// Shutter fraction for motion blur (Phase 24Z). 0.5 is a 180 degree
+    /// shutter, the film default.
+    PostMotionBlurShutter,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.
@@ -146,6 +149,8 @@ pub enum PostFxToggle {
     RestirGi,
     /// Contrast adaptive sharpening (Phase 24AC).
     Cas,
+    /// Motion blur (Phase 24Z, on 24AD's velocity).
+    MotionBlur,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     Volumetrics,
     /// Shadow-test the fog per froxel, which is what draws light shafts.
