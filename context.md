@@ -1225,6 +1225,9 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25H | ✅ Complete | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
+| 25M | ⬜ Planned | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
+| 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
+| 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
 ---
 
@@ -2854,6 +2857,174 @@ edge is still the mesh's edge, so relief does not break the outline of a ridge
 against the sky. O3DE handles that with a pixel depth offset written from the
 parallax result (`CalcPixelDepthOffset`), which needs the depth output of the
 visibility pass to move — a change to a pass every other feature reads.
+
+---
+
+### 25.14 Three new sub-phases, from looking at a scene with foliage in it
+
+Planned, not started. Each names what the screenshots showed, what the code
+actually does, and what the reference does instead.
+
+---
+
+## 25M — Night, twilight, and the sun below the horizon
+
+**What the screenshots show.** Rotating the sun gizmo below the horizon turns the
+terrain deep red with black blotches and bleaches the foliage white. With fog and
+shafts disabled the terrain goes near-black with white speckles and the sky keeps
+a bright band at the horizon. Both are wrong in a way that says "the maths left
+its valid range", not "it is night now".
+
+**Confirmed cause.** `ray_intersects_ground` appears **nowhere** in Somnium's
+shaders (`grep` over all 35 of them returns zero). Bevy's atmosphere applies it
+at the point the sun's contribution is gathered:
+
+```wgsl
+let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
+let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+```
+(`bevy_pbr/src/atmosphere/functions.wgsl`)
+
+Without that factor, a sun below the horizon still samples the transmittance LUT.
+The LUT is parameterised on `mu = sun.y`, and below the horizon the lookup clamps
+to its last valid row — **the reddest one**, because at grazing angles Rayleigh
+has scattered out everything but red. So the engine keeps lighting the world with
+the reddest possible sunlight instead of switching the sun off. That is the red.
+Bevy also guards the sun disc itself with `max(mu_light, 0.0)`
+(`functions.wgsl:501`), which Somnium does not.
+
+**Plan.**
+
+1. Port `ray_intersects_ground(r, mu)` into `atmosphere.wgsl` and apply it
+   wherever the sun's transmittance is fetched: the sky, the aerial-perspective
+   integral, and the volumetric pass's per-step `sun_transmittance`.
+2. Gate the direct sun term on `max(mu_sun, 0)` so `light.color` stops lighting
+   surfaces from below the world.
+3. Give the sun a real twilight ramp rather than a hard cut — attenuate through
+   the last few degrees so sunset is a transition, which is the whole reason to
+   sample a transmittance LUT at all.
+4. **Then re-check the two remaining artefacts against instrumentation**, because
+   they are hypotheses until measured:
+   - *White foliage.* Likely auto-exposure: as the scene darkens the meter drives
+     EV up with no night-appropriate floor. Test with `SOMNIUM_AUTO_EXPOSURE`
+     off and a fixed EV; if it disappears, the fix is exposure limits.
+   - *White speckles at night.* Likely ReSTIR GI fireflies — a bounce that finds
+     a bright sliver has nothing clamping its radiance, and the effect only shows
+     once the frame is dark enough for one pixel to dominate. Test with
+     `SOMNIUM_RESTIR_GI=0`; if it disappears, add a luminance clamp on the
+     initial candidate the way every production ReSTIR does.
+5. **Acceptance:** a sun rotated from noon to below the horizon produces a
+   believable day → dusk → night, which is already written down as Phase 24's
+   own definition of done (§22.4) and has never been checked.
+
+This also finally gives light shafts (24U) the scene they need: a low sun behind
+a ridge is exactly the case that has never been rendered.
+
+---
+
+## 25N — Analytic gradients for visibility-buffer shading
+
+**What the screenshots show.** Foliage is simultaneously blurry and aliased —
+some patches mushy, neighbouring ones crawling with sharp speckle, and the
+character of it changes as the camera moves. Terrain in the same frame is clean.
+
+**Confirmed cause.** The shading pass reconstructs UVs per pixel from the
+visibility buffer and then samples with **implicit derivatives**:
+
+```wgsl
+surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+```
+(`shading.wgsl:672`, and five more like it)
+
+`textureSample` takes its mip level from `dpdx/dpdy` across the 2×2 quad. In a
+full-screen resolve, a quad routinely straddles **different triangles and
+different instances**, so the difference between neighbouring UVs is not a
+derivative at all — it is the gap between two unrelated surfaces. The mip that
+comes out is arbitrary: too high on one pixel (mush), zero on the next (alias).
+Foliage is worst hit because it has many tiny triangles and a high-contrast
+cutout texture. Terrain escapes it because the terrain path already computes
+`world_ddx/world_ddy` explicitly and uses `textureSampleGrad` — the fix is to do
+for meshes what terrain already does.
+
+**Reference.** Wicked's `surfaceHF.hlsli` (`SURFACE_LOAD_QUAD_DERIVATIVES`)
+evaluates the *same triangle's* UVs at the neighbouring pixels' barycentrics and
+differences them:
+
+```hlsl
+uvsets_dx = uvsets - attribute_at_bary(uv0, uv1, uv2, bary_quad_x);
+uvsets_dy = uvsets - attribute_at_bary(uv0, uv1, uv2, bary_quad_y);
+```
+
+No quad ever crosses a triangle boundary, because the neighbour is evaluated
+analytically rather than read from a neighbouring lane.
+
+**Plan.**
+
+1. `shading.wgsl` already builds barycentrics analytically from the triangle's
+   NDC positions. Evaluate that same expression at `target_ndc` offset by one
+   pixel in x and in y, giving `bary_quad_x` / `bary_quad_y`.
+2. Interpolate UV at all three and difference: `uv_ddx`, `uv_ddy`.
+3. Replace every mesh `textureSample` in the shading and transparent paths with
+   `textureSampleGrad`.
+4. **Acceptance:** a still frame of foliage at a fixed camera, captured with the
+   harness, must show the mip-level debug view changing smoothly across a leaf
+   rather than in per-pixel jumps; and the A/B must be visibly sharper without
+   raising aliasing. Wicked also derives a *ray-cone* LOD for its ray-traced
+   path — worth noting as the follow-up for ReSTIR GI's texture fetches, which
+   currently guess a fixed mip 4.
+
+---
+
+## 25P — Foliage instancing and LOD
+
+**What the screenshots show.** With trees and grass painted: **9 047 draws,
+90 963 841 triangles**, Visibility (phase 1) **9.25 ms** and Shading **7.44 ms**
+of a 23.5 ms frame. The two most expensive things in the frame are the geometry
+prepass and the material resolve, in that order.
+
+**Confirmed cause (draws).** `submit_foliage` pushes **one `DrawCommand` per
+part per instance**. Every tuft of grass and every tree part is its own draw,
+its own instance-buffer entry, and its own `rpass.draw` in both the visibility
+pass and (until 24AE culled most of them) the shadow pass. The engine already
+has an instance buffer and the visibility pass already draws by instance
+range — nothing is *batched* into it.
+
+**Confirmed cause (triangles).** There is no foliage LOD at all. The palette
+meshes are the full-detail glTF (~1.5 M triangles across the four assets) and
+every instance draws every triangle at every distance. 17G's distance cull only
+decides whether an instance exists, not how detailed it is.
+
+**Plan, in the order the profiler says to do it.**
+
+1. **Batch identical parts into instanced draws.** Group the foliage batch by
+   `(vertex_offset, index_offset, material_id)`, write their transforms
+   contiguously into the instance buffer, and issue one draw per group with an
+   instance range. ~8 790 draws should collapse to roughly the number of palette
+   parts. This is a submission change only — no shader work — and it is the same
+   mistake 17G found and fixed once already at a different layer.
+2. **Mesh LODs per palette entry.** Pick by projected screen radius, reusing
+   `pass::shadow::casts_shadow`'s ratio test so the engine has one definition of
+   "how big is this on screen".
+3. **Impostors for the far band.** Neither Wicked nor Flax ships a generic
+   impostor system in the copies here, so this is the one part with no reference
+   to lean on and should be scoped last, after 1 and 2 have been measured.
+4. **Shading cost.** 7.44 ms is largely the terrain material — eight layers, hex
+   tiling and now a 24-step parallax march — over a much larger viewport than
+   the 1280×720 the earlier numbers were taken at. Before adding anything,
+   measure with debug mode 12 (taps) and with `SOMNIUM_TERRAIN_PARALLAX=0` to
+   split the terrain material's cost from the foliage's, then consider scaling
+   parallax steps by screen-space footprint rather than by distance alone.
+
+**Acceptance:** draws below 500 with foliage painted, and a frame-time
+comparison from the Phase 29 profiler for each step, since each of the three is
+independently measurable.
+
+---
+
+**Sequencing.** 25M first — it is a correctness bug, it is small, and it unblocks
+24U's light-shaft verification. Then 25N, which is a contained shader change with
+a large visual payoff. Then 25P, whose first step is cheap and whose later steps
+should be judged on measurements taken after the first.
 
 ---
 
