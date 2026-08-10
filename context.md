@@ -1226,6 +1226,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
+| 25M-2 | ⬜ Planned | **What 25M left behind.** Five faults visible once the sun stopped lighting the world from underground, four with a cause confirmed in the source. **(A)** Dusk is all orange with black shadows because `ibl_intensity` is still **0.35** — a fudge whose own comment says it is waiting for ambient occlusion, which the engine has had since 24I, 25K and 24L. **(B)** Blocky terrain shadows at a low sun: `cascade.rs` builds `near = 0, far = 4 * radius` with the eye at `centre + light_dir * radius * 2`, so a caster outside that slab is simply absent from the map — the hard straight boundaries are missing casters, not filtering. UE fits caster extent along the light axis separately; O3DE scales bias by `tanθ` and prefers normal-offset. **(C)** Stars are rectangles: `star_field` clips a star to the cubic cell that owns it, and `pow(dot, 40000)` in fp32 is a step function, so a cell-clipped step is a rectangle. **(D)** There is no moon — only a `pow(dot, 700)` halo with no disc, phase or limb darkening. **(E)** At night the only surviving term is cubemap specular, so everything reads as wet metal; check first whether the environment cubemap is even regenerated when the sun moves. See §25.15.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
@@ -3103,6 +3104,184 @@ auto-exposure running before changing anything. The two hypotheses §25.14 liste
 — exposure with no night floor, and unclamped ReSTIR GI fireflies — are still
 untested for the same reason: the red was drowning them, and now that it is gone
 they need a fresh measurement rather than a guess.
+
+---
+
+### 25.15 Phase 25M-2 — what 25M left behind
+
+Planned, not started. 25M stopped the sun lighting the world from underground.
+Everything below is what became visible once it did. Four of the five have a
+cause confirmed by reading the code, not a guess.
+
+---
+
+## A. Dusk is an explosion of orange and the shadows are black
+
+**Confirmed cause, and it is a comment in our own source.** `shading.wgsl`:
+
+> *"Physically this should be 1.0, but the engine has no ambient occlusion yet,
+> so sky light reaches every surface unattenuated … At full strength that washes
+> shadows out badly. Until SSAO (or a glTF occlusion map) lands, the indirect
+> term is scaled back so shadow contrast survives."*
+
+`ibl_intensity` is **0.35**, a fudge written before the engine had ambient
+occlusion. It now has GTAO (24I), bent normals, per-material AO (25K) and
+ray-traced indirect diffuse (24L). The condition the fudge was waiting on has
+been met three times over and nobody went back to remove it.
+
+At noon it barely shows, because the sun dominates. At dusk the sun is deep
+orange and the *sky* is the blue fill that balances it — and that fill is being
+run at a third strength. So the orange has nothing to balance against and the
+shadows have almost nothing in them. This is one number, and it is the single
+most likely cause of both halves of the complaint.
+
+**Plan.**
+
+1. Raise `ibl_intensity` to 1.0 and re-judge. Expect dusk shadows to fill with
+   blue sky and the orange to stop dominating; expect noon to change very little.
+2. If noon then looks flat, that is GTAO's strength to answer, not the sky's —
+   the AO dials are already in the inspector.
+3. **Check the tonemapper is doing its job on saturated colour.** AgX desaturates
+   as it approaches white, which is exactly what stops a saturated orange from
+   reading as a flat sheet; ACES does it differently and Reinhard barely at all.
+   The A/B is a `CycleTonemapper` away and costs nothing.
+4. Only then consider a sunset-specific saturation limit. It should not be
+   needed, and reaching for it first would paper over 1–3.
+
+---
+
+## B. Blocky shadows on the terrain at a low sun
+
+**Confirmed cause.** `shadow/cascade.rs` fits each cascade to the sub-frustum's
+bounding sphere and then builds:
+
+```rust
+let light_eye = center + light_dir * radius * 2.0;
+let near = 0.0;
+let far  = 4.0 * radius;
+```
+
+The shadow map therefore only contains casters inside a slab `4 × radius` deep,
+centred on the view slice. **A hill outside that slab casts nothing.** At noon
+the slab is deep enough relative to how far shadows travel; at 2° elevation a
+shadow runs tens of times its caster's height and the caster that should be
+producing it is behind the near plane. That is what the large hard-edged
+straight boundaries in the dusk screenshot are — not filtering, not resolution:
+the caster is simply missing from the map.
+
+The second, smaller part is texel footprint. `texel_size = 2 × radius /
+resolution`, and a texel projected onto ground at elevation θ covers
+`texel / sin θ` — at 2° that is 28× its noon size. Even a correct shadow map
+looks stair-stepped there.
+
+**References.** Unreal computes the caster extent along the light axis
+separately from the receiver bounds (`ShadowSetup.cpp`, the subject-Z fitting in
+`FProjectedShadowInfo`) rather than assuming a fixed multiple of the radius, and
+exposes `r.Shadow.CSMSlopeScaleDepthBias` and `r.Shadow.TransitionScale` for what
+is left. O3DE's `DirectionalLightShadowCalculator.azsli` scales its slope bias by
+`tanTheta = sin/cos` of N·L, which grows exactly as the sun gets low — and its
+own comment says the slope bias "exhibits noticeable artifacts" and that
+**normal-offset bias is preferable**, which is what
+`NormalOffsetShadows.azsli` implements: offset the lookup along the geometric
+normal by a multiple of the shadow-map texel size.
+
+**Plan.**
+
+1. **Extend the near plane to include casters.** Compute the scene's extent along
+   the light direction and push `light_eye` back by it, instead of `radius * 2`.
+   This is the fix for the hard boundaries and it is a change to one function.
+2. **Scale the normal offset by the real texel size and by grazing angle.**
+   Somnium's `SHADOW_NORMAL_OFFSET_TEXELS` is a fixed 1.5. O3DE's formulation
+   makes it a function of the map dimension; the grazing term is what low sun
+   needs.
+3. **Then re-judge whether traced shadows should simply take over at low sun.**
+   ReSTIR DI (24K) already produces sun visibility with no texel grid at all, and
+   its `RAY_BIAS_FOOTPRINTS = 6.0` bias — sized for a *pixel* footprint — is the
+   thing to check before adding more cascade machinery. A traced shadow has none
+   of this problem by construction.
+4. **Acceptance:** the dusk capture at `SOMNIUM_SUN_ELEVATION=2` must show no
+   straight-line shadow boundaries that do not correspond to terrain.
+
+---
+
+## C. Stars are rectangles
+
+**Confirmed cause.** `atmosphere.wgsl::star_field` quantises the *direction* into
+cubic cells, keeps one star per cell, and returns zero for any pixel whose cell
+did not win:
+
+```wgsl
+let cell = floor(dir * cell_scale);
+if h < 0.987 { return vec3<f32>(0.0); }
+let falloff = pow(max(dot(dir, star_dir), 0.0), 40000.0);
+```
+
+Two things go wrong together. A star near a cell edge is **clipped by the cell
+boundary**, because the neighbouring pixel belongs to a different cell that has
+no star — so what should be a round dot is cut to the cell's quadrilateral. And
+`pow(x, 40000)` in fp32 is a step function, not a falloff: values below about
+`1 - 1e-5` underflow straight to zero, so there is no soft edge to hide it. A
+cell-clipped step function is a rectangle.
+
+**Plan.**
+
+1. Evaluate the **3×3 neighbourhood of cells**, not one, so a star is never cut
+   by the boundary of the cell that owns it.
+2. Replace the `pow` with an explicit angular radius and a `smoothstep` against
+   the **pixel's own angular footprint**, so a star is antialiased to its true
+   sub-pixel size instead of being a hard dot the size of whatever `pow`
+   survives. This is the same reasoning 25H used for `textureSampleLevel`: a
+   quantity that must not depend on precision luck.
+3. Give brightness a plausible magnitude distribution rather than a uniform
+   `mix(0.002, 0.02)` — a few bright stars and many faint ones is what a sky
+   looks like.
+4. **Note:** TAA and CAS both act on sub-pixel points. Check the result with TAA
+   off before blaming the star code for what a sharpening filter did to it.
+
+---
+
+## D. The moon
+
+**Confirmed cause.** There is no moon. `night_sky_ambient` draws
+`pow(dot(dir, moon_dir), 700) * 6` — a halo with no disc, no phase, no limb
+darkening and no surface. The white blob in the screenshot is that halo clipped
+by the tonemapper, with bloom around it.
+
+**Plan.** Give it the same treatment the sun disc already gets in `sky_detail`:
+a real angular radius (~0.26°, the same as the sun's, which is why eclipses
+work), a phase term from the moon's direction relative to the sun, limb
+darkening, and an intensity in the right units so bloom does not eat it. Keep
+the halo — that part is real scattering — but as a separate, much dimmer term.
+
+---
+
+## E. Night specular: "lights shining on the foliage weirdly"
+
+**Cause, partly confirmed.** With the sun gone, diffuse is essentially zero
+(terrain HDR luminance 0.0001 against 4362 at noon), so the only surviving term
+is image-based **specular** from the environment cubemap, which still holds a
+faint sky. Anything with a low roughness then reads as wet metal, and foliage —
+which has a 4% dielectric Fresnel at grazing angles — catches it worst. §17.16
+already noted this and declined to chase it before looking at it on screen with
+auto-exposure; the screenshots now show it is real and not a capture artefact.
+
+**Plan.**
+
+1. Check `specular_occlusion` is being applied to the night path at all — it
+   exists (Lagarde & de Rousiers) and is exactly the term that should be killing
+   this.
+2. Check the environment cubemap is regenerated when the sun moves. If it holds
+   a daytime sky, night specular is reflecting a sun that has set. **This is the
+   first thing to measure**, because if true it also explains part of A.
+3. Foliage specular at grazing angles wants a roughness floor; leaves are not
+   mirrors. Related to the 17E remainder that has been open since Phase 17.
+
+---
+
+**Sequencing.** A (one number), then B-1 (one function), then E-2 (a measurement
+that may explain part of A). C and D are self-contained and can go last, since
+they are appearance rather than correctness. Each is independently capturable
+with `SOMNIUM_SUN_ELEVATION`.
 
 ---
 
