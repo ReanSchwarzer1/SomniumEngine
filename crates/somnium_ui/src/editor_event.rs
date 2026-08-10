@@ -90,6 +90,12 @@ pub enum InspectorField {
     PostCasSharpness,
     /// How far the sharpened image is blended in. 0 is off.
     PostCasStrength,
+    /// Shutter fraction for motion blur (Phase 24Z). 0.5 is a 180 degree
+    /// shutter, the film default.
+    PostMotionBlurShutter,
+    /// Strength of the traced indirect diffuse (Phase 24L). Every other effect
+    /// has an amount dial; this one was the odd toggle out.
+    PostGiIntensity,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.
@@ -110,6 +116,9 @@ pub enum InspectorField {
     TerrainTile1,
     TerrainTile2,
     TerrainTile3,
+    /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
+    /// parallax occlusion off.
+    TerrainRelief,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,
@@ -146,6 +155,8 @@ pub enum PostFxToggle {
     RestirGi,
     /// Contrast adaptive sharpening (Phase 24AC).
     Cas,
+    /// Motion blur (Phase 24Z, on 24AD's velocity).
+    MotionBlur,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     Volumetrics,
     /// Shadow-test the fog per froxel, which is what draws light shafts.

@@ -801,6 +801,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
                     cas: pp.cas_enabled,
+                    motion_blur: pp.motion_blur_enabled,
                     bloom: pp.bloom_enabled,
                     dof: pp.dof_enabled,
                     volumetrics: pp.volumetrics_enabled,
@@ -828,6 +829,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.gtao_intensity,
                         pp.cas_sharpness,
                         pp.cas_strength,
+                        pp.motion_blur_shutter,
+                        pp.restir_gi_intensity,
                     ],
                     auto_exposure: pp.auto_exposure,
                     tonemapper: pp.tonemapper.label(),
@@ -841,6 +844,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 Some([
                     self.terrain_brush.paint_layer as f32,
                     tile(0), tile(1), tile(2), tile(3),
+                    t.parallax_scale,
                 ])
             });
             let brush = self.foliage_brush;
@@ -1407,6 +1411,9 @@ impl<G: GameApp> Engine<G> {
             r.cas_pass.enabled = pp.cas_enabled;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
+            r.motion_blur_pass.enabled = pp.motion_blur_enabled;
+            r.motion_blur_pass.shutter = pp.motion_blur_shutter;
+            r.restir_gi_pass.intensity = pp.restir_gi_intensity;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled;
@@ -2089,6 +2096,8 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostAoIntensity
                         | IF::PostCasSharpness
                         | IF::PostCasStrength
+                        | IF::PostMotionBlurShutter
+                        | IF::PostGiIntensity
                         | IF::PostFogDensity
                         | IF::PostFogHeight
                         | IF::PostFogAsymmetry
@@ -2131,6 +2140,12 @@ impl<G: GameApp> Engine<G> {
                             IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
                             IF::PostCasSharpness => pp.cas_sharpness = value.clamp(0.0, 1.0),
                             IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
+                            IF::PostMotionBlurShutter => {
+                                pp.motion_blur_shutter = value.clamp(0.0, 1.0);
+                            }
+                            IF::PostGiIntensity => {
+                                pp.restir_gi_intensity = value.clamp(0.0, 4.0);
+                            }
                             IF::PostContrast => pp.contrast = value.max(0.0),
                             IF::PostSaturation => pp.saturation = value.max(0.0),
                             IF::PostGrain => pp.grain = value.max(0.0),
@@ -2153,10 +2168,28 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainTile1
                         | IF::TerrainTile2
                         | IF::TerrainTile3
+                        | IF::TerrainRelief
                 ) {
                     if field == IF::TerrainPaintLayer {
                         self.terrain_brush.paint_layer =
                             (value.round().max(0.0) as usize).min(3);
+                        return;
+                    }
+                    // Phase 25H: a terrain-wide multiplier, not a per-layer
+                    // value — the layers already author their own relief and
+                    // this scales all of them together.
+                    if field == IF::TerrainRelief {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied()
+                        else {
+                            return;
+                        };
+                        if let Some(t) = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.terrain_mut(tc.terrain_id))
+                        {
+                            t.parallax_scale = value.clamp(0.0, 4.0);
+                        }
                         return;
                     }
                     let slot = match field {
@@ -2550,6 +2583,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::LightShafts => {
                             pp.light_shafts = !pp.light_shafts;
                             pp.light_shafts
+                        }
+                        PostFxToggle::MotionBlur => {
+                            pp.motion_blur_enabled = !pp.motion_blur_enabled;
+                            pp.motion_blur_enabled
                         }
                         PostFxToggle::Cas => {
                             pp.cas_enabled = !pp.cas_enabled;

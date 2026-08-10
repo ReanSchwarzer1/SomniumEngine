@@ -13,6 +13,10 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
 const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
+const SPD: &str = include_str!("../src/shaders/spd.wgsl");
+const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
+const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
+const CAS: &str = include_str!("../src/shaders/cas.wgsl");
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
@@ -85,7 +89,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 400, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 448, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -114,6 +118,8 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("detail_fade_start"), 256);
     assert_eq!(offset("detail_fade_end"), 260);
     assert_eq!(offset("layer_albedo"), 272);
+    assert_eq!(offset("layer_parallax"), 400);
+    assert_eq!(offset("parallax_steps"), 432);
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
@@ -131,6 +137,18 @@ fn the_restir_gi_module_validates() {
             "{RESTIR_GI}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
         ),
     );
+}
+
+/// The standalone post and utility modules. Each declares its own bindings
+/// and pulls in nothing, so each validates alone — and every one of them has
+/// already caught something: a reserved keyword in SPD, a reserved parameter
+/// name in the GI module, three struct-field mismatches.
+#[test]
+fn the_standalone_post_modules_validate() {
+    check("spd", SPD);
+    check("velocity", VELOCITY);
+    check("motion_blur", MOTION_BLUR);
+    check("cas", CAS);
 }
 
 #[test]

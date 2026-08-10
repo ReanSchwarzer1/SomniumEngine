@@ -194,6 +194,14 @@ pub struct GpuTerrainMaterial {
     /// `TerrainLayerTextures::mean_albedo` for why it is a mean rather than the
     /// real composite.
     pub layer_albedo: [[f32; 4]; 8],
+    /// Phase 25H: relief depth per layer, in metres.        offset 400 (32)
+    pub layer_parallax: [f32; 8],
+    /// Steps the parallax march takes at its closest.       offset 432
+    pub parallax_steps: u32,
+    /// Steps of the self-shadow march toward the sun. 0 disables it.
+    ///                                                      offset 436
+    pub parallax_shadow_steps: u32,
+    pub _pad4: [u32; 2],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -286,6 +294,13 @@ pub struct TerrainData {
     /// normalised splat weights, which is the only way to see what the height
     /// blend is actually doing.
     pub height_blend: bool,
+    /// Phase 25H. Multiplies every layer's authored relief depth; 0 disables
+    /// parallax entirely, which is the A/B.
+    pub parallax_scale: f32,
+    /// Steps the view march takes at its closest. Falls to 0 with distance.
+    pub parallax_steps: u32,
+    /// Steps of the march toward the sun that gives the relief self-shadowing.
+    pub parallax_shadow_steps: u32,
 
     /// Model matrix submitted for the current frame.
     pub model: glam::Mat4,
@@ -415,6 +430,13 @@ impl TerrainData {
             macro_dirty: true,
             height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref()
                 != Ok("0"),
+            parallax_scale: if std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("0") {
+                0.0
+            } else {
+                1.0
+            },
+            parallax_steps: 24,
+            parallax_shadow_steps: 8,
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
@@ -474,6 +496,12 @@ impl TerrainData {
             detail_fade_end: self.detail_fade_end.max(self.detail_fade_start + 1.0),
             _pad: [0; 2],
             layer_albedo: self.layer_textures.mean_albedo,
+            layer_parallax: std::array::from_fn(|i| {
+                self.layers.get(i).map_or(0.0, |l| l.blend.parallax_depth) * self.parallax_scale
+            }),
+            parallax_steps: if self.parallax_scale > 0.0 { self.parallax_steps } else { 0 },
+            parallax_shadow_steps: self.parallax_shadow_steps,
+            _pad4: [0; 2],
         }
     }
 

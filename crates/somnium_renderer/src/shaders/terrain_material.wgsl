@@ -58,6 +58,13 @@ struct TerrainMaterial {
     _pad1: u32,
     /// Phase 24L: mean linear albedo per layer, for indirect bounces.
     layer_albedo: array<vec4<f32>, 8>,
+    /// Phase 25H: relief depth per layer, in metres. Packed as vec4 pairs for
+    /// the same alignment reason as every other per-layer array here.
+    layer_parallax: array<vec4<f32>, 2>,
+    parallax_steps: u32,
+    parallax_shadow_steps: u32,
+    _pad4: u32,
+    _pad5: u32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -100,6 +107,155 @@ fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_weight_clamp[layer / 4u][layer % 4u];
 }
 
+fn terrain_parallax_depth(tm: TerrainMaterial, layer: u32) -> f32 {
+    return tm.layer_parallax[layer / 4u][layer % 4u];
+}
+
+// ── Parallax occlusion mapping (Phase 25H) ───────────────────────────────────
+//
+// Terrain is the surface most often seen at a grazing angle, and that is exactly
+// where a normal map stops working: it shades a flat plane as though it had
+// relief, but the relief never *moves* against the surface, so the ground reads
+// as a photograph lying on glass. Parallax fixes the one thing a normal map
+// cannot — it displaces where each texel appears, so a pebble occludes the
+// crack behind it and the whole surface gains depth as the camera moves.
+//
+// # Working in metres, not UV
+//
+// The usual formulation marches in tangent-space UV. Somnium's terrain has a
+// world-aligned tangent frame (tangent is +X projected onto the surface, see
+// `evaluate_terrain_material`) and **eight layers with different tiling**, so a
+// UV offset would mean something different for every layer. Marching in world
+// XZ metres instead gives one offset that is correct for all of them: each
+// layer converts it with its own tiling exactly as it converts the position.
+//
+// # Reference
+//
+// - `bevy/crates/bevy_pbr/src/render/parallax_mapping.wgsl` — steep parallax
+//   plus the single-lookup POM refinement, and the reason every fetch is
+//   `textureSampleLevel`: a `textureSample` inside a loop needs derivatives,
+//   which forces the compiler to unroll a loop whose bound is dynamic.
+// - `o3de/.../ShaderLib/Atom/Features/ParallaxMapping.azsli` —
+//   `AdvancedParallaxMapping`'s march toward the light, which is what makes
+//   relief look lit rather than merely displaced.
+
+/// One height sample of `layer` at a world-XZ offset from `local_xz`.
+fn terrain_parallax_height(
+    tm: TerrainMaterial,
+    layer: u32,
+    local_xz: vec2<f32>,
+    tiling: f32,
+) -> f32 {
+    let map = tm.albedo_maps[layer / 4u][layer % 4u];
+    // Level 0 explicitly. Inside a march the derivatives are meaningless — the
+    // taps walk along a ray, not across the screen — and asking for them would
+    // both pick a wrong mip and force the loop to unroll.
+    return textureSampleLevel(textures[map], default_sampler, local_xz * tiling, 0.0).a;
+}
+
+/// World-XZ offset from steep parallax plus a POM refinement.
+///
+/// `view_ts` is the direction *toward the camera* in the surface's tangent
+/// frame: xy along (tangent, bitangent), z along the normal.
+fn terrain_parallax_offset(
+    tm: TerrainMaterial,
+    layer: u32,
+    local_xz: vec2<f32>,
+    tiling: f32,
+    view_ts: vec3<f32>,
+    tangent_xz: vec2<f32>,
+    bitangent_xz: vec2<f32>,
+    depth: f32,
+    steps: f32,
+) -> vec2<f32> {
+    // Grazing angles need more steps and shallower ones fewer, because the ray
+    // crosses more of the height field per unit of depth. Bevy interpolates the
+    // count the same way, and clamps away from zero so a surface parallel to
+    // the view does not divide by its own vanishing z.
+    let steepness = max(abs(view_ts.z), 0.05);
+    let layers = max(mix(steps, 1.0, steepness), 1.0);
+    let layer_depth = 1.0 / layers;
+
+    // How far to step per layer, in metres along the surface. The ray moves
+    // *against* the view direction as it sinks into the surface.
+    let step_ts = -view_ts.xy / steepness * depth * layer_depth;
+    let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
+
+    var offset = vec2<f32>(0.0);
+    var ray_depth = 0.0;
+    // The height map is 1 at the peak; the ray starts at the peak and descends.
+    var surface = 1.0 - terrain_parallax_height(tm, layer, local_xz, tiling);
+
+    var i = 0.0;
+    loop {
+        if surface <= ray_depth || i >= layers {
+            break;
+        }
+        offset += step_xz;
+        ray_depth += layer_depth;
+        surface = 1.0 - terrain_parallax_height(tm, layer, local_xz + offset, tiling);
+        i = i + 1.0;
+    }
+
+    // POM refinement: one extra lookup, interpolating between the step that
+    // crossed the surface and the one before it. Relief mapping's binary search
+    // is more exact and costs a lookup per bisection; at ground-detail depths
+    // the difference is below a pixel.
+    let prev_offset = offset - step_xz;
+    let after = surface - ray_depth;
+    let before = (1.0 - terrain_parallax_height(tm, layer, local_xz + prev_offset, tiling))
+        - ray_depth + layer_depth;
+    let denom = after - before;
+    let weight = select(0.0, after / denom, abs(denom) > 1e-6);
+    return mix(offset, prev_offset, clamp(weight, 0.0, 1.0));
+}
+
+/// How much of the relief shadows itself from the sun (Phase 25H).
+///
+/// Ported from O3DE's `AdvancedParallaxMapping`: from the point the view ray
+/// actually hit, march *toward the light* through the same height field; every
+/// step that ends up under the surface darkens the result. This is what turns a
+/// displaced texture into lit relief — without it a pebble moves correctly and
+/// is still lit as though nothing were beside it.
+///
+/// Returns 1 for fully lit.
+fn terrain_parallax_shadow(
+    tm: TerrainMaterial,
+    layer: u32,
+    local_xz: vec2<f32>,
+    tiling: f32,
+    light_ts: vec3<f32>,
+    tangent_xz: vec2<f32>,
+    bitangent_xz: vec2<f32>,
+    depth: f32,
+    steps: u32,
+) -> f32 {
+    if steps == 0u || light_ts.z <= 0.05 {
+        // The sun is at or below the surface's horizon; the geometric N·L term
+        // has already taken this pixel to black and a relief shadow on top of
+        // it would only be a second, wrong darkening.
+        return 1.0;
+    }
+    let start = 1.0 - terrain_parallax_height(tm, layer, local_xz, tiling);
+    let step = 1.0 / f32(steps);
+    let step_ts = light_ts.xy / light_ts.z * depth * step;
+    let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
+
+    var occlusion = 0.0;
+    var offset = vec2<f32>(0.0);
+    var ray = start;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        offset += step_xz;
+        ray -= step;
+        let h = 1.0 - terrain_parallax_height(tm, layer, local_xz + offset, tiling);
+        // Weighted by how far along the march it is, as O3DE does: an occluder
+        // right beside the point casts a harder shadow than one at the far end
+        // of the trace, which is what keeps the contact edge sharp.
+        occlusion = max(occlusion, (ray - h) * (1.0 - f32(i) * step));
+    }
+    return saturate(1.0 - occlusion);
+}
+
 @group(0) @binding(11) var<storage, read> terrain_materials: array<TerrainMaterial>;
 
 /// Layer texture reads the current fragment issued, for debug mode 12.
@@ -109,6 +265,9 @@ fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
 /// in the path of every mesh in the scene.
 var<private> terrain_taps: u32 = 0u;
 
+/// Phase 25H: the relief self-shadow term, read by the shading pass.
+var<private> terrain_parallax_shadow_factor: f32 = 1.0;
+
 /// The worst case a pixel can pay — eight layers, two maps each, three hex taps
 /// per map. Debug mode 12 scales by this so the heatmap reads as a fraction of
 /// the old fixed cost.
@@ -117,6 +276,11 @@ const TERRAIN_MAX_TAPS: f32 = 48.0;
 /// What the terrain material contributes to the shared `Surface`.
 struct TerrainSurface {
     albedo: vec3<f32>,
+    /// Phase 25H: how much the relief shadows itself from the sun. 1 is lit.
+    /// Applied to the direct term rather than to `occlusion`, which is an
+    /// indirect quantity — mixing them would darken the sky's contribution with
+    /// a shadow the sun casts.
+    parallax_shadow: f32,
     /// Layer texture reads this pixel actually issued (Phase 25D). Carried for
     /// debug mode 12 and for nothing else — it is what makes "detail cost
     /// scales with screen area" a measurement rather than a claim.
@@ -344,6 +508,60 @@ fn evaluate_terrain_material(
     let epsilon = mix(LAYER_WEIGHT_EPSILON, FAR_LAYER_EPSILON, fade);
     let hex = tm.hex_tiling != 0u;
 
+    // ── Parallax occlusion (Phase 25H) ───────────────────────────────────────
+    // The tangent frame is built here rather than at the bottom with the normal
+    // mapping, because the march needs it. Axis-aligned by construction: the
+    // terrain's UVs are world XZ, so the tangent is +X projected onto the
+    // surface.
+    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
+    let bitangent = cross(geo_normal, tangent);
+
+    // Parallax is worthless past a few metres — the displacement falls below a
+    // pixel long before the texture does — and it is the most expensive thing
+    // in this shader. The step count rides 25D's existing distance fade to
+    // zero, so the two budgets are one budget.
+    var parallax_shadow = 1.0;
+    var march_xz = vec2<f32>(0.0);
+    let parallax_steps = f32(tm.parallax_steps) * (1.0 - fade);
+    if parallax_steps >= 1.0 {
+        // One layer's height field, not a blend of eight. Marching a blended
+        // height would mean sampling every contributing layer at every step —
+        // eight times the cost of the most expensive loop in the frame — and
+        // at any given texel the splat is dominated by one material anyway.
+        // The offset is then shared by all layers, which is exactly right:
+        // they are all lying on the same piece of ground.
+        var dominant = 0u;
+        var best = -1.0;
+        for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+            if weight[i] > best {
+                best = weight[i];
+                dominant = i;
+            }
+        }
+        let depth = terrain_parallax_depth(tm, dominant);
+        if depth > 0.0 {
+            let tiling = terrain_layer_tiling(tm, dominant);
+            let v = normalize(view.camera_pos - world_pos);
+            let view_ts = vec3<f32>(dot(v, tangent), dot(v, bitangent), dot(v, geo_normal));
+            march_xz = terrain_parallax_offset(
+                tm, dominant, local_xz, tiling, view_ts,
+                tangent.xz, bitangent.xz, depth, parallax_steps,
+            );
+            let l = normalize(light.direction);
+            let light_ts = vec3<f32>(dot(l, tangent), dot(l, bitangent), dot(l, geo_normal));
+            parallax_shadow = terrain_parallax_shadow(
+                tm, dominant, local_xz + march_xz, tiling, light_ts,
+                tangent.xz, bitangent.xz, depth, tm.parallax_shadow_steps,
+            );
+            // Fade the self-shadow out with the march, or it would pop off at
+            // the distance the step count reaches zero.
+            parallax_shadow = mix(parallax_shadow, 1.0, fade);
+        }
+    }
+    // Every layer samples the displaced position. One offset, in metres, and
+    // each layer scales it by its own tiling exactly as it scales the position.
+    let parallax_xz = local_xz + march_xz;
+
     // Sample every layer that can still affect the pixel. Nothing below the
     // gate may be read afterwards, because `samples[i]` for a skipped layer
     // holds whatever the previous iteration left there.
@@ -357,7 +575,7 @@ fn evaluate_terrain_material(
         }
         let tiling = terrain_layer_tiling(tm, i);
         samples[i] = terrain_sample_layer(
-            tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
+            tm, i, parallax_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         taps += select(2u, 6u, hex);
         if tm.height_blend != 0u {
             adjusted[i] = terrain_append_height(tm, i, weight[i], samples[i].height);
@@ -439,17 +657,15 @@ fn evaluate_terrain_material(
     albedo = mix(albedo, cliff, cliff_blend);
     roughness = mix(roughness, 0.8, cliff_blend);
 
-    // Tangent basis for an up-facing heightfield: tangent along +X projected
-    // onto the surface (terrain UVs are axis-aligned by construction). Derived
-    // here rather than taken from the shading pass's UV-delta TBN, whose
-    // determinant collapses on a grid whose UVs are perfectly axis-aligned.
-    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
-    let bitangent = cross(geo_normal, tangent);
+    // The tangent basis was built above for the parallax march. Derived rather
+    // than taken from the shading pass's UV-delta TBN, whose determinant
+    // collapses on a grid whose UVs are perfectly axis-aligned.
     let tbn = mat3x3<f32>(tangent, bitangent, geo_normal);
 
     var out: TerrainSurface;
     out.albedo = albedo;
     out.taps = taps;
+    out.parallax_shadow = parallax_shadow;
     out.roughness = max(roughness, 0.05);
     out.occlusion = occlusion;
     // Generated normal maps use Z-up tangent space; remap to TBN (x→T, y→B).

@@ -794,6 +794,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // things, and GTAO cannot see detail below a pixel.
         surface.occlusion = surface.occlusion * terrain.occlusion;
         terrain_taps = terrain.taps;
+        terrain_parallax_shadow_factor = terrain.parallax_shadow;
     }
 
 
@@ -810,6 +811,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // actual angular size rather than from a filter chosen to look about right.
     let traced = textureLoad(restir_vis, pixel_coords, 0);
     var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
+    // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
+    // into the shadow factor rather than added anywhere else, because that is
+    // exactly what it is — a second occluder between this point and the sun,
+    // one too small for the shadow map to have ever resolved.
+    shadow_factor = shadow_factor * terrain_parallax_shadow_factor;
     if traced.a > 0.5 {
         shadow_factor = traced.r;
     }

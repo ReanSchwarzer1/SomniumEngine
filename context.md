@@ -1174,14 +1174,14 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24B | ✅ Complete | **AgX tone mapping**, implemented analytically in `postprocess.wgsl` rather than as the 3-D LUT the reference ships — a closed-form curve does not justify shipping and binding a KTX2 asset. Rec.709→AgX inset matrix, log2 encode over [−12.474, +4.026] stops, sixth-order contrast sigmoid, outset matrix, then an inverse-sRGB step so AgX's display encoding does not compound with the sRGB target's own. The tone mapper is selectable (AgX / ACES / Reinhard) through `Tonemapper` on `PostProcessComponent`. ACES was fine while the sun was an arbitrary 3.0 and stops being fine at 100 000 lux: it pushes bright saturated light toward the primaries and clips, where AgX desaturates into the highlight the way film does. |
 | 24C | ✅ Complete | **Atmospheric scattering (Hillaire 2020).** `shaders/atmosphere.wgsl` + `pass/atmosphere.rs`. A transmittance LUT (256×128, Bruneton's horizon-concentrating parameterisation) and a multiple-scattering LUT (32×32, second order plus a geometric series for every remaining order) are built once at startup — neither depends on the sun or the camera. The sky is then a real ray-march through Rayleigh, Mie and ozone: 32 steps with analytic per-segment integration rather than a Riemann sum. **The three duplicated sky gradients are now one.** `ibl_gen.wgsl` marches the atmosphere into the environment cubemap, and `shading.wgsl`'s background samples that same cubemap, so background, ambient and reflections cannot disagree. Sharp features — sun disc with limb darkening, moon disc, stars — are drawn analytically over the background at screen resolution instead of being baked in: at 256² per face a texel spans ~0.35°, so a half-degree disc smeared into a blob (observed, then fixed). Keeping the sun disc out of the cubemap also removed a double-count, since the shading pass already computes its specular highlight from the analytic light. |
 | 24D | ✅ Complete | **Night sky.** Moon disc (0.53°, ~2 500 cd/m²) with a scattered halo, a procedural star field placed one-per-cell so density stays even, and an airglow floor so a moonless night is dark but never identically zero. Night fades in on the sun's **illuminance, not its elevation** — dimming a light and moving it below the horizon are different things, and intensity is the dial the inspector actually exposes; keying off elevation left a starless sky when the sun was turned down to moonlight (observed, then fixed). The environment cubemap already regenerates whenever the sun changes, so ambient tracks it for free. |
-| 24AD | ⬜ Planned | **Velocity buffer for TAA.** 24F reprojects from depth, which is exact for camera motion and wrong for moving objects: geometry that moves while the camera is still ghosts, limited only by the neighbourhood clip. Needs previous-frame per-instance transforms carried through the visibility pass and a velocity target written alongside. Also unlocks motion blur (24Z). |
+| 24AD | ✅ Complete | **Velocity buffer for TAA.** 24F reprojects from depth, which is exact for camera motion and wrong for moving objects: geometry that moves while the camera is still ghosts, limited only by the neighbourhood clip. Needs previous-frame per-instance transforms carried through the visibility pass and a velocity target written alongside. Also unlocks motion blur (24Z). |
 | 24W | ✅ Complete | **Water in physical units.** Two faults, both left over from before 24A. The sun was treated as a **point source**, which drives GGX toward a singularity on a near-mirror surface — an unbounded spike across a few pixels, which is what made sunlit water blow out; the lobe is now widened by the sun's angular radius so the spike becomes a glitter path, with an energy term keeping total reflected light unchanged. And a leftover `min(…, 40.0)` on the glint, written when the sun was an arbitrary ~5, was crushing it to nothing against a sky that now measures thousands of cd/m² — removed, since the disc widening bounds the peak on physical grounds instead of by an arbitrary ceiling. The diffuse and scatter terms also had hand-tuned 0.25/0.5 coefficients replaced by the actual Lambert normalisation. Output is clamped below `Rgba16Float`'s finite limit: water is the most mirror-like surface in the scene and therefore the likeliest to overshoot, and an Inf here would reach TAA's blend as NaN. |
 | 24X | ✅ Complete | **Screen-space contact shadows.** A shadow map cannot resolve contact: its texels cover centimetres at best, and 24H's normal-offset bias deliberately pushes samples off the surface, erasing precisely the darkening where two surfaces meet. A short ray marched through the depth buffer toward the light fills that gap — visible as grass tufts now sitting on the ground rather than floating on flat colour. A **thickness limit** is what makes it usable: without one every thin object casts an infinitely deep shadow volume behind itself, because the march cannot distinguish a leaf from a wall receding from the camera. The start offset is jittered per pixel so the step pattern becomes noise for TAA to resolve rather than visible banding, and the result only ever *darkens* the shadow-map term, which stays authoritative at its own scale. Parameters follow Bend Studio's screen-space shadows; their wavefront scheduling is **not** ported, only the sampling behaviour. |
 | 24Y | ✅ Complete | **Colour grading.** White balance on the orange–blue and green–magenta axes, ASC CDL (slope / offset / power — the standard film grades with), contrast pivoting around middle grey rather than black, and saturation. Applied **after** tone mapping, in display space: grading beforehand fights the curve, whose job is to fit scene luminance into a display's range. Exposure and the tone curve decide how bright the image is and how it rolls off; grading decides what it *feels* like, and no amount of the former substitutes. **File-based 3-D LUTs are not included** — that needs a `.cube` loader and an asset path, and is worth its own sub-phase rather than a stub here; the controls are the part that is usable today. |
-| 24Z | 🟡 Partial | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur is not included** — it needs the velocity buffer from 24AD, which does not exist yet. |
+| 24Z | ✅ Complete | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur landed with 24AD's velocity buffer** — Jimenez's depth and spread weights, Wicked's cheap configuration, before TAA and on HDR. See §17.12. |
 | 24AA | ⏸ Deferred | **Cloud shadows.** A scrolling noise mask over the sun's contribution. Cheap, and one of the strongest cues that an outdoor scene is a place rather than a render, because it puts the sky in motion without any volumetric cost. Reference: Spartan's `cloud_shadow.hlsl`. |
 | 24AB | ⏸ Deferred | **Lighting debug views.** Per-light-type heatmaps, cluster occupancy, exposure histogram readout, a luminance false-colour view. GI is nearly impossible to debug by eye, and every engine surveyed ships these. Reference: O3DE's `LightCullingHeatmap.azsl`, UE's Lumen visualisation modes. |
-| 24AC | 🟨 CAS complete, SPD open | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
+| 24AC | ✅ Complete | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
 | 24E | ✅ Complete | **Sun as a physical disc.** 0.53° angular diameter drives `evaluate_brdf_area`, which widens the specular lobe by the source's angular radius and normalises its energy (Karis' sphere-light approximation). A point source gives a one-pixel highlight on anything smooth, which is among the clearest tells that an image is rendered. The correction is **specular-only** — a first attempt scaled the whole BRDF and would have darkened every lit surface, since diffuse does not care how large a source is. Lights also gained **colour temperature in Kelvin**, one physically meaningful dial replacing three coupled RGB channels; the Planckian fit is sRGB and is decoded to linear before use, which left warm lights far too saturated when skipped. `sun_angular_radius` rides in the light buffer's remaining padding. |
 | 24F | ✅ Complete | **Temporal anti-aliasing + specular AA** (absorbs the old Phase 18). Halton-jittered projection; depth-based reprojection; 9-tap Catmull-Rom history sampling (bilinear compounds and goes visibly soft over ~100 frames); Playdead `clip_aabb` neighbourhood clipping with Salvi variance clipping. Blending happens in a **tone-mapped space** — averaging HDR directly lets one bright sample dominate, so a glint flickers rather than resolving, which is the artefact the pass exists to remove. History buffers ping-pong because wgpu forbids binding one texture as both read and write. **Limitation:** reprojection is depth-based, so it handles camera motion exactly but objects that move while the camera is still will ghost until a velocity buffer exists (24AD). Specular AA folds Toksvig normal-map variance back into roughness so mipped detail widens the lobe rather than aliasing. |
 | 24G | ✅ Complete | **Sampling infrastructure.** Interleaved gradient noise, Vogel disk (chosen over Poisson tables, which must be shipped and indexed, and over grids, which alias into rings), cosine-weighted hemisphere with Frisvad's branchless basis, R2 and Halton sequences. Shared so the patterns are chosen once — white noise clumps, and clumps survive filtering as blotches. |
@@ -1199,7 +1199,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24R | ⬜ Planned | **Area lights (LTC).** Rect, disc and tube lights via Linearly Transformed Cosines — analytic, no sampling noise, correct soft shadows and elongated highlights. Softboxes, windows and strip lights are most of what makes an interior read as photographed rather than rendered, and no amount of point-light tuning substitutes. Reference: `bevy_pbr/src/ltc/`, `bevy_light/src/rect_light.rs`. |
 | 24S | ✅ Complete | **Transmission and subsurface scattering.** Frostbite's approximation (Barré-Brisebois & Bouchard) rather than a real subsurface solve: light leaving the *far* side of a thin surface, spread by scattering, brightest looking almost straight into the source through the material. **This is what the foliage was missing all along.** Leaves lit only by reflection stay flat and dark regardless of how correct the albedo is — the symptom the grass has shown since Phase 17, and which no amount of albedo or occlusion work could have fixed. Transmitted light is tinted by albedo, which is why backlit foliage reads more saturated than the same leaf lit from the front, and it is deliberately **not** multiplied by the shadow factor: the entire point is light arriving through the surface from the side the shadow map calls dark. Materials take `transmissionFactor` from `KHR_materials_transmission` where present; foliage assets do not set it, so a sidecar cutout mask is taken as evidence of thin geometry and infers 0.5 — the same convention-over-metadata rule the alpha masks and ARM packing already use. `GpuMaterial` grew from 48 to 64 bytes (WGSL rounds the array stride to the 16-byte alignment `base_color` forces); the layout test caught this and was updated rather than deleted. |
 | 24T | ✅ Complete | **Emissive materials and physical bloom.** Materials carry `emissiveFactor` and an emissive texture from glTF, added to shading independently of every light in the scene — a screen is as bright in a dark room as a lit one. Bloom is **deliberately not threshold-based**: a threshold asks "which pixels count as bright?", a question with no physical answer whose meaning changes the moment exposure does — a scene metered for night would bloom everything, one metered for noon nothing. Real bloom is light scattering inside the lens, which happens to *all* light in proportion to how much there is. So a progressive 13-tap downsample builds a mip chain and a 9-tap tent upsample sums it back additively (Jimenez, SIGGRAPH 2014); bright regions dominate naturally because they carry more energy. Added **before** exposure and tone mapping, since it is scattering on the way to the sensor rather than a filter over the picture, and built **after** TAA, because a blur of unstable input broadcasts that instability everywhere it reaches. `GpuMaterial` grew 64 → 80 bytes; the layout test was updated again. |
-| 24U | 🟡 Partial | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
+| 24U | ✅ Complete (shafts still unseen) | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
 | 24V | ✅ Complete | **Local lights in physical units, with source radius.** The photometric half landed with 24A-1 — point and spot lights carry lumens converted to candela, and `smooth_distance_attenuation` already divides by distance squared, so illuminance was correct. What was missing is that they were still **point** sources. Lights now carry a `source_radius` in metres (distinct from `range`, which is reach): a 5 cm bulb a metre away subtends a real angle, and feeding that through `evaluate_brdf_area` is what stops its highlight being a single pixel on anything polished. **IES profiles are not included** — that is an asset-pipeline job and is better as its own sub-phase than half-done here. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
@@ -1222,9 +1222,13 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
-| 25H | ⬜ Planned | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
+| 25H | ✅ Complete | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
+| 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
+| 25M-2 | ⬜ Planned | **What 25M left behind.** Five faults visible once the sun stopped lighting the world from underground, four with a cause confirmed in the source. **(A)** Dusk is all orange with black shadows because `ibl_intensity` is still **0.35** — a fudge whose own comment says it is waiting for ambient occlusion, which the engine has had since 24I, 25K and 24L. **(B)** Blocky terrain shadows at a low sun: `cascade.rs` builds `near = 0, far = 4 * radius` with the eye at `centre + light_dir * radius * 2`, so a caster outside that slab is simply absent from the map — the hard straight boundaries are missing casters, not filtering. UE fits caster extent along the light axis separately; O3DE scales bias by `tanθ` and prefers normal-offset. **(C)** Stars are rectangles: `star_field` clips a star to the cubic cell that owns it, and `pow(dot, 40000)` in fp32 is a step function, so a cell-clipped step is a rectangle. **(D)** There is no moon — only a `pow(dot, 700)` halo with no disc, phase or limb darkening. **(E)** At night the only surviving term is cubemap specular, so everything reads as wet metal; check first whether the environment cubemap is even regenerated when the sun moves. See §25.15.
+| 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
+| 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
 ---
 
@@ -2087,6 +2091,23 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **25M** — ✅ passing for the reported bug. `SOMNIUM_SUN_ELEVATION=-10` now
+  renders black-with-stars instead of red; +2° renders a golden hour. HDR
+  terrain luminance 4362 (day) → 137.7 (dusk) → 0.0001 (night). The night
+  specular look and the exposure/firefly hypotheses are still open. See §17.16.
+- **25H** — ✅ passing. `SOMNIUM_TERRAIN_PARALLAX=0/1` at eye level: 1729.8
+  mean absolute luminance over 921 600 terrain pixels, mean luminance moving
+  only −0.4% — detail redistributed, not darkened. Shading 0.898 → 1.022 ms.
+  See §17.15.
+- **24AC (SPD)** — ✅ passing. Hi-Z 0.045 → 0.029 ms with the frame
+  **bit-identical** (`mean_abs = 0.0000, changed = 0`), which is the real
+  acceptance test for something feeding occlusion culling. See §17.14.
+- **24AD / 24Z** — ✅ passing. Both passes dispatch and are profiled:
+  Velocity 0.010 ms, Motion Blur 0.034 ms moving / 0.001 ms static.
+  See §17.11–17.12.
+- **24U** — 🟡 partial. Temporal reprojection and jitter land and cost
+  0.071 → 0.093 ms, but **light shafts have still not been seen** — the demo
+  scene has no low sun behind a hard occluder. See §17.13.
 - **24AC (CAS)** — ✅ passing. `SOMNIUM_CAS=0/1` on the swapchain: mean absolute
   difference 13.6 of 765 across the viewport, max 210, 64.5% of pixels changed;
   cost 0.018 ms. The HDR capture harness cannot see it — see §17.10.
@@ -2592,6 +2613,675 @@ diff is indicative.
 **Not done:** the SPD half of 24AC — single-pass downsample for the Hi-Z pyramid
 and the bloom chain. `ffx_spd.h` and `spd.hlsl` are the reference and the phase
 row stays open for it.
+
+---
+
+## 17.11 Phase 24AD — the velocity buffer
+
+Where each pixel was on the previous frame, in UV space, written once and read
+by anything that walks backwards through time. `shaders/velocity.wgsl`.
+
+Reconstructing the world position from this frame's depth and projecting it with
+the previous frame's matrix gives the exact motion of a **static** point under a
+**moving camera**. Two details from
+`WickedEngine-master/shaders/visibility_velocityCS.hlsl` are what make it usable
+rather than nearly right:
+
+- **The background gets a velocity too.** A pixel with no geometry is treated as
+  a point just inside the far plane along its own ray. Returning zero there
+  would leave the sky the one part of a whip pan that does not blur, which reads
+  as a hole punched through the motion. (Just *inside* 1.0, because exactly 1.0
+  un-projects to infinity and its previous-frame projection divides by ~0.)
+- **The result is clamped to ±1 screen.** A pixel that reprojects far off-screen
+  would otherwise hand motion blur a gather direction hundreds of screens long,
+  and every tap would read the same clamped edge texel.
+
+Wicked subtracts the TAA jitter from both ends; Somnium's matrices are
+un-jittered instead, which is the same correction one level up —
+`TaaPass::record` had already established that both ends of a reprojection must
+be un-jittered, having measured 51 000 of 51 000 pixels reprojecting wrongly
+with a still camera when they were not.
+
+**Not covered: objects that move on their own.** That needs the previous frame's
+model matrix to travel with the instance, and there is nowhere to put it — the
+draw queue is re-sorted every frame, so instance `i` is not the same object it
+was last frame, and there is no stable per-object id to key a history on.
+Nothing in the engine currently moves independently of the camera: there is no
+skinning, no wind, and rigid bodies do not write transforms. Phase 27 is when
+that changes. The note is in the shader so the gap is found by reading rather
+than by watching a smear stay still.
+
+**Cost: 0.010 ms.**
+
+---
+
+## 17.12 Phase 24Z — motion blur, and 24Z closed
+
+The half that had been waiting on 24AD since the phase was written. A real
+shutter is open for a slice of each frame and smears whatever moved during it; a
+renderer that samples one instant produces a sequence of sharp frames, which
+reads as strobing.
+
+From `WickedEngine-master/shaders/motionblurCS.hlsl` (Jimenez, *Next Generation
+Post Processing in Call of Duty: Advanced Warfare*, SIGGRAPH 2014), two weights
+are ported and one piece is deliberately not:
+
+- **`DepthCmp`** classifies each tap as in front of or behind the centre. A
+  moving foreground should bleed *over* a static background; a static foreground
+  must not be smeared by a background moving behind it. Without it a fast pan
+  drags the silhouette of everything static in the frame.
+- **`SpreadCmp`** asks whether the tap's own blur is long enough to reach the
+  centre at all, which stops a still object from picking up colour from a fast
+  one merely because it is nearby.
+- **Tile-max / neighbourhood-max is not ported.** Reducing velocity to tiles and
+  gathering along the tile maximum is what lets a fast *object* blur outside its
+  own silhouette. It costs two more reduction passes and only pays off for
+  object motion, which 24AD does not produce; under camera motion the whole
+  frame moves together and the centre velocity and the neighbourhood maximum
+  agree almost everywhere. This is Wicked's own `MOTIONBLUR_CHEAP`
+  configuration, taken for the reason it offers it.
+
+Also ported: the dithered start offset (a fixed one bands, because every pixel's
+taps land on the same grid) and the `sum.rgb + (1 - sum.a) * centre` fallback,
+so coverage no tap could legitimately account for keeps its own colour instead
+of fading toward black.
+
+**Placed before TAA and on the HDR image.** Before TAA because TAA's history is
+what stabilises the gather's dither, and blurring the resolved image would smear
+a frame already blended with its own past. On HDR because a blur after tone
+mapping smears clipped highlights as flat white — the difference between a
+headlight trail and a grey smudge.
+
+**Off by default** (`SOMNIUM_MOTION_BLUR=1`, or the inspector). It is the one
+effect that makes a still screenshot of a moving camera look broken rather than
+better. **Cost: 0.034 ms** with the camera moving; it early-outs below half a
+pixel of motion, so a static frame pays 0.001 ms.
+
+---
+
+## 17.13 Phase 24U — closed with temporal reprojection
+
+The froxel volume shipped in the earlier session with fog, height falloff, a
+Henyey-Greenstein phase and a per-froxel shadow test. What it lacked was the
+thing that makes a low step count affordable.
+
+**Two halves, and only together are they worth anything:**
+
+- **A per-frame jitter of the sample position within each step.** A fixed
+  midpoint samples the same points every frame, so a thin medium is either
+  always hit or always missed and the error is a *stationary* pattern — banding
+  that sits still while the camera moves, which is the most visible kind. The
+  offset is golden-ratio rather than random, because over a short window the
+  samples should spread evenly through the step and a random sequence clumps.
+- **Reprojection through world space.** The froxel grid is attached to the
+  camera, so a froxel does not keep its identity across a move; reprojecting the
+  froxel centre through the previous view-projection is what makes the history
+  mean the same piece of air. Blended at 0.05, about twenty frames — a third of
+  a second at 60 Hz, below where a fog change reads as lag.
+
+Jitter without reprojection is just noise; reprojection without jitter only
+smears the same bias. Together they turn the error into something the temporal
+filter can average away.
+
+**History is a copy, not a ping-pong.** 32×32×32 RGBA16F is 256 KB, so
+`copy_texture_to_texture` at the end of the pass costs less than the alternative
+— a ping-pong pair would force the shading pass to rebuild its bind group every
+frame, since it binds the volume by view.
+
+**Cost: 0.071 → 0.093 ms**, which is the copy and the extra fetch.
+
+**Still not visually confirmed: light shafts.** The code path is exercised every
+frame and the shadow test is in the integral, but the demo scene has no low sun
+behind a hard occluder, so nobody has *seen* a shaft. That needs a scene, not a
+change — and this note stays until someone has looked at one.
+
+---
+
+## 17.14 Phase 24AC — SPD, and 24AC closed
+
+The Hi-Z pyramid cost one dispatch per mip: **eleven** at 1280×720, each a
+pipeline barrier behind the last, each reading a texture the previous one had
+just written. The arithmetic is trivial; the *dependency chain* is the cost.
+
+SPD's observation is that a workgroup owning a 64×64 tile of the source can
+compute six mip levels of that tile entirely in its own shared memory — after
+the first reduction the whole tile fits there. A dispatch boundary is only
+needed when a level draws on more than one tile, and by then the image is 64×
+smaller. Ported from `SpartanEngine-master/data/shaders/amd_fidelity_fx/` —
+`ffx_spd.h`'s `SpdDownsampleMips_0_1_LDS`, the no-wave-operations path, which is
+the right one because WGSL has no subgroup quad swizzles.
+
+**The last-workgroup trick is deliberately not ported, and this is the
+interesting part of the phase.** SPD does the whole pyramid in one dispatch: a
+global atomic counter elects the workgroup that finishes last, and that one
+reads mip 6 — written by *other* workgroups — and carries on. That requires
+`globallycoherent` storage images. **WGSL has no such qualifier**, and its memory
+model offers no way to make one workgroup's texture writes visible to another
+inside a dispatch; `storageBarrier` is workgroup-scoped. Porting it anyway would
+be a data race that happens to pass on one driver.
+
+So the same shader is dispatched **twice**, separated by a real barrier: once
+over the whole image for six mips, once with a single workgroup to finish the
+tail from the sixth. Eleven dispatches become three — the depth copy, then these
+two — the structure is SPD's, and nothing rests on undefined behaviour.
+
+Two details carried over from the original per-mip shader because the pyramid
+feeds occlusion culling:
+
+- The reduction is **`max`** — a texel holds the *furthest* depth of its region,
+  so the test can never make an occluder look further away than it is.
+- **Odd sizes widen to three.** Halving 5 gives 2, and a plain 2×2 reduction
+  drops source column 4 — a real occluder vanishing from the pyramid, which is
+  the one error direction that rejects visible geometry.
+
+**Measured.** Hi-Z **0.045 → 0.029 ms** (−36%), and the rendered frame is
+**bit-identical**: `SOMNIUM_SPD=0/1` through the capture harness gives
+`mean_abs = 0.0000, changed = 0` over all 921 600 pixels, with the same 257
+draws and 288 460 triangles surviving culling. For something feeding occlusion
+culling that identity is the acceptance test, not the speed.
+
+**One device requirement.** Six storage textures in one stage, where wgpu's
+default ceiling is four. `context.rs` asks the adapter for up to eight in the
+"detect, do not demand" style the file already uses, and `HiZPass` checks the
+*granted* limit before building anything — a device that cannot manage six logs
+a line and keeps the per-mip chain. `SOMNIUM_SPD=0` forces that path anyway,
+which is the A/B.
+
+**Not done:** SPD is not yet used for the bloom chain, which still downsamples a
+level per pass. The reduction there is a filtered average rather than a max, so
+it needs a second variant of the shader; the pyramid was the one with eleven
+barriers in it.
+
+---
+
+## 17.15 Phase 25H — parallax occlusion on terrain
+
+Terrain is the surface most often seen at a grazing angle, and that is exactly
+where a normal map stops working. It shades a flat plane as though it had
+relief, but the relief never *moves* against the surface, so the ground reads as
+a photograph lying on glass. Parallax fixes the one thing a normal map cannot:
+it displaces where each texel appears, so a pebble occludes the crack behind it
+and the surface gains depth as the camera moves.
+
+**Marching in metres, not UV.** The textbook formulation walks tangent-space UV.
+Somnium's terrain has a world-aligned tangent frame and **eight layers with
+different tiling**, so a UV offset would mean something different for each of
+them. Marching in world XZ metres gives one offset that is correct for all
+eight: every layer converts it with its own tiling exactly as it converts the
+position. It also means `LayerBlend::parallax_depth` is authored in metres and
+does not silently change meaning when a layer's tiling is edited.
+
+**One height field, not eight.** Marching a *blended* height would mean sampling
+every contributing layer at every step — eight times the cost of the most
+expensive loop in the frame. The march runs against the dominant layer's height
+map and the resulting offset is shared, which is right: the layers are all lying
+on the same piece of ground. O3DE's `MultilayerParallaxDepth.azsli` does blend
+per step; that is the more correct answer and it is not worth eight times the
+taps here.
+
+**References.** `bevy/crates/bevy_pbr/src/render/parallax_mapping.wgsl` for steep
+parallax plus the single-lookup POM refinement — and for the reason every fetch
+is `textureSampleLevel`: a `textureSample` inside a loop needs derivatives,
+which forces the compiler to unroll a loop whose bound is dynamic.
+`o3de/.../ParallaxMapping.azsli`'s `AdvancedParallaxMapping` for the second
+half.
+
+**That second half is what sells it: parallax self-shadowing.** From the point
+the view ray actually hit, march *toward the sun* through the same height field;
+every step that ends up under the surface darkens the result, weighted by how
+far along the march it is so a nearby occluder casts a harder edge than a
+distant one. Without it a pebble moves correctly and is still lit as though
+nothing were beside it. It is folded into `shadow_factor`, not into `occlusion`,
+because that is what it is — a second occluder between the point and the sun,
+one far too small for the shadow map to have ever resolved. Occlusion is an
+indirect quantity and mixing them would darken the sky's contribution with a
+shadow the sun casts.
+
+**It rides 25D's budget.** The step count is `parallax_steps * (1 - fade)`,
+using the distance fade Phase 25D already computes, so parallax reaches zero at
+the same range the layer count does — one budget, not two. The self-shadow fades
+with it, or it would pop off at the distance the steps run out.
+
+**Measured** at eye level, `SOMNIUM_TERRAIN_PARALLAX=0/1`: **1729.8** mean
+absolute luminance over 921 600 terrain pixels, 898 589 of them past the 1%
+threshold. Mean luminance moves only 4475.3 → 4458.9 (−0.4%), which is the
+useful part of that pair: the effect *redistributes* detail rather than
+darkening the frame, which is what displacement should do and what a
+self-shadow term applied too broadly would not.
+
+**Cost:** shading **0.898 → 1.022 ms** (+14%) at eye level, where nothing is
+faded out. GTAO is identical to the millisecond either way, which is the control.
+
+**Controls.** `Relief` in the Terrain inspector multiplies every layer's
+authored depth, so one dial covers the terrain without flattening the difference
+between gravel and mud; 0 switches it off. `SOMNIUM_TERRAIN_PARALLAX=0` is the
+same switch for the A/B.
+
+**Not done:** silhouette clipping. The march displaces texture but the geometry's
+edge is still the mesh's edge, so relief does not break the outline of a ridge
+against the sky. O3DE handles that with a pixel depth offset written from the
+parallax result (`CalcPixelDepthOffset`), which needs the depth output of the
+visibility pass to move — a change to a pass every other feature reads.
+
+---
+
+### 25.14 Three new sub-phases, from looking at a scene with foliage in it
+
+Planned, not started. Each names what the screenshots showed, what the code
+actually does, and what the reference does instead.
+
+---
+
+## 25M — Night, twilight, and the sun below the horizon
+
+**What the screenshots show.** Rotating the sun gizmo below the horizon turns the
+terrain deep red with black blotches and bleaches the foliage white. With fog and
+shafts disabled the terrain goes near-black with white speckles and the sky keeps
+a bright band at the horizon. Both are wrong in a way that says "the maths left
+its valid range", not "it is night now".
+
+**Confirmed cause.** `ray_intersects_ground` appears **nowhere** in Somnium's
+shaders (`grep` over all 35 of them returns zero). Bevy's atmosphere applies it
+at the point the sun's contribution is gathered:
+
+```wgsl
+let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
+let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+```
+(`bevy_pbr/src/atmosphere/functions.wgsl`)
+
+Without that factor, a sun below the horizon still samples the transmittance LUT.
+The LUT is parameterised on `mu = sun.y`, and below the horizon the lookup clamps
+to its last valid row — **the reddest one**, because at grazing angles Rayleigh
+has scattered out everything but red. So the engine keeps lighting the world with
+the reddest possible sunlight instead of switching the sun off. That is the red.
+Bevy also guards the sun disc itself with `max(mu_light, 0.0)`
+(`functions.wgsl:501`), which Somnium does not.
+
+**Plan.**
+
+1. Port `ray_intersects_ground(r, mu)` into `atmosphere.wgsl` and apply it
+   wherever the sun's transmittance is fetched: the sky, the aerial-perspective
+   integral, and the volumetric pass's per-step `sun_transmittance`.
+2. Gate the direct sun term on `max(mu_sun, 0)` so `light.color` stops lighting
+   surfaces from below the world.
+3. Give the sun a real twilight ramp rather than a hard cut — attenuate through
+   the last few degrees so sunset is a transition, which is the whole reason to
+   sample a transmittance LUT at all.
+4. **Then re-check the two remaining artefacts against instrumentation**, because
+   they are hypotheses until measured:
+   - *White foliage.* Likely auto-exposure: as the scene darkens the meter drives
+     EV up with no night-appropriate floor. Test with `SOMNIUM_AUTO_EXPOSURE`
+     off and a fixed EV; if it disappears, the fix is exposure limits.
+   - *White speckles at night.* Likely ReSTIR GI fireflies — a bounce that finds
+     a bright sliver has nothing clamping its radiance, and the effect only shows
+     once the frame is dark enough for one pixel to dominate. Test with
+     `SOMNIUM_RESTIR_GI=0`; if it disappears, add a luminance clamp on the
+     initial candidate the way every production ReSTIR does.
+5. **Acceptance:** a sun rotated from noon to below the horizon produces a
+   believable day → dusk → night, which is already written down as Phase 24's
+   own definition of done (§22.4) and has never been checked.
+
+This also finally gives light shafts (24U) the scene they need: a low sun behind
+a ridge is exactly the case that has never been rendered.
+
+---
+
+## 25N — Analytic gradients for visibility-buffer shading
+
+**What the screenshots show.** Foliage is simultaneously blurry and aliased —
+some patches mushy, neighbouring ones crawling with sharp speckle, and the
+character of it changes as the camera moves. Terrain in the same frame is clean.
+
+**Confirmed cause.** The shading pass reconstructs UVs per pixel from the
+visibility buffer and then samples with **implicit derivatives**:
+
+```wgsl
+surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+```
+(`shading.wgsl:672`, and five more like it)
+
+`textureSample` takes its mip level from `dpdx/dpdy` across the 2×2 quad. In a
+full-screen resolve, a quad routinely straddles **different triangles and
+different instances**, so the difference between neighbouring UVs is not a
+derivative at all — it is the gap between two unrelated surfaces. The mip that
+comes out is arbitrary: too high on one pixel (mush), zero on the next (alias).
+Foliage is worst hit because it has many tiny triangles and a high-contrast
+cutout texture. Terrain escapes it because the terrain path already computes
+`world_ddx/world_ddy` explicitly and uses `textureSampleGrad` — the fix is to do
+for meshes what terrain already does.
+
+**Reference.** Wicked's `surfaceHF.hlsli` (`SURFACE_LOAD_QUAD_DERIVATIVES`)
+evaluates the *same triangle's* UVs at the neighbouring pixels' barycentrics and
+differences them:
+
+```hlsl
+uvsets_dx = uvsets - attribute_at_bary(uv0, uv1, uv2, bary_quad_x);
+uvsets_dy = uvsets - attribute_at_bary(uv0, uv1, uv2, bary_quad_y);
+```
+
+No quad ever crosses a triangle boundary, because the neighbour is evaluated
+analytically rather than read from a neighbouring lane.
+
+**Plan.**
+
+1. `shading.wgsl` already builds barycentrics analytically from the triangle's
+   NDC positions. Evaluate that same expression at `target_ndc` offset by one
+   pixel in x and in y, giving `bary_quad_x` / `bary_quad_y`.
+2. Interpolate UV at all three and difference: `uv_ddx`, `uv_ddy`.
+3. Replace every mesh `textureSample` in the shading and transparent paths with
+   `textureSampleGrad`.
+4. **Acceptance:** a still frame of foliage at a fixed camera, captured with the
+   harness, must show the mip-level debug view changing smoothly across a leaf
+   rather than in per-pixel jumps; and the A/B must be visibly sharper without
+   raising aliasing. Wicked also derives a *ray-cone* LOD for its ray-traced
+   path — worth noting as the follow-up for ReSTIR GI's texture fetches, which
+   currently guess a fixed mip 4.
+
+---
+
+## 25P — Foliage instancing and LOD
+
+**What the screenshots show.** With trees and grass painted: **9 047 draws,
+90 963 841 triangles**, Visibility (phase 1) **9.25 ms** and Shading **7.44 ms**
+of a 23.5 ms frame. The two most expensive things in the frame are the geometry
+prepass and the material resolve, in that order.
+
+**Confirmed cause (draws).** `submit_foliage` pushes **one `DrawCommand` per
+part per instance**. Every tuft of grass and every tree part is its own draw,
+its own instance-buffer entry, and its own `rpass.draw` in both the visibility
+pass and (until 24AE culled most of them) the shadow pass. The engine already
+has an instance buffer and the visibility pass already draws by instance
+range — nothing is *batched* into it.
+
+**Confirmed cause (triangles).** There is no foliage LOD at all. The palette
+meshes are the full-detail glTF (~1.5 M triangles across the four assets) and
+every instance draws every triangle at every distance. 17G's distance cull only
+decides whether an instance exists, not how detailed it is.
+
+**Plan, in the order the profiler says to do it.**
+
+1. **Batch identical parts into instanced draws.** Group the foliage batch by
+   `(vertex_offset, index_offset, material_id)`, write their transforms
+   contiguously into the instance buffer, and issue one draw per group with an
+   instance range. ~8 790 draws should collapse to roughly the number of palette
+   parts. This is a submission change only — no shader work — and it is the same
+   mistake 17G found and fixed once already at a different layer.
+2. **Mesh LODs per palette entry.** Pick by projected screen radius, reusing
+   `pass::shadow::casts_shadow`'s ratio test so the engine has one definition of
+   "how big is this on screen".
+3. **Impostors for the far band.** Neither Wicked nor Flax ships a generic
+   impostor system in the copies here, so this is the one part with no reference
+   to lean on and should be scoped last, after 1 and 2 have been measured.
+4. **Shading cost.** 7.44 ms is largely the terrain material — eight layers, hex
+   tiling and now a 24-step parallax march — over a much larger viewport than
+   the 1280×720 the earlier numbers were taken at. Before adding anything,
+   measure with debug mode 12 (taps) and with `SOMNIUM_TERRAIN_PARALLAX=0` to
+   split the terrain material's cost from the foliage's, then consider scaling
+   parallax steps by screen-space footprint rather than by distance alone.
+
+**Acceptance:** draws below 500 with foliage painted, and a frame-time
+comparison from the Phase 29 profiler for each step, since each of the three is
+independently measurable.
+
+---
+
+**Sequencing.** 25M first — it is a correctness bug, it is small, and it unblocks
+24U's light-shaft verification. Then 25N, which is a contained shader change with
+a large visual payoff. Then 25P, whose first step is cheap and whose later steps
+should be judged on measurements taken after the first.
+
+---
+
+## 17.16 Phase 25M — the sun below the horizon
+
+**The plan's first claim was wrong, and finding that out was the phase.** §25.14
+said `ray_intersects_ground` appeared nowhere in the engine. It appears
+everywhere — under the name `ray_hits_ground`. The grep had been for Bevy's
+spelling. Two of the three places that sample the sun's transmittance
+(`atmosphere.wgsl:209`, `atmosphere_lut.wgsl:89`) were already guarded.
+
+**The real cause was one level up, on the CPU.** `LightComponent::photometric_color`
+returns intensity × tint and nothing else, so a sun authored at 100 000 lux
+stayed at 100 000 lux when the gizmo rotated it below the horizon. The engine
+went on lighting the world with full noon sunlight arriving from underground.
+The atmosphere shaders were behaving correctly; nothing had told the *direct*
+light that the sun had set.
+
+**Fix: the sun's illuminance is what survives the trip through the air.**
+`somnium_core::sun::transmittance(sun_up, altitude_km)` integrates the same
+Rayleigh, Mie and ozone profile `atmosphere.wgsl` uses — the same constants, in
+kilometres — along the ray toward the sun, and returns zero once that ray would
+have to pass through the planet. Applied where the directional light is uploaded,
+which is the one value every consumer reads: shading, shadows, ReSTIR DI and GI,
+the froxel volume, and the sky's own `sun_illuminance` and moon blending. There
+is nowhere for them to disagree about whether the sun has set.
+
+Two things fall out of integrating rather than fading:
+
+- **Sunset colour is physics, not a gradient.** Rayleigh removes blue first, so a
+  low sun comes out orange on its own. `a_low_sun_comes_out_orange` pins the
+  blue/red ratio at 0.05 elevation against noon.
+- **The horizon crossing is soft.** The cut is at −0.86°, not zero: the sun's
+  disc is about half a degree across and refraction lifts it by roughly another
+  half, so light keeps arriving after the geometric centre has set. A hard cut
+  at zero steps visibly in the one moment anybody is watching.
+
+Six tests, including that brightness falls **monotonically** all the way down —
+a sunset that brightens anywhere flashes as it crosses the step.
+
+**Second fix: the froxel volume's missing guard.** `volumetric.wgsl` was the one
+place that sampled `sample_transmittance` without `ray_hits_ground`. Below the
+horizon the LUT lookup clamps to its last valid row — the reddest one, because at
+grazing angles Rayleigh has taken out everything but red — so every froxel went
+on being lit by the reddest possible sunlight. That is the red frame with fog
+enabled.
+
+**`SOMNIUM_SUN_ELEVATION` / `SOMNIUM_SUN_AZIMUTH`** place the sun in degrees at
+startup. Reproducing a bug by rotating a gizmo by hand is not a test; this makes
+dusk and night a capture like any other, and it is what finally gives **24U's
+light shafts** the low sun behind a ridge they have never been verified against.
+
+**Measured**, HDR terrain luminance at the landscape camera:
+
+| sun elevation | terrain | sky |
+|---|---|---|
+| +35° (day) | 4362 | 18 447 |
+| +2° (dusk) | 137.7 | 283.6 |
+| −10° (night) | 0.0001 | 0.0004 |
+
+Dusk renders as a real golden hour — a warm low sun raking across the terrain
+with long shadows under a blue-grey sky — and night is black with stars instead
+of red.
+
+**What is not settled.** At night the terrain reads specular-dominated, like
+foil. Diffuse is essentially zero while the environment cubemap still reflects a
+faint sky, so whatever specular remains is *relatively* the whole image, and the
+capture harness's PNG uses a fixed exposure that amplifies a near-black frame
+enormously. That is very likely a property of how it is being *looked at* rather
+than of what is rendered, and the honest next step is to judge it on screen with
+auto-exposure running before changing anything. The two hypotheses §25.14 listed
+— exposure with no night floor, and unclamped ReSTIR GI fireflies — are still
+untested for the same reason: the red was drowning them, and now that it is gone
+they need a fresh measurement rather than a guess.
+
+---
+
+### 25.15 Phase 25M-2 — what 25M left behind
+
+Planned, not started. 25M stopped the sun lighting the world from underground.
+Everything below is what became visible once it did. Four of the five have a
+cause confirmed by reading the code, not a guess.
+
+---
+
+## A. Dusk is an explosion of orange and the shadows are black
+
+**Confirmed cause, and it is a comment in our own source.** `shading.wgsl`:
+
+> *"Physically this should be 1.0, but the engine has no ambient occlusion yet,
+> so sky light reaches every surface unattenuated … At full strength that washes
+> shadows out badly. Until SSAO (or a glTF occlusion map) lands, the indirect
+> term is scaled back so shadow contrast survives."*
+
+`ibl_intensity` is **0.35**, a fudge written before the engine had ambient
+occlusion. It now has GTAO (24I), bent normals, per-material AO (25K) and
+ray-traced indirect diffuse (24L). The condition the fudge was waiting on has
+been met three times over and nobody went back to remove it.
+
+At noon it barely shows, because the sun dominates. At dusk the sun is deep
+orange and the *sky* is the blue fill that balances it — and that fill is being
+run at a third strength. So the orange has nothing to balance against and the
+shadows have almost nothing in them. This is one number, and it is the single
+most likely cause of both halves of the complaint.
+
+**Plan.**
+
+1. Raise `ibl_intensity` to 1.0 and re-judge. Expect dusk shadows to fill with
+   blue sky and the orange to stop dominating; expect noon to change very little.
+2. If noon then looks flat, that is GTAO's strength to answer, not the sky's —
+   the AO dials are already in the inspector.
+3. **Check the tonemapper is doing its job on saturated colour.** AgX desaturates
+   as it approaches white, which is exactly what stops a saturated orange from
+   reading as a flat sheet; ACES does it differently and Reinhard barely at all.
+   The A/B is a `CycleTonemapper` away and costs nothing.
+4. Only then consider a sunset-specific saturation limit. It should not be
+   needed, and reaching for it first would paper over 1–3.
+
+---
+
+## B. Blocky shadows on the terrain at a low sun
+
+**Confirmed cause.** `shadow/cascade.rs` fits each cascade to the sub-frustum's
+bounding sphere and then builds:
+
+```rust
+let light_eye = center + light_dir * radius * 2.0;
+let near = 0.0;
+let far  = 4.0 * radius;
+```
+
+The shadow map therefore only contains casters inside a slab `4 × radius` deep,
+centred on the view slice. **A hill outside that slab casts nothing.** At noon
+the slab is deep enough relative to how far shadows travel; at 2° elevation a
+shadow runs tens of times its caster's height and the caster that should be
+producing it is behind the near plane. That is what the large hard-edged
+straight boundaries in the dusk screenshot are — not filtering, not resolution:
+the caster is simply missing from the map.
+
+The second, smaller part is texel footprint. `texel_size = 2 × radius /
+resolution`, and a texel projected onto ground at elevation θ covers
+`texel / sin θ` — at 2° that is 28× its noon size. Even a correct shadow map
+looks stair-stepped there.
+
+**References.** Unreal computes the caster extent along the light axis
+separately from the receiver bounds (`ShadowSetup.cpp`, the subject-Z fitting in
+`FProjectedShadowInfo`) rather than assuming a fixed multiple of the radius, and
+exposes `r.Shadow.CSMSlopeScaleDepthBias` and `r.Shadow.TransitionScale` for what
+is left. O3DE's `DirectionalLightShadowCalculator.azsli` scales its slope bias by
+`tanTheta = sin/cos` of N·L, which grows exactly as the sun gets low — and its
+own comment says the slope bias "exhibits noticeable artifacts" and that
+**normal-offset bias is preferable**, which is what
+`NormalOffsetShadows.azsli` implements: offset the lookup along the geometric
+normal by a multiple of the shadow-map texel size.
+
+**Plan.**
+
+1. **Extend the near plane to include casters.** Compute the scene's extent along
+   the light direction and push `light_eye` back by it, instead of `radius * 2`.
+   This is the fix for the hard boundaries and it is a change to one function.
+2. **Scale the normal offset by the real texel size and by grazing angle.**
+   Somnium's `SHADOW_NORMAL_OFFSET_TEXELS` is a fixed 1.5. O3DE's formulation
+   makes it a function of the map dimension; the grazing term is what low sun
+   needs.
+3. **Then re-judge whether traced shadows should simply take over at low sun.**
+   ReSTIR DI (24K) already produces sun visibility with no texel grid at all, and
+   its `RAY_BIAS_FOOTPRINTS = 6.0` bias — sized for a *pixel* footprint — is the
+   thing to check before adding more cascade machinery. A traced shadow has none
+   of this problem by construction.
+4. **Acceptance:** the dusk capture at `SOMNIUM_SUN_ELEVATION=2` must show no
+   straight-line shadow boundaries that do not correspond to terrain.
+
+---
+
+## C. Stars are rectangles
+
+**Confirmed cause.** `atmosphere.wgsl::star_field` quantises the *direction* into
+cubic cells, keeps one star per cell, and returns zero for any pixel whose cell
+did not win:
+
+```wgsl
+let cell = floor(dir * cell_scale);
+if h < 0.987 { return vec3<f32>(0.0); }
+let falloff = pow(max(dot(dir, star_dir), 0.0), 40000.0);
+```
+
+Two things go wrong together. A star near a cell edge is **clipped by the cell
+boundary**, because the neighbouring pixel belongs to a different cell that has
+no star — so what should be a round dot is cut to the cell's quadrilateral. And
+`pow(x, 40000)` in fp32 is a step function, not a falloff: values below about
+`1 - 1e-5` underflow straight to zero, so there is no soft edge to hide it. A
+cell-clipped step function is a rectangle.
+
+**Plan.**
+
+1. Evaluate the **3×3 neighbourhood of cells**, not one, so a star is never cut
+   by the boundary of the cell that owns it.
+2. Replace the `pow` with an explicit angular radius and a `smoothstep` against
+   the **pixel's own angular footprint**, so a star is antialiased to its true
+   sub-pixel size instead of being a hard dot the size of whatever `pow`
+   survives. This is the same reasoning 25H used for `textureSampleLevel`: a
+   quantity that must not depend on precision luck.
+3. Give brightness a plausible magnitude distribution rather than a uniform
+   `mix(0.002, 0.02)` — a few bright stars and many faint ones is what a sky
+   looks like.
+4. **Note:** TAA and CAS both act on sub-pixel points. Check the result with TAA
+   off before blaming the star code for what a sharpening filter did to it.
+
+---
+
+## D. The moon
+
+**Confirmed cause.** There is no moon. `night_sky_ambient` draws
+`pow(dot(dir, moon_dir), 700) * 6` — a halo with no disc, no phase, no limb
+darkening and no surface. The white blob in the screenshot is that halo clipped
+by the tonemapper, with bloom around it.
+
+**Plan.** Give it the same treatment the sun disc already gets in `sky_detail`:
+a real angular radius (~0.26°, the same as the sun's, which is why eclipses
+work), a phase term from the moon's direction relative to the sun, limb
+darkening, and an intensity in the right units so bloom does not eat it. Keep
+the halo — that part is real scattering — but as a separate, much dimmer term.
+
+---
+
+## E. Night specular: "lights shining on the foliage weirdly"
+
+**Cause, partly confirmed.** With the sun gone, diffuse is essentially zero
+(terrain HDR luminance 0.0001 against 4362 at noon), so the only surviving term
+is image-based **specular** from the environment cubemap, which still holds a
+faint sky. Anything with a low roughness then reads as wet metal, and foliage —
+which has a 4% dielectric Fresnel at grazing angles — catches it worst. §17.16
+already noted this and declined to chase it before looking at it on screen with
+auto-exposure; the screenshots now show it is real and not a capture artefact.
+
+**Plan.**
+
+1. Check `specular_occlusion` is being applied to the night path at all — it
+   exists (Lagarde & de Rousiers) and is exactly the term that should be killing
+   this.
+2. Check the environment cubemap is regenerated when the sun moves. If it holds
+   a daytime sky, night specular is reflecting a sun that has set. **This is the
+   first thing to measure**, because if true it also explains part of A.
+3. Foliage specular at grazing angles wants a roughness floor; leaves are not
+   mirrors. Related to the 17E remainder that has been open since Phase 17.
+
+---
+
+**Sequencing.** A (one number), then B-1 (one function), then E-2 (a measurement
+that may explain part of A). C and D are self-contained and can go last, since
+they are appearance rather than correctness. Each is independently capturable
+with `SOMNIUM_SUN_ELEVATION`.
 
 ---
 

@@ -873,6 +873,29 @@ engine is only the shape of the solution.
 | Flax `ProfilerGPU::Event::Depth` | Events carry a nesting depth, which is what makes the report a tree | `ScopeResult::depth` |
 | Flax `RenderStatsData` | Counters belong beside the timings | `FrameCounters` |
 
+### 13B.7 Parallax occlusion mapping (Phase 25H)
+
+**Bevy:** MIT / Apache-2.0, `crates/bevy_pbr/src/render/parallax_mapping.wgsl`.
+**O3DE:** Apache-2.0 / MIT, `Gems/Atom/.../ShaderLib/Atom/Features/ParallaxMapping.azsli`.
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| Bevy `parallaxed_uv` | Steep parallax with a step count interpolated by view steepness, then a single-lookup POM refinement | `terrain_parallax_offset` |
+| Bevy `sample_depth_map` | `textureSampleLevel` inside the loop — a `textureSample` needs derivatives, which forces a dynamically-bounded loop to unroll | same, level 0 |
+| O3DE `AdvancedParallaxMapping` | March toward the light through the same height field and attenuate, weighted by distance along the march | `terrain_parallax_shadow` |
+| O3DE `MultilayerParallaxDepth.azsli` | Blending layer heights per step. **Not ported** — eight times the taps; the dominant layer’s height is marched instead | dominant-layer selection in `evaluate_terrain_material` |
+| O3DE `CalcPixelDepthOffset` | Writing the parallax result back into depth for silhouettes. **Not done** — needs the visibility pass’s depth output to move | — |
+
+### 13B.6 AMD FidelityFX SPD via SpartanEngine (Phase 24AC)
+
+**Source:** `example_repo/SpartanEngine-master/data/shaders/amd_fidelity_fx/ffx_spd.h`
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| `SpdDownsampleMips_0_1_LDS` | A workgroup owning a 64x64 tile computes six mips in shared memory; the no-wave-operations path, because WGSL has no subgroup quad swizzles | `shaders/spd.wgsl` |
+| `SpdExitWorkgroup` + `globallycoherent` images | **Not ported.** WGSL has no coherent qualifier and no device-scope barrier, so the last-workgroup read would be a race. Two dispatches separated by a real barrier instead | `SpdPass::build` plans the stages |
+| `SpdReduce4` | The reduction is a parameter of the technique | `max`, because this is a Hi-Z pyramid |
+
 ### 13B.5 AMD FidelityFX CAS via SpartanEngine (Phase 24AC)
 
 **Copyright:** AMD FidelityFX (MIT); Spartan wrapper (c) Panos Karabelas, MIT.

@@ -82,6 +82,7 @@ struct InspectorHandles {
     terrain_section: NodeHandle,
     terrain_layer:   NodeHandle,
     terrain_tile:    [NodeHandle; 4],
+    terrain_relief:  NodeHandle,
     foliage_section: NodeHandle,
     foliage_toggle:  NodeHandle,
     foliage_label:   NodeHandle,
@@ -115,6 +116,10 @@ struct InspectorHandles {
     post_restir_toggle: NodeHandle,
     post_restir_gi_toggle: NodeHandle,
     post_cas_toggle:    NodeHandle,
+    post_mb_toggle:     NodeHandle,
+    post_mb_label:      NodeHandle,
+    post_mb_shutter:    NodeHandle,
+    post_gi_intensity:  NodeHandle,
     post_cas_label:     NodeHandle,
     post_cas_sharp:     NodeHandle,
     post_cas_strength:  NodeHandle,
@@ -166,6 +171,8 @@ pub struct PostInspectorState {
     pub restir_gi: bool,
     /// Phase 24AC.
     pub cas: bool,
+    /// Phase 24Z.
+    pub motion_blur: bool,
     pub bloom: bool,
     pub dof: bool,
     /// Phases 24U/25I.
@@ -176,7 +183,7 @@ pub struct PostInspectorState {
     /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
     /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
     /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
-    pub extras: [f32; 20],
+    pub extras: [f32; 22],
     pub auto_exposure: bool,
     pub tonemapper: &'static str,
 }
@@ -624,6 +631,7 @@ impl UiManager {
                     (h.post_restir_label, v.restir, "RT Direct Light"),
                     (h.post_restir_gi_label, v.restir_gi, "RT Indirect (GI)"),
                     (h.post_cas_label, v.cas, "Sharpen (CAS)"),
+                    (h.post_mb_label, v.motion_blur, "Motion Blur"),
                     (h.post_bloom_label, v.bloom, "Bloom"),
                     (h.post_dof_label, v.dof, "Depth of Field"),
                     (h.post_vol_label, v.volumetrics, "Volumetrics"),
@@ -655,6 +663,8 @@ impl UiManager {
                     (h.post_ao_intensity, v.extras[17]),
                     (h.post_cas_sharp, v.extras[18]),
                     (h.post_cas_strength, v.extras[19]),
+                    (h.post_mb_shutter, v.extras[20]),
+                    (h.post_gi_intensity, v.extras[21]),
                 ] {
                     self.native_ui.send(NumericFieldMessage::set_value(field, value));
                 }
@@ -704,10 +714,11 @@ impl UiManager {
 
     /// Show or hide the Terrain section and refresh it (Phase 17C).
     ///
-    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3]`.
-    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 5]>) {
+    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3, relief]`.
+    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 6]>) {
         let h = &self.inspector_handles;
         let (section, layer, tiles) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
+        let relief = h.terrain_relief;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
@@ -715,6 +726,7 @@ impl UiManager {
                 for (i, t) in tiles.iter().enumerate() {
                     self.native_ui.send(NumericFieldMessage::set_value(*t, v[i + 1]));
                 }
+                self.native_ui.send(NumericFieldMessage::set_value(relief, v[5]));
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -819,6 +831,8 @@ impl UiManager {
             (h.post_ao_intensity, IF::PostAoIntensity),
             (h.post_cas_sharp,  IF::PostCasSharpness),
             (h.post_cas_strength, IF::PostCasStrength),
+            (h.post_mb_shutter, IF::PostMotionBlurShutter),
+            (h.post_gi_intensity, IF::PostGiIntensity),
             (h.post_vig_str,    IF::PostVignetteStrength),
             (h.post_ca_str,     IF::PostCaStrength),
             (h.post_ibl,        IF::PostIblIntensity),
@@ -827,6 +841,7 @@ impl UiManager {
             (h.terrain_tile[1], IF::TerrainTile1),
             (h.terrain_tile[2], IF::TerrainTile2),
             (h.terrain_tile[3], IF::TerrainTile3),
+            (h.terrain_relief,  IF::TerrainRelief),
             (h.foliage_density, IF::FoliageDensity),
             (h.foliage_seed,    IF::FoliageSeed),
             (h.foliage_slope,   IF::FoliageSlope),
@@ -872,6 +887,7 @@ impl UiManager {
                     (self.inspector_handles.post_restir_toggle, PostFxToggle::Restir),
                     (self.inspector_handles.post_restir_gi_toggle, PostFxToggle::RestirGi),
                     (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
+                    (self.inspector_handles.post_mb_toggle, PostFxToggle::MotionBlur),
                     (self.inspector_handles.post_bloom_toggle, PostFxToggle::Bloom),
                     (self.inspector_handles.post_dof_toggle, PostFxToggle::DepthOfField),
                     (self.inspector_handles.post_vol_toggle, PostFxToggle::Volumetrics),
@@ -1734,6 +1750,11 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_cas_toggle, post_cas_label) = make_toggle(ui, "Sharpen (CAS)", font_id, post_section);
     let post_cas_sharp    = make_row_step(ui, "Sharp", 34.0, font_id, post_section, 0.01);
     let post_cas_strength = make_row_step(ui, "Amount", 34.0, font_id, post_section, 0.01);
+    // Phase 24Z. Below the two AA/sharpen filters because it is the other
+    // camera-motion effect, and its shutter is a photographic quantity like the
+    // exposure rows at the top.
+    let (post_mb_toggle, post_mb_label) = make_toggle(ui, "Motion Blur", font_id, post_section);
+    let post_mb_shutter = make_row_step(ui, "Shutter", 34.0, font_id, post_section, 0.01);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
 
     // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
@@ -1750,6 +1771,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // other half of the same traced solution and they read as a pair.
     let (post_restir_gi_toggle, post_restir_gi_label) =
         make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
+    // Phase 24L. Directly under its toggle, matching every other effect that
+    // pairs a switch with an amount.
+    let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
     let post_bloom_amt  = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
     let (post_dof_toggle, post_dof_label)     = make_toggle(ui, "Depth of Field", font_id, post_section);
@@ -1838,6 +1862,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
         make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
     ];
+    // Phase 25H: multiplies the relief depth every layer authors for itself, so
+    // one dial covers the whole terrain without flattening the differences
+    // between gravel and mud. 0 switches parallax off.
+    let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
     ui.set_visibility(terrain_section, false);
 
 
@@ -1846,7 +1874,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_section, light_intensity, light_range, light_inner, light_outer,
         light_col_r, light_col_g, light_col_b, light_temp_k,
         light_range_row, light_inner_row, light_outer_row,
-        terrain_section, terrain_layer, terrain_tile,
+        terrain_section, terrain_layer, terrain_tile, terrain_relief,
         foliage_section, foliage_toggle, foliage_label,
         foliage_paint_toggle, foliage_paint_label,
         foliage_erase_toggle, foliage_erase_label,
@@ -1862,7 +1890,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_cel_toggle, post_cel_label,
         post_taa_toggle, post_taa_label, post_gtao_toggle, post_gtao_label,
         post_restir_toggle, post_restir_label, post_bloom_toggle, post_bloom_label,
-        post_restir_gi_toggle, post_restir_gi_label,
+        post_restir_gi_toggle, post_restir_gi_label, post_gi_intensity,
         post_bloom_amt, post_dof_toggle, post_dof_label, post_dof_focus,
         post_temperature, post_contrast, post_saturation, post_grain,
         post_vol_toggle, post_vol_label, post_shafts_toggle, post_shafts_label,
@@ -1872,6 +1900,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_ao_radius, post_ao_intensity,
         post_fxaa_toggle, post_fxaa_label,
         post_cas_toggle, post_cas_label, post_cas_sharp, post_cas_strength,
+        post_mb_toggle, post_mb_label, post_mb_shutter,
     }
 }
 
