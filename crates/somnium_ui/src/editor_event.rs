@@ -113,6 +113,9 @@ pub enum InspectorField {
     FoliageLayer,
     FoliageScaleMin,
     FoliageScaleMax,
+    /// Metres from the camera past which foliage stops casting shadows
+    /// (Phase 24AE). Nearer than the draw distance on purpose.
+    FoliageShadowDistance,
 }
 
 /// Which post-processing effect a toggle click targets (Phase 15A1).

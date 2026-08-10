@@ -339,6 +339,7 @@ impl VoxelTerrain {
             let Some(alloc) = entry else { continue };
             let origin = somnium_voxel::chunk_origin(*coord);
             renderer.submit(somnium_renderer::command::DrawCommand {
+                casts_shadow: true,
                 sort_key: somnium_renderer::command::SortKey::new(
                     0, self.material_id as u16, alloc.vertex_offset,
                 ),
@@ -1138,6 +1139,7 @@ impl GameApp for HelloGame {
                     let material = unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity   = archetype.entities()[row];
                     renderer.submit(somnium_renderer::command::DrawCommand {
+                        casts_shadow: true,
                         sort_key:     somnium_renderer::command::SortKey::new(0, material.id as u16, entity.index()),
                         vertex_offset: mesh.vertex_offset,
                         index_offset:  mesh.index_offset,

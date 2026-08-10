@@ -52,6 +52,14 @@ pub struct DrawCommand {
     pub material_id: u32,
     /// The world transformation matrix.
     pub transform: Mat4,
+    /// Whether this draw reaches the shadow atlas at all (Phase 24AE).
+    ///
+    /// Separate from the screen-radius test in `Renderer::shadow_casters`,
+    /// which is automatic and size-based. This one is *authored*: foliage sets
+    /// it from its own shadow distance, because a field of grass is the case
+    /// where the artist wants the cut nearer than "too small to see" would put
+    /// it. Everything else sets `true` and is judged on size alone.
+    pub casts_shadow: bool,
 }
 
 // ─── Visibility-buffer packing limits (Phase 15C) ────────────────────────────

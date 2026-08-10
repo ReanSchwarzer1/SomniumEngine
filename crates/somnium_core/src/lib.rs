@@ -399,6 +399,18 @@ pub struct FoliageComponent {
     /// the indirect arguments entirely, which the GPU cull cannot do since the
     /// draw has to exist before it can be rejected.
     pub cull_distance: f32,
+    /// Phase 24AE: painted instances beyond this distance from the camera are
+    /// still drawn, but stop casting shadows.
+    ///
+    /// A separate, *nearer* cut than [`Self::cull_distance`], and the reason it
+    /// exists is what the profiler showed: a grass field fills the frame long
+    /// before it reaches the draw-distance cut, and every one of those tufts
+    /// was costing four cascades of depth for a shadow that reads as noise a
+    /// few metres out. The automatic screen-radius test only rescues you once
+    /// the *camera* is far away, which is not how anyone plays.
+    ///
+    /// `0` means "never stop", which is the A/B against the old behaviour.
+    pub foliage_shadow_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -419,6 +431,10 @@ impl Default for FoliageComponent {
             scale_max: 1.5,
             radius: 45.0,
             cull_distance: 120.0,
+            // A third of the draw distance. Grass shadows stop reading as
+            // individual blades within a few metres and as texture within a
+            // few tens; past that they are noise that costs four cascades.
+            foliage_shadow_distance: 40.0,
             max_instances: 18_000,
         }
     }

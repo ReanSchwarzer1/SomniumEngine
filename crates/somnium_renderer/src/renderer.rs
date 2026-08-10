@@ -1440,6 +1440,7 @@ impl SomniumRenderer {
                 // terrain's material is registered opaque, so the routing
                 // `submit` does would be a no-op anyway.
                 self.draw_queue.push(DrawCommand {
+                    casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
                         0,
                         material_id as u16,
@@ -2238,6 +2239,11 @@ impl SomniumRenderer {
                 instance_index,
                 index_count: cmd.index_count,
             };
+            // The authored opt-out comes first: foliage past its own shadow
+            // distance is out regardless of how large it is on screen.
+            if !cmd.casts_shadow {
+                continue;
+            }
             if threshold <= 0.0 {
                 out.push(caster);
                 continue;

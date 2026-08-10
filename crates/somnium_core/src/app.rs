@@ -155,7 +155,7 @@ pub struct Engine<G: GameApp> {
     pub foliage_erase: bool,
     /// Scratch list for this frame's visible foliage, reused so a field of
     /// instances does not allocate a fresh vector every frame.
-    foliage_batch: Vec<(FoliagePart, glam::Mat4)>,
+    foliage_batch: Vec<(FoliagePart, glam::Mat4, bool)>,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -855,6 +855,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         f32::from(brush.kind),
                         brush.scale_min,
                         brush.scale_max,
+                        f.foliage_shadow_distance,
                     ],
                     [f.enabled, paint_on, erase_on, single_on],
                 ));
@@ -1507,7 +1508,7 @@ impl<G: GameApp> Engine<G> {
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
         let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32)> = self
+        let terrains: Vec<(u32, glam::Mat4, f32, f32)> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -1520,11 +1521,11 @@ impl<G: GameApp> Engine<G> {
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model, fc.cull_distance))
+                Some((tc.terrain_id, model, fc.cull_distance, fc.foliage_shadow_distance))
             })
             .collect();
 
-        for (terrain_id, model, cull_distance) in terrains {
+        for (terrain_id, model, cull_distance, shadow_distance) in terrains {
             // Which palette entries this terrain actually uses, so nothing is
             // loaded for a kind that has never been painted.
             let kinds: Vec<u8> = {
@@ -1546,6 +1547,11 @@ impl<G: GameApp> Engine<G> {
             // Phase 17G: reject distant instances before they become draws.
             let camera_local = model.inverse().transform_point3(camera_ws);
             let cull_sq = if cull_distance > 0.0 { cull_distance * cull_distance } else { f32::MAX };
+            let shadow_sq = if shadow_distance > 0.0 {
+                shadow_distance * shadow_distance
+            } else {
+                f32::MAX
+            };
             self.foliage_batch.clear();
             for inst in &t.painted_foliage {
                 let d = inst.position - camera_local;
@@ -1564,13 +1570,18 @@ impl<G: GameApp> Engine<G> {
                     glam::Quat::from_rotation_y(inst.yaw),
                     inst.position,
                 );
+                // Horizontal, like the draw cull above and for the same
+                // reason: climbing a hill should not switch every shadow below
+                // you back on.
+                let casts = d.x * d.x + d.z * d.z <= shadow_sq;
                 for part in parts {
-                    self.foliage_batch.push((*part, model * placement * part.local));
+                    self.foliage_batch
+                        .push((*part, model * placement * part.local, casts));
                 }
             }
 
             if let Some(r) = self.renderer.as_mut() {
-                for (part, transform) in self.foliage_batch.drain(..) {
+                for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
                         vertex_offset: part.vertex_offset,
@@ -1578,6 +1589,7 @@ impl<G: GameApp> Engine<G> {
                         index_count: part.index_count,
                         material_id: part.material_id,
                         transform,
+                        casts_shadow,
                     });
                 }
             }
@@ -2170,6 +2182,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::FoliageLayer
                         | IF::FoliageScaleMin
                         | IF::FoliageScaleMax
+                        | IF::FoliageShadowDistance
                 ) {
                     // Phase 17F: these edit the brush, not a scatter. Foliage
                     // is painted now, so the settings that matter are the ones
@@ -2185,6 +2198,19 @@ impl<G: GameApp> Engine<G> {
                         }
                         IF::FoliageScaleMin => b.scale_min = value.max(0.01),
                         IF::FoliageScaleMax => b.scale_max = value.max(0.01),
+                        // Not a brush setting: this one lives on the component,
+                        // because it describes the foliage that already exists
+                        // rather than the next stroke.
+                        IF::FoliageShadowDistance => {
+                            if let Some(e) = self.selected_entity {
+                                if let Some(f) =
+                                    self.world.get_mut::<FoliageComponent>(e)
+                                {
+                                    f.foliage_shadow_distance =
+                                        value.clamp(0.0, 2000.0);
+                                }
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     return;

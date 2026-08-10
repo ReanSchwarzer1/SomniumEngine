@@ -1189,7 +1189,8 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24I | ✅ Complete | **GTAO with bent normals.** `pass/gtao.rs` + `gtao.wgsl`. Phase 17I applied only *baked* occlusion, so terrain, procedural meshes and all foliage received sky light unattenuated — the reason contact points stayed flat and shaded bark read sky-blue. GTAO (Jimenez 2016) rather than classic SSAO: it searches each screen-space slice for its **horizon angles** and integrates the visible arc analytically, producing a real visibility fraction rather than a darkening heuristic — which matters because this term will later feed the GI gather, not just tint the image. Normals are reconstructed from depth, taking the *closer* neighbour per axis: a naive central difference straddles silhouettes and yields normals facing nowhere real. Two slices with per-pixel and per-frame rotation, then a depth-weighted denoise; the residual noise is what TAA is for, which is precisely why 24F was its prerequisite. The **bent normal** is the part that changes indirect light's colour rather than only its amount — the irradiance gather uses it, so a surface in a crevice collects light from the opening rather than from the wall beside it. Screen-space AO **multiplies** the baked term rather than replacing it: the two know different things, and taking the minimum would discard whichever is more informative. Reference: Spartan's `ssao.hlsl`. |
 | 24J | ✅ Complete | **Ray-tracing scene: BLAS/TLAS via wgpu acceleration structures.** A bottom-level structure per uploaded mesh and a top-level structure rebuilt each frame from the *same draw queue the raster path uses*, so the traced scene and the drawn one cannot drift apart. Positions are the first 12 bytes of the 32-byte vertex, so `BLAS_INPUT` on the existing pools lets the build read geometry in place — no second copy. The plan's claim held: **the feature gap really was just ray query**, since the binding arrays and non-uniform indexing Solari also needs were already mandatory for the bindless pool. Four things beyond the feature bit were needed and none are obvious: an `unsafe` **experimental-features token** (wgpu asks the caller to acknowledge that these APIs may contain soundness bugs), the `max_blas_*`/`max_tlas_instance_count` **limits**, the `max_acceleration_structures_per_shader_stage` **binding limit** — all three default to zero — and `enable wgpu_ray_query` in the shader. Ships with a ray-traced shadow **acceptance test** (`SOMNIUM_RT_DEBUG=1`), because a correctly built acceleration structure and a silently broken one look identical until something traces against it; it showed the helmet self-shadowing, which is what confirmed the build. Degrades cleanly: every entry point checks whether the device granted ray query. |
 | 24K | ✅ Complete | **ReSTIR DI — resampled direct lighting.** The shadow ray from 24J plus the thing that makes rays affordable: *resampling*. Eight unshadowed candidates are drawn across the sun's disc, one is kept in proportion to its contribution by weighted reservoir sampling, and the single expensive ray confirms only that one — the estimator stays unbiased because the kept sample carries the weight of everyone it beat. **Temporal reuse** then combines each pixel's reservoir with its own history, capped at `M_CAP` so a reservoir keeps responding to change rather than fossilising (an uncapped `m` keeps a switched-off light visible for as long as the history has been accumulating). Sampling across the sun's angular disc gives a **real penumbra** rather than PCSS's filtered approximation of one, with no cascades, no depth bias and no peter-panning. Enabled by `SOMNIUM_RESTIR=1`; shading prefers the traced result and falls back to the shadow map when alpha is 0, which is also what an unsupported device produces since wgpu zero-fills the target. **Remaining: spatial reuse** (neighbour reservoirs) and a **multi-light set** — the target function currently evaluates only the sun, where a full implementation would weigh every light's intensity and falloff. **On by default.** Verified against the shadow map on a cube over a plane: 3.0 against 3.1 in shadow, 110.9 lit either way. It was switched off for a while on the reading that it "returned lit" and erased shadows — that was wrong. The missing shadows were the `GpuMaterial` layout bug, which zeroed the sun term so nothing could darken whether traced or mapped. **Remaining, moved to 24L's scope:** spatial reuse and a multi-light target function. **Known limit:** it shadows only visibility-buffer geometry, because terrain and water write depth in their own later passes — Phase 25A/25B closes that. |
-| 24L | ⬜ Planned | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
+| 24L | ✅ Complete | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
+| 24AE | ✅ Complete | **Shadow caster culling.** The shadow pass issued every draw four times, once per cascade: 24.5 ms of a 42 ms frame, nearly all of it grass whose shadow is a sub-pixel speckle. Two independent cuts. Unreal's `r.Shadow.RadiusThreshold` (`ShadowSetup.cpp`) culls a caster when its **projected screen radius** falls below a threshold — a *size* test, not a distance cut, and measured from the camera rather than the light, so a tree keeps casting at 200 m where a tuft stops at 30. And an authored `FoliageComponent::foliage_shadow_distance` (**Sh Dst** in the Foliage inspector, default 40 m), because the size test only rescues you once the camera is far from the grass, which is not how anyone plays. **Measured** at eye level: casters 7 166 → 1 873, Shadows **23.769 → 6.158 ms**, frame 26.893 → 9.545 ms, with every other pass unchanged to the third decimal. See §17.9. |
 | 24M | ⬜ Planned | **World-space radiance cache for multi-bounce.** A hashed/clipmapped world cache that rays terminate into, so a single traced bounce still resolves to many bounces of energy across frames, and distant geometry costs a lookup instead of a long trace. Reference: `bevy_solari/src/realtime/world_cache_{query,update,compact}.wgsl`; UE's equivalent is `LumenRadianceCache.usf`. |
 | 24N | ⬜ Planned | **Ray-traced reflections with a denoiser.** Specular GI proper: screen-space trace first, ray traced where the screen has no answer, radiance cache beyond that, then spatial + temporal denoising — one bounce per pixel is far too noisy raw. Finally gives water something better than a single planar reflection. Reference: `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/`. |
 | 24O | ⬜ Planned | **Offline path tracer for validation.** A slow, unbiased, accumulate-over-many-frames reference renderer sharing the 24J scene bindings. Not shipped in the frame loop — its whole job is to be *ground truth*, so “does the real-time GI actually converge to the right answer” becomes a comparison rather than an opinion. Bevy ships exactly this alongside Solari and it is the single best idea taken from studying it. Reference: `bevy_solari/src/pathtracer/`. |
@@ -2086,6 +2087,12 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **24L** — ✅ passing. `SOMNIUM_RESTIR_GI=0/1` at eye level: 51.2 mean
+  absolute luminance over 921 600 terrain pixels, 342 748 past the 1% threshold.
+  Cost 0.788 ms on the profiler. See §17.8.
+- **24AE** — ✅ passing. Eye-level foliage camera: casters 7 166 → 1 873 and
+  Shadows 23.769 → 6.158 ms, with every other pass unchanged to the third
+  decimal. See §17.9.
 - **25D** — ✅ passing. Debug mode 12 (`SOMNIUM_SHADOW_DEBUG=12`) reports mean
   layer taps per pixel: 16.74 → 11.44 with the detail budget on, unchanged at
   eye level. `SOMNIUM_TERRAIN_MACRO=0/1` moves 127.5 over 784 523 terrain
@@ -2388,6 +2395,127 @@ frames (default 120), which is how the 25D table above was produced.
 memory counters, and a frame-graph *view* beyond the indented tree. 24AB's
 lighting debug views were absorbed into the phase and already exist as
 `SOMNIUM_SHADOW_DEBUG` modes 1–12.
+
+---
+
+## 17.8 Phase 24L — ReSTIR GI
+
+24K resampled *direct* light: which of the sun's samples a pixel can see. 24L
+resamples the other half of the rendering equation — light that arrived by
+bouncing off something else. The estimator is the same; the sample space is not.
+**A DI reservoir holds a direction to a light; a GI reservoir holds a point in
+the world** — where the ray landed, its normal, and the radiance leaving it
+toward us. That difference is the whole of ReSTIR GI, and it is what makes a
+neighbour's sample reusable: two pixels a few centimetres apart see the same lit
+patch from slightly different angles, and a Jacobian converts between them.
+
+Ported from `bevy_solari/src/realtime/restir_gi.wgsl`. Three things came out of
+reading it that were not in the phase description:
+
+- **The reconnection-shift Jacobian and its rejection threshold.** Reusing a
+  neighbour's *point* means looking at the same patch from a different position;
+  the solid angle it subtends and the cosine at its surface both change, and the
+  estimator is only unbiased if that is divided out. Bevy rejects above 1.2 —
+  past it the shift is a bad approximation and the sample adds variance instead
+  of removing it.
+- **Fixed buffer roles, not a ping-pong.** The spatial pass reads its
+  *neighbours'* reservoirs, so reading and writing one buffer would be a data
+  race and a double-count at once. `gi_a` is the previous frame's finished set,
+  `gi_b` the handoff between the two dispatches.
+- Bevy's `NO_WORLD_CACHE` path lights the sample point directly, which is what
+  Somnium does — there is no world cache here.
+
+**`global_pool.wgsl`** came out of this phase and matters beyond it. The
+`@group(0)` scene bindings used to live at the top of `shading.wgsl`; they are
+now their own module, concatenated into both passes. A **ray hit resolves through
+the same `instances` array a visibility-buffer hit does** — one description of
+the scene, not two that could disagree. The TLAS's `instance_custom_data`
+changed from `vertex_offset` to the instance-buffer index to make that lookup
+exact: `instance_index` on an intersection is the TLAS *slot*, and instances
+without a BLAS are skipped during the build, so the two drift apart the moment
+one mesh is missing.
+
+**Terrain bounce albedo.** A ray landing on terrain would otherwise take
+`base_color`, which is white, and the ground would bounce colourless light into
+everything above it. Evaluating the real eight-layer composite per bounce is out
+of the question, so `GpuTerrainMaterial::layer_albedo` carries each layer's
+**mean linear albedo** and the hit blends them by the splat weights — two
+texture reads. Averaged in linear space, because the mean of sRGB bytes is not
+the sRGB of the mean.
+
+**Measured.** `SOMNIUM_RESTIR_GI=0/1` at eye level: **51.2** mean absolute
+luminance over 921 600 terrain pixels, 342 748 past the 1% threshold, mean
+luminance 4527 → 4476 — slightly *darker*, which is the right direction for
+replacing a constant ambient with a real occluded bounce. Cost, from the Phase 29
+profiler: **0.788 ms** for two full-res dispatches at 1280×720.
+
+**Honest limit:** the effect is conservative in the demo scene, an open hillside
+under a bright sky where a constant ambient and a real bounce largely agree. GI
+earns its keep in enclosed and occluded geometry, and the scene has none. That
+is a scene limitation, not a pass limitation.
+
+**Not done:** specular GI (the cubemap still supplies the specular lobe), a
+world cache, a denoiser, and multi-bounce — the sample point is lit by the sun
+directly, so this is a one-bounce solution.
+
+---
+
+## 17.9 Phase 24AE — shadow caster culling
+
+The profiler's first real finding on a working scene: **Shadows at 24.5 ms of a
+42 ms frame**, with 8 599 draws and 52.9 million triangles issued *four times*,
+once per cascade. Most of it was grass whose shadow is a sub-pixel speckle. The
+main view has stopped drawing distant foliage since 17G; the shadow pass never
+learned to.
+
+**Two cuts, deliberately independent.**
+
+**1. Projected screen radius** — Unreal's `r.Shadow.RadiusThreshold`
+(`ShadowSetup.cpp`):
+
+```
+draw = radius² > threshold² · distance²        i.e.  radius / distance > threshold
+```
+
+Two things about it are easy to get wrong. The distance is from the **camera**,
+not the light — the question is whether anyone would see the shadow, which is a
+screen-space question. And it is a **size** test, not a distance cut: a tree
+keeps casting at 200 m because its radius is metres, a tuft stops at 30 m
+because its radius is centimetres. One rule that scales itself to the object,
+which is why UE uses it in place of a per-asset shadow distance. `casts_shadow`
+in `pass/shadow.rs`, five tests, `SOMNIUM_SHADOW_RADIUS` to tune (UE ships 0.01;
+0 disables).
+
+**2. An authored foliage shadow distance** — `FoliageComponent::foliage_shadow_distance`,
+default 40 m, editable as **Sh Dst** in the Foliage inspector. The size test is
+the right general rule but only rescues you once the *camera* is far from the
+grass, which is not how anyone plays. At eye level the field fills the frame and
+every tuft is still large enough to pass the radius test. This is the dial for
+that case, and it is nearer than the draw distance on purpose.
+
+**Measured** (eye-level foliage camera, `SOMNIUM_FOLIAGE=1`):
+
+| | casters | Shadows | Frame |
+|---|---|---|---|
+| neither cut | 7 166 / 7 166 | 23.769 ms | 26.893 ms |
+| both | 1 873 / 7 166 | **6.158 ms** | **9.545 ms** |
+
+Every other pass is unchanged to the third decimal — Visibility 0.042/0.045,
+GTAO 0.482/0.478, Shading 0.895/0.902 — which is the control. From a distant
+camera the radius test alone takes it further: 362 of 1 069 casters, Shadows
+0.669 ms.
+
+`shadow casters N of M draws` is now a profiler row and an overlay row, because
+a `Shadows` time that has grown is nearly always this ratio having grown.
+
+**One structural change:** `ShadowPass::record` takes
+`&[ShadowCaster { instance_index, index_count }]` rather than the draw queue.
+The pass used a draw's *position in the queue* as its instance index, so
+filtering into a new `Vec<DrawCommand>` would have renumbered them and paired
+every draw with another mesh's transform.
+
+**Not done:** per-cascade frustum culling of casters (a caster is in or out for
+all four cascades), and a fade rather than a hard cut at the foliage distance.
 
 ---
 

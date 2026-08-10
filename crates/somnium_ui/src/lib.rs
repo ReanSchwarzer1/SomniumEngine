@@ -100,6 +100,7 @@ struct InspectorHandles {
     foliage_layer:   NodeHandle,
     foliage_smin:    NodeHandle,
     foliage_smax:    NodeHandle,
+    foliage_shadow:  NodeHandle,
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label:  NodeHandle,
     post_ca_label:   NodeHandle,
@@ -714,12 +715,12 @@ impl UiManager {
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
     /// plus the enable flag.
-    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 6], [bool; 4])>) {
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 7], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
         let fields = [
             h.foliage_density, h.foliage_seed, h.foliage_slope,
-            h.foliage_layer, h.foliage_smin, h.foliage_smax,
+            h.foliage_layer, h.foliage_smin, h.foliage_smax, h.foliage_shadow,
         ];
         match values {
             Some((v, flags)) => {
@@ -821,6 +822,7 @@ impl UiManager {
             (h.foliage_layer,   IF::FoliageLayer),
             (h.foliage_smin,    IF::FoliageScaleMin),
             (h.foliage_smax,    IF::FoliageScaleMax),
+            (h.foliage_shadow,  IF::FoliageShadowDistance),
         ];
 
         for msg in msgs {
@@ -1796,6 +1798,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     ui.set_visibility(foliage_layer_row, false);
     let foliage_smin    = make_row_step(ui, "Sc Mn", 34.0, font_id, foliage_section, 0.01);
     let foliage_smax    = make_row_step(ui, "Sc Mx", 34.0, font_id, foliage_section, 0.01);
+    // Phase 24AE. Metres, so a whole-number step: this is the dial that decides
+    // how much of the shadow pass a grass field is allowed to cost, and the
+    // profiler's `shadow casters` row is the readout for it.
+    let foliage_shadow  = make_row_step(ui, "Sh Dst", 34.0, font_id, foliage_section, 1.0);
     ui.set_visibility(foliage_section, false);
 
     // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
@@ -1831,6 +1837,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         foliage_kind_button, foliage_kind_label,
         foliage_density,
         foliage_seed, foliage_slope, foliage_layer, foliage_smin, foliage_smax,
+        foliage_shadow,
         post_section, post_exposure, post_exp_comp, post_auto_exp_toggle,
         post_auto_exp_label, post_tonemap_button, post_tonemap_label,
         post_ibl, post_vig_toggle, post_vig_str,
