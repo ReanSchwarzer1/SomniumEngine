@@ -1225,7 +1225,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25H | ✅ Complete | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
-| 25M | ⬜ Planned | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
+| 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
@@ -2090,6 +2090,10 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **25M** — ✅ passing for the reported bug. `SOMNIUM_SUN_ELEVATION=-10` now
+  renders black-with-stars instead of red; +2° renders a golden hour. HDR
+  terrain luminance 4362 (day) → 137.7 (dusk) → 0.0001 (night). The night
+  specular look and the exposure/firefly hypotheses are still open. See §17.16.
 - **25H** — ✅ passing. `SOMNIUM_TERRAIN_PARALLAX=0/1` at eye level: 1729.8
   mean absolute luminance over 921 600 terrain pixels, mean luminance moving
   only −0.4% — detail redistributed, not darkened. Shading 0.898 → 1.022 ms.
@@ -3025,6 +3029,80 @@ independently measurable.
 24U's light-shaft verification. Then 25N, which is a contained shader change with
 a large visual payoff. Then 25P, whose first step is cheap and whose later steps
 should be judged on measurements taken after the first.
+
+---
+
+## 17.16 Phase 25M — the sun below the horizon
+
+**The plan's first claim was wrong, and finding that out was the phase.** §25.14
+said `ray_intersects_ground` appeared nowhere in the engine. It appears
+everywhere — under the name `ray_hits_ground`. The grep had been for Bevy's
+spelling. Two of the three places that sample the sun's transmittance
+(`atmosphere.wgsl:209`, `atmosphere_lut.wgsl:89`) were already guarded.
+
+**The real cause was one level up, on the CPU.** `LightComponent::photometric_color`
+returns intensity × tint and nothing else, so a sun authored at 100 000 lux
+stayed at 100 000 lux when the gizmo rotated it below the horizon. The engine
+went on lighting the world with full noon sunlight arriving from underground.
+The atmosphere shaders were behaving correctly; nothing had told the *direct*
+light that the sun had set.
+
+**Fix: the sun's illuminance is what survives the trip through the air.**
+`somnium_core::sun::transmittance(sun_up, altitude_km)` integrates the same
+Rayleigh, Mie and ozone profile `atmosphere.wgsl` uses — the same constants, in
+kilometres — along the ray toward the sun, and returns zero once that ray would
+have to pass through the planet. Applied where the directional light is uploaded,
+which is the one value every consumer reads: shading, shadows, ReSTIR DI and GI,
+the froxel volume, and the sky's own `sun_illuminance` and moon blending. There
+is nowhere for them to disagree about whether the sun has set.
+
+Two things fall out of integrating rather than fading:
+
+- **Sunset colour is physics, not a gradient.** Rayleigh removes blue first, so a
+  low sun comes out orange on its own. `a_low_sun_comes_out_orange` pins the
+  blue/red ratio at 0.05 elevation against noon.
+- **The horizon crossing is soft.** The cut is at −0.86°, not zero: the sun's
+  disc is about half a degree across and refraction lifts it by roughly another
+  half, so light keeps arriving after the geometric centre has set. A hard cut
+  at zero steps visibly in the one moment anybody is watching.
+
+Six tests, including that brightness falls **monotonically** all the way down —
+a sunset that brightens anywhere flashes as it crosses the step.
+
+**Second fix: the froxel volume's missing guard.** `volumetric.wgsl` was the one
+place that sampled `sample_transmittance` without `ray_hits_ground`. Below the
+horizon the LUT lookup clamps to its last valid row — the reddest one, because at
+grazing angles Rayleigh has taken out everything but red — so every froxel went
+on being lit by the reddest possible sunlight. That is the red frame with fog
+enabled.
+
+**`SOMNIUM_SUN_ELEVATION` / `SOMNIUM_SUN_AZIMUTH`** place the sun in degrees at
+startup. Reproducing a bug by rotating a gizmo by hand is not a test; this makes
+dusk and night a capture like any other, and it is what finally gives **24U's
+light shafts** the low sun behind a ridge they have never been verified against.
+
+**Measured**, HDR terrain luminance at the landscape camera:
+
+| sun elevation | terrain | sky |
+|---|---|---|
+| +35° (day) | 4362 | 18 447 |
+| +2° (dusk) | 137.7 | 283.6 |
+| −10° (night) | 0.0001 | 0.0004 |
+
+Dusk renders as a real golden hour — a warm low sun raking across the terrain
+with long shadows under a blue-grey sky — and night is black with stars instead
+of red.
+
+**What is not settled.** At night the terrain reads specular-dominated, like
+foil. Diffuse is essentially zero while the environment cubemap still reflects a
+faint sky, so whatever specular remains is *relatively* the whole image, and the
+capture harness's PNG uses a fixed exposure that amplifies a near-black frame
+enormously. That is very likely a property of how it is being *looked at* rather
+than of what is rendered, and the honest next step is to judge it on screen with
+auto-exposure running before changing anything. The two hypotheses §25.14 listed
+— exposure with no night floor, and unclamped ReSTIR GI fireflies — are still
+untested for the same reason: the red was drowning them, and now that it is gone
+they need a fresh measurement rather than a guess.
 
 ---
 

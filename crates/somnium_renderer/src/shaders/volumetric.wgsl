@@ -214,10 +214,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let scatter_mie = vec3<f32>(MIE_SCATTERING * density.y * KM_PER_M);
 
             let mu_sun = sun_dir.y;
-            let sun_transmittance = sample_transmittance(
-                transmittance_lut, lut_sampler, sample_r, mu_sun);
-            let multiscatter = sample_multiscatter(
-                multiscatter_lut, lut_sampler, sample_r, mu_sun);
+            // Phase 25M. `atmosphere.wgsl` and `atmosphere_lut.wgsl` both guard
+            // their sun transmittance with this; the froxel volume did not, and
+            // it is the one place the omission was visible. Below the horizon
+            // the LUT lookup clamps to its last valid row — the reddest one,
+            // because at grazing angles Rayleigh has taken everything but red
+            // out — so every froxel went on being lit by the reddest possible
+            // sunlight instead of by none. That is the red frame.
+            var sun_transmittance = vec3<f32>(0.0);
+            var multiscatter = vec3<f32>(0.0);
+            if !ray_hits_ground(sample_r, mu_sun) {
+                sun_transmittance = sample_transmittance(
+                    transmittance_lut, lut_sampler, sample_r, mu_sun);
+                multiscatter = sample_multiscatter(
+                    multiscatter_lut, lut_sampler, sample_r, mu_sun);
+            }
 
             var step_scatter = (scatter_rayleigh * rayleigh + scatter_mie * mie)
                 * sun_transmittance

@@ -54,6 +54,7 @@ pub mod event;
 pub mod light_units;
 pub mod log_capture;
 pub mod scene_serial;
+pub mod sun;
 pub mod time;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────

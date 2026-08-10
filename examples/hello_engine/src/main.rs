@@ -764,10 +764,27 @@ impl GameApp for HelloGame {
         }
 
         // Phase 11A: Spawn the directional light entity.
+        //
+        // Phase 25M: `SOMNIUM_SUN_ELEVATION` (degrees above the horizon) and
+        // `SOMNIUM_SUN_AZIMUTH` place the sun at startup. Rotating it by hand
+        // with the gizmo is how the night bug was found, and reproducing that by
+        // hand is not a test — this makes dusk and night a capture like any
+        // other. It is also the only way to give 24U's light shafts the low sun
+        // behind a ridge they have never been verified against.
+        let elevation = std::env::var("SOMNIUM_SUN_ELEVATION")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(35.0);
+        let azimuth = std::env::var("SOMNIUM_SUN_AZIMUTH")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(-30.0);
+        // Pitch is negated: the light's forward is -Z, so a *positive* elevation
+        // has to tilt the forward vector downward for `to_light` to point up.
         let light_rot = glam::Quat::from_euler(
             glam::EulerRot::YXZ,
-            (-30.0_f32).to_radians(),
-            (-35.0_f32).to_radians(),
+            azimuth.to_radians(),
+            -elevation.to_radians(),
             0.0,
         );
         ctx.world.spawn((
@@ -1026,7 +1043,23 @@ impl GameApp for HelloGame {
 
                         match light.light_type {
                             LightType::Directional => {
-                                renderer.set_directional_light(to_light, light.photometric_color());
+                                // Phase 25M: the sun's illuminance is what
+                                // survives the trip through the atmosphere, so
+                                // it reddens as the sun drops and reaches zero
+                                // once it is below the horizon. Applied here,
+                                // to the one value every consumer reads —
+                                // shading, shadows, ReSTIR, the froxel volume
+                                // and the sky's own moon blending all take the
+                                // light buffer, so there is nowhere for them to
+                                // disagree about whether the sun has set.
+                                let survives = somnium_core::sun::transmittance(
+                                    to_light.y,
+                                    transform.translation.y * 0.001,
+                                );
+                                renderer.set_directional_light(
+                                    to_light,
+                                    light.photometric_color() * survives,
+                                );
                             }
                             LightType::Point | LightType::Spot => {
                                 let l_type = if light.light_type == LightType::Point { 0 } else { 1 };
