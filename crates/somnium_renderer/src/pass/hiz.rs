@@ -27,6 +27,12 @@ pub struct HiZPass {
     mip_views: Vec<wgpu::TextureView>,
     /// `bind_groups[i]` produces mip `i`. Index 0 reads the depth buffer.
     bind_groups: Vec<wgpu::BindGroup>,
+    /// Phase 24AC: builds levels 1.. in a couple of dispatches instead of one
+    /// each. `SOMNIUM_SPD=0` falls back to the per-mip chain, which is the A/B.
+    /// `None` when the device grants fewer storage textures per stage than SPD
+    /// needs — the per-mip chain is the fallback, not an error.
+    spd: Option<crate::pass::spd::SpdPass>,
+    use_spd: bool,
 
     width: u32,
     height: u32,
@@ -35,6 +41,7 @@ pub struct HiZPass {
 impl HiZPass {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         width: u32,
         height: u32,
         depth_view: &wgpu::TextureView,
@@ -119,9 +126,29 @@ impl HiZPass {
             device, width, height, depth_view, &copy_layout, &down_layout,
         );
 
+        // Phase 24AC. The bind-group layout would fail outright on a device
+        // with fewer storage textures than the shader declares, so this is
+        // checked before anything is created rather than caught after.
+        let spd_supported = device.limits().max_storage_textures_per_shader_stage
+            >= crate::pass::spd::MIPS_PER_DISPATCH;
+        let spd = if spd_supported {
+            let mut p = crate::pass::spd::SpdPass::new(device);
+            p.build(device, queue, &mip_views, width, height, mip_count(width, height));
+            Some(p)
+        } else {
+            tracing::info!(
+                "Hi-Z: single-pass downsample unavailable (needs {} storage textures per stage)                  — using the per-mip chain",
+                crate::pass::spd::MIPS_PER_DISPATCH,
+            );
+            None
+        };
+        let use_spd = spd.is_some() && std::env::var("SOMNIUM_SPD").as_deref() != Ok("0");
+
         Self {
             copy_pipeline, down_pipeline, copy_layout, down_layout,
             texture, view, mip_views, bind_groups, width, height,
+            spd,
+            use_spd,
         }
     }
 
@@ -139,6 +166,7 @@ impl HiZPass {
     pub fn resize(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         width: u32,
         height: u32,
         depth_view: &wgpu::TextureView,
@@ -152,21 +180,36 @@ impl HiZPass {
         self.bind_groups = bind_groups;
         self.width = width;
         self.height = height;
+        if let Some(spd) = self.spd.as_mut() {
+            spd.build(
+                device, queue, &self.mip_views, width, height, mip_count(width, height),
+            );
+        }
     }
 
-    /// Record the full pyramid build. Each level depends on the one below, so
-    /// they go in separate dispatches — wgpu inserts the barriers between them.
+    /// Record the full pyramid build.
+    ///
+    /// Level 0 is always its own dispatch: a depth texture cannot be bound as a
+    /// storage image, so it has to be copied rather than reduced. Above that,
+    /// SPD takes six levels per dispatch (Phase 24AC); the fallback path walks
+    /// them one at a time, each a pipeline barrier behind the last.
     pub fn record(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Hi-Z Build"),
             timestamp_writes: None,
         });
-        for (level, bg) in self.bind_groups.iter().enumerate() {
-            if level == 0 {
-                pass.set_pipeline(&self.copy_pipeline);
-            } else if level == 1 {
-                pass.set_pipeline(&self.down_pipeline);
-            }
+        pass.set_pipeline(&self.copy_pipeline);
+        pass.set_bind_group(0, &self.bind_groups[0], &[]);
+        let (w0, h0) = mip_size(self.width, self.height, 0);
+        pass.dispatch_workgroups(w0.div_ceil(8), h0.div_ceil(8), 1);
+
+        if let (true, Some(spd)) = (self.use_spd, self.spd.as_ref()) {
+            spd.record(&mut pass);
+            return;
+        }
+
+        pass.set_pipeline(&self.down_pipeline);
+        for (level, bg) in self.bind_groups.iter().enumerate().skip(1) {
             let (w, h) = mip_size(self.width, self.height, level as u32);
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);

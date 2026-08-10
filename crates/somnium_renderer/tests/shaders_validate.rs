@@ -13,6 +13,10 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
 const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
+const SPD: &str = include_str!("../src/shaders/spd.wgsl");
+const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
+const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
+const CAS: &str = include_str!("../src/shaders/cas.wgsl");
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
@@ -131,6 +135,18 @@ fn the_restir_gi_module_validates() {
             "{RESTIR_GI}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
         ),
     );
+}
+
+/// The standalone post and utility modules. Each declares its own bindings
+/// and pulls in nothing, so each validates alone — and every one of them has
+/// already caught something: a reserved keyword in SPD, a reserved parameter
+/// name in the GI module, three struct-field mismatches.
+#[test]
+fn the_standalone_post_modules_validate() {
+    check("spd", SPD);
+    check("velocity", VELOCITY);
+    check("motion_blur", MOTION_BLUR);
+    check("cas", CAS);
 }
 
 #[test]

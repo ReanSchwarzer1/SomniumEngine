@@ -167,6 +167,16 @@ impl RenderContext {
         let mut limits = wgpu::Limits::default();
         limits.max_binding_array_elements_per_shader_stage = 1024;
         limits.max_storage_buffers_per_shader_stage = 16;
+        // Phase 24AC: SPD writes six mip levels from one dispatch, and wgpu's
+        // default ceiling is four storage textures per stage. Asked for from
+        // the adapter rather than demanded — a device that cannot manage six
+        // falls back to the per-mip pyramid, which is why `HiZPass` checks the
+        // granted limit rather than assuming this succeeded.
+        limits.max_storage_textures_per_shader_stage = adapter
+            .limits()
+            .max_storage_textures_per_shader_stage
+            .min(8)
+            .max(limits.max_storage_textures_per_shader_stage);
         // Phase 17E: the geometry pool is a storage buffer, and wgpu's default
         // ceiling of 128 MB is small for a scene holding a photoscanned model.
         // Ask for whatever this adapter actually supports and let the pool size

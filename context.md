@@ -1181,7 +1181,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24Z | ✅ Complete | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur landed with 24AD's velocity buffer** — Jimenez's depth and spread weights, Wicked's cheap configuration, before TAA and on HDR. See §17.12. |
 | 24AA | ⏸ Deferred | **Cloud shadows.** A scrolling noise mask over the sun's contribution. Cheap, and one of the strongest cues that an outdoor scene is a place rather than a render, because it puts the sky in motion without any volumetric cost. Reference: Spartan's `cloud_shadow.hlsl`. |
 | 24AB | ⏸ Deferred | **Lighting debug views.** Per-light-type heatmaps, cluster occupancy, exposure histogram readout, a luminance false-colour view. GI is nearly impossible to debug by eye, and every engine surveyed ships these. Reference: O3DE's `LightCullingHeatmap.azsl`, UE's Lumen visualisation modes. |
-| 24AC | 🟨 CAS complete, SPD open | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
+| 24AC | ✅ Complete | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
 | 24E | ✅ Complete | **Sun as a physical disc.** 0.53° angular diameter drives `evaluate_brdf_area`, which widens the specular lobe by the source's angular radius and normalises its energy (Karis' sphere-light approximation). A point source gives a one-pixel highlight on anything smooth, which is among the clearest tells that an image is rendered. The correction is **specular-only** — a first attempt scaled the whole BRDF and would have darkened every lit surface, since diffuse does not care how large a source is. Lights also gained **colour temperature in Kelvin**, one physically meaningful dial replacing three coupled RGB channels; the Planckian fit is sRGB and is decoded to linear before use, which left warm lights far too saturated when skipped. `sun_angular_radius` rides in the light buffer's remaining padding. |
 | 24F | ✅ Complete | **Temporal anti-aliasing + specular AA** (absorbs the old Phase 18). Halton-jittered projection; depth-based reprojection; 9-tap Catmull-Rom history sampling (bilinear compounds and goes visibly soft over ~100 frames); Playdead `clip_aabb` neighbourhood clipping with Salvi variance clipping. Blending happens in a **tone-mapped space** — averaging HDR directly lets one bright sample dominate, so a glint flickers rather than resolving, which is the artefact the pass exists to remove. History buffers ping-pong because wgpu forbids binding one texture as both read and write. **Limitation:** reprojection is depth-based, so it handles camera motion exactly but objects that move while the camera is still will ghost until a velocity buffer exists (24AD). Specular AA folds Toksvig normal-map variance back into roughness so mipped detail widens the lobe rather than aliasing. |
 | 24G | ✅ Complete | **Sampling infrastructure.** Interleaved gradient noise, Vogel disk (chosen over Poisson tables, which must be shipped and indexed, and over grids, which alias into rings), cosine-weighted hemisphere with Frisvad's branchless basis, R2 and Halton sequences. Shared so the patterns are chosen once — white noise clumps, and clumps survive filtering as blotches. |
@@ -2087,6 +2087,9 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
   terrain shadowing terrain — the 24K acceptance test, and 24K is ✅ with it.
   See §25.3d.
 - **25C** — fly a ridge line against the sky and record; no popping frame to frame.
+- **24AC (SPD)** — ✅ passing. Hi-Z 0.045 → 0.029 ms with the frame
+  **bit-identical** (`mean_abs = 0.0000, changed = 0`), which is the real
+  acceptance test for something feeding occlusion culling. See §17.14.
 - **24AD / 24Z** — ✅ passing. Both passes dispatch and are profiled:
   Velocity 0.010 ms, Motion Blur 0.034 ms moving / 0.001 ms static.
   See §17.11–17.12.
@@ -2719,6 +2722,63 @@ frame, since it binds the volume by view.
 frame and the shadow test is in the integral, but the demo scene has no low sun
 behind a hard occluder, so nobody has *seen* a shaft. That needs a scene, not a
 change — and this note stays until someone has looked at one.
+
+---
+
+## 17.14 Phase 24AC — SPD, and 24AC closed
+
+The Hi-Z pyramid cost one dispatch per mip: **eleven** at 1280×720, each a
+pipeline barrier behind the last, each reading a texture the previous one had
+just written. The arithmetic is trivial; the *dependency chain* is the cost.
+
+SPD's observation is that a workgroup owning a 64×64 tile of the source can
+compute six mip levels of that tile entirely in its own shared memory — after
+the first reduction the whole tile fits there. A dispatch boundary is only
+needed when a level draws on more than one tile, and by then the image is 64×
+smaller. Ported from `SpartanEngine-master/data/shaders/amd_fidelity_fx/` —
+`ffx_spd.h`'s `SpdDownsampleMips_0_1_LDS`, the no-wave-operations path, which is
+the right one because WGSL has no subgroup quad swizzles.
+
+**The last-workgroup trick is deliberately not ported, and this is the
+interesting part of the phase.** SPD does the whole pyramid in one dispatch: a
+global atomic counter elects the workgroup that finishes last, and that one
+reads mip 6 — written by *other* workgroups — and carries on. That requires
+`globallycoherent` storage images. **WGSL has no such qualifier**, and its memory
+model offers no way to make one workgroup's texture writes visible to another
+inside a dispatch; `storageBarrier` is workgroup-scoped. Porting it anyway would
+be a data race that happens to pass on one driver.
+
+So the same shader is dispatched **twice**, separated by a real barrier: once
+over the whole image for six mips, once with a single workgroup to finish the
+tail from the sixth. Eleven dispatches become three — the depth copy, then these
+two — the structure is SPD's, and nothing rests on undefined behaviour.
+
+Two details carried over from the original per-mip shader because the pyramid
+feeds occlusion culling:
+
+- The reduction is **`max`** — a texel holds the *furthest* depth of its region,
+  so the test can never make an occluder look further away than it is.
+- **Odd sizes widen to three.** Halving 5 gives 2, and a plain 2×2 reduction
+  drops source column 4 — a real occluder vanishing from the pyramid, which is
+  the one error direction that rejects visible geometry.
+
+**Measured.** Hi-Z **0.045 → 0.029 ms** (−36%), and the rendered frame is
+**bit-identical**: `SOMNIUM_SPD=0/1` through the capture harness gives
+`mean_abs = 0.0000, changed = 0` over all 921 600 pixels, with the same 257
+draws and 288 460 triangles surviving culling. For something feeding occlusion
+culling that identity is the acceptance test, not the speed.
+
+**One device requirement.** Six storage textures in one stage, where wgpu's
+default ceiling is four. `context.rs` asks the adapter for up to eight in the
+"detect, do not demand" style the file already uses, and `HiZPass` checks the
+*granted* limit before building anything — a device that cannot manage six logs
+a line and keeps the per-mip chain. `SOMNIUM_SPD=0` forces that path anyway,
+which is the A/B.
+
+**Not done:** SPD is not yet used for the bloom chain, which still downsamples a
+level per pass. The reduction there is a filtered average rather than a max, so
+it needs a second variant of the shader; the pyramid was the one with eleven
+barriers in it.
 
 ---
 

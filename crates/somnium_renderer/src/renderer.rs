@@ -433,7 +433,8 @@ impl SomniumRenderer {
             &ctx.device, ctx.config.width, ctx.config.height, &global_pool.layout,
         );
         let hiz_pass = crate::pass::hiz::HiZPass::new(
-            &ctx.device, ctx.config.width, ctx.config.height, &vis_pass.depth_view,
+            &ctx.device, &ctx.queue, ctx.config.width, ctx.config.height,
+            &vis_pass.depth_view,
         );
         let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
 
@@ -1150,7 +1151,9 @@ impl SomniumRenderer {
             self.motion_blur_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
-            self.hiz_pass.resize(&ctx.device, width, height, &self.vis_pass.depth_view);
+            self.hiz_pass.resize(
+                &ctx.device, &ctx.queue, width, height, &self.vis_pass.depth_view,
+            );
             // The new texture is zero-filled, i.e. everything at the near
             // plane, so occlusion has to stand down until it is rebuilt.
             self.hiz_ready = false;
