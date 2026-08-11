@@ -118,6 +118,8 @@ Research prioritized source code in the supplied reference repositories, officia
 | Wicked Engine | Terrain uses material arrays and sparse/virtual atlas techniques for larger scopes. | Continue material arrays; avoid introducing an atlas/VT subsystem without a world-size requirement. |
 | Fyrox | Terrain layers are individually masked and authored as a stack. | Preserve intuitive layer-based authoring while keeping Somnium's packed one-pass control textures. |
 | Bevy biplanar reference | Demonstrates biplanar sampling with explicit gradients and the reduction from three projections to two, with known axis-switch discontinuities. | Use full-PBR biplanar projection as the default steep-slope path, retain triplanar as a debug/quality fallback, and test seam hysteresis. |
+| Bethesda Game Studios / Fallout 4 | Bethesda's first-party graphics overview describes a physically based deferred renderer designed to make materials visually distinct, plus a material system that changes world surfaces when rain arrives. | Judge all sixteen materials by their light response—not albedo alone—and verify wet/dry weather states without erasing the identity of sand, soil, grass, and rock. |
+| Bethesda Game Studios / GDC 2016 | Joel Burgess and Nathan Purkeypile describe reusable modular art kits and an iterative level-design workflow as the production foundation that allowed a comparatively small content team to build Fallout 4's enormous world. | Treat the sixteen-material palette and biome preset as a reusable **landscape kit**: versioned, previewable, composable, and repeatedly reviewed across the whole terrain rather than tuned as isolated textures. |
 
 ### 5.2 Research-to-design decisions
 
@@ -131,6 +133,17 @@ Research prioritized source code in the supplied reference repositories, officia
 | Photogrammetry | DICE's photogrammetry workflow and MatSynth both highlight scale, material completeness, cleanup, and metadata. | Treat “photoscanned” as a quality/provenance requirement, not a marketing label. Validate seams, scale, lighting neutrality, and all PBR channels. |
 | Compression | wgpu exposes BC texture compression only when the adapter supports `TEXTURE_COMPRESSION_BC`. | Produce BC7 runtime packs and request the feature conditionally. Keep a deterministic RGBA8 fallback and never keep both resident. |
 | Virtual texturing | Unreal, Far Cry 5, Ghost Recon, O3DE, and Wicked demonstrate its value at large scale. | Defer until a profiler-backed gate is crossed. Somnium currently has a bounded 1 km terrain and a working direct-array path. |
+
+### 5.3 The Bethesda/Appalachia landscape connection
+
+The Appalachia codename now has a practical design link as well as the “sixteen times the detail” joke:
+
+- Bethesda Game Studios' Fallout 4 graphics overview says its technology choices were selected jointly by the art and engineering teams against specific artistic and performance goals. Its PBR renderer was intended to make surfaces feel tactile and materially distinct, while rain could alter world-surface response. Phase XV follows that discipline by giving every terrain category a characteristic albedo, normal scale, roughness range, height response, and wet-state response, then testing those properties within a fixed GPU budget.
+- In the GDC 2016 session **Fallout 4's Modular Level Design**, BGS presented reusable art kits and iteration as a way to create a large, varied open world efficiently. The direct analogue here is not modular architecture but a modular landscape kit: sixteen stable materials, one manifest, shared biome rules, consistent debug views, and repeated whole-world review.
+- Bethesda's official Fallout 76 overview describes Appalachia as six visually distinct regions, including the Forest, Toxic Valley, and Ash Heap. Somnium should similarly require readable biome identities from combinations of a reusable palette rather than equating variety with one unique texture per biome.
+- BGS senior environment artist Megan Sawyer describes a landscape team that reviews its work weekly and uses regionally meaningful flora—such as West Virginia's rhododendron—to ground Fallout 76. Foliage remains outside Phase XV, but the material manifest should retain biome and moisture tags so a later scatter system can extend the same environmental identity instead of inventing a disconnected one.
+
+This does **not** mean copying Creation Engine technology or Fallout's art direction. It contributes production principles: distinct physical materials, weather-aware validation, reusable landscape building blocks, strong regional identity, and regular landscape-scale review.
 
 ## 6. Proposed sixteen-material palette
 
@@ -309,6 +322,7 @@ All subphases are **PLANNED**. Completing a subphase requires its acceptance evi
 **Work**
 
 - Freeze reference scenes, camera transforms, adapter details, shader timings, tap counts, and memory measurements.
+- Define a landscape-kit review matrix covering each intended biome identity in dry, wet, day, and night conditions.
 - Add the sixteen-entry manifest schema and fill existing-layer provenance gaps.
 - Validate the eight proposed new asset pages, channel sets, real-world sizes, licenses, and source hashes.
 - Record any evidence images under `dev records/phase XV/evidence/` using `phase_XV-A_<purpose>.png` names.
@@ -415,6 +429,7 @@ All subphases are **PLANNED**. Completing a subphase requires its acceptance evi
 **Work**
 
 - Apply per-material physical scale and bounded artistic multipliers.
+- Calibrate dry and wet responses so each material remains distinct under weather-driven roughness and colour changes.
 - Integrate shared/category microdetail through RNM with distance fade.
 - Retune macro variation and hex randomization as one system.
 - A/B histogram-preserving blending; ship it only if evidence justifies its preprocessing and runtime cost.
@@ -622,6 +637,11 @@ All web sources were accessed on 2026-08-12 unless otherwise noted.
 
 ### 15.2 Terrain rendering and authoring
 
+- Bethesda Game Studios, **The Graphics Technology of Fallout 4**: <https://bethesda.net/tr-TR/news/the-graphics-technology-of-fallout-4>
+- Burgess and Purkeypile, Bethesda Game Studios, **Fallout 4's Modular Level Design**, GDC 2016 session: <https://www.gdcvault.com/play/1022930/-Fallout-4-s-Modular>
+- Burgess and Purkeypile, Bethesda Game Studios, **Fallout 4's Modular Level Design**, GDC 2016 slides: <https://media.gdcvault.com/gdc2016/Presentations/Burgess_Joel_Modular%20Level%20Design.pdf>
+- Bethesda Game Studios, **What is Fallout 76?** (six-region Appalachia overview): <https://fallout.bethesda.net/en-EU/news/what-is-fallout-76>
+- Bethesda Game Studios, **Meet Megan Sawyer — Senior Environment Artist**: <https://bethesda.net/tr-TR/news/meet-megan-sawyer-senior-environment-artist-at-bethesda-game-studios>
 - Andersson, **Terrain Rendering in Frostbite Using Procedural Shader Splatting**, SIGGRAPH 2007: <https://advances.realtimerendering.com/s2007/Andersson-TerrainRendering%28Siggraph07%29-CourseNotes.pdf>
 - Mikkelsen, **Practical Real-Time Hex-Tiling**, JCGT 2022: <https://jcgt.org/published/0011/03/05/>
 - Burley, **On Histogram-Preserving Blending for Randomized Texture Tiling**, JCGT 2019: <https://jcgt.org/published/0008/04/02/>
