@@ -34,6 +34,8 @@ project_somnium.md
 architecture_decisions.md
 wgpu_api_gotchas.md
 somnium_phase*.md
+m2.md
+m25.md
 
 # ── Reference repositories (see ATTRIBUTION.md) ──────────────────────────────
 # example_repo/ holds ~6 GB of third-party engines studied for architectural
