@@ -63,6 +63,9 @@ struct InspectorHandles {
     light_range_row: NodeHandle,
     light_inner_row: NodeHandle,
     light_outer_row: NodeHandle,
+    /// Row container for directional-only moonlight intensity field (Phase 25M-2).
+    light_moon_row:  NodeHandle,
+    light_moon_int:  NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section:    NodeHandle,
@@ -213,9 +216,7 @@ pub const PROFILER_ROWS: usize = 20;
 pub const FOLIAGE_KIND_NAMES: [&str; 4] =
     ["Grass Medium", "Grass Bermuda", "Fir Sapling", "Island Tree"];
 
-/// Light values shown in the inspector: intensity, range, inner°, outer°,
-/// then linear-RGB colour.
-pub type LightInspectorValues = [f32; 7];
+pub type LightInspectorValues = [f32; 8];
 
 // ── Layout build result ───────────────────────────────────────────────────────
 
@@ -541,22 +542,21 @@ impl UiManager {
         }
     }
 
-    /// Show or hide the inspector's Light section and refresh its values
+    /// Show or hide the inspector's Light section and refresh it
     /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
     ///
-    /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b]`, paired
-    /// with whether the light is directional — a sun has no range or cone, so
-    /// those rows are hidden rather than shown holding meaningless zeroes.
+    /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b, moon_intensity]`, paired
+    /// with whether the light is directional.
     pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool)>) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section, h.light_intensity, h.light_range, h.light_inner, h.light_outer,
         );
         let (col_r, col_g, col_b) = (h.light_col_r, h.light_col_g, h.light_col_b);
-        let (range_row, inner_row, outer_row) =
-            (h.light_range_row, h.light_inner_row, h.light_outer_row);
+        let (range_row, inner_row, outer_row, moon_row, moon_int) =
+            (h.light_range_row, h.light_inner_row, h.light_outer_row, h.light_moon_row, h.light_moon_int);
         match values {
-            Some(([i, r, ia, oa, cr, cg, cb], directional)) => {
+            Some(([i, r, ia, oa, cr, cg, cb, moon_i], directional)) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui.send(NumericFieldMessage::set_value(intensity, i));
                 self.native_ui.send(NumericFieldMessage::set_value(range, r));
@@ -565,13 +565,17 @@ impl UiManager {
                 self.native_ui.send(NumericFieldMessage::set_value(col_r, cr));
                 self.native_ui.send(NumericFieldMessage::set_value(col_g, cg));
                 self.native_ui.send(NumericFieldMessage::set_value(col_b, cb));
+                self.native_ui.send(NumericFieldMessage::set_value(moon_int, moon_i));
                 self.native_ui.set_visibility(range_row, !directional);
                 self.native_ui.set_visibility(inner_row, !directional);
                 self.native_ui.set_visibility(outer_row, !directional);
+                self.native_ui.set_visibility(moon_row, directional);
             }
             None => self.native_ui.set_visibility(section, false),
         }
     }
+
+
 
     /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
     ///
@@ -809,6 +813,7 @@ impl UiManager {
             (h.light_col_g,     IF::LightColorG),
             (h.light_col_b,     IF::LightColorB),
             (h.light_temp_k,    IF::LightColorTemperature),
+            (h.light_moon_int,  IF::LightMoonIntensity),
             (h.post_exposure,   IF::PostExposure),
             (h.post_exp_comp,   IF::PostExposureCompensation),
             (h.post_bloom_amt,  IF::PostBloomIntensity),
@@ -1702,6 +1707,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (light_range_row, light_range) = make_row_rw(ui, "Rng",  34.0, font_id, light_section, 0.1);
     let (light_inner_row, light_inner) = make_row_rw(ui, "In°",  34.0, font_id, light_section, 0.2);
     let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
+    let (light_moon_row, light_moon_int) = make_row_rw(ui, "Moon", 34.0, font_id, light_section, 0.005);
     ui.set_visibility(light_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -1874,6 +1880,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_section, light_intensity, light_range, light_inner, light_outer,
         light_col_r, light_col_g, light_col_b, light_temp_k,
         light_range_row, light_inner_row, light_outer_row,
+        light_moon_row, light_moon_int,
         terrain_section, terrain_layer, terrain_tile, terrain_relief,
         foliage_section, foliage_toggle, foliage_label,
         foliage_paint_toggle, foliage_paint_label,

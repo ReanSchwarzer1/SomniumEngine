@@ -71,7 +71,7 @@ struct View {
     // We use a separate f32 field below for clarity.
 }
 
-// GpuDirectionalLight (320 bytes) — matches shadow/mod.rs::GpuDirectionalLight.
+// GpuDirectionalLight (336 bytes) — matches shadow/mod.rs::GpuDirectionalLight.
 struct DirectionalLight {
     direction:       vec3<f32>,               // offset   0
     _pad0:           f32,                     // offset  12
@@ -83,6 +83,8 @@ struct DirectionalLight {
     ibl_intensity:   f32,                     // offset 308  Phase 22C: editable indirect strength
     sun_angular_radius: f32,                  // offset 312  Phase 24E
     _pad2_z:         f32,                     // offset 316
+    moon_direction:  vec3<f32>,               // offset 320  Phase 25M-2: physical lunar orbit
+    moon_intensity:  f32,                     // offset 332  Phase 25M-2: moonlight illuminance in lux
 }
 
 struct GpuLocalLight {

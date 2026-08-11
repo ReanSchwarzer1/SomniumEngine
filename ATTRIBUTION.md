@@ -1189,3 +1189,15 @@ Bevy was read as a worked example of applying the same model on wgpu, per the ru
 Written from the papers. Bevy's `bruneton_functions.wgsl` was read to confirm the exact
 form of the transmittance mapping — the easiest part of the model to get subtly wrong —
 and its LUT sizes were adopted; both are covered by §13.27's terms.
+
+---
+
+### 13.30 Sunset & Night Sky Visual Fixes (Phase 25M-2)
+
+| Piece | Reference Engine / Paper |
+|---|---|
+| CSM Near/Far Scene Extent Projection | **Flax Engine** (`Source/Engine/Renderer/ShadowsPass.cpp` — `cullRangeExtent` near plane pullback for low sun shadow stability) |
+| Star Field 3×3×3 Neighborhood & Magnitude Distribution | **SpartanEngine** (`data/shaders/sky/skysphere.hlsl` — multi-cell neighborhood sampling, exponential magnitude distribution, galactic plane density concentration) |
+| Celestial Sphere Unit Vector & Phase Shading | **O3DE** (`Gems/Stars/Assets/Shaders/Stars/Stars.azsl` & `StarsComponentController.cpp` — spherical coordinate mapping, point spread & limb darkening) |
+| Grazing Angle Shadow Normal Bias | **Karis 2013 / Frostbite PBR** — quadratic normal offset scaling based on texel world size and incidence cosine |
+

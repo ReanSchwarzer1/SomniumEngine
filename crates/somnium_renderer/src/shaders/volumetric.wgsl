@@ -46,6 +46,8 @@ struct DirectionalLight {
     ibl_intensity: f32,
     sun_angular_radius: f32,
     _pad2_z: f32,
+    moon_direction: vec3<f32>,
+    moon_intensity: f32,
 }
 
 struct VolumetricParams {

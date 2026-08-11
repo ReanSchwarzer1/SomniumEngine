@@ -50,6 +50,8 @@ pub enum InspectorField {
     LightColorB,
     /// Colour temperature in Kelvin (Phase 24E). Drives the light's hue.
     LightColorTemperature,
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    LightMoonIntensity,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto

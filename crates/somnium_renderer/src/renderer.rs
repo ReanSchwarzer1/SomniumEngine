@@ -95,6 +95,8 @@ pub struct SomniumRenderer {
     ibl_intensity: f32,
     /// Directional light color, pre-multiplied by intensity.
     pub light_color: glam::Vec3,
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    pub moon_intensity: f32,
 
     /// When true, the shading pass tints pixels by cascade index (debug overlay).
     cascade_debug: bool,
@@ -292,10 +294,10 @@ impl SomniumRenderer {
             mapped_at_creation: false,
         });
 
-        // Phase 11A: Directional light buffer (320 bytes).
+        // Phase 11A: Directional light buffer (336 bytes — expanded Phase 25M-2 for moon_direction).
         let light_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DirectionalLight Buffer"),
-            size: 320,
+            size: std::mem::size_of::<GpuDirectionalLight>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -503,8 +505,9 @@ impl SomniumRenderer {
             camera_pos:  glam::Vec3::ZERO,
             time:        0.0,
             light_direction: default_dir,
-            ibl_intensity: 0.35,
+            ibl_intensity: 1.0,
             light_color: default_color,
+            moon_intensity: 0.03,
             cascade_debug: false,
             shading_mode: 0,
             local_lights: Vec::new(),
@@ -820,6 +823,11 @@ impl SomniumRenderer {
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
     pub fn set_ibl_intensity(&mut self, intensity: f32) {
         self.ibl_intensity = intensity.max(0.0);
+    }
+
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    pub fn set_moon_intensity(&mut self, intensity: f32) {
+        self.moon_intensity = intensity.max(0.0);
     }
 
     /// Colour the HDR target is cleared to, in cd/m² (Phase 24A).
@@ -1399,6 +1407,12 @@ impl SomniumRenderer {
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
                 .unwrap_or(0.0),
+            // Phase 25M-2: physical moon direction from simplified orbital model.
+            moon_direction: crate::shadow::moon_direction(
+                self.light_direction,
+                (self.time as f64) / 86400.0,
+            ).to_array(),
+            moon_intensity: self.moon_intensity,
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,

@@ -206,6 +206,8 @@ pub struct LightComponent {
     pub inner_angle: f32,
     /// Spot outer cone half-angle (radians). Zero intensity at this edge.
     pub outer_angle: f32,
+    /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.03 lux.
+    pub moon_intensity: f32,
 }
 
 impl LightComponent {
@@ -246,6 +248,7 @@ impl LightComponent {
             range: 0.0,
             inner_angle: 0.0,
             outer_angle: 0.0,
+            moon_intensity: 0.03,
         }
     }
 
@@ -260,6 +263,7 @@ impl LightComponent {
             range,
             inner_angle: 0.0,
             outer_angle: 0.0,
+            moon_intensity: 0.0,
         }
     }
 
@@ -274,6 +278,7 @@ impl LightComponent {
             range,
             inner_angle,
             outer_angle,
+            moon_intensity: 0.0,
         }
     }
 }

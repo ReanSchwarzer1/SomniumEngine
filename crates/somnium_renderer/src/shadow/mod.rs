@@ -48,8 +48,11 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
 /// offset 288 :  cascade_splits vec4<f32>         (16 bytes)  view-space far Z per cascade
 /// offset 304 :  shadow_map_size f32              ( 4 bytes)  total atlas size in texels
 /// offset 308 :  ibl_intensity f32                (4 bytes)
-/// offset 312 :  _pad2         [f32; 2]           (8 bytes)
-///              total                             320 bytes
+/// offset 312 :  sun_angular_radius f32           (4 bytes)  Phase 24E
+/// offset 316 :  _pad2         f32                (4 bytes)  debug flag
+/// offset 320 :  moon_direction vec3<f32>         (12 bytes) Phase 25M-2
+/// offset 332 :  _pad3         f32                (4 bytes)
+///              total                             336 bytes
 /// ```
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -75,6 +78,10 @@ pub struct GpuDirectionalLight {
     /// remaining padding, so no pass needed a layout change.
     pub sun_angular_radius: f32,
     pub _pad2: f32,
+    /// Moon direction in world space, normalised (Phase 25M-2).
+    pub moon_direction: [f32; 3],
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    pub moon_intensity: f32,
 }
 
 impl Default for GpuDirectionalLight {
@@ -93,13 +100,54 @@ impl Default for GpuDirectionalLight {
             view_proj: [identity; 4],
             cascade_splits: [5.0, 20.0, 50.0, 100.0],
             shadow_map_size: ATLAS_SIZE as f32,
-            ibl_intensity: 0.35,
+            ibl_intensity: 1.0,
             // 0.53° diameter → 0.00463 rad radius.
             sun_angular_radius: 0.004_654,
             _pad2: 0.0,
+            moon_direction: [0.0, -1.0, 0.0],
+            moon_intensity: 0.03,
         }
     }
 }
+
+/// Direction toward the moon in world space, normalised.
+///
+/// Phase 25M-2D: a simplified but physically-based model. The real moon orbits
+/// the Earth every 29.53 days (synodic period) in a plane tilted ~5.14° from
+/// the ecliptic.
+///
+/// - `sun_direction`: normalised direction toward the sun.
+/// - `time_days`: total engine time in fractional days (e.g. `engine_seconds / 86400`).
+#[must_use]
+pub fn moon_direction(sun_direction: glam::Vec3, time_days: f64) -> glam::Vec3 {
+    use std::f64::consts::TAU;
+
+    const SYNODIC_PERIOD: f64 = 29.530588; // days
+    const INCLINATION: f64 = 5.14_f64; // degrees
+
+    let phase_frac = (time_days / SYNODIC_PERIOD).fract();
+    let phase_angle = phase_frac * TAU;
+
+    let sun = sun_direction.normalize_or(glam::Vec3::Y);
+    let up_hint = if sun.dot(glam::Vec3::Y).abs() > 0.99 {
+        glam::Vec3::Z
+    } else {
+        glam::Vec3::Y
+    };
+    let right = sun.cross(up_hint).normalize();
+    let up = right.cross(sun).normalize();
+
+    let incl_rad = (INCLINATION as f32).to_radians();
+    let cos_phase = (phase_angle as f32).cos();
+    let sin_phase = (phase_angle as f32).sin();
+
+    let moon = -sun * cos_phase
+        + right * sin_phase * incl_rad.cos()
+        + up * sin_phase * incl_rad.sin();
+
+    moon.normalize()
+}
+
 
 /// Owns the shadow atlas texture, its views, and the comparison sampler.
 pub struct ShadowMapResources {

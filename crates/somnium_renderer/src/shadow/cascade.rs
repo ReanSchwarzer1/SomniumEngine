@@ -139,7 +139,26 @@ fn cascade_vp(
     let radius = (radius * 16.0).ceil() / 16.0; // round up slightly for safety
 
     // Light view: look from "above" the center along the light direction.
-    let light_eye = center + light_dir * radius * 2.0;
+    //
+    // Phase 25M-2B: at low sun angles the sub-frustum's bounding sphere
+    // doesn't contain shadow casters that sit far "behind" it in the light
+    // direction. Instead of a fixed `radius * 2` pullback, project all 8
+    // sub-frustum corners along the light axis and push the light eye back
+    // far enough to capture the full scene extent. Clamped to 8× radius to
+    // avoid degenerate projections. (Reference: Flax Engine CSM extends the
+    // near plane by ~1 km for the same reason — `cullRangeExtent`.)
+    let center_proj = center.dot(light_dir);
+    let mut min_proj = f32::MAX;
+    let mut max_proj = f32::MIN;
+    for c in &all_corners {
+        let p = c.dot(light_dir);
+        min_proj = min_proj.min(p);
+        max_proj = max_proj.max(p);
+    }
+    let back = (center_proj - min_proj)
+        .max(radius * 2.0)   // never less than the old behaviour
+        .min(radius * 8.0);  // prevent degenerate projections
+    let light_eye = center + light_dir * back;
     let light_view = Mat4::look_at_rh(light_eye, center, up);
 
     // Texel snapping: round the center's x,y in light view space to the texel grid.
@@ -156,7 +175,7 @@ fn cascade_vp(
     let bottom = -radius + offset_y;
     let top    =  radius + offset_y;
     let near   = 0.0_f32;
-    let far    = 4.0 * radius;
+    let far    = back + (max_proj - center_proj).max(radius);
 
     let light_proj = ortho_rh_zo(left, right, bottom, top, near, far);
     light_proj * light_view

@@ -32,13 +32,12 @@
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
 
-/// Scale applied to image-based ambient.
+/// Scale applied to image-based ambient (Phase 25M-2).
 ///
-/// Physically this should be 1.0, but the engine has no ambient occlusion yet,
-/// so sky light reaches every surface unattenuated — including the insides of
-/// creases and anything sitting in the sun's shadow. At full strength that
-/// washes shadows out badly. Until SSAO (or a glTF occlusion map) lands, the
-/// indirect term is scaled back so shadow contrast survives.
+/// Set to 1.0 (physically correct). Screen-space ambient occlusion (GTAO),
+/// ReSTIR GI, and Lagarde specular occlusion now handle the shadowing of sky
+/// light in creases and occluded regions, so the old 0.35 scale-back fudge
+/// is no longer required.
 
 
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
@@ -307,15 +306,25 @@ fn sample_shadow_cascade(
     // Offset along the surface normal, widened at grazing angles where one
     // texel spans more depth. Offsetting in the plane of the surface rather
     // than along depth is what avoids the acne/peter-panning trade entirely.
+    //
+    // Phase 25M-2B: quadratic ramp — the old linear `(1 + 2*(1-NdotL))` was
+    // too mild for the large texel sizes of outer cascades at grazing angles.
+    let grazing = 1.0 - n_dot_l;
     let offset_pos = world_pos
-        + normal * texel_world * (1.0 + 2.0 * (1.0 - n_dot_l)) * SHADOW_NORMAL_OFFSET_TEXELS;
+        + normal * texel_world * max(1.0, 4.0 * grazing * grazing) * SHADOW_NORMAL_OFFSET_TEXELS;
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    // A much smaller residual epsilon: the normal offset now does the work, and
-    // a large depth bias on top of it is what detaches a shadow from its caster.
-    let compare_depth = ndc.z - 0.0002;
+    // Phase 25M-2 (UE5 pattern): Slope-Scaled Depth Bias.
+    //
+    // A constant depth bias is insufficient on steep terrain slopes at grazing
+    // sun angles, causing depth values across a single shadow map texel to cross
+    // the surface and produce blocky staircase self-shadowing. Slope bias scales
+    // depth offset dynamically with surface inclination relative to the light.
+    let slope = sqrt(saturate(1.0 - n_dot_l * n_dot_l)) / max(n_dot_l, 0.001);
+    let slope_bias = 0.0002 + 0.0012 * slope * texel_world;
+    let compare_depth = ndc.z - slope_bias;
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
@@ -390,6 +399,11 @@ fn contact_shadow(
     light_dir: vec3<f32>,
     pixel: vec2<f32>,
 ) -> f32 {
+    // Guard against marching when light (sun) is below horizon
+    if light_dir.y <= -0.02 {
+        return 1.0;
+    }
+
     let step_world = CONTACT_LENGTH / f32(CONTACT_STEPS);
 
     // Phase 25L: start the march off the surface, along the normal.
@@ -526,8 +540,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sharp detail at screen resolution, not cubemap resolution.
         let sun_dir = normalize(light.direction);
         let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
-        // See ibl_gen.wgsl: night is keyed to illuminance, not elevation.
-        let moon_dir = -sun_dir;
+        // Phase 25M-2D: physical moon direction from the simplified lunar
+        // orbital model in sun.rs, not the old `-sun_dir` full-moon hack.
+        let moon_dir = normalize(light.moon_direction);
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
         let detail = sky_detail(ray_dir, sun_dir, sun_illuminance, moon_dir, moon_strength);
 
@@ -767,6 +782,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
     }
 
+    // Phase 25M-2: foliage roughness floor (night wet/metallic fix).
+    //
+    // Leaves are not mirrors — their waxy cuticle is rough, and at grazing
+    // angles the micro-roughness of surface irregularities dominates.
+    // Without this floor the environment specular (which is all that remains
+    // at night when diffuse goes to zero) makes grass read as wet metal.
+    if (material.flags & 2u) != 0u {
+        let foliage_ndv = max(dot(surface.normal, normalize(view.camera_pos - hit_point)), 0.0);
+        let foliage_roughness_floor = mix(0.6, 0.35, foliage_ndv);
+        surface.roughness = max(surface.roughness, foliage_roughness_floor);
+    }
+
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
     //
     // The only material branch terrain needs. Everything above it — decoding
@@ -970,11 +997,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let light_dir   = normalize(light.direction);
         let light_color = light.color;
 
-        // Phase 24E: the sun is a disc, not a point. A point source gives a
-        // highlight one pixel wide on anything smooth, which is among the
-        // clearest tells that an image is rendered rather than photographed.
+        // Phase 25M-2 (UE5 pattern): Directional Moonlight.
+        // In UE5, when the sun drops below the horizon, the moon acts as a secondary
+        // directional light (AtmosphereLightIndex 1), illuminating terrain and foliage from
+        // `moon_direction` with a cool blue tint (~0.15 lux).
+        var moonlight = vec3<f32>(0.0);
+        let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
+        if moon_strength > 0.0 && light.moon_intensity > 0.0 {
+            let moon_dir = normalize(light.moon_direction);
+            let moon_color = vec3<f32>(0.55, 0.72, 1.0) * light.moon_intensity * moon_strength;
+            let moon_geo_ndotl = saturate(dot(geo_normal, moon_dir));
+            let moon_self_shadow = smoothstep(0.0, 0.05, moon_geo_ndotl);
+            let moon_ndotl = max(dot(surface.normal, moon_dir), 0.0) * moon_self_shadow;
+            moonlight = evaluate_brdf(surface, moon_dir) * moon_color * moon_ndotl;
+        }
+
+        // Direct sunlight + directional moonlight
         let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
-            * light_color * shadow_factor;
+            * light_color * shadow_factor + moonlight;
 
         // Phase 24S. Deliberately *not* multiplied by the shadow factor: the
         // whole point is light arriving through the surface from the side the

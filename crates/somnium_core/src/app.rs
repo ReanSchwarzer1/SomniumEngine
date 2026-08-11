@@ -878,6 +878,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     lc.color.x,
                     lc.color.y,
                     lc.color.z,
+                    lc.moon_intensity,
                 ], lc.light_type == LightType::Directional));
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner(&entity_list, selected_idx);
@@ -2270,6 +2271,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::LightColorG
                         | IF::LightColorB
                         | IF::LightColorTemperature
+                        | IF::LightMoonIntensity
                 ) {
                     if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
                         let mut new_light = old_light;
@@ -2295,6 +2297,9 @@ impl<G: GameApp> Engine<G> {
                             IF::LightColorB => new_light.color.z = value.max(0.0),
                             IF::LightColorTemperature => {
                                 new_light.color_temperature_k = value.max(0.0);
+                            }
+                            IF::LightMoonIntensity => {
+                                new_light.moon_intensity = value.max(0.0);
                             }
                             _ => unreachable!(),
                         }

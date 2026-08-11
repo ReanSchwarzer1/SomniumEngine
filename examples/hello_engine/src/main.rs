@@ -1060,6 +1060,7 @@ impl GameApp for HelloGame {
                                     to_light,
                                     light.photometric_color() * survives,
                                 );
+                                renderer.set_moon_intensity(light.moon_intensity);
                             }
                             LightType::Point | LightType::Spot => {
                                 let l_type = if light.light_type == LightType::Point { 0 } else { 1 };
