@@ -86,6 +86,11 @@ struct InspectorHandles {
     terrain_layer:   NodeHandle,
     terrain_tile:    [NodeHandle; 4],
     terrain_relief:  NodeHandle,
+    water_section:   NodeHandle,
+    water_surface:   NodeHandle,
+    water_depth:     NodeHandle,
+    water_clarity:   NodeHandle,
+    water_amplitude: NodeHandle,
     foliage_section: NodeHandle,
     foliage_toggle:  NodeHandle,
     foliage_label:   NodeHandle,
@@ -736,6 +741,22 @@ impl UiManager {
         }
     }
 
+    /// Show the stable authoring subset of a first-class water body.
+    pub fn update_water_inspector(&mut self, values: Option<[f32; 4]>) {
+        let h = &self.inspector_handles;
+        match values {
+            Some(values) => {
+                self.native_ui.set_visibility(h.water_section, true);
+                for (handle, value) in [h.water_surface, h.water_depth, h.water_clarity,
+                    h.water_amplitude].into_iter().zip(values)
+                {
+                    self.native_ui.send(NumericFieldMessage::set_value(handle, value));
+                }
+            }
+            None => self.native_ui.set_visibility(h.water_section, false),
+        }
+    }
+
     /// Show or hide the Foliage section and refresh it (Phase 17C).
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
@@ -847,6 +868,10 @@ impl UiManager {
             (h.terrain_tile[2], IF::TerrainTile2),
             (h.terrain_tile[3], IF::TerrainTile3),
             (h.terrain_relief,  IF::TerrainRelief),
+            (h.water_surface,   IF::WaterSurface),
+            (h.water_depth,     IF::WaterMaxDepth),
+            (h.water_clarity,   IF::WaterClarity),
+            (h.water_amplitude, IF::WaterAmplitude),
             (h.foliage_density, IF::FoliageDensity),
             (h.foliage_seed,    IF::FoliageSeed),
             (h.foliage_slope,   IF::FoliageSlope),
@@ -1874,6 +1899,19 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
     ui.set_visibility(terrain_section, false);
 
+    let water_panel = StackPanelBuilder::new(
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let water_section = ui.add_node(water_panel, parent);
+    sec_label(ui, "Water Body", font_id, water_section);
+    let water_surface = make_row_step(ui, "Level", 34.0, font_id, water_section, 0.05);
+    let water_depth = make_row_step(ui, "Depth", 34.0, font_id, water_section, 0.05);
+    let water_clarity = make_row_step(ui, "Clear", 34.0, font_id, water_section, 0.01);
+    let water_amplitude = make_row_step(ui, "Waves", 34.0, font_id, water_section, 0.01);
+    ui.set_visibility(water_section, false);
+
 
     InspectorHandles {
         pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, sc_x, sc_y, sc_z,
@@ -1882,6 +1920,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_range_row, light_inner_row, light_outer_row,
         light_moon_row, light_moon_int,
         terrain_section, terrain_layer, terrain_tile, terrain_relief,
+        water_section, water_surface, water_depth, water_clarity, water_amplitude,
         foliage_section, foliage_toggle, foliage_label,
         foliage_paint_toggle, foliage_paint_label,
         foliage_erase_toggle, foliage_erase_label,

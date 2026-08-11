@@ -174,19 +174,56 @@ fn load_tbmp(path: &str) -> Result<HeightImage, String> {
     Ok(HeightImage { width, height, samples })
 }
 
-/// Any image the `image` crate decodes. 16-bit greyscale is preserved at full
-/// precision; anything else is taken from the luminance of the 8-bit form.
+/// Any image the `image` crate decodes. Integer sources retain their native
+/// 16-bit precision and FLOAT32 EXR sources remain FLOAT32 all the way into the
+/// terrain resampler. Only genuinely 8-bit inputs take the 8-bit path.
 ///
 /// The distinction matters more than it looks: an 8-bit heightmap over a
 /// kilometre of relief quantises to ~4 m steps, which reads as visible terracing
 /// on every slope. 16-bit sources are the norm for exactly that reason.
 fn load_image(path: &str) -> Result<HeightImage, String> {
+    if path.to_ascii_lowercase().ends_with(".exr") {
+        return load_exr(path);
+    }
     let img = image::open(path).map_err(|e| format!("{path}: {e}"))?;
     let (width, height) = (img.width(), img.height());
     let samples = match img {
         image::DynamicImage::ImageLuma16(buf) => {
             buf.pixels().map(|p| p.0[0] as f32 / u16::MAX as f32).collect()
         }
+        image::DynamicImage::ImageLumaA16(buf) => {
+            buf.pixels().map(|p| p.0[0] as f32 / u16::MAX as f32).collect()
+        }
+        image::DynamicImage::ImageRgb16(buf) => buf
+            .pixels()
+            .map(|p| {
+                let [r, g, b] = p.0;
+                (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32)
+                    / u16::MAX as f32
+            })
+            .collect(),
+        image::DynamicImage::ImageRgba16(buf) => buf
+            .pixels()
+            .map(|p| {
+                let [r, g, b, _] = p.0;
+                (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32)
+                    / u16::MAX as f32
+            })
+            .collect(),
+        image::DynamicImage::ImageRgb32F(buf) => buf
+            .pixels()
+            .map(|p| {
+                let [r, g, b] = p.0;
+                0.2126 * r + 0.7152 * g + 0.0722 * b
+            })
+            .collect(),
+        image::DynamicImage::ImageRgba32F(buf) => buf
+            .pixels()
+            .map(|p| {
+                let [r, g, b, _] = p.0;
+                0.2126 * r + 0.7152 * g + 0.0722 * b
+            })
+            .collect(),
         other => other
             .to_luma8()
             .pixels()
@@ -390,4 +427,77 @@ mod tests {
         let max = a.iter().cloned().fold(f32::MIN, f32::max);
         assert!(max - min > 5.0, "relief is too flat to judge anything against");
     }
+
+    #[test]
+    fn float_exr_keeps_more_than_eight_bit_precision() {
+        // A 1024-step ramp collapses to at most 256 values through `to_luma8`.
+        // Writing and reading the real codec pins the exact route used by the
+        // Great Lakes source rather than merely testing an in-memory helper.
+        let dir = std::env::temp_dir().join("somnium_float_height_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ramp.exr");
+        let image = image::ImageBuffer::from_fn(1024, 1, |x, _| {
+            let v = x as f32 / 1023.0;
+            image::Rgb([v, v, v])
+        });
+        image.save(&path).expect("encode EXR");
+
+        let decoded = load(path.to_str().unwrap()).expect("decode EXR");
+        let mut distinct = decoded.samples.clone();
+        distinct.sort_by(f32::total_cmp);
+        distinct.dedup_by(|a, b| a.to_bits() == b.to_bits());
+        assert!(
+            distinct.len() > 256,
+            "FLOAT32 height collapsed to {} distinct levels",
+            distinct.len(),
+        );
+    }
+
+    #[test]
+    fn baked_great_lakes_height_is_smooth_and_high_precision() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..").join(crate::terrain::DEFAULT_HEIGHTMAP);
+        let image = load(path.to_str().unwrap()).expect("Great Lakes runtime height");
+        assert_eq!((image.width, image.height), (1025, 1025));
+        assert!(image.samples.iter().all(|height| height.is_finite()));
+        let mut distinct = image.samples.clone();
+        distinct.sort_by(f32::total_cmp);
+        distinct.dedup_by(|a, b| a.to_bits() == b.to_bits());
+        assert!(distinct.len() > 256, "runtime terrain lost precision");
+        let mut largest_neighbor_step = 0.0f32;
+        for z in 0..image.height {
+            for x in 0..image.width - 1 {
+                let a = image.samples[(z * image.width + x) as usize];
+                let b = image.samples[(z * image.width + x + 1) as usize];
+                largest_neighbor_step = largest_neighbor_step.max((a - b).abs());
+            }
+        }
+        assert!(largest_neighbor_step < 0.08,
+            "bake introduced a discontinuity of {largest_neighbor_step}");
+    }
+}
+
+/// Read the first flat EXR layer without assuming it contains RGB channels.
+/// Height sources commonly contain a single `Y` FLOAT channel (the Great
+/// Lakes source does), which `image::open` rejects even though it is valid EXR.
+fn load_exr(path: &str) -> Result<HeightImage, String> {
+    use exr::prelude::*;
+    let image = read_first_flat_layer_from_file(path).map_err(|e| format!("{path}: {e}"))?;
+    let layer = image.layer_data;
+    let channel = layer
+        .channel_data
+        .list
+        .iter()
+        .find(|channel| channel.name.eq_case_insensitive("Y"))
+        .or_else(|| layer.channel_data.list.first())
+        .ok_or_else(|| format!("{path}: EXR contains no flat channel"))?;
+    let samples: Vec<f32> = channel.sample_data.values_as_f32().collect();
+    if samples.iter().any(|value| !value.is_finite()) {
+        return Err(format!("{path}: EXR height channel contains non-finite values"));
+    }
+    Ok(HeightImage {
+        width: layer.size.0 as u32,
+        height: layer.size.1 as u32,
+        samples,
+    })
 }

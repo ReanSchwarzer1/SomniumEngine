@@ -601,14 +601,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     var geo_normal = normalize((instance.model * vec4<f32>(normal_interp, 0.0)).xyz);
 
-    // A receiver bias must follow the triangle plane, not the interpolated
-    // vertex normal used for smooth shading. The latter can point behind the
-    // actual face on coarse terrain, so an outward-looking offset moves the
-    // lookup underneath its own triangle and creates hard triangular acne.
-    // Keep this normal separate: terrain and normal maps still shade smoothly.
+    // Hard-surface meshes bias along their real triangle plane. Terrain is the
+    // important exception: its central-difference vertex normals describe one
+    // continuous height field, while the per-face normal jumps at every fan
+    // triangle. Using that discontinuous normal for receiver bias made the
+    // shadow term reproduce the topology as large dark triangles. Terrain
+    // therefore uses the smooth geometric normal; normal maps remain excluded.
     let face_cross = cross(p1 - p0, p2 - p0);
     var shadow_normal = geo_normal;
-    if dot(face_cross, face_cross) > 1.0e-16 {
+    if material.terrain_index < 0 && dot(face_cross, face_cross) > 1.0e-16 {
         shadow_normal = normalize(face_cross);
         if dot(shadow_normal, geo_normal) < 0.0 {
             shadow_normal = -shadow_normal;
@@ -899,6 +900,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // pixel — which is how the detail budget gets a number instead of a claim.
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
+    }
+
+    // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only
+    // while this debug view is active; zero means a non-terrain instance.
+    if light._pad2_z > 12.5 && light._pad2_z < 13.5 {
+        let lod = instance._padding;
+        if lod == 0u { return vec4<f32>(0.08, 0.08, 0.08, 1.0); }
+        let palette = array<vec3<f32>, 5>(
+            vec3<f32>(0.10, 0.85, 0.25), vec3<f32>(0.20, 0.55, 1.00),
+            vec3<f32>(0.85, 0.75, 0.10), vec3<f32>(1.00, 0.35, 0.08),
+            vec3<f32>(0.75, 0.12, 0.85)
+        );
+        return vec4<f32>(palette[min(lod - 1u, 4u)] * 4.0, 1.0);
+    }
+    // 14 = analytic triangle edges reconstructed from visibility barycentrics.
+    if light._pad2_z > 13.5 && light._pad2_z < 14.5 {
+        let edge = 1.0 - smoothstep(0.005, 0.025, min(bary.x, min(bary.y, bary.z)));
+        return vec4<f32>(vec3<f32>(edge * 4.0), 1.0);
+    }
+    // 15/16 = interpolated geometric normal / actual receiver-bias normal.
+    if light._pad2_z > 14.5 && light._pad2_z < 15.5 {
+        return vec4<f32>(geo_normal * 0.5 + 0.5, 1.0);
+    }
+    if light._pad2_z > 15.5 && light._pad2_z < 16.5 {
+        return vec4<f32>(shadow_normal * 0.5 + 0.5, 1.0);
+    }
+    // 17 = screen-space contact-shadow factor before cascade composition.
+    if light._pad2_z > 16.5 && light._pad2_z < 17.5 {
+        let contact = contact_shadow(hit_point, shadow_normal, normalize(light.direction), in.clip_pos.xy);
+        return vec4<f32>(vec3<f32>(contact), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.

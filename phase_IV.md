@@ -1,7 +1,7 @@
 # Phase IV — Great Lakes Landscape and Black Flag Water
 
 **Project:** Somnium Engine  
-**Status:** Research complete; implementation not started  
+**Status:** IV-A, IV-B, and IV-C complete; IV-D next
 **Plan date:** 2026-08-11  
 **Codename:** Black Flag  
 **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -17,7 +17,12 @@ Phase IV will replace the current demo terrain/water pairing with one shared, pr
 - application startup and **Create → Terrain** call one landscape factory, so they cannot drift;
 - asset and reference provenance is recorded in `assets/LICENSE.md` and `ATTRIBUTION.md` before the new default ships.
 
-This is a plan only. No Great Lakes files have been copied and no renderer behavior has been changed in this phase-planning pass.
+IV-A through IV-C were implemented on 2026-08-11. The remaining sections are
+the active plan beginning with IV-D.
+
+Live wgpu evidence: [`phase_iv_default_validation.png`](phase_iv_default_validation.png)
+was captured from release frame 12 after the Great Lakes default and portable
+water resource uploads initialized successfully.
 
 ## 2. Research conclusion
 
@@ -223,6 +228,15 @@ Wicked/ACIII-style projected-grid rendering remains an explicit prototype and is
 
 ### IV-A — Terrain truth pass and precision import
 
+**Status: DONE — 2026-08-11**
+
+Implemented direct FLOAT32 OpenEXR channel loading without an 8-bit conversion,
+real-codec precision tests, continuous-normal analytic terrain tests, and shadow
+debug modes for LOD, triangle edges, geometric normals, receiver-bias normals,
+shadow factor, and contact shadows. The daytime triangle patches were isolated
+to per-face receiver bias and fixed by using the interpolated terrain geometric
+normal while retaining face normals for ordinary meshes.
+
 **Work**
 
 - Add FLOAT32 EXR preservation and importer tests.
@@ -238,6 +252,14 @@ Wicked/ACIII-style projected-grid rendering remains an explicit prototype and is
 - Adjacent chunk and LOD boundaries have matching positions and shading normals.
 
 ### IV-B — Great Lakes landscape bake
+
+**Status: DONE — 2026-08-11**
+
+Added the deterministic `bake_great_lakes` importer and committed its 1025²
+16-bit height, masked macro colour, 1024² lake mask, bathymetric depth, shoreline
+SDF, and recipe products. Repeated runs produce identical hashes. The default
+terrain now loads these derivatives, uses 105 m total relief, a 15 m water datum,
+up to 12 m of synthetic bathymetry, and a 0.35 m minimum dry-ground clearance.
 
 **Work**
 
@@ -256,6 +278,17 @@ Wicked/ACIII-style projected-grid rendering remains an explicit prototype and is
 - Reimport is deterministic from the source hashes and recipe.
 
 ### IV-C — First-class ECS water body
+
+**Status: DONE — 2026-08-11**
+
+Expanded `WaterComponent` into a stable, serializable handle with terrain
+relationship, preset, kind, bounds, datum, maximum depth, enabled state, and
+editable optics/wave fields. Renderer-owned `WaterBodyData` now loads the lake
+mask/depth/SDF textures. The default scene and Create → Terrain spawn a separate
+child `Water` entity; hierarchy, inspector editing, duplicate/delete,
+composite undo/redo, scene serialization, and renderer-resource reconciliation
+are covered by tests. The temporary broad render mesh remains until IV-D, where
+the stored mask and bounds become explicit finite surface coverage.
 
 **Work**
 

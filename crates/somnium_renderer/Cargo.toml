@@ -19,6 +19,7 @@ bytemuck     = { workspace = true }
 somnium_asset = { workspace = true }
 # Phase 25K: decoding the packed terrain layer PNGs at load.
 image        = { workspace = true }
+exr          = { workspace = true }
 
 [dev-dependencies]
 # Shader compilation happens at device-creation time, so a WGSL mistake used to

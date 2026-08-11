@@ -104,7 +104,16 @@ pub struct TerrainChunk {
 pub const UNALLOCATED: u32 = u32::MAX;
 
 /// Heightmap a new terrain loads unless told otherwise (Phase 25L).
-pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/heightmap.tbmp";
+pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/great_lakes/height.png";
+
+/// Authored low-frequency colour paired with [`DEFAULT_HEIGHTMAP`].
+pub const DEFAULT_MACRO_MAP: &str = "assets/terrain/great_lakes/macro_color.png";
+
+/// Great Lakes preset surface datum in terrain-local metres.
+pub const DEFAULT_WATER_LEVEL_METRES: f32 = 15.0;
+
+/// Maximum synthetic lake-bed depth in the baked preset.
+pub const DEFAULT_WATER_DEPTH_METRES: f32 = 12.0;
 
 /// Metres of relief the default heightmap's full range maps to.
 ///
@@ -112,7 +121,7 @@ pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/heightmap.tbmp";
 /// alpine — enough for the eight materials to separate by altitude and for
 /// slopes to reach the angles that put rock and gravel on the ground, without
 /// walls the camera cannot see over.
-pub const DEFAULT_RELIEF_METRES: f32 = 90.0;
+pub const DEFAULT_RELIEF_METRES: f32 = 105.0;
 
 /// A material layer (Phase 14A-2). Texture data lives in the shared
 /// `TerrainLayerTextures` arrays; this carries the per-layer parameters.
@@ -279,6 +288,9 @@ pub struct TerrainData {
     /// Phase 25D. `SOMNIUM_TERRAIN_MACRO=0` sets this to zero, which is the
     /// A/B — a strength of zero is exactly "no macro tier".
     pub macro_strength: f32,
+    /// Authored whole-landscape colour. When present this wins over the
+    /// procedural macro generator after terrain edits/rebuilds.
+    authored_macro: Option<macro_map::MacroMap>,
     /// Phase 25D: metres over which the per-pixel layer budget falls away.
     pub detail_fade_start: f32,
     pub detail_fade_end: f32,
@@ -412,6 +424,7 @@ impl TerrainData {
             } else {
                 macro_map::DEFAULT_MACRO_STRENGTH
             },
+            authored_macro: None,
             // Roughly: full detail out to the far edge of LOD 0, then a fall
             // to the dominant layers over the next few hundred metres. Past
             // `end` a pixel covers metres of ground and the layers it is
@@ -571,13 +584,47 @@ impl TerrainData {
         let path = std::env::var("SOMNIUM_HEIGHTMAP")
             .unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
         match self.load_heightmap_file(&path, amplitude) {
-            Ok(()) => path,
+            Ok(()) => {
+                if path == DEFAULT_HEIGHTMAP {
+                    if let Err(e) = self.load_authored_macro_file(DEFAULT_MACRO_MAP) {
+                        tracing::warn!("terrain: authored macro map unavailable ({e})");
+                    }
+                }
+                path
+            }
             Err(e) => {
                 tracing::info!("terrain: heightmap unavailable ({e}); procedural relief");
                 self.generate_relief(1337, amplitude);
                 "procedural".to_string()
             }
         }
+    }
+
+    /// Use an authored whole-terrain colour map instead of the procedural
+    /// landform tint. Alpha is a per-texel strength mask, so the Great Lakes
+    /// bake can exclude water pixels from ground colour.
+    pub fn load_authored_macro_file(&mut self, path: &str) -> Result<(), String> {
+        let image = image::open(path).map_err(|e| format!("{path}: {e}"))?.to_rgba8();
+        let resized = if image.width() == macro_map::MACRO_SIZE
+            && image.height() == macro_map::MACRO_SIZE
+        {
+            image
+        } else {
+            image::imageops::resize(
+                &image,
+                macro_map::MACRO_SIZE,
+                macro_map::MACRO_SIZE,
+                image::imageops::FilterType::Triangle,
+            )
+        };
+        self.authored_macro = Some(macro_map::MacroMap {
+            texels: resized.into_raw(),
+            size: macro_map::MACRO_SIZE,
+        });
+        self.macro_mode = macro_map::MacroBlendMode::Lerp;
+        self.macro_strength = 0.68;
+        self.macro_dirty = true;
+        Ok(())
     }
 
     /// Fill the heightmap with procedural FBM relief (Phase 25L).
@@ -761,14 +808,20 @@ impl TerrainData {
         rewritten: &mut Vec<u32>,
     ) {
         if std::mem::take(&mut self.macro_dirty) {
-            let map = macro_map::generate(
-                &self.heightmap,
-                self.desc.total_vertices_x(),
-                self.desc.total_vertices_z(),
-                self.desc.cell_size,
-                self.desc.height_scale,
-                0,
-            );
+            let generated;
+            let map = if let Some(authored) = self.authored_macro.as_ref() {
+                authored
+            } else {
+                generated = macro_map::generate(
+                    &self.heightmap,
+                    self.desc.total_vertices_x(),
+                    self.desc.total_vertices_z(),
+                    self.desc.cell_size,
+                    self.desc.height_scale,
+                    0,
+                );
+                &generated
+            };
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.macro_texture,

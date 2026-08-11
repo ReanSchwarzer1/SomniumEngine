@@ -86,6 +86,7 @@ serde_json = "1.0"
 gltf = { version = "1", features = ["names", "utils", "image", "KHR_texture_transform",
     "KHR_materials_transmission"] }
 image = "0.25"
+exr = "1.74"
 
 # -- Font rasterization (Phase 12A-4) ----------------------------------------
 fontdue = "0.7"

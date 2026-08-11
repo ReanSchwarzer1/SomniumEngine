@@ -22,7 +22,7 @@
 use somnium_core::{
     Component, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState,
     KeyCode, MeshComponent, MaterialComponent, MeshKind, Name, Transform, LightComponent, LightType,
-    Parent, WorldTransform, propagate_transforms,
+    Children, Parent, WorldTransform, propagate_transforms,
     ComponentId, ComponentSet,
 };
 use somnium_physics::body::{RigidBodyDescriptor, MotionType, BodyId};
@@ -31,85 +31,6 @@ use somnium_physics::layer::{LAYER_NON_MOVING, LAYER_MOVING};
 use glam::Vec3;
 use tracing::info;
 use serde::Serialize;
-
-fn downsample_wrap(img: &image::RgbaImage) -> image::RgbaImage {
-    let w = (img.width() / 2).max(1);
-    let h = (img.height() / 2).max(1);
-    let mut out = image::RgbaImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let sx = x * 2;
-            let sy = y * 2;
-            
-            let x0 = sx % img.width();
-            let x1 = (sx + 1) % img.width();
-            let y0 = sy % img.height();
-            let y1 = (sy + 1) % img.height();
-            
-            let p00 = img.get_pixel(x0, y0);
-            let p10 = img.get_pixel(x1, y0);
-            let p01 = img.get_pixel(x0, y1);
-            let p11 = img.get_pixel(x1, y1);
-            
-            let mut res = [0u32; 4];
-            for i in 0..4 {
-                res[i] = p00[i] as u32 + p10[i] as u32 + p01[i] as u32 + p11[i] as u32;
-            }
-            out.put_pixel(x, y, image::Rgba([
-                (res[0] / 4) as u8,
-                (res[1] / 4) as u8,
-                (res[2] / 4) as u8,
-                (res[3] / 4) as u8,
-            ]));
-        }
-    }
-    out
-}
-
-fn load_texture_from_path(device: &wgpu::Device, queue: &wgpu::Queue, path: &str, format: wgpu::TextureFormat) -> wgpu::TextureView {
-    let img = image::open(path).unwrap_or_else(|e| panic!("Failed to load texture at {}: {}", path, e));
-    let rgba = img.to_rgba8();
-    let dimensions = rgba.dimensions();
-
-    let mip_level_count = (dimensions.0.max(dimensions.1) as f32).log2().floor() as u32 + 1;
-
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(path),
-        size: wgpu::Extent3d { width: dimensions.0, height: dimensions.1, depth_or_array_layers: 1 },
-        mip_level_count,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    let mut current_img = rgba;
-    for level in 0..mip_level_count {
-        let level_dims = current_img.dimensions();
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &current_img,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * level_dims.0),
-                rows_per_image: Some(level_dims.1),
-            },
-            wgpu::Extent3d { width: level_dims.0, height: level_dims.1, depth_or_array_layers: 1 },
-        );
-        
-        if level < mip_level_count - 1 {
-            current_img = downsample_wrap(&current_img);
-        }
-    }
-
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
-}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Components
@@ -462,56 +383,6 @@ impl GameApp for HelloGame {
             self.default_cube_alloc  = Some(alloc);
         }
 
-        // Phase 13: Water Plane (spawned alongside the helmet)
-        let (plane_verts, plane_idxs) = somnium_asset::generate_plane(20.0, 10);
-        let plane_alloc = ctx.renderer.as_mut().unwrap().geometry.upload_mesh(
-            &ctx.render_ctx.as_ref().unwrap().queue, &plane_verts, &plane_idxs, 0
-        );
-        ctx.world.spawn((
-            Transform::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
-            MeshComponent { 
-                vertex_offset: plane_alloc.vertex_offset, 
-                index_offset: plane_alloc.index_offset, 
-                index_count: plane_alloc.index_count 
-            },
-            somnium_core::WaterComponent::default(),
-            Name::new("WaterPlane"),
-            WorldTransform::identity(),
-            MeshKind::Plane,
-        ));
-
-        // Load Water PBR Textures
-        let render_ctx = ctx.render_ctx.as_ref().unwrap();
-        let base_color = load_texture_from_path(&render_ctx.device, &render_ctx.queue, "assets/ocean_pbr/BaseColor.png", wgpu::TextureFormat::Rgba8UnormSrgb);
-        let normal = load_texture_from_path(&render_ctx.device, &render_ctx.queue, "assets/ocean_pbr/Normal_DX.png", wgpu::TextureFormat::Rgba8Unorm);
-        let orm = load_texture_from_path(&render_ctx.device, &render_ctx.queue, "assets/ocean_pbr/ORM_RAO_GROUGH_BMETAL.png", wgpu::TextureFormat::Rgba8Unorm);
-        
-        let sampler = render_ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Water Sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
-
-        let water_tex_bg = render_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Water Textures Bind Group"),
-            layout: &ctx.renderer.as_ref().unwrap().water_pass.tex_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base_color) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&normal) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&orm) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
-
-        ctx.renderer.as_mut().unwrap().water_textures_bind_group = Some(water_tex_bg);
-
-
-
         // Phase 14: the voxel world is no longer spawned automatically — create
         // it from the editor via Create > Voxel Terrain. `sync_voxel_terrain`
         // builds the streaming driver when that entity appears.
@@ -736,7 +607,7 @@ impl GameApp for HelloGame {
                     brush::auto_splat(terrain, 10.0);
                 }
 
-                ctx.world.spawn((
+                let terrain_entity = ctx.world.spawn((
                     Transform::from_translation(Vec3::new(
                         -wx * 0.5,
                         if flat_terrain { 0.0 } else { -6.0 },
@@ -758,7 +629,37 @@ impl GameApp for HelloGame {
                         enabled: foliage_camera.is_some(),
                         ..Default::default()
                     },
+                    Children::empty(),
                 ));
+                if flat_terrain {
+                    let water_id = renderer.allocate_water_body_id();
+                    let water = somnium_core::WaterComponent::great_lakes(
+                        water_id, terrain_id, [0.0, 0.0, wx, wz],
+                    );
+                    if let Err(error) = renderer.ensure_water_body(render_ctx, water.descriptor()) {
+                        tracing::warn!("Great Lakes water data unavailable: {error}");
+                    }
+                    let (vertices, indices) = somnium_asset::generate_plane(wx.max(wz), 64);
+                    let allocation = renderer.geometry.upload_mesh(
+                        &render_ctx.queue, &vertices, &indices, 0,
+                    );
+                    let water_entity = ctx.world.spawn((
+                        Transform::from_translation(Vec3::new(
+                            wx * 0.5, water.surface_level, wz * 0.5,
+                        )),
+                        MeshComponent {
+                            vertex_offset: allocation.vertex_offset,
+                            index_offset: allocation.index_offset,
+                            index_count: allocation.index_count,
+                        },
+                        water,
+                        Name::new("Water"),
+                        WorldTransform::identity(),
+                        MeshKind::Plane,
+                        Parent { entity: terrain_entity },
+                    ));
+                    ctx.world.get_mut::<Children>(terrain_entity).unwrap().push(water_entity);
+                }
                 info!("Heightmap terrain smoke test active ({}x{} m)", wx, wz);
             }
         }
@@ -1203,6 +1104,9 @@ impl GameApp for HelloGame {
                     let wt    = unsafe { archetype.column(wt_col).get::<WorldTransform>(row) };
                     let mesh  = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
                     let water = unsafe { archetype.column(w_col).get::<somnium_core::WaterComponent>(row) };
+                    if !water.enabled {
+                        continue;
+                    }
                     renderer.add_water(
                         wt.0,
                         somnium_renderer::pass::water::WaterMaterialData {

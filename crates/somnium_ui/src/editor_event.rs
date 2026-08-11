@@ -121,6 +121,11 @@ pub enum InspectorField {
     /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
     /// parallax occlusion off.
     TerrainRelief,
+    // First-class lake body settings (Phase IV-C).
+    WaterSurface,
+    WaterMaxDepth,
+    WaterClarity,
+    WaterAmplitude,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,

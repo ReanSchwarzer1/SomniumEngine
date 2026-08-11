@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-11
-> **Current phase:** 25M-2 (sunset/night fixes audited; automated verification complete, final visual acceptance pending)
+> **Current phase:** Phase IV-C complete; IV-D finite water surface and query contract next
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -3350,7 +3350,46 @@ complete until those checks are recorded.
 
 ---
 
+## 17.17 Phase IV-A–IV-C — Great Lakes landscape foundation
+
+**Completed 2026-08-11.** The default heightmap is now a deterministic
+1025×1025 16-bit derivative of Motion Forge Pictures' FLOAT32 Great Lakes EXR.
+The importer preserves floating-point EXR channels, verifies the audited source
+range, area-resamples height, masks water out of the sRGB macro-colour map, and
+bakes a 1024×1024 water mask, shoreline SDF, and 0–12 m synthetic bathymetry.
+The dry terrain floor is 0.35 m above the 15 m water datum, preventing coplanar
+ground and water.
+
+The daytime triangle-shaped terrain shadows were not present in the source
+height field. Phase 25M-2 had made shadow receiver bias use a per-face normal for
+all geometry, turning each terrain triangle into a different bias plane. Terrain
+now uses its continuous interpolated geometric normal; ordinary meshes retain
+the face-normal path. Debug modes 13–17 expose terrain LOD, triangle edges,
+geometric and receiver-bias normals, shadow factor, and contact-shadow factor.
+
+`WaterComponent` is now a small serializable ECS handle containing its terrain
+relationship, preset, body kind, bounds, datum, maximum depth, enabled state,
+and editable optics/wave settings. Heavy mask/depth/SDF CPU and GPU data lives
+in the renderer's `WaterBodyRegistry`. Default startup and **Create → Terrain**
+both create a `Terrain` and child `Water` hierarchy; composite create/delete
+undo, duplication, inspection, serialization, and resource reconciliation are
+tested. Asset provenance is in `assets/terrain/great_lakes/README.md`; reference
+patterns are in `ATTRIBUTION.md` §13.31.
+
+Validation: `cargo check --workspace --all-targets`; 202 renderer tests, 31 core
+tests, and 3 UI tests pass in release mode. The importer was executed twice and
+all output hashes matched. `phase_iv_default_validation.png` is the release-mode
+frame-12 live wgpu capture.
+
 ## 18. Known Issues & Active Bugs
+
+**ACTIVE — Phase IV-C water data is finite, but the IV-D render surface is not
+yet mask-clipped.** The ECS component and renderer registry own the Great Lakes
+bounds, wet/dry mask, depth map, and shoreline SDF. The current water draw still
+uses a broad terrain-sized mesh and relies on the baked dry-ground clearance and
+depth test to hide dry regions. IV-D must consume the mask explicitly, replace
+the temporary mesh with the selected finite surface representation, and expose
+the gameplay depth/containment query contract.
 
 **RESOLVED — shattered foliage (visibility-buffer id packing).** The visibility
 buffer packed instance id and primitive id into one `R32Uint`, which forces a

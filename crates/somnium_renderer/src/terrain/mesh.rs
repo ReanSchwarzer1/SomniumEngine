@@ -243,4 +243,28 @@ mod tests {
             assert_eq!(ea.normal, wb.normal);
         }
     }
+
+    #[test]
+    fn sinusoidal_hill_has_continuous_finite_normals_across_chunks() {
+        let n = 129u32;
+        let mut heightmap = vec![0.0f32; (n * n) as usize];
+        for z in 0..n {
+            for x in 0..n {
+                let xf = x as f32 / (n - 1) as f32 * std::f32::consts::TAU;
+                let zf = z as f32 / (n - 1) as f32 * std::f32::consts::TAU;
+                heightmap[(z * n + x) as usize] = (xf.sin() * zf.sin() + 1.0) * 0.5;
+            }
+        }
+        let a = build_chunk_vertices(&heightmap, n, n, 64, [0, 0], 1.0, 20.0);
+        let b = build_chunk_vertices(&heightmap, n, n, 64, [1, 0], 1.0, 20.0);
+        for z in 0..65u32 {
+            let left = a[(z * 65 + 64) as usize];
+            let right = b[(z * 65) as usize];
+            assert_eq!(left.position, right.position);
+            assert_eq!(left.normal, right.normal);
+            let normal = glam::Vec3::from(left.normal);
+            assert!(normal.is_finite());
+            assert!((normal.length() - 1.0).abs() < 1e-5);
+        }
+    }
 }

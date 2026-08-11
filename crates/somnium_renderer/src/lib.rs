@@ -27,6 +27,7 @@ pub mod renderer;
 pub mod shadow;
 pub mod terrain;
 pub mod texture_pool;
+pub mod water_body;
 
 pub use bindless::{GlobalResourcePool, MAX_BINDLESS_TEXTURES};
 pub use command::{DrawCommand, SortKey};

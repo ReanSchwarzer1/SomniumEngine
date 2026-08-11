@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "source": "Motion Forge Pictures / Great Lakes",
+  "height_sha256": "d608ec2e62a40e38ff3a65180c6e017b14422496920a1f517d9aa691e2f252b9",
+  "diffuse_sha256": "45cc8c1e4a2698ff01de2a441e8ad2cf822bf4bae29dfb95dc9a7a20a38dce17",
+  "source_range": [0.039686963, 0.221651301],
+  "plateau": 0.040073775,
+  "plateau_epsilon": 0.0001,
+  "resample": "centred area box",
+  "terrain_size": 1025,
+  "water_size": 1024,
+  "water_level_metres": 15,
+  "max_depth_metres": 12,
+  "wet_cells": 299034,
+  "wet_fraction": 0.28518105,
+  "max_baked_depth_metres": 12.000000
+}

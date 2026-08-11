@@ -63,6 +63,20 @@ Pass `2k` to both steps for a quarter of the size at terrain viewing distances.
 Normal Z is reconstructed in the shader; metalness is dropped because terrain
 layers are dielectric.
 
+## assets/terrain/great_lakes/ — default landscape (Phase IV-B)
+
+**Asset:** Great Lakes Height Map
+**Author:** Chris J Mitchell / Motion Forge Pictures
+**License:** CC0 1.0 Universal, per the asset-specific height-map catalog statement
+**Source:** <https://www.motionforgepictures.com/height-maps/> and
+<https://www.motionforgepictures.com/sdm_downloads/great-lakes-height-map/>
+
+Somnium commits only deterministic runtime derivatives, not the downloaded
+OpenEXR package. Full source and output hashes, transformations, encodings, and
+the note about the catalog's `CCO` typo versus the general site terms are kept in
+[`great_lakes/README.md`](terrain/great_lakes/README.md). Credit is given
+voluntarily.
+
 ## assets/terrain/heightmap.tbmp — terrain heightmap (Phase 25L)
 
 **Asset:** `TestData/maintestdata/heightmap.tbmp` (4096×2048, 16-bit)
@@ -70,9 +84,10 @@ layers are dielectric.
 **License:** MIT — Copyright (c) 2010 Filip Strugar
 **Source:** [CDLOD](https://github.com/fstrugar/CDLOD)
 
-The demo scene loads this by default. MIT requires the copyright notice above to
-travel with the file, which is why it is recorded here rather than the asset
-being dropped in unattributed.
+This was the demo default through Phase 25M-2. Phase IV-B replaced it with the
+Great Lakes derivatives above, but the file remains as a legacy/regression
+heightmap. MIT requires the copyright notice above to travel with the file,
+which is why it remains recorded here.
 
 CDLOD is also the reference the terrain's chunked LOD scheme came from in
 Phase 14 and the `.tbmp` decoder in Phase 25L — see ATTRIBUTION.md.

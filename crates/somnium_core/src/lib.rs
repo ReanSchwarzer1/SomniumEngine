@@ -63,7 +63,7 @@ pub use app::{Engine, GameApp};
 pub use config::EngineConfig;
 pub use context::EngineContext;
 pub use editor_commands::{
-    CreateEntityCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
+    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
     ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
 };
 pub use error::EngineError;
@@ -1108,8 +1108,24 @@ pub fn simulate_particles(
 // ── Water Component ─────────────────────────────────────────────────────────
 
 /// Configuration for the procedural water shader (Phase 13).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterComponent {
+    /// Stable handle into renderer-owned `WaterBodyData`.
+    pub water_id: u32,
+    /// Renderer terrain whose local space and bathymetry this body follows.
+    pub terrain_id: u32,
+    /// 0 = legacy/unset, 1 = baked Great Lakes lake preset.
+    pub preset: u32,
+    /// 0 = lake. Reserved for ocean and river body types.
+    pub body_kind: u32,
+    /// Surface datum in the parent terrain's local metres.
+    pub surface_level: f32,
+    /// Deepest baked point below the datum.
+    pub max_depth: f32,
+    /// Terrain-local `[min_x, min_z, max_x, max_z]` coverage bounds.
+    pub bounds: [f32; 4],
+    /// Rendering/gameplay enable flag stored as a scalar for scene stability.
+    pub enabled: bool,
     /// Deep water color.
     pub deep_color: [f32; 4],
     /// Shallow water color (near edges/shore).
@@ -1137,6 +1153,14 @@ pub struct WaterComponent {
 impl Default for WaterComponent {
     fn default() -> Self {
         Self {
+            water_id: u32::MAX,
+            terrain_id: u32::MAX,
+            preset: 0,
+            body_kind: 0,
+            surface_level: 0.0,
+            max_depth: 0.0,
+            bounds: [-10.0, -10.0, 10.0, 10.0],
+            enabled: true,
             deep_color: [0.01, 0.05, 0.15, 0.9],
             shallow_color: [0.1, 0.4, 0.6, 0.5],
             edge_color: [0.8, 0.9, 1.0, 1.0],
@@ -1148,6 +1172,36 @@ impl Default for WaterComponent {
             wave_dir_a: [1.0, 0.0],
             wave_dir_b: [0.0, 1.0],
             wave_blend: 0.5,
+        }
+    }
+}
+
+impl WaterComponent {
+    /// The authored Phase IV Great Lakes body paired with a 1024 m terrain.
+    pub fn great_lakes(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
+        Self {
+            water_id,
+            terrain_id,
+            preset: 1,
+            body_kind: 0,
+            surface_level: somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES,
+            max_depth: somnium_renderer::terrain::DEFAULT_WATER_DEPTH_METRES,
+            bounds,
+            amplitude: 0.35,
+            coord_scale: [0.08, 0.08],
+            ..Self::default()
+        }
+    }
+
+    /// Renderer-facing descriptor; large textures and query arrays stay out of ECS.
+    pub fn descriptor(self) -> somnium_renderer::water_body::WaterBodyDescriptor {
+        somnium_renderer::water_body::WaterBodyDescriptor {
+            water_id: self.water_id,
+            terrain_id: self.terrain_id,
+            preset: self.preset,
+            surface_level: self.surface_level,
+            max_depth: self.max_depth,
+            bounds: self.bounds,
         }
     }
 }

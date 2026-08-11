@@ -69,6 +69,7 @@ pub enum MacroBlendMode {
 pub const DEFAULT_MACRO_STRENGTH: f32 = 0.45;
 
 /// A generated macro map, ready to upload.
+#[derive(Clone)]
 pub struct MacroMap {
     /// `MACRO_SIZE² * 4` bytes, RGBA8, row-major.
     pub texels: Vec<u8>,

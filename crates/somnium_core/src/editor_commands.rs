@@ -8,7 +8,8 @@
 use somnium_ecs::{Entity, World};
 use crate::{
     Children, LightComponent, MaterialComponent, MeshComponent, MeshKind,
-    Name, Parent, TerrainComponent, Transform, VoxelTerrainComponent, WorldTransform,
+    Name, Parent, TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent,
+    WorldTransform,
 };
 
 // ─── EditorCommand trait ──────────────────────────────────────────────────
@@ -117,6 +118,9 @@ pub struct EntitySnapshot {
     pub terrain: Option<TerrainComponent>,
     pub voxel_terrain: Option<VoxelTerrainComponent>,
     pub foliage: Option<crate::FoliageComponent>,
+    pub water: Option<WaterComponent>,
+    pub parent: Option<Parent>,
+    pub children: Option<Children>,
 }
 
 impl EntitySnapshot {
@@ -134,6 +138,9 @@ impl EntitySnapshot {
             terrain: world.get::<TerrainComponent>(entity).copied(),
             voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
             foliage: world.get::<crate::FoliageComponent>(entity).copied(),
+            water: world.get::<WaterComponent>(entity).copied(),
+            parent: world.get::<Parent>(entity).copied(),
+            children: world.get::<Children>(entity).copied(),
         }
     }
 
@@ -147,14 +154,30 @@ impl EntitySnapshot {
             return world.spawn((transform, name, wt, crate::ParticleEmitter::default()));
         }
 
+        if let Some(water) = self.water {
+            return match (self.mesh, self.mesh_kind, self.parent) {
+                (Some(mesh), Some(kind), Some(parent)) =>
+                    world.spawn((transform, name, wt, mesh, water, kind, parent)),
+                (Some(mesh), Some(kind), None) =>
+                    world.spawn((transform, name, wt, mesh, water, kind)),
+                (Some(mesh), None, Some(parent)) =>
+                    world.spawn((transform, name, wt, mesh, water, parent)),
+                (Some(mesh), None, None) => world.spawn((transform, name, wt, mesh, water)),
+                (None, _, Some(parent)) => world.spawn((transform, name, wt, water, parent)),
+                (None, _, None) => world.spawn((transform, name, wt, water)),
+            };
+        }
+
         // Terrain entities only carry the component — the renderer-side
         // TerrainData survives deletion, so respawning reattaches to it.
         // Foliage rides along when present: the archetype ECS takes every
         // component at spawn time, so it cannot be attached afterwards.
         if let Some(terrain) = self.terrain {
-            return match self.foliage {
-                Some(f) => world.spawn((transform, name, wt, terrain, f)),
-                None => world.spawn((transform, name, wt, terrain)),
+            return match (self.foliage, self.children) {
+                (Some(f), Some(children)) => world.spawn((transform, name, wt, terrain, f, children)),
+                (Some(f), None) => world.spawn((transform, name, wt, terrain, f)),
+                (None, Some(children)) => world.spawn((transform, name, wt, terrain, children)),
+                (None, None) => world.spawn((transform, name, wt, terrain)),
             };
         }
 
@@ -306,6 +329,43 @@ pub struct CreateEntityCmd {
     spawned_index: Option<u32>,
 }
 
+/// One undoable Terrain + child Water creation.
+pub struct CreateLandscapeCmd {
+    terrain: EntitySnapshot,
+    water: EntitySnapshot,
+    spawned: Option<(u32, u32)>,
+}
+
+impl CreateLandscapeCmd {
+    pub fn new(mut terrain: EntitySnapshot, mut water: EntitySnapshot) -> Self {
+        terrain.children = Some(Children::empty());
+        water.parent = None;
+        Self { terrain, water, spawned: None }
+    }
+}
+
+impl EditorCommand for CreateLandscapeCmd {
+    fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        let terrain = self.terrain.respawn(world);
+        let mut water_snapshot = self.water;
+        water_snapshot.parent = Some(Parent { entity: terrain });
+        let water = water_snapshot.respawn(world);
+        if let Some(children) = world.get_mut::<Children>(terrain) { children.push(water); }
+        self.spawned = Some((terrain.index(), water.index()));
+        *selected = Some(terrain);
+    }
+
+    fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        if let Some((terrain, water)) = self.spawned.take() {
+            if let Some(entity) = world.find_entity_by_index(water) { world.despawn(entity); }
+            if let Some(entity) = world.find_entity_by_index(terrain) { world.despawn(entity); }
+        }
+        *selected = None;
+    }
+
+    fn description(&self) -> &str { "Create Landscape" }
+}
+
 impl CreateEntityCmd {
     pub fn new(snapshot: EntitySnapshot) -> Self {
         Self { snapshot, spawned_index: None }
@@ -315,6 +375,9 @@ impl CreateEntityCmd {
 impl EditorCommand for CreateEntityCmd {
     fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
         let entity = self.snapshot.respawn(world);
+        if let Some(parent) = self.snapshot.parent.map(|parent| parent.entity) {
+            if let Some(children) = world.get_mut::<Children>(parent) { children.push(entity); }
+        }
         self.spawned_index = Some(entity.index());
         *selected = Some(entity);
     }
@@ -322,6 +385,11 @@ impl EditorCommand for CreateEntityCmd {
     fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
         if let Some(idx) = self.spawned_index {
             if let Some(entity) = world.find_entity_by_index(idx) {
+                if let Some(parent) = world.get::<Parent>(entity).copied() {
+                    if let Some(children) = world.get_mut::<Children>(parent.entity) {
+                        children.remove(entity);
+                    }
+                }
                 world.despawn(entity);
             }
             self.spawned_index = None;
@@ -342,11 +410,12 @@ impl EditorCommand for CreateEntityCmd {
 pub struct DeleteEntityCmd {
     entity_index: u32,
     snapshot: Option<EntitySnapshot>,
+    child_snapshots: Vec<EntitySnapshot>,
 }
 
 impl DeleteEntityCmd {
     pub fn new(entity_index: u32) -> Self {
-        Self { entity_index, snapshot: None }
+        Self { entity_index, snapshot: None, child_snapshots: Vec::new() }
     }
 }
 
@@ -354,6 +423,19 @@ impl EditorCommand for DeleteEntityCmd {
     fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
         if let Some(entity) = world.find_entity_by_index(self.entity_index) {
             self.snapshot = Some(EntitySnapshot::capture(world, entity));
+            self.child_snapshots = world.get::<Children>(entity)
+                .map(|children| children.as_slice().iter().copied()
+                    .filter(|child| world.is_alive(*child))
+                    .map(|child| EntitySnapshot::capture(world, child)).collect())
+                .unwrap_or_default();
+            let child_entities: Vec<Entity> = world.get::<Children>(entity)
+                .map(|children| children.as_slice().to_vec()).unwrap_or_default();
+            for child in child_entities { world.despawn(child); }
+            if let Some(parent) = world.get::<Parent>(entity).copied() {
+                if let Some(children) = world.get_mut::<Children>(parent.entity) {
+                    children.remove(entity);
+                }
+            }
             world.despawn(entity);
             if *selected == Some(entity) {
                 *selected = None;
@@ -363,7 +445,19 @@ impl EditorCommand for DeleteEntityCmd {
 
     fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
         if let Some(snap) = self.snapshot {
-            let entity = snap.respawn(world);
+            let mut parent_snapshot = snap;
+            if !self.child_snapshots.is_empty() {
+                parent_snapshot.children = Some(Children::empty());
+            }
+            let entity = parent_snapshot.respawn(world);
+            if let Some(parent) = snap.parent.map(|parent| parent.entity) {
+                if let Some(children) = world.get_mut::<Children>(parent) { children.push(entity); }
+            }
+            for mut child_snapshot in self.child_snapshots.iter().copied() {
+                child_snapshot.parent = Some(Parent { entity });
+                let child = child_snapshot.respawn(world);
+                if let Some(children) = world.get_mut::<Children>(entity) { children.push(child); }
+            }
             // Update entity_index so the next execute (redo) targets the new entity.
             self.entity_index = entity.index();
             *selected = Some(entity);
@@ -538,5 +632,72 @@ fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {
         if let Some(p) = world.get_mut::<Parent>(child) {
             p.entity = Entity::DANGLING;
         }
+    }
+}
+
+#[cfg(test)]
+mod landscape_tests {
+    use super::*;
+
+    fn terrain_snapshot() -> EntitySnapshot {
+        EntitySnapshot {
+            transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+            name: Some(Name::new("Terrain")), light: None, mesh: None, mat: None,
+            wt: Some(WorldTransform::identity()), mesh_kind: None,
+            is_particle_emitter: false,
+            terrain: Some(TerrainComponent { terrain_id: 2, chunk_cells: 64,
+                grid_x: 16, grid_z: 16, cell_size: 1.0, height_scale: 1.0 }),
+            voxel_terrain: None, foliage: None, water: None, parent: None,
+            children: Some(Children::empty()),
+        }
+    }
+
+    fn water_snapshot() -> EntitySnapshot {
+        EntitySnapshot {
+            transform: Some(Transform::from_translation(glam::Vec3::new(512.0, 15.0, 512.0))),
+            name: Some(Name::new("Water")), light: None, mesh: None, mat: None,
+            wt: Some(WorldTransform::identity()), mesh_kind: None,
+            is_particle_emitter: false, terrain: None, voxel_terrain: None,
+            foliage: None,
+            water: Some(WaterComponent::great_lakes(3, 2, [0.0, 0.0, 1024.0, 1024.0])),
+            parent: None, children: None,
+        }
+    }
+
+    #[test]
+    fn landscape_create_undo_redo_preserves_two_entity_hierarchy() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut stack = UndoStack::new(8);
+        stack.push(Box::new(CreateLandscapeCmd::new(terrain_snapshot(), water_snapshot())),
+            &mut world, &mut selected);
+        assert_eq!(world.entities().count(), 2);
+        let terrain = selected.unwrap();
+        let child = world.get::<Children>(terrain).unwrap().as_slice()[0];
+        assert_eq!(world.get::<Parent>(child).unwrap().entity, terrain);
+        assert!(world.get::<WaterComponent>(child).is_some());
+
+        assert!(stack.undo(&mut world, &mut selected));
+        assert_eq!(world.entities().count(), 0);
+        assert!(stack.redo(&mut world, &mut selected));
+        assert_eq!(world.entities().count(), 2);
+    }
+
+    #[test]
+    fn deleting_a_landscape_cascades_and_undo_restores_the_child() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut create = CreateLandscapeCmd::new(terrain_snapshot(), water_snapshot());
+        create.execute(&mut world, &mut selected);
+        let terrain = selected.unwrap();
+        let mut delete = DeleteEntityCmd::new(terrain.index());
+        delete.execute(&mut world, &mut selected);
+        assert_eq!(world.entities().count(), 0);
+        delete.undo(&mut world, &mut selected);
+        assert_eq!(world.entities().count(), 2);
+        let terrain = selected.unwrap();
+        let water = world.get::<Children>(terrain).unwrap().as_slice()[0];
+        assert_eq!(world.get::<Parent>(water).unwrap().entity, terrain);
+        assert!(world.get::<WaterComponent>(water).is_some());
     }
 }

@@ -990,6 +990,10 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/geometry.rs` | Original — bump allocator (Phase 7) + first-fit free-list for dynamic chunk meshes (Phase 14) |
 | `somnium_renderer/src/terrain/mod.rs` | Fyrox `terrain/mod.rs` — chunked heightmap, height accessors, raycast; CDLOD log2 LOD selection (Phase 14 SSS) |
 | `somnium_renderer/src/terrain/mesh.rs` | Fyrox `terrain/geometry.rs` grid emission + original block-fan T-junction stitching (Phase 14 SSS) |
+| `somnium_renderer/src/terrain/heightmap.rs` | CDLOD source-sample/cell convention retained; Phase IV FLOAT32 EXR channel preservation and precision validation are original |
+| `somnium_asset/examples/bake_great_lakes.rs` | Original deterministic import recipe: area resampling, plateau mask extraction, chamfer shoreline distance, and synthetic bathymetry (Phase IV-B) |
+| `somnium_renderer/src/water_body.rs` | Renderer-owned water resources following Somnium's existing `TerrainData` handle pattern; ECS/render split cross-checked against bevy_water (Phase IV-C) |
+| `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
 | `somnium_renderer/src/terrain/brush.rs` | Fyrox `brushstroke/brushraster.rs` falloff + hardness remap; stamp flow from `brushstroke/mod.rs` (Phase 14 SSS) |
 | `somnium_renderer/src/terrain/textures.rs` | Original procedural PBR layers; array-texture layout from bevy_triplanar_splatting (Phase 14 SSS) |
 | `somnium_renderer/src/pass/terrain.rs` | WaterPass integration pattern (HDR + vis-depth); own pipeline per Phase 14 SSS plan |
@@ -1204,4 +1208,16 @@ and its LUT sizes were adopted; both are covered by §13.27's terms.
 | Two-Sided Foliage Transmission | **Unreal Engine 5** (`Engine/Shaders/Private/ShadingModels.ush` — `TwoSidedBxDF` wrapped backside N·L and view-dependent scatter pattern; translated to Somnium's WGSL material path) |
 | Curved Foliage Shading Normal | **SpartanEngine** (`data/shaders/g_buffer.hlsl` — face-signed, camera-relative foliage normal bending pattern; adapted to preserve a separate geometric normal for shadow lookup) |
 | ReSTIR GI Night Fallback & Light-Change Invalidation | **Bevy Solari** (`crates/bevy_solari/src/realtime/restir_gi.wgsl` — reservoir roles/reuse flow and rejecting emissive hits in `generate_initial_reservoir`); Somnium's zero-sun IBL fallback plus direction/colour history key are original integration work |
+
+---
+
+### 13.31 Great Lakes landscape foundation (Phase IV-A–IV-C)
+
+| Piece | Reference / provenance |
+|---|---|
+| Great Lakes source asset | **Motion Forge Pictures**, Chris J Mitchell, *Great Lakes Height Map*. The asset-specific catalog states CC0 1.0 Universal; source/output hashes and the catalog-versus-general-terms note are recorded in `assets/terrain/great_lakes/README.md`. |
+| Terrain sample convention and LOD continuity | **CDLOD**, Filip Strugar (`Demo/.../CDLODStreamingStorage.cpp` and the existing `.tbmp` path), plus Somnium's existing Fyrox-derived terrain chunk organization. The FLOAT32 EXR reader, analytic continuity tests, and shadow debug modes are original Rust/WGSL work. |
+| Smooth terrain shadow receiver bias | The Phase 25M-2 Karis/Frostbite grazing-angle bias remains, but terrain now supplies its continuous interpolated geometric normal instead of the per-triangle plane. This correction is original and follows the analytic-hill evidence rather than a copied engine implementation. |
+| ECS water authoring versus renderer ownership | **bevy_water** (`src/lib.rs`, `src/water.rs`, `src/water/material.rs`, MIT/Apache-2.0) was read to confirm the separation between ECS authoring data and render-owned images/material state. Somnium implements its own compact `WaterComponent`, `WaterBodyRegistry`, resource formats, hierarchy, commands, and serialization. |
+| Later spectral/underwater architecture research | **Wicked Engine** (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, `shaders/underwaterCS.hlsl`, MIT) was studied for Phase IV-D onward. No FFT, ocean, or underwater shader code was translated in IV-A–IV-C; those citations are recorded now so later implementation does not silently inherit them. |
 

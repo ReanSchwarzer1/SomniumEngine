@@ -25,6 +25,82 @@ pub struct WaterPass {
     pub tex_bind_group_layout: wgpu::BindGroupLayout,
 }
 
+/// Build the shared water-material textures once for the renderer. Coverage,
+/// depth, and shoreline data remain per water body; these repeating surface
+/// maps are common to every body and no longer belong to the demo application.
+pub fn create_default_texture_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::BindGroup {
+    fn view(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: &str,
+        format: wgpu::TextureFormat,
+        fallback: [u8; 4],
+    ) -> wgpu::TextureView {
+        let (width, height, bytes) = match image::open(path) {
+            Ok(image) => {
+                let image = image.to_rgba8();
+                (image.width(), image.height(), image.into_raw())
+            }
+            Err(error) => {
+                tracing::warn!("water: {path} unavailable ({error}); using fallback texel");
+                (1, 1, fallback.to_vec())
+            }
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(path),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        texture.create_view(&Default::default())
+    }
+
+    let base = view(device, queue, "assets/ocean_pbr/BaseColor.png",
+        wgpu::TextureFormat::Rgba8UnormSrgb, [20, 55, 90, 255]);
+    let normal = view(device, queue, "assets/ocean_pbr/Normal_DX.png",
+        wgpu::TextureFormat::Rgba8Unorm, [128, 128, 255, 255]);
+    let orm = view(device, queue, "assets/ocean_pbr/ORM_RAO_GROUGH_BMETAL.png",
+        wgpu::TextureFormat::Rgba8Unorm, [255, 90, 0, 255]);
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Water surface sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Shared water surface textures"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&normal) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&orm) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    })
+}
+
 impl WaterPass {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

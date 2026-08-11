@@ -108,6 +108,8 @@ pub struct SomniumRenderer {
 
     /// Water textures bind group.
     pub water_textures_bind_group: Option<wgpu::BindGroup>,
+    /// Phase IV-C: mask/depth/SDF resources keyed by ECS water handles.
+    pub water_bodies: crate::water_body::WaterBodyRegistry,
 
     /// Editor infinite-grid overlay pass.
     grid_pass: GridPass,
@@ -478,6 +480,13 @@ impl SomniumRenderer {
         let default_color = glam::Vec3::splat(5.0);
 
         let water_pass = crate::pass::water::WaterPass::new(&ctx.device, HDR_FORMAT);
+        let water_textures_bind_group = Some(
+            crate::pass::water::create_default_texture_bind_group(
+                &ctx.device,
+                &ctx.queue,
+                &water_pass.tex_bind_group_layout,
+            ),
+        );
 
         // Phase 24AD. Built here rather than inside the struct literal because
         // it borrows the visibility pass's depth view, which the literal moves.
@@ -601,7 +610,8 @@ impl SomniumRenderer {
             terrain_queue: Vec::new(),
             draw_queue: Vec::new(),
 
-            water_textures_bind_group: None,
+            water_textures_bind_group,
+            water_bodies: Default::default(),
         }
     }
 
@@ -1225,6 +1235,23 @@ impl SomniumRenderer {
         self.water_queue.push((transform, water, vertex_offset, index_offset, index_count));
     }
 
+    /// Allocate a stable ECS-visible water handle.
+    pub fn allocate_water_body_id(&mut self) -> u32 {
+        self.water_bodies.allocate_id()
+    }
+
+    /// Create or restore renderer-owned mask/depth/SDF state for one body.
+    pub fn ensure_water_body(
+        &mut self,
+        ctx: &RenderContext,
+        descriptor: crate::water_body::WaterBodyDescriptor,
+    ) -> Result<(), String> {
+        if self.water_bodies.descriptor(descriptor.water_id) != Some(descriptor) {
+            self.water_bodies.create_or_replace(ctx, descriptor)?;
+        }
+        Ok(())
+    }
+
     /// Create a new heightmap terrain (Phase 14) and return its terrain id.
     ///
     /// Phase 25A-2 does three things here that the terrain pass used to do for
@@ -1387,6 +1414,10 @@ impl SomniumRenderer {
             self.view_proj_unjittered.inverse(),
         );
 
+        let shadow_debug = std::env::var("SOMNIUM_SHADOW_DEBUG")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
         let gpu_light = GpuDirectionalLight {
             direction: self.light_direction.to_array(),
             _pad0: 0.0,
@@ -1403,10 +1434,7 @@ impl SomniumRenderer {
             ibl_intensity: self.ibl_intensity,
             sun_angular_radius: self.sun_angular_radius,
             // TEMP: shadow_factor debug visualisation.
-            _pad2: std::env::var("SOMNIUM_SHADOW_DEBUG")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-                .unwrap_or(0.0),
+            _pad2: shadow_debug,
             // Phase 25M-2: physical moon direction from simplified orbital model.
             moon_direction: crate::shadow::moon_direction(
                 self.light_direction,
@@ -1515,12 +1543,21 @@ impl SomniumRenderer {
         // ── 3. Build and upload instance buffer ──────────────────────────────
         self.instances.clear();
         for cmd in &self.draw_queue {
+            let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
+                self.terrains
+                    .iter()
+                    .flat_map(|terrain| terrain.chunks.iter())
+                    .find(|chunk| chunk.vertex_offset == cmd.vertex_offset)
+                    .map_or(0, |chunk| u32::from(chunk.lod) + 1)
+            } else {
+                0
+            };
             self.instances.add_instance(crate::instance::GpuInstanceData {
                 model_matrix:       cmd.transform.to_cols_array_2d(),
                 material_id:        cmd.material_id,
                 mesh_vertex_offset: cmd.vertex_offset,
                 mesh_index_offset:  cmd.index_offset,
-                _padding:           0,
+                _padding:           terrain_lod,
             });
         }
         // Phase 21: blended draws share the same instance buffer, appended

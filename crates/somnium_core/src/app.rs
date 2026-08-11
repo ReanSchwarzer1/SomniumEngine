@@ -18,13 +18,15 @@ use somnium_ui::{EditorEvent, UiManager};
 use crate::config::EngineConfig;
 use crate::context::EngineContext;
 use crate::editor_commands::{
-    CreateEntityCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd, SetTransformCmd,
+    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd, SetTransformCmd,
     TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
 use crate::event::{translate_window_event, EngineEvent};
 use crate::time::TimeState;
-use crate::{FoliageComponent, LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, PostProcessComponent, TerrainComponent, Transform, WorldTransform, simulate_particles};
+use crate::{Children, FoliageComponent, LightComponent, LightType, MeshComponent,
+    MaterialComponent, MeshKind, Name, Parent, PostProcessComponent, TerrainComponent,
+    Transform, WaterComponent, WorldTransform, simulate_particles};
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
 
@@ -767,6 +769,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.game.on_update(&mut ctx);
         }
 
+        // Phase IV-C: ECS membership is authoritative for renderer-owned water
+        // data. Delete drops textures; undo/redo recreates them from the small
+        // stable descriptor, so no stale GPU handle survives in a component.
+        let water_descriptors: Vec<_> = self.world.entities()
+            .filter_map(|entity| self.world.get::<WaterComponent>(entity).copied())
+            .filter(|water| water.enabled && water.water_id != u32::MAX && water.preset != 0)
+            .map(WaterComponent::descriptor)
+            .collect();
+        if let (Some(renderer), Some(render_ctx)) = (&mut self.renderer, &self.render_ctx) {
+            let active: std::collections::HashSet<u32> = water_descriptors
+                .iter().map(|descriptor| descriptor.water_id).collect();
+            for descriptor in water_descriptors {
+                if let Err(error) = renderer.ensure_water_body(render_ctx, descriptor) {
+                    warn!("Failed to restore water body {}: {error}", descriptor.water_id);
+                }
+            }
+            renderer.water_bodies.retain_ids(&active);
+        }
+
         // ── Update native UI panels with current frame state ─────────────────
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
@@ -866,6 +887,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ],
                     [f.enabled, paint_on, erase_on, single_on],
                 ));
+            let sel_water = self.selected_entity
+                .and_then(|entity| self.world.get::<WaterComponent>(entity).copied())
+                .map(|water| [water.surface_level, water.max_depth, water.clarity, water.amplitude]);
 
             // Phase 13E: light properties for the inspector (angles in degrees).
             let sel_light = self.selected_entity
@@ -896,6 +920,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_light_inspector(sel_light);
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
+                ui.update_water_inspector(sel_water);
                 ui.update_foliage_inspector(sel_foliage);
             }
         }
@@ -1877,6 +1902,9 @@ impl<G: GameApp> Engine<G> {
                     terrain: None,
                     voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
                     foliage: None,
+                    water: None,
+                    parent: None,
+                    children: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -1933,8 +1961,44 @@ impl<G: GameApp> Engine<G> {
                     // Phase 17A: present but disabled, so a new terrain is bare
                     // until foliage is deliberately switched on.
                     foliage: Some(crate::FoliageComponent::default()),
+                    water: None,
+                    parent: None,
+                    children: Some(Children::empty()),
                 };
-                let cmd = Box::new(CreateEntityCmd::new(snapshot));
+                let water_id = renderer.allocate_water_body_id();
+                let water_component = WaterComponent::great_lakes(
+                    water_id, terrain_id, [0.0, 0.0, wx, wz],
+                );
+                if let Err(error) = renderer.ensure_water_body(render_ctx, water_component.descriptor()) {
+                    warn!("Failed to create Great Lakes water data: {error}");
+                }
+                let (water_vertices, water_indices) = somnium_asset::generate_plane(wx.max(wz), 64);
+                let water_allocation = renderer.geometry.upload_mesh(
+                    &render_ctx.queue, &water_vertices, &water_indices, 0,
+                );
+                let water_snapshot = EntitySnapshot {
+                    transform: Some(Transform::from_translation(glam::Vec3::new(
+                        wx * 0.5, water_component.surface_level, wz * 0.5,
+                    ))),
+                    name: Some(Name::new("Water")),
+                    light: None,
+                    mesh: Some(MeshComponent {
+                        vertex_offset: water_allocation.vertex_offset,
+                        index_offset: water_allocation.index_offset,
+                        index_count: water_allocation.index_count,
+                    }),
+                    mat: None,
+                    wt: Some(WorldTransform::identity()),
+                    mesh_kind: Some(MeshKind::Plane),
+                    is_particle_emitter: false,
+                    terrain: None,
+                    voxel_terrain: None,
+                    foliage: None,
+                    water: Some(water_component),
+                    parent: None,
+                    children: None,
+                };
+                let cmd = Box::new(CreateLandscapeCmd::new(snapshot, water_snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
                 info!(
                     "Created terrain {} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
@@ -2040,6 +2104,9 @@ impl<G: GameApp> Engine<G> {
                     terrain: None,
                     voxel_terrain: None,
                     foliage: None,
+                    water: None,
+                    parent: None,
+                    children: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
@@ -2090,6 +2157,25 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetInspectorValue { field, value, live } => {
                 let Some(entity) = self.selected_entity else { return };
+
+                if matches!(field, IF::WaterSurface | IF::WaterMaxDepth | IF::WaterClarity | IF::WaterAmplitude) {
+                    if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                        match field {
+                            IF::WaterSurface => water.surface_level = value,
+                            IF::WaterMaxDepth => water.max_depth = value.max(0.01),
+                            IF::WaterClarity => water.clarity = value.clamp(0.0, 1.0),
+                            IF::WaterAmplitude => water.amplitude = value.max(0.0),
+                            _ => unreachable!(),
+                        }
+                    }
+                    if field == IF::WaterSurface {
+                        if let Some(transform) = self.world.get_mut::<Transform>(entity) {
+                            transform.translation.y = value;
+                        }
+                    }
+                    let _ = live;
+                    return;
+                }
 
                 // Phase 15A1: post-processing fields edit PostProcessComponent.
                 if matches!(
@@ -2452,6 +2538,16 @@ impl<G: GameApp> Engine<G> {
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
+                    let mut water = self.world.get::<WaterComponent>(entity).copied();
+                    if let Some(component) = water.as_mut() {
+                        if let (Some(renderer), Some(render_ctx)) = (&mut self.renderer, &self.render_ctx) {
+                            component.water_id = renderer.allocate_water_body_id();
+                            if let Err(error) = renderer.ensure_water_body(render_ctx, component.descriptor()) {
+                                warn!("Failed to duplicate water data: {error}");
+                            }
+                        }
+                    }
+                    let parent = self.world.get::<Parent>(entity).copied();
                     let is_particle_emitter = self.world.get::<crate::ParticleEmitter>(entity).is_some();
                     // Offset the duplicate slightly so it's visible
                     let mut dup_transform = transform;
@@ -2470,6 +2566,9 @@ impl<G: GameApp> Engine<G> {
                         terrain: None,
                         voxel_terrain: None,
                         foliage: None,
+                        water,
+                        parent,
+                        children: None,
                     };
                     let cmd = Box::new(CreateEntityCmd::new(snapshot));
                     self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
