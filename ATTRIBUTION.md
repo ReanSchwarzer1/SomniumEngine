@@ -990,6 +990,21 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/geometry.rs` | Original — bump allocator (Phase 7) + first-fit free-list for dynamic chunk meshes (Phase 14) |
 | `somnium_renderer/src/terrain/mod.rs` | Fyrox `terrain/mod.rs` — chunked heightmap, height accessors, raycast; CDLOD log2 LOD selection (Phase 14 SSS) |
 | `somnium_renderer/src/terrain/mesh.rs` | Fyrox `terrain/geometry.rs` grid emission + original block-fan T-junction stitching (Phase 14 SSS) |
+| `somnium_renderer/src/terrain/heightmap.rs` | CDLOD source-sample/cell convention retained; Phase IV FLOAT32 EXR channel preservation and precision validation are original |
+| `somnium_asset/examples/bake_great_lakes.rs` | Original deterministic import recipe: area resampling, plateau mask extraction, chamfer shoreline distance, and synthetic bathymetry (Phase IV-B) |
+| `somnium_renderer/src/water_body.rs` | Renderer-owned water resources following Somnium's existing `TerrainData` handle pattern; ECS/render split cross-checked against bevy_water (Phase IV-C) |
+| `somnium_renderer/src/water_body.rs` (IV-D) | GPU Gems Ch. 1 Gerstner displacement/analytic derivatives plus bevy_water's CPU/GPU query-parity pattern; Somnium's finite wet-cell mesh, baked mask/depth/SDF sampling, registry API, and Rust implementation are original |
+| `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (IV-D/E) | Wicked Engine ocean resource/query ownership and pre-water composition ordering; GPU Gems water math; established Beer–Lambert, Henyey–Greenstein, Fresnel, and GGX models. WGSL bindings, finite-body MRT, validated refraction, SSR fallback, filtering, and integration are original |
+| `somnium_renderer/src/pass/taa.rs`, `shaders/taa.wgsl` (IV-D) | Existing Somnium TAA retained for opaque pixels; water-only motion-vector selection and surface coverage target are original integration work |
+| `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
+| `somnium_renderer/src/pass/water_spectrum.rs`, `shaders/water_spectrum.wgsl` (IV-F) | Tessendorf wind-spectrum/deep-water-dispersion model plus Wicked Engine's persistent displacement/gradient/folding resource split; Somnium's deterministic spectrum generation, radix-2 wgpu scheduling, two finite-lake scales, WGSL, and temporal foam integration are original |
+| `somnium_renderer/src/pass/underwater.rs`, `shaders/underwater.wgsl` (IV-G) | Wicked Engine's HDR underwater composition ordering and finite-medium concerns were studied; Somnium's ray-segment mask, RGB medium, caustics, and transition WGSL are original and deliberately exclude Wicked's Shadertoy-cited Brown–Conrady/god-ray helpers |
+| `somnium_core/src/context.rs`, `app.rs`; `somnium_ui/src/lib.rs` (IV-I) | Unreal viewport transport convention; Somnium's fixed-step simulation clock, native-wgpu button routing, pause/freeze, deterministic stop/reset behavior, and Play-session editor-overlay suppression are original |
+| `somnium_physics_sys/src/jolt_bridge.*`, `somnium_physics/src/world.rs`, `examples/hello_engine/src/main.rs` (IV-I) | Jolt `BoatTest.cpp`/`WaterShapeTest.cpp` distributed buoyancy, point drag, and submerged propulsion pattern; original Rust ECS/query integration and C ABI extensions |
+| `somnium_renderer/src/shaders/water.wgsl` (IV-I) | Wicked ripple/pass organization, scene-depth shore contact, and Eidos shoreline-SDF research; Unreal Water's dilated-water/terrain-depth merge informed the under-bank guard. Somnium's analytic Kelvin wake, prop wash, filtered shoreline coverage, breaker/contact foam, and rotated multi-scale material detail are original |
+| `somnium_renderer/src/terrain/mod.rs` (IV-I shoreline refinement) | Unreal Water's explicit water/landscape coupling and smoothed brush-distance fields informed treating the intersection as protected detail. Somnium's water-aware chunk AABB test, LOD-0 pinning, neighbor relaxation integration, and tests are original Rust implementation |
+| `assets/models/gislinge_viking_boat/`, `examples/hello_engine/src/main.rs` (IV-J) | Opus Poly's CC BY 4.0 Gislinge Viking Boat is retained as an unchanged multi-node GLB; Somnium's centimetre-to-metre root, ECS ownership, low-frequency physics proxy, and render/physics separation are original integration |
+| `somnium_core/src/landscape.rs` (IV-H) | Original versioned landscape recipe and shared startup/Create-menu factory built on Somnium's existing snapshots, hierarchy, and composite command system |
 | `somnium_renderer/src/terrain/brush.rs` | Fyrox `brushstroke/brushraster.rs` falloff + hardness remap; stamp flow from `brushstroke/mod.rs` (Phase 14 SSS) |
 | `somnium_renderer/src/terrain/textures.rs` | Original procedural PBR layers; array-texture layout from bevy_triplanar_splatting (Phase 14 SSS) |
 | `somnium_renderer/src/pass/terrain.rs` | WaterPass integration pattern (HDR + vis-depth); own pipeline per Phase 14 SSS plan |
@@ -1189,3 +1204,60 @@ Bevy was read as a worked example of applying the same model on wgpu, per the ru
 Written from the papers. Bevy's `bruneton_functions.wgsl` was read to confirm the exact
 form of the transmittance mapping — the easiest part of the model to get subtly wrong —
 and its LUT sizes were adopted; both are covered by §13.27's terms.
+
+---
+
+### 13.30 Sunset & Night Sky Visual Fixes (Phase 25M-2)
+
+| Piece | Reference Engine / Paper |
+|---|---|
+| CSM Caster-Depth Extension | **Flax Engine** (`Source/Engine/Renderer/ShadowsPass.cpp` — the 1000 m `cullRangeExtent` used to expand directional-shadow caster culling beyond the camera receiver volume) |
+| Star Field 3×3×3 Neighborhood & Magnitude Distribution | **SpartanEngine** (`data/shaders/sky/skysphere.hlsl` — multi-cell neighborhood sampling, exponential magnitude distribution, galactic plane density concentration) |
+| Celestial Sphere Unit Vector & Phase Shading | **O3DE** (`Gems/Stars/Assets/Shaders/Stars/Stars.azsl` & `StarsComponentController.cpp` — spherical coordinate mapping, point spread & limb darkening) |
+| Grazing Angle Shadow Normal Bias | **Karis 2013 / Frostbite PBR** — quadratic normal offset scaling based on texel world size and incidence cosine |
+| Contact-Shadow Thickness Correction | **Bend Studio screen-space shadow pattern** (already adopted in Phase 24X); Somnium's linear view-space reconstruction fixes the local integration's previous metre-vs-NDC unit mismatch |
+| Two-Sided Foliage Transmission | **Unreal Engine 5** (`Engine/Shaders/Private/ShadingModels.ush` — `TwoSidedBxDF` wrapped backside N·L and view-dependent scatter pattern; translated to Somnium's WGSL material path) |
+| Curved Foliage Shading Normal | **SpartanEngine** (`data/shaders/g_buffer.hlsl` — face-signed, camera-relative foliage normal bending pattern; adapted to preserve a separate geometric normal for shadow lookup) |
+| ReSTIR GI Night Fallback & Light-Change Invalidation | **Bevy Solari** (`crates/bevy_solari/src/realtime/restir_gi.wgsl` — reservoir roles/reuse flow and rejecting emissive hits in `generate_initial_reservoir`); Somnium's zero-sun IBL fallback plus direction/colour history key are original integration work |
+
+---
+
+### 13.31 Great Lakes landscape foundation (Phase IV-A–IV-C)
+
+| Piece | Reference / provenance |
+|---|---|
+| Great Lakes source asset | **Motion Forge Pictures**, Chris J Mitchell, *Great Lakes Height Map*. The asset-specific catalog states CC0 1.0 Universal; source/output hashes and the catalog-versus-general-terms note are recorded in `assets/terrain/great_lakes/README.md`. |
+| Terrain sample convention and LOD continuity | **CDLOD**, Filip Strugar (`Demo/.../CDLODStreamingStorage.cpp` and the existing `.tbmp` path), plus Somnium's existing Fyrox-derived terrain chunk organization. The FLOAT32 EXR reader, analytic continuity tests, and shadow debug modes are original Rust/WGSL work. |
+| Smooth terrain shadow receiver bias | The Phase 25M-2 Karis/Frostbite grazing-angle bias remains, but terrain now supplies its continuous interpolated geometric normal instead of the per-triangle plane. This correction is original and follows the analytic-hill evidence rather than a copied engine implementation. |
+| ECS water authoring versus renderer ownership | **bevy_water** (`src/lib.rs`, `src/water.rs`, `src/water/material.rs`, MIT/Apache-2.0) was read to confirm the separation between ECS authoring data and render-owned images/material state. Somnium implements its own compact `WaterComponent`, `WaterBodyRegistry`, resource formats, hierarchy, commands, and serialization. |
+| Later spectral/underwater architecture research | **Wicked Engine** (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, `shaders/underwaterCS.hlsl`, MIT) was studied for Phase IV-D onward. No FFT, ocean, or underwater shader code was translated in IV-A–IV-C; those citations are recorded now so later implementation does not silently inherit them. |
+
+### 13.32 Finite water and coherent surface optics (Phase IV-D–IV-E)
+
+| Piece | Reference / adaptation boundary |
+|---|---|
+| Deterministic Gerstner displacement and analytic derivatives | Mark Finch, NVIDIA GPU Gems Ch. 1, *Effective Water Simulation from Physical Models*. Somnium re-derived the equations in Rust and WGSL, uses its own four-band parameters, shore attenuation, velocity output, and query API; no source was copied. |
+| CPU/GPU surface-query parity | **bevy_water** (`src/wave.rs`, `src/water.rs`, MIT OR Apache-2.0) demonstrated the value of evaluating compatible wave math on CPU and GPU. Somnium's descriptor, registry ownership, bilinear bathymetry sampling, containment, and motion-vector contract are original. |
+| Resource ownership and future spectrum boundary | **Wicked Engine** (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, MIT) informed the separation of persistent ocean resources, displacement/gradient data, and CPU queries/readback. IV-D remains deterministic Gerstner rather than translating Wicked's FFT implementation. |
+| Surface/volume pass ordering | Epic's official *Single Layer Water* documentation and Wicked Engine's pre-water/underwater composition were used as architecture references. Somnium retains opaque terrain depth/color beneath a separate finite water pass and writes its own HDR/surface/velocity MRTs. |
+| Refraction and volumetric colour | Beer–Lambert extinction and Henyey–Greenstein phase are standard published models. Somnium reconstructs a bounded RGB path length from its depth/bathymetry, validates displaced UVs against opaque depth, and falls back to the unperturbed sample. |
+| Reflection | Standard dielectric Fresnel (`F0 = 0.02037`) and GGX are used with Somnium's existing physical sun/moon/environment data. The bounded screen-space march, confidence fade, environment fallback, and distance/footprint anti-aliasing are original WGSL integration. |
+
+### 13.33 Spectral surface, underwater medium, and shared landscape (Phase IV-F–IV-H)
+
+| Piece | Reference / adaptation boundary |
+|---|---|
+| Wind spectrum and inverse FFT | Jerry Tessendorf, *Simulating Ocean Water*, supplied the foundational wind-spectrum, deep-water dispersion, and horizontal-displacement model. Wicked Engine (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, MIT) was inspected for persistent cascade resources and compute-pass organization. Somnium generates its own fixed-seed spectrum, uses original Rust scheduling and WGSL radix-2 ping-pong transforms, and chooses incommensurate 192 m/53 m finite-lake scales. No source was copied. |
+| Gradient, folding, and foam history | Wicked Engine `oceanUpdateGradientFoldingCS.hlsl` established the useful separation between displacement, gradient, and Jacobian folding data. Somnium independently derives finite-difference slopes and the horizontal Jacobian, accumulates foam with exponential ECS-controlled decay, combines it with the existing authored shoreline SDF, and synchronizes a wet-sand band. |
+| Underwater composition | Wicked Engine `underwaterCS.hlsl` and `oceanSurfacePS.hlsl` were read for pass placement, water-interface visibility, extinction, and in-scattering concerns. Somnium's finite-body containment, near-plane partial-submersion mask, submerged ray-segment calculation, portable receiver-only caustics, TIR-facing surface logic, Rust integration, and WGSL are original. The Brown–Conrady and stylized god-ray helper paths cited by Wicked from Shadertoy were not translated. |
+| Shared default factory | No third-party implementation was translated. `DefaultLandscapePreset` and `create_default_landscape` consolidate Somnium's own terrain importer, water registry, ECS snapshots, hierarchy, post process, and `CreateLandscapeCmd`; structural and undo/serialization tests enforce the shared recipe. The 16.1 m default water datum is a project-authored visual calibration accepted from direct Somnium runtime inspection, not a value derived from a reference engine. |
+
+### 13.34 Water interaction, editor transport, and demo vessel (Phase IV-I–IV-J)
+
+| Piece | Reference / adaptation boundary |
+|---|---|
+| Distributed buoyancy and propulsion | **Jolt Physics** `Samples/Tests/Water/BoatTest.cpp` and `WaterShapeTest.cpp` (MIT, Jorrit Rouwe) were inspected for a simplified convex physics hull, submerged force application, surface normal/velocity sampling, drag, and propulsion below the waterline. Somnium's eight-point force model, ECS components, fixed-step callback, and Rust/C ABI additions are original. |
+| Wake and shoreline foam | **Wicked Engine** `wiScene.cpp`, `wiRenderPath3D.cpp`, and `shaders/oceanSurfacePS.hlsl` (MIT, Turánszki János) were inspected for ripple injection, pass placement, and scene-depth-difference shore foam. Eidos Montréal's *From Shore to Horizon* informed SDF-scaled coastal bands. Unreal Engine Water plugin `WaterBrushManager.cpp` and `WaterInfoMerge.usf` were inspected for landscape coupling, distance-field smoothing, dilated water, and terrain-depth ownership at the intersection. Somnium's analytic Kelvin-angle arms, prop wash, water-aware terrain LOD pinning, under-bank coverage dilation, metre-scaled SDF/contact band, three-frequency normal stack, and WGSL integration are original. No source was copied. |
+| Play/Pause/Stop | Unreal Engine's viewport transport convention informed the three-control editor UX. Somnium's `SimulationClock`, fixed accumulator, event routing, explicit pause/freeze, reset semantics, and player-visible-only Play viewport are original Rust implementation. Environmental preview runs in both Editing and Playing; Pause is the intentional freeze control. Editor overlays remain hidden through a paused Play session and return on Stop. No Unreal source was copied. |
+| Vessel geometry and materials | **Gislinge Viking Boat** by Opus Poly, 29,035 triangles, licensed under CC BY 4.0. The original Sketchfab page, license, source hash, scale, and unchanged embedded material/texture record are preserved in `assets/models/gislinge_viking_boat/README.md`. Somnium's multi-node submission, centimetre-to-metre root transform, ECS ownership, and separate buoyancy proxy are original integration. |
+

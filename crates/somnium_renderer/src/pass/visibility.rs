@@ -27,7 +27,12 @@ pub struct VisibilityBufferPass {
 }
 
 impl VisibilityBufferPass {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32, global_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let size = wgpu::Extent3d {
             width,
             height,
@@ -197,7 +202,11 @@ impl VisibilityBufferPass {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             cache: None,
         };
         two_sided_desc.label = Some("Visibility Pipeline (two-sided)");
@@ -214,7 +223,13 @@ impl VisibilityBufferPass {
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32, global_bind_group_layout: &wgpu::BindGroupLayout) {
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+    ) {
         *self = Self::new(device, width, height, global_bind_group_layout);
     }
 }

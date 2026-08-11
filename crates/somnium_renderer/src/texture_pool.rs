@@ -16,7 +16,11 @@ impl TexturePool {
     pub fn new(device: &wgpu::Device) -> Self {
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Bindless Texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -45,7 +49,8 @@ impl TexturePool {
         if let Some(index) = self.free_indices.pop() {
             // Ensure views vector is large enough
             if self.views.len() <= index as usize {
-                self.views.resize_with(index as usize + 1, || self.dummy_view.clone());
+                self.views
+                    .resize_with(index as usize + 1, || self.dummy_view.clone());
             }
             self.views[index as usize] = view;
             index

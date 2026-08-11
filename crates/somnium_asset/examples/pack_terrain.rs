@@ -97,6 +97,10 @@ fn main() -> Result<(), String> {
         println!("packed {material} ({w}x{h})");
     }
 
-    println!("\n{} materials written to {}", MATERIALS.len(), out_dir.display());
+    println!(
+        "\n{} materials written to {}",
+        MATERIALS.len(),
+        out_dir.display()
+    );
     Ok(())
 }

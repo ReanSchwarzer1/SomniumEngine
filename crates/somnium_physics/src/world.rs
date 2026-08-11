@@ -2,7 +2,10 @@ use glam::{Quat, Vec3};
 use somnium_physics_sys::*;
 use std::ffi::c_void;
 
-use crate::{body::{BodyId, RigidBodyDescriptor}, config::PhysicsConfig};
+use crate::{
+    body::{BodyId, RigidBodyDescriptor},
+    config::PhysicsConfig,
+};
 
 /// The main physics simulation world.
 pub struct PhysicsWorld {
@@ -19,9 +22,14 @@ impl PhysicsWorld {
                 config.max_body_pairs,
                 config.max_contact_constraints,
             );
-            
-            jph_physics_system_set_gravity(system, config.gravity.x, config.gravity.y, config.gravity.z);
-            
+
+            jph_physics_system_set_gravity(
+                system,
+                config.gravity.x,
+                config.gravity.y,
+                config.gravity.z,
+            );
+
             Self { system }
         }
     }
@@ -48,10 +56,10 @@ impl PhysicsWorld {
             }
 
             let id = jph_body_interface_create_and_add_body(self.system, &jolt_settings, 1);
-            
+
             // Release the shape reference since Jolt took ownership internally
             jph_shape_destroy(jolt_settings.shape);
-            
+
             BodyId(id)
         }
     }
@@ -72,9 +80,7 @@ impl PhysicsWorld {
 
     /// Check if a body is active (not sleeping).
     pub fn is_active(&self, id: BodyId) -> bool {
-        unsafe {
-            jph_body_interface_is_active(self.system, id.0) != 0
-        }
+        unsafe { jph_body_interface_is_active(self.system, id.0) != 0 }
     }
 
     /// Get the world-space position of a body.
@@ -91,7 +97,14 @@ impl PhysicsWorld {
     /// Set the world-space position of a body.
     pub fn set_position(&mut self, id: BodyId, pos: Vec3, activate: bool) {
         unsafe {
-            jph_body_interface_set_position(self.system, id.0, pos.x, pos.y, pos.z, if activate { 1 } else { 0 });
+            jph_body_interface_set_position(
+                self.system,
+                id.0,
+                pos.x,
+                pos.y,
+                pos.z,
+                if activate { 1 } else { 0 },
+            );
         }
     }
 
@@ -105,6 +118,21 @@ impl PhysicsWorld {
             jph_body_interface_get_rotation(self.system, id.0, &mut x, &mut y, &mut z, &mut w);
         }
         Quat::from_xyzw(x, y, z, w)
+    }
+
+    /// Set the world-space rotation of a body.
+    pub fn set_rotation(&mut self, id: BodyId, rotation: Quat, activate: bool) {
+        unsafe {
+            jph_body_interface_set_rotation(
+                self.system,
+                id.0,
+                rotation.x,
+                rotation.y,
+                rotation.z,
+                rotation.w,
+                if activate { 1 } else { 0 },
+            );
+        }
     }
 
     /// Get the linear velocity of a body.
@@ -132,6 +160,45 @@ impl PhysicsWorld {
         }
     }
 
+    /// Apply a force at a world-space point, producing both translation and
+    /// torque. This is the primitive used by distributed buoyancy samples.
+    pub fn add_force_at_position(&mut self, id: BodyId, force: Vec3, position: Vec3) {
+        unsafe {
+            jph_body_interface_add_force_at_position(
+                self.system,
+                id.0,
+                force.x,
+                force.y,
+                force.z,
+                position.x,
+                position.y,
+                position.z,
+            );
+        }
+    }
+
+    pub fn get_angular_velocity(&self, id: BodyId) -> Vec3 {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut z = 0.0;
+        unsafe {
+            jph_body_interface_get_angular_velocity(self.system, id.0, &mut x, &mut y, &mut z);
+        }
+        Vec3::new(x, y, z)
+    }
+
+    pub fn set_angular_velocity(&mut self, id: BodyId, velocity: Vec3) {
+        unsafe {
+            jph_body_interface_set_angular_velocity(
+                self.system,
+                id.0,
+                velocity.x,
+                velocity.y,
+                velocity.z,
+            );
+        }
+    }
+
     /// Apply an impulse to the body.
     pub fn add_impulse(&mut self, id: BodyId, impulse: Vec3) {
         unsafe {
@@ -148,9 +215,7 @@ impl PhysicsWorld {
 
     /// Get the total number of bodies in the simulation.
     pub fn num_bodies(&self) -> u32 {
-        unsafe {
-            jph_physics_system_get_num_bodies(self.system)
-        }
+        unsafe { jph_physics_system_get_num_bodies(self.system) }
     }
 }
 

@@ -19,8 +19,8 @@
 //! - binding 9: `array<ClusterOffset>`  — per-froxel (offset, count)
 //! - binding 10: `ClusterParams`        — grid dimensions, shading mode
 
-use wgpu;
 use crate::cluster::ClusterGrid;
+use wgpu;
 
 /// Maximum number of sampled textures in the bindless array.
 pub const MAX_BINDLESS_TEXTURES: u32 = 1024;
@@ -211,7 +211,11 @@ impl GlobalResourcePool {
 
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Bindless Texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -292,13 +296,15 @@ impl GlobalResourcePool {
             light_buffer: light_buffer.clone(),
             terrain_material_buffer: terrain_material_buffer.clone(),
             cluster_grid,
-            texture_views: (0..MAX_BINDLESS_TEXTURES).map(|_| dummy_view.clone()).collect(),
+            texture_views: (0..MAX_BINDLESS_TEXTURES)
+                .map(|_| dummy_view.clone())
+                .collect(),
         }
     }
 
     pub fn update_textures(&mut self, device: &wgpu::Device) {
         let views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
-        
+
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GlobalResourcePool_BindGroup"),
             layout: &self.layout,

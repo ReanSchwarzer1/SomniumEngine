@@ -109,7 +109,9 @@ impl ComponentColumn {
             "component size mismatch"
         );
         let ptr = std::ptr::from_ref(&value).cast::<u8>();
-        unsafe { self.push_raw(ptr, std::mem::size_of::<T>()); }
+        unsafe {
+            self.push_raw(ptr, std::mem::size_of::<T>());
+        }
         std::mem::forget(value);
     }
 
@@ -119,7 +121,7 @@ impl ComponentColumn {
     ///
     /// The caller must ensure `T` matches the stored type and `row < len`.
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub unsafe fn get<T: 'static>(&self, row: usize) -> &T {
         debug_assert!(row < self.len);
         let offset = row * self.item_size();
@@ -168,7 +170,9 @@ impl ComponentColumn {
 
         // Drop the removed element.
         if let Some(drop_fn) = self.info.drop_fn {
-            unsafe { drop_fn(self.data.as_mut_ptr().add(row * item_size)); }
+            unsafe {
+                drop_fn(self.data.as_mut_ptr().add(row * item_size));
+            }
         }
 
         let swapped = row != last;
@@ -250,7 +254,9 @@ impl Drop for ComponentColumn {
         if let Some(drop_fn) = self.info.drop_fn {
             let item_size = self.item_size();
             for i in 0..self.len {
-                unsafe { drop_fn(self.data.as_mut_ptr().add(i * item_size)); }
+                unsafe {
+                    drop_fn(self.data.as_mut_ptr().add(i * item_size));
+                }
             }
         }
     }
@@ -370,7 +376,11 @@ impl Archetype {
 
         self.entities.swap_remove(row);
 
-        if swapped { Some(self.entities[row]) } else { None }
+        if swapped {
+            Some(self.entities[row])
+        } else {
+            None
+        }
     }
 }
 
@@ -384,22 +394,22 @@ mod tests {
     use crate::component::Component;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Pos { x: f32, y: f32 }
+    struct Pos {
+        x: f32,
+        y: f32,
+    }
     impl Component for Pos {}
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Vel { dx: f32, dy: f32 }
+    struct Vel {
+        dx: f32,
+        dy: f32,
+    }
     impl Component for Vel {}
 
     fn make_archetype() -> Archetype {
-        let set = ComponentSet::from_ids(vec![
-            ComponentId::of::<Pos>(),
-            ComponentId::of::<Vel>(),
-        ]);
-        let infos = vec![
-            ComponentInfo::of::<Pos>(),
-            ComponentInfo::of::<Vel>(),
-        ];
+        let set = ComponentSet::from_ids(vec![ComponentId::of::<Pos>(), ComponentId::of::<Vel>()]);
+        let infos = vec![ComponentInfo::of::<Pos>(), ComponentInfo::of::<Vel>()];
         // Re-order infos to match sorted set order.
         let mut ordered_infos = Vec::new();
         for id in set.iter() {
@@ -422,8 +432,14 @@ mod tests {
         arch.column_mut(vel_col).push(Vel { dx: 3.0, dy: 4.0 });
 
         unsafe {
-            assert_eq!(*arch.column(pos_col).get::<Pos>(row), Pos { x: 1.0, y: 2.0 });
-            assert_eq!(*arch.column(vel_col).get::<Vel>(row), Vel { dx: 3.0, dy: 4.0 });
+            assert_eq!(
+                *arch.column(pos_col).get::<Pos>(row),
+                Pos { x: 1.0, y: 2.0 }
+            );
+            assert_eq!(
+                *arch.column(vel_col).get::<Vel>(row),
+                Vel { dx: 3.0, dy: 4.0 }
+            );
         }
         assert_eq!(arch.len(), 1);
     }

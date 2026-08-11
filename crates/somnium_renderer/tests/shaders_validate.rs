@@ -27,6 +27,9 @@ const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
 const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
 const SHADOW: &str = include_str!("../src/shaders/shadow.wgsl");
 const TRANSPARENT: &str = include_str!("../src/shaders/transparent.wgsl");
+const WATER: &str = include_str!("../src/shaders/water.wgsl");
+const WATER_SPECTRUM: &str = include_str!("../src/shaders/water_spectrum.wgsl");
+const UNDERWATER: &str = include_str!("../src/shaders/underwater.wgsl");
 
 /// Parse and validate one module, panicking with naga's own diagnostic.
 fn check(label: &str, source: &str) {
@@ -52,7 +55,9 @@ fn the_shading_module_validates() {
     // are order-independent, and this is what proves it rather than assuming.
     check(
         "shading",
-        &format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"),
+        &format!(
+            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+        ),
     );
 }
 
@@ -61,8 +66,13 @@ fn the_volumetric_module_validates() {
     // The froxel volume for aerial perspective and fog (24U/25I), which is
     // concatenated after the atmosphere so it can reuse its density, phase and
     // LUT helpers rather than defining a second atmosphere.
-    check("volumetric", &format!("{ATMOSPHERE}
-{ATMOSPHERE_VOL}"));
+    check(
+        "volumetric",
+        &format!(
+            "{ATMOSPHERE}
+{ATMOSPHERE_VOL}"
+        ),
+    );
 }
 
 /// The WGSL side of the CPU/GPU struct mirrors, checked against the Rust side.
@@ -75,8 +85,9 @@ fn the_volumetric_module_validates() {
 /// `vec3<u32>` pad, which aligns to 16 in WGSL and to 4 in Rust.
 #[test]
 fn the_terrain_material_struct_matches_the_rust_layout() {
-    let source =
-        format!("{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}");
+    let source = format!(
+        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+    );
     let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
 
     let (_, ty) = module
@@ -164,4 +175,11 @@ fn the_shadow_module_validates() {
 #[test]
 fn the_transparent_module_validates() {
     check("transparent", &format!("{BRDF}\n{TRANSPARENT}"));
+}
+
+#[test]
+fn the_phase_iv_water_modules_validate() {
+    check("water", WATER);
+    check("water_spectrum", WATER_SPECTRUM);
+    check("underwater", UNDERWATER);
 }

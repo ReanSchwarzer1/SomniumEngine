@@ -47,9 +47,27 @@ pub fn chunks_touching_voxel(voxel: IVec3) -> Vec<ChunkCoord> {
         }
     };
 
-    let xs: &[i32] = if local.x == 0 { &[-1] } else if local.x == max { &[1] } else { &[] };
-    let ys: &[i32] = if local.y == 0 { &[-1] } else if local.y == max { &[1] } else { &[] };
-    let zs: &[i32] = if local.z == 0 { &[-1] } else if local.z == max { &[1] } else { &[] };
+    let xs: &[i32] = if local.x == 0 {
+        &[-1]
+    } else if local.x == max {
+        &[1]
+    } else {
+        &[]
+    };
+    let ys: &[i32] = if local.y == 0 {
+        &[-1]
+    } else if local.y == max {
+        &[1]
+    } else {
+        &[]
+    };
+    let zs: &[i32] = if local.z == 0 {
+        &[-1]
+    } else if local.z == max {
+        &[1]
+    } else {
+        &[]
+    };
 
     for &dx in xs.iter().chain(std::iter::once(&0)) {
         for &dy in ys.iter().chain(std::iter::once(&0)) {
@@ -70,7 +88,10 @@ mod tests {
     #[test]
     fn chunk_of_negative_voxel() {
         assert_eq!(chunk_of_voxel(IVec3::new(-1, 0, 31)), IVec3::new(-1, 0, 0));
-        assert_eq!(chunk_of_voxel(IVec3::new(-32, -33, 32)), IVec3::new(-1, -2, 1));
+        assert_eq!(
+            chunk_of_voxel(IVec3::new(-32, -33, 32)),
+            IVec3::new(-1, -2, 1)
+        );
     }
 
     #[test]

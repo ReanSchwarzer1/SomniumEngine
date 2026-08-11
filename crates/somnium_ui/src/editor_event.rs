@@ -16,16 +16,16 @@ pub enum CreateKind {
 impl CreateKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Cube             => "Cube",
-            Self::Sphere           => "Sphere",
-            Self::Plane            => "Plane",
-            Self::Cylinder         => "Cylinder",
+            Self::Cube => "Cube",
+            Self::Sphere => "Sphere",
+            Self::Plane => "Plane",
+            Self::Cylinder => "Cylinder",
             Self::DirectionalLight => "Directional Light",
-            Self::PointLight       => "Point Light",
-            Self::SpotLight        => "Spot Light",
-            Self::Particle         => "Particle Emitter",
-            Self::Terrain          => "Terrain",
-            Self::VoxelTerrain     => "Voxel Terrain",
+            Self::PointLight => "Point Light",
+            Self::SpotLight => "Spot Light",
+            Self::Particle => "Particle Emitter",
+            Self::Terrain => "Terrain",
+            Self::VoxelTerrain => "Voxel Terrain",
         }
     }
 }
@@ -33,9 +33,15 @@ impl CreateKind {
 /// Which TRS component a NumericField targets (for SetInspectorValue).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectorField {
-    PosX, PosY, PosZ,
-    RotX, RotY, RotZ,
-    ScaleX, ScaleY, ScaleZ,
+    PosX,
+    PosY,
+    PosZ,
+    RotX,
+    RotY,
+    RotZ,
+    ScaleX,
+    ScaleY,
+    ScaleZ,
     // Light properties (Phase 13E) — only meaningful when the selected entity
     // has a `LightComponent`. Angles are edited in degrees.
     LightIntensity,
@@ -50,6 +56,8 @@ pub enum InspectorField {
     LightColorB,
     /// Colour temperature in Kelvin (Phase 24E). Drives the light's hue.
     LightColorTemperature,
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    LightMoonIntensity,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
@@ -119,6 +127,17 @@ pub enum InspectorField {
     /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
     /// parallax occlusion off.
     TerrainRelief,
+    // First-class lake body settings (Phase IV-C).
+    WaterSurface,
+    WaterMaxDepth,
+    WaterClarity,
+    WaterAmplitude,
+    WaterRoughness,
+    WaterSsrStrength,
+    WaterWaveLengthA,
+    WaterWaveLengthB,
+    WaterWaveSpeed,
+    WaterWaveSteepness,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,
@@ -177,13 +196,23 @@ pub enum EditorEvent {
     Undo,
     Redo,
     ToggleShadingMode,
+    /// Start or resume deterministic game/physics time.
+    PlaySimulation,
+    /// Freeze game/physics time while keeping the editor interactive.
+    PauseSimulation,
+    /// Return to edit mode and reset the simulation clock.
+    StopSimulation,
     SaveScene,
     NewScene,
     LoadScene(String),
     /// `live` marks an in-progress drag-scrub: apply it to the scene, but do
     /// not record an undo entry yet. The gesture ends with one non-live event
     /// carrying the final value, and that is what becomes a single undo step.
-    SetInspectorValue { field: InspectorField, value: f32, live: bool },
+    SetInspectorValue {
+        field: InspectorField,
+        value: f32,
+        live: bool,
+    },
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),

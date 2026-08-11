@@ -8,43 +8,47 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use somnium_renderer::{GizmoAxis, GizmoMode, SomniumRenderer, RenderContext, gizmo_hit_test};
-use somnium_physics::{world::PhysicsWorld, config::PhysicsConfig};
+use somnium_audio::engine::AudioEngine;
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
-use somnium_audio::engine::AudioEngine;
+use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
+use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
 use somnium_ui::{EditorEvent, UiManager};
 
 use crate::config::EngineConfig;
-use crate::context::EngineContext;
+use crate::context::{EngineContext, SimulationClock, SimulationState};
 use crate::editor_commands::{
-    CreateEntityCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd, SetTransformCmd,
-    TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
+    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd,
+    SetTransformCmd, TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
-use crate::event::{translate_window_event, EngineEvent};
+use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
-use crate::{FoliageComponent, LightComponent, LightType, MeshComponent, MaterialComponent, MeshKind, Name, PostProcessComponent, TerrainComponent, Transform, WorldTransform, simulate_particles};
+use crate::{
+    FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent, MeshKind, Name,
+    Parent, PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
+    simulate_particles,
+};
 use somnium_ecs::World;
-use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
+use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
 
 /// State captured when the user begins dragging a gizmo axis handle.
 #[derive(Clone)]
 struct GizmoDragState {
-    axis:             GizmoAxis,
-    mode:             GizmoMode,
-    entity_index:     u32,
-    start_transform:  Transform,
+    axis: GizmoAxis,
+    mode: GizmoMode,
+    entity_index: u32,
+    start_transform: Transform,
     /// Scalar along the drag axis from gizmo origin at drag start (translate/scale).
     start_axis_param: f32,
     /// Angle in the ring plane at drag start, in radians (rotate).
-    start_angle:      f32,
+    start_angle: f32,
     /// Ring-plane tangent vector (rotate).
-    ring_tangent:     glam::Vec3,
+    ring_tangent: glam::Vec3,
     /// Ring-plane bitangent vector (rotate).
-    ring_bitangent:   glam::Vec3,
+    ring_bitangent: glam::Vec3,
     /// Gizmo world position at drag start.
-    gizmo_pos:        glam::Vec3,
+    gizmo_pos: glam::Vec3,
 }
 
 /// State captured while a terrain brush stroke is in progress (Phase 14D).
@@ -53,12 +57,12 @@ struct GizmoDragState {
 /// affected region accumulates as the stroke moves. On release, the old/new
 /// data of just that region is pushed as a [`TerrainEditCmd`].
 struct TerrainStroke {
-    terrain_id:    u32,
-    is_paint:      bool,
+    terrain_id: u32,
+    is_paint: bool,
     start_heights: Vec<f32>,
-    start_texels:  Vec<somnium_renderer::terrain::textures::SplatTexel>,
+    start_texels: Vec<somnium_renderer::terrain::textures::SplatTexel>,
     /// Union of all touched (vertex or texel) regions, inclusive.
-    region:        Option<(u32, u32, u32, u32)>,
+    region: Option<(u32, u32, u32, u32)>,
 }
 
 /// Trait to be implemented by the user's game.
@@ -71,6 +75,11 @@ pub trait GameApp {
 
     /// Called every frame for game logic.
     fn on_update(&mut self, _ctx: &mut EngineContext) {}
+
+    /// Called once per deterministic fixed simulation step, immediately before
+    /// Jolt advances. Buoyancy and other forces belong here rather than in the
+    /// variable-rate editor update.
+    fn on_fixed_update(&mut self, _ctx: &mut EngineContext) {}
 
     /// Called every frame for UI and debug rendering.
     fn on_render(&mut self, _ctx: &mut EngineContext) {}
@@ -95,10 +104,22 @@ enum LifecycleState {
 ///
 /// All four are CC0 from Poly Haven — see ATTRIBUTION.md.
 pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
-    ("Grass Medium",  "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf"),
-    ("Grass Bermuda", "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf"),
-    ("Fir Sapling",   "assets/foliage/fir_sapling/fir_sapling_2k.gltf"),
-    ("Island Tree",   "assets/foliage/island_tree_02/island_tree_02_2k.gltf"),
+    (
+        "Grass Medium",
+        "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
+    ),
+    (
+        "Grass Bermuda",
+        "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
+    ),
+    (
+        "Fir Sapling",
+        "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
+    ),
+    (
+        "Island Tree",
+        "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
+    ),
 ];
 
 /// One drawable piece of a palette entry.
@@ -184,6 +205,13 @@ pub struct Engine<G: GameApp> {
     /// Phase 20B: editor camera speed as a normalized 0..1 slider position.
     /// Game code reads the mapped speed via `EngineContext::camera_speed`.
     camera_speed_norm: f32,
+    /// UE-style editor transport state and deterministic gameplay time.
+    simulation_clock: SimulationClock,
+    /// True from Play until Stop, including while a play session is paused.
+    /// Editor-only overlays and authoring tools stay disabled for the session.
+    play_session_active: bool,
+    /// Carries fractional wall-clock time between 60 Hz physics steps.
+    simulation_accumulator: f32,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -251,6 +279,9 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
+            simulation_clock: SimulationClock::default(),
+            play_session_active: false,
+            simulation_accumulator: 0.0,
         };
 
         event_loop
@@ -267,7 +298,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         if self.physics.is_none() {
             self.physics = Some(PhysicsWorld::new(PhysicsConfig::default()));
         }
-        
+
         if self.audio.is_none() {
             match AudioEngine::new() {
                 Ok(engine) => self.audio = Some(engine),
@@ -288,6 +319,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Resumed);
             return;
@@ -309,7 +341,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 info!("Initializing rendering subsystems...");
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
                 let renderer = SomniumRenderer::new(&render_ctx);
-                
+
                 let ui_manager = UiManager::new(
                     &render_ctx.device,
                     render_ctx.config.format,
@@ -335,6 +367,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.selected_entity,
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
+                    self.simulation_clock,
                 );
                 self.game.on_init(&mut ctx);
 
@@ -342,7 +375,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.initiate_shutdown(event_loop);
                     return;
                 }
-
             }
             Err(err) => {
                 error!(%err, "Failed to create window");
@@ -366,6 +398,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Suspended);
         }
@@ -407,7 +440,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── 1. Handle global Ctrl+ shortcuts FIRST (never for text widgets) ────
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = &event {
-            if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat && self.ctrl_held {
+            if key_ev.state == winit::event::ElementState::Pressed
+                && !key_ev.repeat
+                && self.ctrl_held
+            {
                 use winit::keyboard::{KeyCode as WKC, PhysicalKey};
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
                     match code {
@@ -471,7 +507,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                 self.terrain_edit_active = !self.terrain_edit_active;
                                 info!(
                                     "Terrain edit mode: {}",
-                                    if self.terrain_edit_active { "ON" } else { "off" }
+                                    if self.terrain_edit_active {
+                                        "ON"
+                                    } else {
+                                        "off"
+                                    }
                                 );
                             } else {
                                 info!("Select a terrain entity before pressing F6");
@@ -499,15 +539,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             info!("Brush radius: {:.1} m", self.terrain_brush.radius);
                         }
                         WKC::BracketRight if self.terrain_edit_active => {
-                            self.terrain_brush.radius = (self.terrain_brush.radius * 1.25).min(128.0);
+                            self.terrain_brush.radius =
+                                (self.terrain_brush.radius * 1.25).min(128.0);
                             info!("Brush radius: {:.1} m", self.terrain_brush.radius);
                         }
                         WKC::Minus if self.terrain_edit_active => {
-                            self.terrain_brush.strength = (self.terrain_brush.strength - 0.1).max(0.05);
+                            self.terrain_brush.strength =
+                                (self.terrain_brush.strength - 0.1).max(0.05);
                             info!("Brush strength: {:.2}", self.terrain_brush.strength);
                         }
                         WKC::Equal if self.terrain_edit_active => {
-                            self.terrain_brush.strength = (self.terrain_brush.strength + 0.1).min(1.0);
+                            self.terrain_brush.strength =
+                                (self.terrain_brush.strength + 0.1).min(1.0);
                             info!("Brush strength: {:.2}", self.terrain_brush.strength);
                         }
                         WKC::Comma if self.terrain_edit_active => {
@@ -516,7 +559,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             info!("Paint layer: {}", self.terrain_brush.paint_layer);
                         }
                         WKC::Period if self.terrain_edit_active => {
-                            self.terrain_brush.paint_layer = (self.terrain_brush.paint_layer + 1) % 4;
+                            self.terrain_brush.paint_layer =
+                                (self.terrain_brush.paint_layer + 1) % 4;
                             info!("Paint layer: {}", self.terrain_brush.paint_layer);
                         }
                         WKC::F7 => {
@@ -528,7 +572,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                     .and_then(|r| r.terrain_mut(tc.terrain_id))
                                 {
                                     somnium_renderer::terrain::brush::auto_splat(t, 10.0);
-                                    info!("Auto-splatted terrain {} by slope/height", tc.terrain_id);
+                                    info!(
+                                        "Auto-splatted terrain {} by slope/height",
+                                        tc.terrain_id
+                                    );
                                 }
                             }
                         }
@@ -550,13 +597,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             false
         };
-        if ui_consumed { return; }
+        if ui_consumed {
+            return;
+        }
 
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
-        if self.foliage_paint_active {
+        if !self.play_session_active && self.foliage_paint_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
-                button: winit::event::MouseButton::Left, ..
+                button: winit::event::MouseButton::Left,
+                ..
             } = &event
             {
                 self.foliage_painting = self.paint_foliage_dab();
@@ -566,7 +616,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Released,
-                button: winit::event::MouseButton::Left, ..
+                button: winit::event::MouseButton::Left,
+                ..
             } = &event
             {
                 if self.foliage_painting {
@@ -585,19 +636,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── 3.5 Terrain brush stroke (Phase 14D) — takes priority over gizmo ──
-        if self.terrain_edit_active {
+        if !self.play_session_active && self.terrain_edit_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
-                button: winit::event::MouseButton::Left, ..
-            } = &event {
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
                 if self.begin_terrain_stroke() {
                     return;
                 }
             }
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Released,
-                button: winit::event::MouseButton::Left, ..
-            } = &event {
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
                 if self.end_terrain_stroke() {
                     return;
                 }
@@ -607,37 +662,48 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── 4. Gizmo LMB pick / drag-end ────────────────────────────────────
         let mut gizmo_consumed = false;
 
-        if let WindowEvent::MouseInput {
-            state: winit::event::ElementState::Pressed,
-            button: winit::event::MouseButton::Left, ..
-        } = &event {
-            let drag = try_start_gizmo_drag(
-                self.renderer.as_ref(),
-                &self.world,
-                &self.selected_entity,
-                self.cursor_pos,
-                self.viewport_size,
-            );
-            if drag.is_some() {
-                self.gizmo_drag = drag;
-                gizmo_consumed = true;
-            }
-        }
-
-        if let WindowEvent::MouseInput {
-            state: winit::event::ElementState::Released,
-            button: winit::event::MouseButton::Left, ..
-        } = &event {
-            if let Some(drag) = self.gizmo_drag.take() {
-                if let Some(entity) = self.world.find_entity_by_index(drag.entity_index) {
-                    let final_t = self.world.get::<Transform>(entity).copied()
-                        .unwrap_or(drag.start_transform);
-                    let cmd = Box::new(SetTransformCmd::new(
-                        drag.entity_index, drag.start_transform, final_t,
-                    ));
-                    self.undo_stack.push_silent(cmd);
+        if !self.play_session_active {
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                let drag = try_start_gizmo_drag(
+                    self.renderer.as_ref(),
+                    &self.world,
+                    &self.selected_entity,
+                    self.cursor_pos,
+                    self.viewport_size,
+                );
+                if drag.is_some() {
+                    self.gizmo_drag = drag;
+                    gizmo_consumed = true;
                 }
-                gizmo_consumed = true;
+            }
+
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                if let Some(drag) = self.gizmo_drag.take() {
+                    if let Some(entity) = self.world.find_entity_by_index(drag.entity_index) {
+                        let final_t = self
+                            .world
+                            .get::<Transform>(entity)
+                            .copied()
+                            .unwrap_or(drag.start_transform);
+                        let cmd = Box::new(SetTransformCmd::new(
+                            drag.entity_index,
+                            drag.start_transform,
+                            final_t,
+                        ));
+                        self.undo_stack.push_silent(cmd);
+                    }
+                    gizmo_consumed = true;
+                }
             }
         }
 
@@ -658,6 +724,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &engine_event);
             let speed_request = ctx.camera_speed_request;
@@ -694,12 +761,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         let engine_event: Option<EngineEvent> = match event {
-            winit::event::DeviceEvent::MouseMotion { delta } => {
-                Some(EngineEvent::MouseMotion {
-                    delta_x: delta.0 as f32,
-                    delta_y: delta.1 as f32,
-                })
-            }
+            winit::event::DeviceEvent::MouseMotion { delta } => Some(EngineEvent::MouseMotion {
+                delta_x: delta.0 as f32,
+                delta_y: delta.1 as f32,
+            }),
             _ => None,
         };
 
@@ -715,6 +780,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &ev);
         }
@@ -728,13 +794,42 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
 
-        if let Some(physics) = self.physics.as_mut() {
-            physics.step(dt);
+        // Editor-world simulations (water, buoyancy, particles, previews) run
+        // in ordinary Edit mode. Pause is the only state that freezes time;
+        // Play remains a game-state distinction, not an animation power switch.
+        if self.simulation_clock.state != SimulationState::Paused {
+            self.simulation_accumulator += dt.min(0.1);
+            let fixed_dt = self.simulation_clock.fixed_delta_seconds;
+            while self.simulation_accumulator >= fixed_dt {
+                {
+                    let mut ctx = EngineContext::new(
+                        &self.time,
+                        &self.config,
+                        &mut self.world,
+                        self.physics.as_mut().unwrap(),
+                        self.audio.as_mut().unwrap(),
+                        self.render_ctx.as_ref(),
+                        self.renderer.as_mut(),
+                        &mut self.selected_entity,
+                        self.ui_manager.as_mut().unwrap(),
+                        crate::camera_speed_from_normalized(self.camera_speed_norm),
+                        self.simulation_clock,
+                    );
+                    self.game.on_fixed_update(&mut ctx);
+                }
+                if let Some(physics) = self.physics.as_mut() {
+                    physics.step(fixed_dt);
+                }
+                self.simulation_clock.elapsed_seconds += fixed_dt;
+                self.simulation_accumulator -= fixed_dt;
+            }
         }
 
         // ── Gizmo drag: update entity transform each frame while dragging ────
         let drag_result: Option<(u32, Transform)> = self.gizmo_drag.as_ref().and_then(|drag| {
-            let (cam, inv_vp) = self.renderer.as_ref()
+            let (cam, inv_vp) = self
+                .renderer
+                .as_ref()
                 .map(|r| (r.camera_pos, r.view_proj.inverse()))
                 .unwrap_or((glam::Vec3::ZERO, glam::Mat4::IDENTITY));
             let new_t = apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, self.viewport_size);
@@ -763,26 +858,58 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_update(&mut ctx);
+        }
+
+        // Phase IV-C: ECS membership is authoritative for renderer-owned water
+        // data. Delete drops textures; undo/redo recreates them from the small
+        // stable descriptor, so no stale GPU handle survives in a component.
+        let water_descriptors: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| self.world.get::<WaterComponent>(entity).copied())
+            .filter(|water| water.enabled && water.water_id != u32::MAX && water.preset != 0)
+            .map(WaterComponent::descriptor)
+            .collect();
+        if let (Some(renderer), Some(render_ctx)) = (&mut self.renderer, &self.render_ctx) {
+            let active: std::collections::HashSet<u32> = water_descriptors
+                .iter()
+                .map(|descriptor| descriptor.water_id)
+                .collect();
+            for descriptor in water_descriptors {
+                if let Err(error) = renderer.ensure_water_body(render_ctx, descriptor) {
+                    warn!(
+                        "Failed to restore water body {}: {error}",
+                        descriptor.water_id
+                    );
+                }
+            }
+            renderer.water_bodies.retain_ids(&active);
         }
 
         // ── Update native UI panels with current frame state ─────────────────
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
-            let entity_list: Vec<(u32, String)> = all_entities.iter()
+            let entity_list: Vec<(u32, String)> = all_entities
+                .iter()
                 .map(|&e| {
-                    let name = self.world.get::<Name>(e)
+                    let name = self
+                        .world
+                        .get::<Name>(e)
                         .map(|n| n.as_str().to_owned())
                         .unwrap_or_else(|| format!("Entity {}", e.index()));
                     (e.index(), name)
                 })
                 .collect();
             let selected_idx = self.selected_entity.map(|e| e.index());
-            let sel_t = self.selected_entity
+            let sel_t = self
+                .selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
             // Phase 15A1: post-processing settings for the inspector.
-            let sel_post = self.selected_entity
+            let sel_post = self
+                .selected_entity
                 .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
                 .map(|pp| somnium_ui::PostInspectorState {
                     values: [
@@ -823,7 +950,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         pp.gain,
                         pp.aperture_f_stops,
                         // Shown as the denominator: 0.01 s reads as 100.
-                        if pp.shutter_speed_s > 0.0 { 1.0 / pp.shutter_speed_s } else { 0.0 },
+                        if pp.shutter_speed_s > 0.0 {
+                            1.0 / pp.shutter_speed_s
+                        } else {
+                            0.0
+                        },
                         pp.sensitivity_iso,
                         pp.gtao_radius,
                         pp.gtao_intensity,
@@ -843,7 +974,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let tile = |i: usize| t.layers.get(i).map_or(1.0, |l| l.tiling);
                 Some([
                     self.terrain_brush.paint_layer as f32,
-                    tile(0), tile(1), tile(2), tile(3),
+                    tile(0),
+                    tile(1),
+                    tile(2),
+                    tile(3),
                     t.parallax_scale,
                 ])
             });
@@ -854,31 +988,57 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_foliage = self
                 .selected_entity
                 .and_then(|e| self.world.get::<FoliageComponent>(e).copied())
-                .map(|f| (
+                .map(|f| {
+                    (
+                        [
+                            brush.density,
+                            brush.radius,
+                            brush.max_slope_deg,
+                            f32::from(brush.kind),
+                            brush.scale_min,
+                            brush.scale_max,
+                            f.foliage_shadow_distance,
+                        ],
+                        [f.enabled, paint_on, erase_on, single_on],
+                    )
+                });
+            let sel_water = self
+                .selected_entity
+                .and_then(|entity| self.world.get::<WaterComponent>(entity).copied())
+                .map(|water| {
                     [
-                        brush.density,
-                        brush.radius,
-                        brush.max_slope_deg,
-                        f32::from(brush.kind),
-                        brush.scale_min,
-                        brush.scale_max,
-                        f.foliage_shadow_distance,
-                    ],
-                    [f.enabled, paint_on, erase_on, single_on],
-                ));
+                        water.surface_level,
+                        water.max_depth,
+                        water.clarity,
+                        water.amplitude,
+                        water.roughness,
+                        water.ssr_strength,
+                        water.wave_length_a,
+                        water.wave_length_b,
+                        water.wave_speed,
+                        water.wave_steepness,
+                    ]
+                });
 
             // Phase 13E: light properties for the inspector (angles in degrees).
-            let sel_light = self.selected_entity
+            let sel_light = self
+                .selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
-                .map(|lc| ([
-                    lc.intensity,
-                    lc.range,
-                    lc.inner_angle.to_degrees(),
-                    lc.outer_angle.to_degrees(),
-                    lc.color.x,
-                    lc.color.y,
-                    lc.color.z,
-                ], lc.light_type == LightType::Directional));
+                .map(|lc| {
+                    (
+                        [
+                            lc.intensity,
+                            lc.range,
+                            lc.inner_angle.to_degrees(),
+                            lc.outer_angle.to_degrees(),
+                            lc.color.x,
+                            lc.color.y,
+                            lc.color.z,
+                            lc.moon_intensity,
+                        ],
+                        lc.light_type == LightType::Directional,
+                    )
+                });
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner(&entity_list, selected_idx);
                 if let Some(t) = sel_t {
@@ -895,6 +1055,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_light_inspector(sel_light);
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
+                ui.update_water_inspector(sel_water);
                 ui.update_foliage_inspector(sel_foliage);
             }
         }
@@ -903,57 +1064,61 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // selection changes like the inspectors above it — the numbers move
         // whether or not anything was clicked.
         {
-            let rows = self.renderer.as_ref().filter(|r| r.profiler.enabled()).map(|r| {
-                let p = &r.profiler;
-                let mut rows: Vec<somnium_ui::ProfilerRow> = p
-                    .results()
-                    .iter()
-                    .map(|s| somnium_ui::ProfilerRow {
-                        label: s.name.to_string(),
-                        value: format!("{:.3} ms", s.ms),
-                        depth: s.depth,
-                    })
-                    .collect();
-                if rows.is_empty() {
+            let rows = self
+                .renderer
+                .as_ref()
+                .filter(|r| r.profiler.enabled())
+                .map(|r| {
+                    let p = &r.profiler;
+                    let mut rows: Vec<somnium_ui::ProfilerRow> = p
+                        .results()
+                        .iter()
+                        .map(|s| somnium_ui::ProfilerRow {
+                            label: s.name.to_string(),
+                            value: format!("{:.3} ms", s.ms),
+                            depth: s.depth,
+                        })
+                        .collect();
+                    if rows.is_empty() {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: "collecting…".to_string(),
+                            value: String::new(),
+                            depth: 0,
+                        });
+                    }
                     rows.push(somnium_ui::ProfilerRow {
-                        label: "collecting…".to_string(),
-                        value: String::new(),
+                        label: "unattributed".to_string(),
+                        value: format!("{:.3} ms", p.unattributed_ms()),
                         depth: 0,
                     });
-                }
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "unattributed".to_string(),
-                    value: format!("{:.3} ms", p.unattributed_ms()),
-                    depth: 0,
+                    let c = p.last_counters;
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "draws".to_string(),
+                        value: c.draw_calls.to_string(),
+                        depth: 0,
+                    });
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "triangles".to_string(),
+                        value: c.triangles.to_string(),
+                        depth: 0,
+                    });
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "terrain chunks".to_string(),
+                        value: c.terrain_chunks.to_string(),
+                        depth: 0,
+                    });
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "TLAS instances".to_string(),
+                        value: c.tlas_instances.to_string(),
+                        depth: 0,
+                    });
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "shadow casters".to_string(),
+                        value: format!("{} / {}", c.shadow_casters, c.draw_calls),
+                        depth: 0,
+                    });
+                    rows
                 });
-                let c = p.last_counters;
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "draws".to_string(),
-                    value: c.draw_calls.to_string(),
-                    depth: 0,
-                });
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "triangles".to_string(),
-                    value: c.triangles.to_string(),
-                    depth: 0,
-                });
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "terrain chunks".to_string(),
-                    value: c.terrain_chunks.to_string(),
-                    depth: 0,
-                });
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "TLAS instances".to_string(),
-                    value: c.tlas_instances.to_string(),
-                    depth: 0,
-                });
-                rows.push(somnium_ui::ProfilerRow {
-                    label: "shadow casters".to_string(),
-                    value: format!("{} / {}", c.shadow_casters, c.draw_calls),
-                    depth: 0,
-                });
-                rows
-            });
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_profiler(rows.as_deref());
             }
@@ -977,9 +1142,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_render(&mut ctx);
-            
+
             if ctx.should_exit {
                 self.initiate_shutdown(event_loop);
                 return;
@@ -989,7 +1155,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
-            let gpu_particles = simulate_particles(&mut self.world, dt, frame);
+            let particle_dt = if self.simulation_clock.state != SimulationState::Paused {
+                dt
+            } else {
+                0.0
+            };
+            let gpu_particles = simulate_particles(&mut self.world, particle_dt, frame);
             if let Some(r) = &mut self.renderer {
                 r.set_particles(gpu_particles);
             }
@@ -997,13 +1168,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Terrain editing + submission (Phase 14) ──────────────────────────
         self.apply_terrain_restores();
-        self.update_terrain_editing(dt);
+        if self.play_session_active {
+            self.gizmo_drag = None;
+            self.terrain_stroke = None;
+            self.foliage_painting = false;
+            if let Some(r) = &mut self.renderer {
+                for terrain in &mut r.terrains {
+                    terrain.brush_cursor = [0.0; 4];
+                }
+            }
+        } else {
+            self.update_terrain_editing(dt);
+        }
         self.submit_terrains();
         self.submit_foliage();
         self.sync_terrain_colliders();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
-        self.submit_light_gizmos();
+        if !self.play_session_active {
+            self.submit_light_gizmos();
+        }
 
         // ── Post-processing settings (Phase 15A1) ────────────────────────────
         self.apply_post_process();
@@ -1014,7 +1198,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             &mut self.ui_manager,
             &self.window,
         ) {
-            r.time = self.time.elapsed().as_secs_f32();
+            r.set_editor_overlays_enabled(!self.play_session_active);
+            r.time = self.simulation_clock.elapsed_seconds;
             r.render(c, ui, window);
         }
 
@@ -1098,8 +1283,10 @@ impl<G: GameApp> Engine<G> {
         let r = self.renderer.as_ref()?;
         let inv_vp = r.view_proj.inverse();
         let world_pt = ndc_to_world(
-            self.cursor_pos.0, self.cursor_pos.1,
-            self.viewport_size.0, self.viewport_size.1,
+            self.cursor_pos.0,
+            self.cursor_pos.1,
+            self.viewport_size.0,
+            self.viewport_size.1,
             &inv_vp,
         );
         let dir = (world_pt - r.camera_pos).normalize_or_zero();
@@ -1125,14 +1312,26 @@ impl<G: GameApp> Engine<G> {
 
     /// Begin a brush stroke under the cursor. Returns true if a stroke started.
     fn begin_terrain_stroke(&mut self) -> bool {
-        let Some(tc) = self.selected_terrain() else { return false };
-        let Some(model) = self.selected_terrain_model() else { return false };
-        let Some((origin, dir)) = self.cursor_ray() else { return false };
-        let Some(renderer) = self.renderer.as_mut() else { return false };
-        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return false };
+        let Some(tc) = self.selected_terrain() else {
+            return false;
+        };
+        let Some(model) = self.selected_terrain_model() else {
+            return false;
+        };
+        let Some((origin, dir)) = self.cursor_ray() else {
+            return false;
+        };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return false;
+        };
+        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else {
+            return false;
+        };
 
         terrain.model = model; // keep raycast in sync with the entity transform
-        let Some(hit) = terrain.raycast(origin, dir) else { return false };
+        let Some(hit) = terrain.raycast(origin, dir) else {
+            return false;
+        };
 
         let is_paint = self.terrain_brush.mode == BrushMode::Paint;
         // Flatten levels toward the raw height under the initial hit point.
@@ -1145,8 +1344,16 @@ impl<G: GameApp> Engine<G> {
         self.terrain_stroke = Some(TerrainStroke {
             terrain_id: tc.terrain_id,
             is_paint,
-            start_heights: if is_paint { Vec::new() } else { terrain.heightmap.clone() },
-            start_texels: if is_paint { terrain.splatmap.data.clone() } else { Vec::new() },
+            start_heights: if is_paint {
+                Vec::new()
+            } else {
+                terrain.heightmap.clone()
+            },
+            start_texels: if is_paint {
+                terrain.splatmap.data.clone()
+            } else {
+                Vec::new()
+            },
             region: None,
         });
         true
@@ -1158,13 +1365,21 @@ impl<G: GameApp> Engine<G> {
         // the single worst thing about the first cut of it — you could not see
         // where a stroke would land until after it landed.
         if self.foliage_paint_active {
-            let Some(tc) = self.selected_terrain() else { return };
-            let Some(model) = self.selected_terrain_model() else { return };
+            let Some(tc) = self.selected_terrain() else {
+                return;
+            };
+            let Some(model) = self.selected_terrain_model() else {
+                return;
+            };
             let ray = self.cursor_ray();
             let radius = self.foliage_brush.radius;
-            let Some(renderer) = self.renderer.as_mut() else { return };
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
             renderer.clear_gizmo();
-            let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return };
+            let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else {
+                return;
+            };
             terrain.model = model;
             match ray.and_then(|(o, d)| terrain.raycast(o, d)) {
                 Some(hit) => terrain.brush_cursor = [hit.x, hit.z, radius, 3.0],
@@ -1182,15 +1397,23 @@ impl<G: GameApp> Engine<G> {
             }
             return;
         }
-        let Some(tc) = self.selected_terrain() else { return };
-        let Some(model) = self.selected_terrain_model() else { return };
+        let Some(tc) = self.selected_terrain() else {
+            return;
+        };
+        let Some(model) = self.selected_terrain_model() else {
+            return;
+        };
         let ray = self.cursor_ray();
         let brush = self.terrain_brush;
         let stroking = self.terrain_stroke.is_some();
-        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
         // Phase 14F-1: regular transform gizmos are hidden in terrain mode.
         renderer.clear_gizmo();
-        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return };
+        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else {
+            return;
+        };
         terrain.model = model;
 
         let hit = ray.and_then(|(o, d)| terrain.raycast(o, d));
@@ -1200,7 +1423,11 @@ impl<G: GameApp> Engine<G> {
         };
 
         // Cursor ring: green for sculpt modes, blue for paint (Phase 14D-3).
-        let mode_flag = if brush.mode == BrushMode::Paint { 2.0 } else { 1.0 };
+        let mode_flag = if brush.mode == BrushMode::Paint {
+            2.0
+        } else {
+            1.0
+        };
         terrain.brush_cursor = [hit.x, hit.z, brush.radius, mode_flag];
 
         if stroking {
@@ -1214,8 +1441,10 @@ impl<G: GameApp> Engine<G> {
                 stroke.region = Some(match stroke.region {
                     None => rg,
                     Some(acc) => (
-                        acc.0.min(rg.0), acc.1.min(rg.1),
-                        acc.2.max(rg.2), acc.3.max(rg.3),
+                        acc.0.min(rg.0),
+                        acc.1.min(rg.1),
+                        acc.2.max(rg.2),
+                        acc.3.max(rg.3),
                     ),
                 });
             }
@@ -1225,10 +1454,18 @@ impl<G: GameApp> Engine<G> {
     /// Finish the active stroke and push an undo command. Returns true if a
     /// stroke was finished.
     fn end_terrain_stroke(&mut self) -> bool {
-        let Some(stroke) = self.terrain_stroke.take() else { return false };
-        let Some(region) = stroke.region else { return true };
-        let Some(renderer) = self.renderer.as_ref() else { return true };
-        let Some(terrain) = renderer.terrain(stroke.terrain_id) else { return true };
+        let Some(stroke) = self.terrain_stroke.take() else {
+            return false;
+        };
+        let Some(region) = stroke.region else {
+            return true;
+        };
+        let Some(renderer) = self.renderer.as_ref() else {
+            return true;
+        };
+        let Some(terrain) = renderer.terrain(stroke.terrain_id) else {
+            return true;
+        };
 
         let (x0, z0, x1, z1) = region;
         let cmd: Box<dyn crate::editor_commands::EditorCommand> = if stroke.is_paint {
@@ -1277,11 +1514,19 @@ impl<G: GameApp> Engine<G> {
             Ok(mut q) => q.drain(..).collect(),
             Err(_) => return,
         };
-        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
         for op in ops {
             match op {
-                TerrainRestoreOp::Heights { terrain_id, region, heights } => {
-                    let Some(terrain) = renderer.terrain_mut(terrain_id) else { continue };
+                TerrainRestoreOp::Heights {
+                    terrain_id,
+                    region,
+                    heights,
+                } => {
+                    let Some(terrain) = renderer.terrain_mut(terrain_id) else {
+                        continue;
+                    };
                     let (x0, z0, x1, z1) = region;
                     let row_w = terrain.desc.total_vertices_x();
                     let w = (x1 - x0 + 1) as usize;
@@ -1292,8 +1537,14 @@ impl<G: GameApp> Engine<G> {
                     }
                     terrain.mark_region_dirty(x0, z0, x1, z1);
                 }
-                TerrainRestoreOp::Splat { terrain_id, region, texels } => {
-                    let Some(terrain) = renderer.terrain_mut(terrain_id) else { continue };
+                TerrainRestoreOp::Splat {
+                    terrain_id,
+                    region,
+                    texels,
+                } => {
+                    let Some(terrain) = renderer.terrain_mut(terrain_id) else {
+                        continue;
+                    };
                     let (x0, z0, x1, z1) = region;
                     let row_w = terrain.splatmap.width;
                     let w = (x1 - x0 + 1) as usize;
@@ -1327,8 +1578,7 @@ impl<G: GameApp> Engine<G> {
         };
         let path_str = path.to_string_lossy().to_string();
 
-        let Some((renderer, render_ctx)) =
-            self.renderer.as_mut().zip(self.render_ctx.as_ref())
+        let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref())
         else {
             warn!("Cannot import before the renderer is ready");
             return;
@@ -1350,15 +1600,18 @@ impl<G: GameApp> Engine<G> {
 
         let count = uploaded.len();
         for node in uploaded {
-            let (scale, rotation, translation) =
-                node.transform.to_scale_rotation_translation();
+            let (scale, rotation, translation) = node.transform.to_scale_rotation_translation();
             let name = if node.entity_name.is_empty() {
                 Name::new("Imported Mesh")
             } else {
                 Name::new(&node.entity_name)
             };
             let entity = self.world.spawn((
-                Transform { translation, rotation, scale },
+                Transform {
+                    translation,
+                    rotation,
+                    scale,
+                },
                 name,
                 WorldTransform::identity(),
                 MeshComponent {
@@ -1366,7 +1619,9 @@ impl<G: GameApp> Engine<G> {
                     index_offset: node.index_offset,
                     index_count: node.index_count,
                 },
-                MaterialComponent { id: node.material_id },
+                MaterialComponent {
+                    id: node.material_id,
+                },
             ));
             // Select the last node so the import is immediately visible in the
             // inspector and the gizmo lands on it.
@@ -1483,12 +1738,20 @@ impl<G: GameApp> Engine<G> {
                 .as_ref()
                 .and_then(|r| r.terrain(terrain_id))
                 .map_or(0, |t| t.edit_revision);
-            if self.terrain_colliders.get(&terrain_id).is_some_and(|(rev, _)| *rev == revision) {
+            if self
+                .terrain_colliders
+                .get(&terrain_id)
+                .is_some_and(|(rev, _)| *rev == revision)
+            {
                 continue;
             }
 
-            let Some(renderer) = self.renderer.as_ref() else { continue };
-            let Some(terrain) = renderer.terrain(terrain_id) else { continue };
+            let Some(renderer) = self.renderer.as_ref() else {
+                continue;
+            };
+            let Some(terrain) = renderer.terrain(terrain_id) else {
+                continue;
+            };
             let (samples, sample_count, scale) = terrain.heightfield();
 
             // Drop the old body first: two overlapping static surfaces would
@@ -1499,18 +1762,22 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            let Some(physics) = self.physics.as_mut() else { continue };
+            let Some(physics) = self.physics.as_mut() else {
+                continue;
+            };
             let body = physics.create_body(RigidBodyDescriptor {
-                shape: ColliderShape::HeightField { samples, sample_count, scale },
+                shape: ColliderShape::HeightField {
+                    samples,
+                    sample_count,
+                    scale,
+                },
                 position,
                 motion_type: MotionType::Static,
                 object_layer: somnium_physics::layer::LAYER_NON_MOVING,
                 ..Default::default()
             });
             self.terrain_colliders.insert(terrain_id, (revision, body));
-            info!(
-                "Terrain {terrain_id}: collider rebuilt ({sample_count}x{sample_count} samples)",
-            );
+            info!("Terrain {terrain_id}: collider rebuilt ({sample_count}x{sample_count} samples)",);
         }
     }
 
@@ -1520,7 +1787,10 @@ impl<G: GameApp> Engine<G> {
     /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
-        let camera_ws = self.renderer.as_ref().map_or(glam::Vec3::ZERO, |r| r.camera_pos);
+        let camera_ws = self
+            .renderer
+            .as_ref()
+            .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
         let terrains: Vec<(u32, glam::Mat4, f32, f32)> = self
             .world
             .entities()
@@ -1534,7 +1804,12 @@ impl<G: GameApp> Engine<G> {
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model, fc.cull_distance, fc.foliage_shadow_distance))
+                Some((
+                    tc.terrain_id,
+                    model,
+                    fc.cull_distance,
+                    fc.foliage_shadow_distance,
+                ))
             })
             .collect();
 
@@ -1559,7 +1834,11 @@ impl<G: GameApp> Engine<G> {
             };
             // Phase 17G: reject distant instances before they become draws.
             let camera_local = model.inverse().transform_point3(camera_ws);
-            let cull_sq = if cull_distance > 0.0 { cull_distance * cull_distance } else { f32::MAX };
+            let cull_sq = if cull_distance > 0.0 {
+                cull_distance * cull_distance
+            } else {
+                f32::MAX
+            };
             let shadow_sq = if shadow_distance > 0.0 {
                 shadow_distance * shadow_distance
             } else {
@@ -1652,6 +1931,16 @@ impl<G: GameApp> Engine<G> {
                 if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
                     m.alpha_cutoff = 0.5;
                 }
+                // Palette entries are known vegetation. Re-routing a material
+                // to the opaque visibility path must retain the semantic data
+                // that activates curved normals, the roughness floor, and
+                // two-sided transmission in deferred shading. Limit this to
+                // the originally blended pieces so opaque trunks stay solid.
+                m.foliage = true;
+                m.double_sided = true;
+                if m.transmission <= 0.0 {
+                    m.transmission = 0.5;
+                }
             }
         }
 
@@ -1702,7 +1991,10 @@ impl<G: GameApp> Engine<G> {
             })
             .collect();
         let tris: u32 = built.iter().map(|p| p.index_count / 3).sum();
-        info!("Foliage: loaded {name} ({} parts, {tris} triangles)", built.len());
+        info!(
+            "Foliage: loaded {name} ({} parts, {tris} triangles)",
+            built.len()
+        );
         self.foliage_meshes[idx] = Some(built);
     }
 
@@ -1711,19 +2003,31 @@ impl<G: GameApp> Engine<G> {
     /// Returns true when a terrain was hit, so the caller knows the click was
     /// consumed by painting rather than falling through to selection.
     fn paint_foliage_dab(&mut self) -> bool {
-        let Some(tc) = self.selected_terrain() else { return false };
-        let Some(model) = self.selected_terrain_model() else { return false };
-        let Some((origin, dir)) = self.cursor_ray() else { return false };
+        let Some(tc) = self.selected_terrain() else {
+            return false;
+        };
+        let Some(model) = self.selected_terrain_model() else {
+            return false;
+        };
+        let Some((origin, dir)) = self.cursor_ray() else {
+            return false;
+        };
 
         let brush = self.foliage_brush;
         let erase = self.foliage_erase;
         let seed = self.foliage_stroke_seed;
         self.foliage_stroke_seed = seed.wrapping_add(1);
 
-        let Some(renderer) = self.renderer.as_mut() else { return false };
-        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else { return false };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return false;
+        };
+        let Some(terrain) = renderer.terrain_mut(tc.terrain_id) else {
+            return false;
+        };
         terrain.model = model; // keep the raycast in sync with the entity
-        let Some(hit) = terrain.raycast(origin, dir) else { return false };
+        let Some(hit) = terrain.raycast(origin, dir) else {
+            return false;
+        };
         // `raycast` marches in terrain-local space but transforms the result
         // back to world before returning. Painted instances are stored local,
         // because `submit_foliage` composes them with the terrain's transform —
@@ -1866,9 +2170,13 @@ impl<G: GameApp> Engine<G> {
                     terrain: None,
                     voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
                     foliage: None,
+                    water: None,
+                    parent: None,
+                    children: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
-                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                self.undo_stack
+                    .push(cmd, &mut self.world, &mut self.selected_entity);
                 info!("Created voxel terrain entity");
             }
 
@@ -1880,55 +2188,20 @@ impl<G: GameApp> Engine<G> {
                 else {
                     return;
                 };
-                let desc = somnium_renderer::terrain::TerrainDescriptor::default();
-                let terrain_id = renderer.create_terrain(render_ctx, desc);
-                let [wx, wz] = desc.world_size();
-
-                // Phase 25L: a new terrain arrives with relief and materials
-                // already on it, rather than as a flat plain the user has to
-                // sculpt before it looks like anything. The heightmap is fixed
-                // for now; choosing one at creation is a UI-phase job, which is
-                // why the source lives behind `apply_default_relief` rather
-                // than being spelled out here.
-                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
-                    let amplitude = somnium_renderer::terrain::DEFAULT_RELIEF_METRES;
-                    let source = terrain.apply_default_relief(amplitude);
-                    // Assigns all eight materials by altitude and slope.
-                    somnium_renderer::terrain::brush::auto_splat(terrain, amplitude * 0.62);
-                    info!("Created terrain ({wx}x{wz} m, heightmap: {source})");
+                match crate::create_default_landscape(renderer, render_ctx) {
+                    Ok(built) => {
+                        let desc = built.preset.terrain;
+                        let [wx, wz] = desc.world_size();
+                        let cmd = Box::new(CreateLandscapeCmd::new(built.terrain, built.water));
+                        self.undo_stack
+                            .push(cmd, &mut self.world, &mut self.selected_entity);
+                        info!(
+                            "Created landscape preset v{} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
+                            built.preset.version, desc.grid_size[0], desc.grid_size[1], wx, wz,
+                        );
+                    }
+                    Err(error) => warn!("Failed to create default landscape: {error}"),
                 }
-
-                let snapshot = EntitySnapshot {
-                    // Center the terrain footprint on the world origin.
-                    transform: Some(Transform::from_translation(glam::Vec3::new(
-                        -wx * 0.5, 0.0, -wz * 0.5,
-                    ))),
-                    name: Some(Name::new("Terrain")),
-                    light: None,
-                    mesh: None,
-                    mat: None,
-                    wt: Some(WorldTransform::identity()),
-                    mesh_kind: None,
-                    is_particle_emitter: false,
-                    voxel_terrain: None,
-                    terrain: Some(TerrainComponent {
-                        terrain_id,
-                        chunk_cells: desc.chunk_cells,
-                        grid_x: desc.grid_size[0],
-                        grid_z: desc.grid_size[1],
-                        cell_size: desc.cell_size,
-                        height_scale: desc.height_scale,
-                    }),
-                    // Phase 17A: present but disabled, so a new terrain is bare
-                    // until foliage is deliberately switched on.
-                    foliage: Some(crate::FoliageComponent::default()),
-                };
-                let cmd = Box::new(CreateEntityCmd::new(snapshot));
-                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
-                info!(
-                    "Created terrain {} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
-                    terrain_id, desc.grid_size[0], desc.grid_size[1], wx, wz,
-                );
             }
 
             EditorEvent::CreateEntity(kind) => {
@@ -1952,21 +2225,23 @@ impl<G: GameApp> Engine<G> {
 
                 // Determine mesh_kind for procedural mesh entities.
                 let mesh_kind = match kind {
-                    CreateKind::Cube     => Some(MeshKind::Cube),
-                    CreateKind::Sphere   => Some(MeshKind::Sphere),
-                    CreateKind::Plane    => Some(MeshKind::Plane),
+                    CreateKind::Cube => Some(MeshKind::Cube),
+                    CreateKind::Sphere => Some(MeshKind::Sphere),
+                    CreateKind::Plane => Some(MeshKind::Plane),
                     CreateKind::Cylinder => Some(MeshKind::Cylinder),
                     _ => None,
                 };
 
                 // Generate and upload mesh geometry if this is a mesh primitive.
                 let (mesh, mat) = if let Some(mk) = mesh_kind {
-                    if let (Some(renderer), Some(render_ctx)) = (&mut self.renderer, &self.render_ctx) {
+                    if let (Some(renderer), Some(render_ctx)) =
+                        (&mut self.renderer, &self.render_ctx)
+                    {
                         // Generate procedural geometry.
                         let (verts, idxs) = match mk {
-                            MeshKind::Cube     => somnium_asset::generate_cube(1.0),
-                            MeshKind::Sphere   => somnium_asset::generate_sphere(0.5, 32, 16),
-                            MeshKind::Plane    => somnium_asset::generate_plane(5.0, 1),
+                            MeshKind::Cube => somnium_asset::generate_cube(1.0),
+                            MeshKind::Sphere => somnium_asset::generate_sphere(0.5, 32, 16),
+                            MeshKind::Plane => somnium_asset::generate_plane(5.0, 1),
                             MeshKind::Cylinder => somnium_asset::generate_cylinder(0.5, 1.0, 32),
                         };
 
@@ -1984,13 +2259,13 @@ impl<G: GameApp> Engine<G> {
                                     normal_map: -1,
                                     metallic_roughness_map: -1,
                                     alpha_cutoff: 0.0,
-                flags: 0,
-                occlusion_map: -1,
-                transmission: 0.0,
-                emissive: [0.0; 3],
-                emissive_map: -1,
-                terrain_index: -1,
-                _pad: [0.0; 2],
+                                    flags: 0,
+                                    occlusion_map: -1,
+                                    transmission: 0.0,
+                                    emissive: [0.0; 3],
+                                    emissive_map: -1,
+                                    terrain_index: -1,
+                                    _pad: [0.0; 2],
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -1998,9 +2273,10 @@ impl<G: GameApp> Engine<G> {
                         };
 
                         // Upload geometry to GPU.
-                        let alloc = renderer.geometry.upload_mesh(
-                            &render_ctx.queue, &verts, &idxs, mat_id,
-                        );
+                        let alloc =
+                            renderer
+                                .geometry
+                                .upload_mesh(&render_ctx.queue, &verts, &idxs, mat_id);
 
                         (
                             Some(MeshComponent {
@@ -2029,15 +2305,20 @@ impl<G: GameApp> Engine<G> {
                     terrain: None,
                     voxel_terrain: None,
                     foliage: None,
+                    water: None,
+                    parent: None,
+                    children: None,
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
-                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                self.undo_stack
+                    .push(cmd, &mut self.world, &mut self.selected_entity);
             }
 
             EditorEvent::DeleteSelected => {
                 if let Some(entity) = self.selected_entity {
                     let cmd = Box::new(DeleteEntityCmd::new(entity.index()));
-                    self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                    self.undo_stack
+                        .push(cmd, &mut self.world, &mut self.selected_entity);
                     if let Some(r) = &mut self.renderer {
                         r.clear_gizmo();
                     }
@@ -2045,11 +2326,13 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::Undo => {
-                self.undo_stack.undo(&mut self.world, &mut self.selected_entity);
+                self.undo_stack
+                    .undo(&mut self.world, &mut self.selected_entity);
             }
 
             EditorEvent::Redo => {
-                self.undo_stack.redo(&mut self.world, &mut self.selected_entity);
+                self.undo_stack
+                    .redo(&mut self.world, &mut self.selected_entity);
             }
 
             EditorEvent::ToggleShadingMode => {
@@ -2073,12 +2356,58 @@ impl<G: GameApp> Engine<G> {
                 }
                 if let Some(r) = &mut self.renderer {
                     r.shading_mode = if r.shading_mode == 0 { 1 } else { 0 };
-                    info!("Shading mode toggled to: {}", if r.shading_mode == 1 { "Cel-Shading" } else { "PBR" });
+                    info!(
+                        "Shading mode toggled to: {}",
+                        if r.shading_mode == 1 {
+                            "Cel-Shading"
+                        } else {
+                            "PBR"
+                        }
+                    );
                 }
             }
 
             EditorEvent::SetInspectorValue { field, value, live } => {
-                let Some(entity) = self.selected_entity else { return };
+                let Some(entity) = self.selected_entity else {
+                    return;
+                };
+
+                if matches!(
+                    field,
+                    IF::WaterSurface
+                        | IF::WaterMaxDepth
+                        | IF::WaterClarity
+                        | IF::WaterAmplitude
+                        | IF::WaterRoughness
+                        | IF::WaterSsrStrength
+                        | IF::WaterWaveLengthA
+                        | IF::WaterWaveLengthB
+                        | IF::WaterWaveSpeed
+                        | IF::WaterWaveSteepness
+                ) {
+                    if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                        match field {
+                            IF::WaterSurface => water.surface_level = value,
+                            IF::WaterMaxDepth => water.max_depth = value.max(0.01),
+                            IF::WaterClarity => water.clarity = value.clamp(0.0, 1.0),
+                            IF::WaterAmplitude => water.amplitude = value.max(0.0),
+                            IF::WaterRoughness => water.roughness = value.clamp(0.02, 1.0),
+                            IF::WaterSsrStrength => water.ssr_strength = value.clamp(0.0, 1.0),
+                            IF::WaterWaveLengthA => water.wave_length_a = value.max(0.5),
+                            IF::WaterWaveLengthB => water.wave_length_b = value.max(0.5),
+                            IF::WaterWaveSpeed => water.wave_speed = value.max(0.0),
+                            IF::WaterWaveSteepness => water.wave_steepness = value.clamp(0.0, 0.95),
+                            _ => unreachable!(),
+                        }
+                    }
+                    if field == IF::WaterSurface {
+                        if let Some(transform) = self.world.get_mut::<Transform>(entity) {
+                            transform.translation.y = value;
+                        }
+                    }
+                    let _ = live;
+                    return;
+                }
 
                 // Phase 15A1: post-processing fields edit PostProcessComponent.
                 if matches!(
@@ -2171,16 +2500,14 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainRelief
                 ) {
                     if field == IF::TerrainPaintLayer {
-                        self.terrain_brush.paint_layer =
-                            (value.round().max(0.0) as usize).min(3);
+                        self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(3);
                         return;
                     }
                     // Phase 25H: a terrain-wide multiplier, not a per-layer
                     // value — the layers already author their own relief and
                     // this scales all of them together.
                     if field == IF::TerrainRelief {
-                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied()
-                        else {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
                             return;
                         };
                         if let Some(t) = self
@@ -2237,7 +2564,8 @@ impl<G: GameApp> Engine<G> {
                         IF::FoliageSlope => b.max_slope_deg = value.clamp(0.0, 90.0),
                         IF::FoliageLayer => {
                             b.kind = (value.round().max(0.0) as usize)
-                                .min(FOLIAGE_PALETTE.len() - 1) as u8;
+                                .min(FOLIAGE_PALETTE.len() - 1)
+                                as u8;
                         }
                         IF::FoliageScaleMin => b.scale_min = value.max(0.01),
                         IF::FoliageScaleMax => b.scale_max = value.max(0.01),
@@ -2246,11 +2574,8 @@ impl<G: GameApp> Engine<G> {
                         // rather than the next stroke.
                         IF::FoliageShadowDistance => {
                             if let Some(e) = self.selected_entity {
-                                if let Some(f) =
-                                    self.world.get_mut::<FoliageComponent>(e)
-                                {
-                                    f.foliage_shadow_distance =
-                                        value.clamp(0.0, 2000.0);
+                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
+                                    f.foliage_shadow_distance = value.clamp(0.0, 2000.0);
                                 }
                             }
                         }
@@ -2270,6 +2595,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::LightColorG
                         | IF::LightColorB
                         | IF::LightColorTemperature
+                        | IF::LightMoonIntensity
                 ) {
                     if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
                         let mut new_light = old_light;
@@ -2295,6 +2621,9 @@ impl<G: GameApp> Engine<G> {
                             IF::LightColorB => new_light.color.z = value.max(0.0),
                             IF::LightColorTemperature => {
                                 new_light.color_temperature_k = value.max(0.0);
+                            }
+                            IF::LightMoonIntensity => {
+                                new_light.moon_intensity = value.max(0.0);
                             }
                             _ => unreachable!(),
                         }
@@ -2323,7 +2652,11 @@ impl<G: GameApp> Engine<G> {
                                 }
                                 let cmd =
                                     Box::new(SetLightCmd::new(entity.index(), base, new_light));
-                                self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                                self.undo_stack.push(
+                                    cmd,
+                                    &mut self.world,
+                                    &mut self.selected_entity,
+                                );
                             }
                         }
                     }
@@ -2337,9 +2670,30 @@ impl<G: GameApp> Engine<G> {
                         IF::PosX => new_t.translation.x = value,
                         IF::PosY => new_t.translation.y = value,
                         IF::PosZ => new_t.translation.z = value,
-                        IF::RotX => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, value.to_radians(), ey, ez),
-                        IF::RotY => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, value.to_radians(), ez),
-                        IF::RotZ => new_t.rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, ex, ey, value.to_radians()),
+                        IF::RotX => {
+                            new_t.rotation = glam::Quat::from_euler(
+                                glam::EulerRot::XYZ,
+                                value.to_radians(),
+                                ey,
+                                ez,
+                            )
+                        }
+                        IF::RotY => {
+                            new_t.rotation = glam::Quat::from_euler(
+                                glam::EulerRot::XYZ,
+                                ex,
+                                value.to_radians(),
+                                ez,
+                            )
+                        }
+                        IF::RotZ => {
+                            new_t.rotation = glam::Quat::from_euler(
+                                glam::EulerRot::XYZ,
+                                ex,
+                                ey,
+                                value.to_radians(),
+                            )
+                        }
                         IF::ScaleX => new_t.scale.x = value,
                         IF::ScaleY => new_t.scale.y = value,
                         IF::ScaleZ => new_t.scale.z = value,
@@ -2363,7 +2717,8 @@ impl<G: GameApp> Engine<G> {
                             *t = base;
                         }
                         let cmd = Box::new(SetTransformCmd::new(entity.index(), base, new_t));
-                        self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                        self.undo_stack
+                            .push(cmd, &mut self.world, &mut self.selected_entity);
                     }
                     // The gizmo otherwise only re-syncs on selection or on its
                     // own drag, so typing a position left it stranded at the
@@ -2385,7 +2740,11 @@ impl<G: GameApp> Engine<G> {
                     let terrain_ids: Vec<u32> = self
                         .world
                         .entities()
-                        .filter_map(|e| self.world.get::<TerrainComponent>(e).map(|tc| tc.terrain_id))
+                        .filter_map(|e| {
+                            self.world
+                                .get::<TerrainComponent>(e)
+                                .map(|tc| tc.terrain_id)
+                        })
                         .collect();
                     for id in terrain_ids {
                         if let Some(t) = r.terrain(id) {
@@ -2418,7 +2777,11 @@ impl<G: GameApp> Engine<G> {
                     0.0,
                 );
                 self.world.spawn((
-                    Transform { translation: glam::Vec3::ZERO, rotation: light_rot, scale: glam::Vec3::ONE },
+                    Transform {
+                        translation: glam::Vec3::ZERO,
+                        rotation: light_rot,
+                        scale: glam::Vec3::ONE,
+                    },
                     LightComponent::directional(crate::light_units::lux::DIRECT_SUNLIGHT),
                     Name::new("SunLight"),
                     WorldTransform::identity(),
@@ -2428,16 +2791,36 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::DuplicateSelected => {
                 if let Some(entity) = self.selected_entity {
-                    let transform = self.world.get::<Transform>(entity).copied()
+                    let transform = self
+                        .world
+                        .get::<Transform>(entity)
+                        .copied()
                         .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
-                    let name = self.world.get::<Name>(entity)
+                    let name = self
+                        .world
+                        .get::<Name>(entity)
                         .map(|n| Name::new(&format!("{}_copy", n.as_str())))
                         .unwrap_or_else(|| Name::new("Entity_copy"));
                     let light = self.world.get::<LightComponent>(entity).copied();
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
-                    let is_particle_emitter = self.world.get::<crate::ParticleEmitter>(entity).is_some();
+                    let mut water = self.world.get::<WaterComponent>(entity).copied();
+                    if let Some(component) = water.as_mut() {
+                        if let (Some(renderer), Some(render_ctx)) =
+                            (&mut self.renderer, &self.render_ctx)
+                        {
+                            component.water_id = renderer.allocate_water_body_id();
+                            if let Err(error) =
+                                renderer.ensure_water_body(render_ctx, component.descriptor())
+                            {
+                                warn!("Failed to duplicate water data: {error}");
+                            }
+                        }
+                    }
+                    let parent = self.world.get::<Parent>(entity).copied();
+                    let is_particle_emitter =
+                        self.world.get::<crate::ParticleEmitter>(entity).is_some();
                     // Offset the duplicate slightly so it's visible
                     let mut dup_transform = transform;
                     dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
@@ -2455,9 +2838,13 @@ impl<G: GameApp> Engine<G> {
                         terrain: None,
                         voxel_terrain: None,
                         foliage: None,
+                        water,
+                        parent,
+                        children: None,
                     };
                     let cmd = Box::new(CreateEntityCmd::new(snapshot));
-                    self.undo_stack.push(cmd, &mut self.world, &mut self.selected_entity);
+                    self.undo_stack
+                        .push(cmd, &mut self.world, &mut self.selected_entity);
                     info!("Duplicated entity {}", entity.index());
                 }
             }
@@ -2479,6 +2866,47 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::PlaySimulation => {
+                self.simulation_clock.state = SimulationState::Playing;
+                self.play_session_active = true;
+                self.gizmo_drag = None;
+                self.terrain_stroke = None;
+                if let Some(r) = &mut self.renderer {
+                    r.set_editor_overlays_enabled(false);
+                }
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(1);
+                }
+                info!("Simulation playing");
+            }
+
+            EditorEvent::PauseSimulation => {
+                self.simulation_clock.state = SimulationState::Paused;
+                if self.play_session_active {
+                    if let Some(r) = &mut self.renderer {
+                        r.set_editor_overlays_enabled(false);
+                    }
+                }
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(2);
+                }
+                info!("Simulation paused");
+            }
+
+            EditorEvent::StopSimulation => {
+                self.simulation_clock.state = SimulationState::Editing;
+                self.simulation_clock.elapsed_seconds = 0.0;
+                self.simulation_accumulator = 0.0;
+                self.play_session_active = false;
+                if let Some(r) = &mut self.renderer {
+                    r.set_editor_overlays_enabled(true);
+                }
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(0);
+                }
+                info!("Simulation stopped");
+            }
+
             EditorEvent::ImportModel => {
                 self.import_model();
             }
@@ -2491,9 +2919,7 @@ impl<G: GameApp> Engine<G> {
                     if r.profiler.available() {
                         r.profiler.toggle();
                     } else {
-                        tracing::warn!(
-                            "profiler: GPU timestamps unavailable on this adapter"
-                        );
+                        tracing::warn!("profiler: GPU timestamps unavailable on this adapter");
                     }
                 }
             }
@@ -2514,7 +2940,11 @@ impl<G: GameApp> Engine<G> {
                 }
                 info!(
                     "Foliage paint: {}",
-                    if self.foliage_paint_active { "ON" } else { "off" }
+                    if self.foliage_paint_active {
+                        "ON"
+                    } else {
+                        "off"
+                    }
                 );
             }
             EditorEvent::ToggleFoliageErase => {
@@ -2533,7 +2963,9 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::CycleTonemapper => {
-                let Some(entity) = self.selected_entity else { return };
+                let Some(entity) = self.selected_entity else {
+                    return;
+                };
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                     pp.tonemapper = pp.tonemapper.next();
                     info!("Tonemapper: {}", pp.tonemapper.label());
@@ -2541,7 +2973,9 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::TogglePostFx(which) => {
                 use somnium_ui::PostFxToggle;
-                let Some(entity) = self.selected_entity else { return };
+                let Some(entity) = self.selected_entity else {
+                    return;
+                };
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                     let on = match which {
                         PostFxToggle::Vignette => {
@@ -2622,7 +3056,7 @@ impl<G: GameApp> Engine<G> {
 fn ndc_to_world(cx: f32, cy: f32, vw: f32, vh: f32, inv_vp: &glam::Mat4) -> glam::Vec3 {
     let ndc_x = 2.0 * cx / vw - 1.0;
     let ndc_y = 1.0 - 2.0 * cy / vh;
-    let clip  = glam::Vec4::new(ndc_x, ndc_y, 0.5, 1.0);
+    let clip = glam::Vec4::new(ndc_x, ndc_y, 0.5, 1.0);
     let world = *inv_vp * clip;
     glam::Vec3::new(world.x, world.y, world.z) / world.w
 }
@@ -2632,13 +3066,15 @@ fn ndc_to_world(cx: f32, cy: f32, vw: f32, vh: f32, inv_vp: &glam::Mat4) -> glam
 /// Returns `None` if ray and axis are nearly parallel.
 fn ray_axis_param(
     ray_origin: glam::Vec3,
-    ray_dir:    glam::Vec3,
+    ray_dir: glam::Vec3,
     axis_origin: glam::Vec3,
-    axis_dir:    glam::Vec3,
+    axis_dir: glam::Vec3,
 ) -> Option<f32> {
-    let b     = ray_dir.dot(axis_dir);
+    let b = ray_dir.dot(axis_dir);
     let denom = 1.0 - b * b;
-    if denom.abs() < 1e-8 { return None; }
+    if denom.abs() < 1e-8 {
+        return None;
+    }
     let w = ray_origin - axis_origin;
     let d = -w.dot(ray_dir);
     let e = -w.dot(axis_dir);
@@ -2650,17 +3086,21 @@ fn ray_axis_param(
 /// Returns `None` if the ray is nearly parallel to the plane or hits behind
 /// the camera.
 fn ring_angle(
-    ray_origin:    glam::Vec3,
-    ray_dir:       glam::Vec3,
-    ring_center:   glam::Vec3,
-    ring_normal:   glam::Vec3,
-    ring_tangent:  glam::Vec3,
+    ray_origin: glam::Vec3,
+    ray_dir: glam::Vec3,
+    ring_center: glam::Vec3,
+    ring_normal: glam::Vec3,
+    ring_tangent: glam::Vec3,
     ring_bitangent: glam::Vec3,
 ) -> Option<f32> {
     let denom = ray_dir.dot(ring_normal);
-    if denom.abs() < 1e-8 { return None; }
+    if denom.abs() < 1e-8 {
+        return None;
+    }
     let t = (ring_center - ray_origin).dot(ring_normal) / denom;
-    if t < 0.0 { return None; }
+    if t < 0.0 {
+        return None;
+    }
     let v = ray_origin + t * ray_dir - ring_center;
     Some(f32::atan2(v.dot(ring_bitangent), v.dot(ring_tangent)))
 }
@@ -2677,44 +3117,50 @@ fn ring_plane_basis(axis: GizmoAxis) -> (glam::Vec3, glam::Vec3) {
 /// Try to begin a gizmo drag.  Returns `Some(state)` if the cursor ray hits
 /// an axis handle; `None` if no gizmo is visible or no axis was hit.
 fn try_start_gizmo_drag(
-    renderer:        Option<&SomniumRenderer>,
-    world:           &somnium_ecs::World,
+    renderer: Option<&SomniumRenderer>,
+    world: &somnium_ecs::World,
     selected_entity: &Option<somnium_ecs::entity::Entity>,
-    cursor_pos:      (f32, f32),
-    viewport_size:   (f32, f32),
+    cursor_pos: (f32, f32),
+    viewport_size: (f32, f32),
 ) -> Option<GizmoDragState> {
-    let renderer  = renderer?;
-    let entity    = (*selected_entity)?;
+    let renderer = renderer?;
+    if !renderer.editor_overlays_enabled() {
+        return None;
+    }
+    let entity = (*selected_entity)?;
     let gizmo_pos = renderer.gizmo_world_pos?;
 
     let (vw, vh) = viewport_size;
-    if vw < 1.0 || vh < 1.0 { return None; }
+    if vw < 1.0 || vh < 1.0 {
+        return None;
+    }
 
     let camera_pos = renderer.camera_pos;
-    let inv_vp     = renderer.view_proj.inverse();
+    let inv_vp = renderer.view_proj.inverse();
 
-    let world_pt  = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
-    let ray_dir   = (world_pt - camera_pos).normalize();
+    let world_pt = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
+    let ray_dir = (world_pt - camera_pos).normalize();
 
     // Transform ray to gizmo-local space.
-    let dist      = (camera_pos - gizmo_pos).length().max(0.5);
-    let scale     = dist * 0.15;
-    let model     = glam::Mat4::from_translation(gizmo_pos)
-        * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let dist = (camera_pos - gizmo_pos).length().max(0.5);
+    let scale = dist * 0.15;
+    let model =
+        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
     let inv_model = model.inverse();
     let local_origin = inv_model.transform_point3(camera_pos);
-    let local_dir    = inv_model.transform_vector3(ray_dir).normalize();
+    let local_dir = inv_model.transform_vector3(ray_dir).normalize();
 
     let mode = renderer.gizmo_mode;
     let axis = gizmo_hit_test(local_origin, local_dir, mode)?;
 
-    let start_transform = world.get::<Transform>(entity).copied()
+    let start_transform = world
+        .get::<Transform>(entity)
+        .copied()
         .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
 
     let (start_axis_param, start_angle, ring_tangent, ring_bitangent) = match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
-            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis.world_dir())
-                .unwrap_or(0.0);
+            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis.world_dir()).unwrap_or(0.0);
             (s, 0.0, glam::Vec3::ZERO, glam::Vec3::ZERO)
         }
         GizmoMode::Rotate => {
@@ -2740,25 +3186,27 @@ fn try_start_gizmo_drag(
 
 /// Compute the new entity transform given the current cursor ray.
 fn apply_gizmo_drag(
-    drag:         &GizmoDragState,
-    camera_pos:   glam::Vec3,
-    inv_vp:       glam::Mat4,
-    cursor_pos:   (f32, f32),
+    drag: &GizmoDragState,
+    camera_pos: glam::Vec3,
+    inv_vp: glam::Mat4,
+    cursor_pos: (f32, f32),
     viewport_size: (f32, f32),
 ) -> Transform {
     let mut result = drag.start_transform;
     let (vw, vh) = viewport_size;
-    if vw < 1.0 || vh < 1.0 { return result; }
+    if vw < 1.0 || vh < 1.0 {
+        return result;
+    }
 
     let world_pt = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
-    let ray_dir  = (world_pt - camera_pos).normalize();
+    let ray_dir = (world_pt - camera_pos).normalize();
     let axis_dir = drag.axis.world_dir();
 
     match drag.mode {
         GizmoMode::Translate => {
             if let Some(s) = ray_axis_param(camera_pos, ray_dir, drag.gizmo_pos, axis_dir) {
-                result.translation = drag.start_transform.translation
-                    + (s - drag.start_axis_param) * axis_dir;
+                result.translation =
+                    drag.start_transform.translation + (s - drag.start_axis_param) * axis_dir;
             }
         }
         GizmoMode::Scale => {
@@ -2777,8 +3225,12 @@ fn apply_gizmo_drag(
         }
         GizmoMode::Rotate => {
             if let Some(angle) = ring_angle(
-                camera_pos, ray_dir, drag.gizmo_pos,
-                axis_dir, drag.ring_tangent, drag.ring_bitangent,
+                camera_pos,
+                ray_dir,
+                drag.gizmo_pos,
+                axis_dir,
+                drag.ring_tangent,
+                drag.ring_bitangent,
             ) {
                 let delta = angle - drag.start_angle;
                 result.rotation =

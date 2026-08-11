@@ -237,13 +237,20 @@ impl RestirPass {
         self.history_valid = false;
     }
 
-    fn ensure_binds(&mut self, device: &wgpu::Device, tlas: &wgpu::Tlas, depth: &wgpu::TextureView) {
+    fn ensure_binds(
+        &mut self,
+        device: &wgpu::Device,
+        tlas: &wgpu::Tlas,
+        depth: &wgpu::TextureView,
+    ) {
         if !self.binds.is_empty() {
             return;
         }
-        let (Some(layout), Some(params), Some(vis)) =
-            (self.layout.as_ref(), self.params.as_ref(), self.vis_view.as_ref())
-        else {
+        let (Some(layout), Some(params), Some(vis)) = (
+            self.layout.as_ref(),
+            self.params.as_ref(),
+            self.vis_view.as_ref(),
+        ) else {
             return;
         };
 
@@ -251,36 +258,37 @@ impl RestirPass {
         // written.
         for write in 0..2usize {
             let read = 1 - write;
-            self.binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ReSTIR BG"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::AccelerationStructure(tlas),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(vis),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: params.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.reservoirs[read].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: self.reservoirs[write].as_entire_binding(),
-                    },
-                ],
-            }));
+            self.binds
+                .push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("ReSTIR BG"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::AccelerationStructure(tlas),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(vis),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.reservoirs[read].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.reservoirs[write].as_entire_binding(),
+                        },
+                    ],
+                }));
         }
     }
 

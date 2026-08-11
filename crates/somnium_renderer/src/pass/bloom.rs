@@ -188,11 +188,7 @@ impl BloomPass {
     }
 
     pub fn intensity(&self) -> f32 {
-        if self.enabled {
-            self.intensity
-        } else {
-            0.0
-        }
+        if self.enabled { self.intensity } else { 0.0 }
     }
 
     /// Build the chain from `source`.

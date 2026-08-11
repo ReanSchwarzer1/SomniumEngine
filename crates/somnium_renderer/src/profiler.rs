@@ -182,8 +182,16 @@ impl Timeline {
                 // before its begin is garbage, and `end - begin` on u64 would
                 // turn it into several years rather than into zero.
                 let ms = (end.saturating_sub(begin) as f64 * f64::from(period_ns) / 1.0e6) as f32;
-                let ms = if ms.is_finite() && ms < IMPLAUSIBLE_MS { ms } else { 0.0 };
-                Some(ScopeResult { name: s.name, depth: s.depth, ms })
+                let ms = if ms.is_finite() && ms < IMPLAUSIBLE_MS {
+                    ms
+                } else {
+                    0.0
+                };
+                Some(ScopeResult {
+                    name: s.name,
+                    depth: s.depth,
+                    ms,
+                })
             })
             .collect()
     }
@@ -210,7 +218,8 @@ impl Smoother {
             {
                 Some(e) => e,
                 None => {
-                    self.entries.push((r.name, r.depth, Vec::with_capacity(WINDOW), 0));
+                    self.entries
+                        .push((r.name, r.depth, Vec::with_capacity(WINDOW), 0));
                     self.entries.last_mut().expect("just pushed")
                 }
             };
@@ -317,9 +326,7 @@ impl GpuProfiler {
                 .collect();
             (Some(query_set), frames)
         } else {
-            tracing::info!(
-                "profiler: GPU timestamps unavailable on this adapter — counters only"
-            );
+            tracing::info!("profiler: GPU timestamps unavailable on this adapter — counters only");
             (None, Vec::new())
         };
 
@@ -376,7 +383,11 @@ impl GpuProfiler {
     /// Total of the top-level scopes — the GPU frame, without double-counting
     /// nested passes.
     pub fn total_ms(&self) -> f32 {
-        self.results.iter().filter(|r| r.depth == 0).map(|r| r.ms).sum()
+        self.results
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.ms)
+            .sum()
     }
 
     /// GPU time inside the frame that no scope claims.
@@ -387,7 +398,12 @@ impl GpuProfiler {
     /// of the frame the profiler still cannot see. That is the number worth
     /// looking at when a change does not show up where it was expected.
     pub fn unattributed_ms(&self) -> f32 {
-        let children: f32 = self.results.iter().filter(|r| r.depth == 1).map(|r| r.ms).sum();
+        let children: f32 = self
+            .results
+            .iter()
+            .filter(|r| r.depth == 1)
+            .map(|r| r.ms)
+            .sum();
         (self.total_ms() - children).max(0.0)
     }
 
@@ -469,13 +485,7 @@ impl GpuProfiler {
         let Some(qs) = &self.query_set else { return };
         let frame = &self.frames[i];
         encoder.resolve_query_set(qs, 0..count, &frame.resolve, 0);
-        encoder.copy_buffer_to_buffer(
-            &frame.resolve,
-            0,
-            &frame.readback,
-            0,
-            u64::from(count) * 8,
-        );
+        encoder.copy_buffer_to_buffer(&frame.resolve, 0, &frame.readback, 0, u64::from(count) * 8);
     }
 
     /// Start the asynchronous read. Must be called *after* the submit that
@@ -581,9 +591,7 @@ impl GpuProfiler {
         let c = self.last_counters;
         out.push(format!(
             "{:<26} {} draws / {} tris",
-            "geometry",
-            c.draw_calls,
-            c.triangles
+            "geometry", c.draw_calls, c.triangles
         ));
         out.push(format!(
             "{:<26} {} inst / {} chunks / {} tlas",
@@ -609,7 +617,11 @@ mod tests {
         (0..n * 2)
             .map(|q| {
                 let scope = q / 2;
-                if q % 2 == 0 { 10 * scope as u64 } else { 10 * scope as u64 + 5 }
+                if q % 2 == 0 {
+                    10 * scope as u64
+                } else {
+                    10 * scope as u64 + 5
+                }
             })
             .collect()
     }
@@ -716,7 +728,11 @@ mod tests {
         let mut s = Smoother::default();
         let mut last = 0.0;
         for _ in 0..WINDOW * 2 {
-            let mut r = vec![ScopeResult { name: "pass", depth: 0, ms: 4.0 }];
+            let mut r = vec![ScopeResult {
+                name: "pass",
+                depth: 0,
+                ms: 4.0,
+            }];
             s.push(&mut r);
             last = r[0].ms;
         }
@@ -728,11 +744,19 @@ mod tests {
         let mut s = Smoother::default();
         // Fill with 10 ms, then feed 0 ms for a full window.
         for _ in 0..WINDOW {
-            s.push(&mut [ScopeResult { name: "pass", depth: 0, ms: 10.0 }]);
+            s.push(&mut [ScopeResult {
+                name: "pass",
+                depth: 0,
+                ms: 10.0,
+            }]);
         }
         let mut last = 0.0;
         for _ in 0..WINDOW {
-            let mut r = vec![ScopeResult { name: "pass", depth: 0, ms: 0.0 }];
+            let mut r = vec![ScopeResult {
+                name: "pass",
+                depth: 0,
+                ms: 0.0,
+            }];
             s.push(&mut r);
             last = r[0].ms;
         }
@@ -746,13 +770,29 @@ mod tests {
         let mut s = Smoother::default();
         for _ in 0..WINDOW {
             s.push(&mut [
-                ScopeResult { name: "hiz", depth: 0, ms: 8.0 },
-                ScopeResult { name: "hiz", depth: 1, ms: 2.0 },
+                ScopeResult {
+                    name: "hiz",
+                    depth: 0,
+                    ms: 8.0,
+                },
+                ScopeResult {
+                    name: "hiz",
+                    depth: 1,
+                    ms: 2.0,
+                },
             ]);
         }
         let mut r = vec![
-            ScopeResult { name: "hiz", depth: 0, ms: 8.0 },
-            ScopeResult { name: "hiz", depth: 1, ms: 2.0 },
+            ScopeResult {
+                name: "hiz",
+                depth: 0,
+                ms: 8.0,
+            },
+            ScopeResult {
+                name: "hiz",
+                depth: 1,
+                ms: 2.0,
+            },
         ];
         s.push(&mut r);
         assert!((r[0].ms - 8.0).abs() < 1e-3, "{:?}", r);

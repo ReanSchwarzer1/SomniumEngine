@@ -25,8 +25,12 @@ impl Control for Border {
         for &ch in &widget.children {
             ctx.measure_child(ch, inner);
             let ds = ctx.desired_size(ch);
-            if ds.x > desired.x { desired.x = ds.x; }
-            if ds.y > desired.y { desired.y = ds.y; }
+            if ds.x > desired.x {
+                desired.x = ds.x;
+            }
+            if ds.y > desired.y {
+                desired.y = ds.y;
+            }
         }
         desired + Vec2::new(st.h(), st.v())
     }
@@ -48,7 +52,7 @@ impl Control for Border {
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
-        let b  = widget.screen_bounds();
+        let b = widget.screen_bounds();
         let st = self.stroke_thickness;
         // Background fill
         ctx.push_rect_filled(b, widget.background);
@@ -56,26 +60,46 @@ impl Control for Border {
         let fg = widget.foreground;
         ctx.push_rect_filled(Rect::new(b.x, b.y, b.w, st.top), fg);
         ctx.push_rect_filled(Rect::new(b.x, b.y + b.h - st.bottom, b.w, st.bottom), fg);
-        ctx.push_rect_filled(Rect::new(b.x, b.y + st.top, st.left, (b.h - st.top - st.bottom).max(0.0)), fg);
-        ctx.push_rect_filled(Rect::new(b.x + b.w - st.right, b.y + st.top, st.right, (b.h - st.top - st.bottom).max(0.0)), fg);
+        ctx.push_rect_filled(
+            Rect::new(
+                b.x,
+                b.y + st.top,
+                st.left,
+                (b.h - st.top - st.bottom).max(0.0),
+            ),
+            fg,
+        );
+        ctx.push_rect_filled(
+            Rect::new(
+                b.x + b.w - st.right,
+                b.y + st.top,
+                st.right,
+                (b.h - st.top - st.bottom).max(0.0),
+            ),
+            fg,
+        );
     }
 
     fn handle_routed_message(
         &mut self,
         _widget: &mut Widget,
-        _msg:    &mut UiMessage,
-        _emit:   &mut Vec<UiMessage>,
-    ) {}
+        _msg: &mut UiMessage,
+        _emit: &mut Vec<UiMessage>,
+    ) {
+    }
 }
 
 pub struct BorderBuilder {
-    widget:           WidgetBuilder,
+    widget: WidgetBuilder,
     stroke_thickness: Thickness,
 }
 
 impl BorderBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
-        Self { widget, stroke_thickness: Thickness::uniform(1.0) }
+        Self {
+            widget,
+            stroke_thickness: Thickness::uniform(1.0),
+        }
     }
 
     pub fn with_stroke_thickness(mut self, t: Thickness) -> Self {
@@ -86,7 +110,9 @@ impl BorderBuilder {
     pub fn build(self) -> UiNode {
         UiNode::new(
             self.widget.build(),
-            Box::new(Border { stroke_thickness: self.stroke_thickness }),
+            Box::new(Border {
+                stroke_thickness: self.stroke_thickness,
+            }),
         )
     }
 }

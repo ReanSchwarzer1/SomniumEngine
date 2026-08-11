@@ -77,7 +77,10 @@ fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
     // the view ray never starts inside the planet.
     let view_pos = vec3<f32>(0.0, GROUND_RADIUS + 0.5, 0.0);
 
-    // `.w` carries the sun's illuminance in lux (Phase 24A).
+    // Phase 25M-2: raymarch_sky calculates unit-less atmospheric scattering per lux of sun.
+    // Multiply by sun_illuminance (which carries the sun's lux attenuated by atmosphere transmittance).
+    // Transmittance fades smoothly across twilight (via HORIZON_FADE in sun.rs), causing the sky to
+    // transition naturally from daylight (8000 cd/m²) -> sunset (500 cd/m²) -> night airglow floor.
     let sun_illuminance = params.sun_color.w;
 
     var radiance = raymarch_sky(
@@ -85,15 +88,6 @@ fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
         view_pos, ray_dir, sun_dir, 32,
     ) * sun_illuminance;
 
-    // Sharp features (sun disc, moon disc, stars) are deliberately absent
-    // here and drawn over the background instead — see `sky_detail`. Keeping
-    // them out also avoids double-counting the sun, whose specular highlight
-    // the shading pass already computes from the analytic light.
-    // Night fades in on the sun's *illuminance*, not its elevation. Dimming a
-    // light and moving it below the horizon are different things, and the dial
-    // in the inspector is intensity — so keying off elevation meant turning the
-    // sun down to moonlight left a starless sky. 10 lux is roughly civil
-    // twilight, the point where the eye starts picking out stars.
     let moon_dir = -sun_dir;
     let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
     radiance += night_sky_ambient(ray_dir, moon_dir, moon_strength);

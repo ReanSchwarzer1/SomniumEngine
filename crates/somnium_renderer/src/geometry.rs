@@ -136,7 +136,13 @@ impl GeometryPool {
     }
 
     /// Upload mesh data to the GPU and return its allocation info.
-    pub fn upload_mesh(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
+    pub fn upload_mesh(
+        &mut self,
+        queue: &wgpu::Queue,
+        vertices: &[Vertex],
+        indices: &[u32],
+        material_id: u32,
+    ) -> MeshAllocation {
         debug_assert_indices_in_range(vertices.len(), indices);
         if let Some(empty) = self.reject_if_full(vertices.len(), indices.len(), material_id) {
             return empty;
@@ -146,7 +152,11 @@ impl GeometryPool {
         // each meshlet is a contiguous range that 15F can draw directly.
         // Triangle order within a draw does not affect the image.
         let build = crate::meshlet::build_meshlets(vertices, indices);
-        let indices: &[u32] = if build.meshlets.is_empty() { indices } else { &build.indices };
+        let indices: &[u32] = if build.meshlets.is_empty() {
+            indices
+        } else {
+            &build.indices
+        };
 
         let v_offset = self.next_vertex;
         let i_offset = self.next_index;
@@ -183,14 +193,21 @@ impl GeometryPool {
     /// Upload a dynamic mesh, reusing a freed block when one is big enough
     /// (first-fit). Pair with [`GeometryPool::free_mesh`] — used by the Phase
     /// 14 voxel chunks, which are remeshed and despawned continuously.
-    pub fn upload_mesh_pooled(&mut self, queue: &wgpu::Queue, vertices: &[Vertex], indices: &[u32], material_id: u32) -> MeshAllocation {
+    pub fn upload_mesh_pooled(
+        &mut self,
+        queue: &wgpu::Queue,
+        vertices: &[Vertex],
+        indices: &[u32],
+        material_id: u32,
+    ) -> MeshAllocation {
         debug_assert_indices_in_range(vertices.len(), indices);
         let v_count = vertices.len() as u32;
         let i_count = indices.len() as u32;
 
-        let reuse = self.free_blocks.iter().position(|b| {
-            b.vertex_capacity >= v_count && b.index_capacity >= i_count
-        });
+        let reuse = self
+            .free_blocks
+            .iter()
+            .position(|b| b.vertex_capacity >= v_count && b.index_capacity >= i_count);
 
         let alloc = if let Some(slot) = reuse {
             let block = self.free_blocks.swap_remove(slot);
@@ -357,8 +374,8 @@ impl GeometryPool {
         index_count: usize,
         material_id: u32,
     ) -> Option<MeshAllocation> {
-        let v_end = (self.next_vertex as u64 + vertex_count as u64)
-            * std::mem::size_of::<Vertex>() as u64;
+        let v_end =
+            (self.next_vertex as u64 + vertex_count as u64) * std::mem::size_of::<Vertex>() as u64;
         let i_end = (self.next_index as u64 + index_count as u64) * 4;
         if v_end <= self.vertex_bytes && i_end <= self.index_bytes {
             return None;
@@ -386,10 +403,17 @@ impl GeometryPool {
         self.aabbs.get(&vertex_offset).copied()
     }
 
-    fn write_mesh(&mut self, queue: &wgpu::Queue, alloc: &MeshAllocation, vertices: &[Vertex], indices: &[u32]) {
+    fn write_mesh(
+        &mut self,
+        queue: &wgpu::Queue,
+        alloc: &MeshAllocation,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) {
         // Record local bounds for GPU culling (Phase 15B). Both upload paths
         // funnel through here, so every mesh gets one.
-        self.aabbs.insert(alloc.vertex_offset, compute_aabb(vertices));
+        self.aabbs
+            .insert(alloc.vertex_offset, compute_aabb(vertices));
 
         // Phase 15C: the visibility buffer packs the primitive index into 16
         // bits, so a larger mesh would wrap and shade the wrong triangle.
@@ -476,7 +500,11 @@ mod tests {
     use super::*;
 
     fn vert(p: [f32; 3]) -> Vertex {
-        Vertex { position: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] }
+        Vertex {
+            position: p,
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        }
     }
 
     #[test]
@@ -550,7 +578,10 @@ mod tests {
         assert!(span_accepts(&spans, 64, 100, "vertices"));
         assert!(span_accepts(&spans, 64, 1, "vertices"));
         assert!(!span_accepts(&spans, 64, 101, "vertices"));
-        assert!(!span_accepts(&spans, 65, 1, "vertices"), "offset must be a reserved span");
+        assert!(
+            !span_accepts(&spans, 65, 1, "vertices"),
+            "offset must be a reserved span"
+        );
     }
 }
 

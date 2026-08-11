@@ -4,8 +4,8 @@
 //! Somnium-native types (`LoadedScene`) that the renderer can upload
 //! without ever seeing `gltf::` crate types directly.
 
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -18,17 +18,17 @@ use tracing::{info, warn};
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex {
-    pub position: [f32; 3],  // 12 bytes
-    pub normal:   [f32; 3],  // 12 bytes
-    pub uv:       [f32; 2],  //  8 bytes
-}                             // = 32 bytes
+    pub position: [f32; 3], // 12 bytes
+    pub normal: [f32; 3],   // 12 bytes
+    pub uv: [f32; 2],       //  8 bytes
+} // = 32 bytes
 
 // ── Loaded types (Somnium-native, no gltf:: types) ────────────────────────
 
 /// Raw RGBA8 image decoded from a glTF texture.
 pub struct LoadedTexture {
-    pub data:   Vec<u8>, // row-major RGBA8 pixels
-    pub width:  u32,
+    pub data: Vec<u8>, // row-major RGBA8 pixels
+    pub width: u32,
     pub height: u32,
 }
 
@@ -50,68 +50,68 @@ pub enum AlphaMode {
 
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
-    pub base_color:            [f32; 4],
-    pub roughness:             f32,
-    pub metallic:              f32,
-    pub albedo_map:            Option<usize>,
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub albedo_map: Option<usize>,
     /// glTF `occlusionTexture` (red channel). Distinct from the
     /// metallic-roughness texture: the spec leaves *its* red channel
     /// undefined, so AO must never be read from it.
-    pub occlusion_map:         Option<usize>,
-    pub normal_map:            Option<usize>,
+    pub occlusion_map: Option<usize>,
+    pub normal_map: Option<usize>,
     pub metallic_roughness_map: Option<usize>,
     /// glTF `alphaMode`. Dropping this was why blended glass rendered as
     /// opaque grey panels.
-    pub alpha_mode:            AlphaMode,
+    pub alpha_mode: AlphaMode,
     /// Threshold for [`AlphaMode::Mask`].
-    pub alpha_cutoff:          f32,
+    pub alpha_cutoff: f32,
     /// How much light passes *through* the surface (Phase 24S).
     ///
     /// 0 is opaque. Leaves and grass blades are thin enough that a large
     /// fraction of the light hitting their far side comes out toward the
     /// viewer, which is why real foliage glows when backlit and looks flat and
     /// dead without it — no amount of correcting the albedo substitutes.
-    pub transmission:          f32,
+    pub transmission: f32,
     /// Phase 17E: this material is vegetation — a thin, cut-out card.
     ///
     /// Inferred from the same `*_alpha_*` sidecar convention that promotes it
     /// to MASK. Kept separate from `transmission` because glass is transmissive
     /// too and must not be treated as a leaf.
-    pub foliage:               bool,
+    pub foliage: bool,
     /// Light the surface emits on its own, linear RGB (Phase 24T).
     ///
     /// Carried in the same photometric scale as everything else since 24A, so
     /// a screen or a lit sign has to be given a real luminance rather than a
     /// number that happened to look right.
-    pub emissive:              [f32; 3],
+    pub emissive: [f32; 3],
     /// Texture modulating `emissive`, if the material has one.
-    pub emissive_map:          Option<usize>,
+    pub emissive_map: Option<usize>,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
-    pub double_sided:          bool,
+    pub double_sided: bool,
 }
 
 /// A single mesh primitive (position + normal + UV geometry + triangle indices).
 pub struct LoadedMesh {
     pub vertices: Vec<Vertex>,
-    pub indices:  Vec<u32>,
+    pub indices: Vec<u32>,
 }
 
 /// A scene node flattened to world-space. Mesh/material indices reference
 /// the parallel `meshes` and `materials` vecs in `LoadedScene`.
 pub struct SceneNode {
-    pub name:           String,
-    pub mesh_index:     Option<usize>,
+    pub name: String,
+    pub mesh_index: Option<usize>,
     pub material_index: Option<usize>,
-    pub transform:      Mat4, // world-space (parent chain already multiplied)
+    pub transform: Mat4, // world-space (parent chain already multiplied)
 }
 
 /// The result of `load_gltf`. Everything the renderer needs to upload a scene.
 #[derive(Default)]
 pub struct LoadedScene {
-    pub meshes:    Vec<LoadedMesh>,
+    pub meshes: Vec<LoadedMesh>,
     pub materials: Vec<LoadedMaterial>,
-    pub textures:  Vec<LoadedTexture>,
-    pub nodes:     Vec<SceneNode>,
+    pub textures: Vec<LoadedTexture>,
+    pub nodes: Vec<SceneNode>,
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -123,8 +123,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     let path = path.as_ref();
     info!("Loading glTF: {:?}", path);
 
-    let (document, buffers, images) = gltf::import(path)
-        .map_err(|e| format!("glTF import failed: {e}"))?;
+    let (document, buffers, images) =
+        gltf::import(path).map_err(|e| format!("glTF import failed: {e}"))?;
 
     let mut scene = LoadedScene::default();
 
@@ -151,30 +151,31 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     for mat in document.materials() {
         let pbr = mat.pbr_metallic_roughness();
         scene.materials.push(LoadedMaterial {
-            base_color:            pbr.base_color_factor(),
-            roughness:             pbr.roughness_factor(),
-            metallic:              pbr.metallic_factor(),
+            base_color: pbr.base_color_factor(),
+            roughness: pbr.roughness_factor(),
+            metallic: pbr.metallic_factor(),
             alpha_mode: match mat.alpha_mode() {
                 gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
-                gltf::material::AlphaMode::Mask   => AlphaMode::Mask,
-                gltf::material::AlphaMode::Blend  => AlphaMode::Blend,
+                gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend => AlphaMode::Blend,
             },
-            alpha_cutoff:          mat.alpha_cutoff().unwrap_or(0.5),
-            transmission:          mat
-                .transmission()
-                .map_or(0.0, |t| t.transmission_factor()),
+            alpha_cutoff: mat.alpha_cutoff().unwrap_or(0.5),
+            transmission: mat.transmission().map_or(0.0, |t| t.transmission_factor()),
             // Set below, where the sidecar cutout mask identifies vegetation.
-            foliage:               false,
-            emissive:              mat.emissive_factor(),
-            emissive_map:          mat
-                .emissive_texture()
+            foliage: false,
+            emissive: mat.emissive_factor(),
+            emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
+            double_sided: mat.double_sided(),
+            albedo_map: pbr
+                .base_color_texture()
                 .map(|t| t.texture().source().index()),
-            double_sided:          mat.double_sided(),
-            albedo_map:            pbr.base_color_texture().map(|t| t.texture().source().index()),
-            occlusion_map:         mat.occlusion_texture().map(|t| t.texture().source().index()),
-            normal_map:            mat.normal_texture().map(|t| t.texture().source().index()),
-            metallic_roughness_map: pbr.metallic_roughness_texture()
-                                       .map(|t| t.texture().source().index()),
+            occlusion_map: mat
+                .occlusion_texture()
+                .map(|t| t.texture().source().index()),
+            normal_map: mat.normal_texture().map(|t| t.texture().source().index()),
+            metallic_roughness_map: pbr
+                .metallic_roughness_texture()
+                .map(|t| t.texture().source().index()),
         });
     }
     // ARM-packed textures carry occlusion in red, but glTF has no way to say
@@ -185,7 +186,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     // channel undefined and reading that would darken models to black.
     for m in &mut scene.materials {
         if m.occlusion_map.is_none()
-            && m.metallic_roughness_map.is_some_and(|i| arm_packed.contains(&i))
+            && m.metallic_roughness_map
+                .is_some_and(|i| arm_packed.contains(&i))
         {
             m.occlusion_map = m.metallic_roughness_map;
         }
@@ -194,14 +196,13 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     // A sidecar mask means the albedo is a cutout atlas, so the material has
     // to be alpha-tested even though the glTF called it opaque.
     for m in &mut scene.materials {
-        if m.albedo_map.is_some_and(|i| masked.contains(&i))
-            && m.alpha_mode == AlphaMode::Opaque
-        {
+        if m.albedo_map.is_some_and(|i| masked.contains(&i)) && m.alpha_mode == AlphaMode::Opaque {
             m.alpha_mode = AlphaMode::Mask;
             // Foliage masks are near-binary; cutting at the midpoint keeps
             // blade edges crisp without eroding thin tips.
             m.alpha_cutoff = 0.5;
             m.double_sided = true;
+            m.foliage = true;
             // A sidecar cutout mask means foliage: thin, and translucent.
             // The glTF carries no transmission factor for these assets, and
             // inferring it from the same convention is better than leaving
@@ -215,20 +216,20 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     // Ensure there is always at least a default material at index 0.
     if scene.materials.is_empty() {
         scene.materials.push(LoadedMaterial {
-            base_color:            [1.0, 1.0, 1.0, 1.0],
-            roughness:             0.5,
-            metallic:              0.0,
-            albedo_map:            None,
-            occlusion_map:         None,
-            normal_map:            None,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            roughness: 0.5,
+            metallic: 0.0,
+            albedo_map: None,
+            occlusion_map: None,
+            normal_map: None,
             metallic_roughness_map: None,
-            alpha_mode:            AlphaMode::Opaque,
-            alpha_cutoff:          0.5,
-            transmission:          0.0,
-            foliage:          false,
-            emissive:              [0.0; 3],
-            emissive_map:          None,
-            double_sided:          false,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            transmission: 0.0,
+            foliage: false,
+            emissive: [0.0; 3],
+            emissive_map: None,
+            double_sided: false,
         });
     }
 
@@ -251,8 +252,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 })?
                 .collect();
 
-            let normals: Option<Vec<[f32; 3]>> =
-                reader.read_normals().map(|n| n.collect());
+            let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
             let uvs: Option<Vec<[f32; 2]>> =
                 reader.read_tex_coords(0).map(|u| u.into_f32().collect());
 
@@ -261,9 +261,13 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 .enumerate()
                 .map(|(i, &pos)| Vertex {
                     position: pos,
-                    normal: normals.as_ref().and_then(|n| n.get(i).copied())
+                    normal: normals
+                        .as_ref()
+                        .and_then(|n| n.get(i).copied())
                         .unwrap_or([0.0, 1.0, 0.0]),
-                    uv: uvs.as_ref().and_then(|u| u.get(i).copied())
+                    uv: uvs
+                        .as_ref()
+                        .and_then(|u| u.get(i).copied())
                         .unwrap_or([0.0, 0.0]),
                 })
                 .collect();
@@ -292,7 +296,9 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     }
 
     // 4. Scene graph → flat world-space nodes ----------------------------
-    let gltf_scene = document.default_scene().or_else(|| document.scenes().next());
+    let gltf_scene = document
+        .default_scene()
+        .or_else(|| document.scenes().next());
     match gltf_scene {
         Some(s) => {
             for root in s.nodes() {
@@ -315,10 +321,10 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
 // ── Internal helpers ───────────────────────────────────────────────────────
 
 fn collect_nodes(
-    node:           &gltf::Node,
-    parent_xform:   Mat4,
+    node: &gltf::Node,
+    parent_xform: Mat4,
     prim_to_loaded: &HashMap<(usize, usize), usize>,
-    out:            &mut Vec<SceneNode>,
+    out: &mut Vec<SceneNode>,
 ) {
     let local = Mat4::from_cols_array_2d(&node.transform().matrix());
     let world = parent_xform * local;
@@ -327,14 +333,19 @@ fn collect_nodes(
     if let Some(mesh) = node.mesh() {
         let prim_count = mesh.primitives().count();
         for (prim_idx, primitive) in mesh.primitives().enumerate() {
-            let mesh_index     = prim_to_loaded.get(&(mesh.index(), prim_idx)).copied();
+            let mesh_index = prim_to_loaded.get(&(mesh.index(), prim_idx)).copied();
             let material_index = primitive.material().index();
             let name = if prim_count == 1 {
                 node_name.clone()
             } else {
                 format!("{node_name}_{prim_idx}")
             };
-            out.push(SceneNode { name, mesh_index, material_index, transform: world });
+            out.push(SceneNode {
+                name,
+                mesh_index,
+                material_index,
+                transform: world,
+            });
         }
     }
 
@@ -386,7 +397,11 @@ fn attach_sidecar_alpha(
         if mask.width() != tex.width || mask.height() != tex.height {
             warn!(
                 "Alpha sidecar {:?} is {}x{} but its albedo is {}x{}; skipping",
-                mask_path, mask.width(), mask.height(), tex.width, tex.height,
+                mask_path,
+                mask.width(),
+                mask.height(),
+                tex.width,
+                tex.height,
             );
             continue;
         }
@@ -395,7 +410,10 @@ fn attach_sidecar_alpha(
             texel[3] = m.0[0];
         }
         masked.insert(image.index());
-        info!("Applied alpha sidecar {:?}", mask_path.file_name().unwrap_or_default());
+        info!(
+            "Applied alpha sidecar {:?}",
+            mask_path.file_name().unwrap_or_default()
+        );
     }
 
     masked
@@ -423,25 +441,35 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> LoadedTexture {
     use gltf::image::Format;
     let rgba: Vec<u8> = match data.format {
         Format::R8G8B8A8 => data.pixels.clone(),
-        Format::R8G8B8 => data.pixels.chunks_exact(3)
+        Format::R8G8B8 => data
+            .pixels
+            .chunks_exact(3)
             .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
             .collect(),
-        Format::R8 => data.pixels.iter()
-            .flat_map(|&r| [r, r, r, 255])
-            .collect(),
-        Format::R8G8 => data.pixels.chunks_exact(2)
+        Format::R8 => data.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect(),
+        Format::R8G8 => data
+            .pixels
+            .chunks_exact(2)
             .flat_map(|rg| [rg[0], rg[1], 0, 255])
             .collect(),
         _ => {
-            warn!("Unsupported texture format {:?}; using magenta placeholder", data.format);
-            [255u8, 0, 255, 255].iter()
+            warn!(
+                "Unsupported texture format {:?}; using magenta placeholder",
+                data.format
+            );
+            [255u8, 0, 255, 255]
+                .iter()
                 .cycle()
                 .take((data.width * data.height * 4) as usize)
                 .copied()
                 .collect()
         }
     };
-    LoadedTexture { data: rgba, width: data.width, height: data.height }
+    LoadedTexture {
+        data: rgba,
+        width: data.width,
+        height: data.height,
+    }
 }
 
 // ── Phase 11.5D-2: Procedural Mesh Generation ─────────────────────────────
@@ -483,12 +511,8 @@ pub fn generate_cube(size: f32) -> (Vec<Vertex>, Vec<u32>) {
         Vertex { position: [-h,  h, -h], normal: [-1.0, 0.0, 0.0], uv: [0.0, 1.0] },
     ];
     let indices = vec![
-         0,  1,  2,  2,  3,  0,
-         4,  5,  6,  6,  7,  4,
-         8,  9, 10, 10, 11,  8,
-        12, 13, 14, 14, 15, 12,
-        16, 17, 18, 18, 19, 16,
-        20, 21, 22, 22, 23, 20,
+        0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4, 8, 9, 10, 10, 11, 8, 12, 13, 14, 14, 15, 12, 16, 17,
+        18, 18, 19, 16, 20, 21, 22, 22, 23, 20,
     ];
     (vertices, indices)
 }
@@ -513,8 +537,8 @@ pub fn generate_sphere(radius: f32, segments: u32, rings: u32) -> (Vec<Vertex>, 
             let nz = sin_phi * sin_t;
             vertices.push(Vertex {
                 position: [nx * radius, ny * radius, nz * radius],
-                normal:   [nx, ny, nz],
-                uv:       [seg as f32 / segments as f32, ring as f32 / rings as f32],
+                normal: [nx, ny, nz],
+                uv: [seg as f32 / segments as f32, ring as f32 / rings as f32],
             });
         }
     }
@@ -543,8 +567,8 @@ pub fn generate_plane(size: f32, subdivisions: u32) -> (Vec<Vertex>, Vec<u32>) {
             let z = -h + iz as f32 * step;
             vertices.push(Vertex {
                 position: [x, 0.0, z],
-                normal:   [0.0, 1.0, 0.0],
-                uv:       [ix as f32 / divs as f32, iz as f32 / divs as f32],
+                normal: [0.0, 1.0, 0.0],
+                uv: [ix as f32 / divs as f32, iz as f32 / divs as f32],
             });
         }
     }
@@ -553,7 +577,14 @@ pub fn generate_plane(size: f32, subdivisions: u32) -> (Vec<Vertex>, Vec<u32>) {
     for iz in 0..divs {
         for ix in 0..divs {
             let base = iz * row + ix;
-            indices.extend_from_slice(&[base, base + row, base + 1, base + 1, base + row, base + row + 1]);
+            indices.extend_from_slice(&[
+                base,
+                base + row,
+                base + 1,
+                base + 1,
+                base + row,
+                base + row + 1,
+            ]);
         }
     }
     (vertices, indices)
@@ -573,8 +604,16 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
         let c = theta.cos();
         let s = theta.sin();
         let u = seg as f32 / segments as f32;
-        vertices.push(Vertex { position: [c * radius, -h, s * radius], normal: [c, 0.0, s], uv: [u, 1.0] });
-        vertices.push(Vertex { position: [c * radius,  h, s * radius], normal: [c, 0.0, s], uv: [u, 0.0] });
+        vertices.push(Vertex {
+            position: [c * radius, -h, s * radius],
+            normal: [c, 0.0, s],
+            uv: [u, 1.0],
+        });
+        vertices.push(Vertex {
+            position: [c * radius, h, s * radius],
+            normal: [c, 0.0, s],
+            uv: [u, 0.0],
+        });
     }
     for seg in 0..segments {
         let b = side_base + seg * 2;
@@ -583,12 +622,21 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
 
     // Top cap
     let top_centre = vertices.len() as u32;
-    vertices.push(Vertex { position: [0.0, h, 0.0], normal: [0.0, 1.0, 0.0], uv: [0.5, 0.5] });
+    vertices.push(Vertex {
+        position: [0.0, h, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.5, 0.5],
+    });
     let top_ring_start = vertices.len() as u32;
     for seg in 0..segments {
         let theta = 2.0 * std::f32::consts::PI * seg as f32 / segments as f32;
-        let c = theta.cos(); let s = theta.sin();
-        vertices.push(Vertex { position: [c * radius, h, s * radius], normal: [0.0, 1.0, 0.0], uv: [c * 0.5 + 0.5, s * 0.5 + 0.5] });
+        let c = theta.cos();
+        let s = theta.sin();
+        vertices.push(Vertex {
+            position: [c * radius, h, s * radius],
+            normal: [0.0, 1.0, 0.0],
+            uv: [c * 0.5 + 0.5, s * 0.5 + 0.5],
+        });
     }
     for seg in 0..segments {
         let a = top_ring_start + seg;
@@ -598,12 +646,21 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
 
     // Bottom cap
     let bot_centre = vertices.len() as u32;
-    vertices.push(Vertex { position: [0.0, -h, 0.0], normal: [0.0,-1.0, 0.0], uv: [0.5, 0.5] });
+    vertices.push(Vertex {
+        position: [0.0, -h, 0.0],
+        normal: [0.0, -1.0, 0.0],
+        uv: [0.5, 0.5],
+    });
     let bot_ring_start = vertices.len() as u32;
     for seg in 0..segments {
         let theta = 2.0 * std::f32::consts::PI * seg as f32 / segments as f32;
-        let c = theta.cos(); let s = theta.sin();
-        vertices.push(Vertex { position: [c * radius, -h, s * radius], normal: [0.0,-1.0, 0.0], uv: [c * 0.5 + 0.5, s * 0.5 + 0.5] });
+        let c = theta.cos();
+        let s = theta.sin();
+        vertices.push(Vertex {
+            position: [c * radius, -h, s * radius],
+            normal: [0.0, -1.0, 0.0],
+            uv: [c * 0.5 + 0.5, s * 0.5 + 0.5],
+        });
     }
     for seg in 0..segments {
         let a = bot_ring_start + seg;
@@ -752,7 +809,10 @@ mod foliage_tuft_tests {
 
     #[test]
     fn the_same_seed_gives_the_same_tuft() {
-        assert_eq!(generate_foliage_tuft(6, 9).0.len(), generate_foliage_tuft(6, 9).0.len());
+        assert_eq!(
+            generate_foliage_tuft(6, 9).0.len(),
+            generate_foliage_tuft(6, 9).0.len()
+        );
         let a = generate_foliage_tuft(6, 9).0;
         let b = generate_foliage_tuft(6, 9).0;
         assert!(a.iter().zip(&b).all(|(x, y)| x.position == y.position));

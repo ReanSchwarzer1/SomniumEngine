@@ -3272,6 +3272,7 @@ name = "somnium_asset"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "exr",
  "glam 0.29.3",
  "gltf",
  "image",
@@ -3337,6 +3338,7 @@ name = "somnium_renderer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "exr",
  "glam 0.29.3",
  "image",
  "naga",

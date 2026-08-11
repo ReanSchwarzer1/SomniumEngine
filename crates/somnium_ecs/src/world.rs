@@ -113,7 +113,9 @@ impl<A: Component, B: Component, C: Component, D: Component> ComponentBundle for
 }
 
 // Implement for 5-tuple.
-impl<A: Component, B: Component, C: Component, D: Component, E: Component> ComponentBundle for (A, B, C, D, E) {
+impl<A: Component, B: Component, C: Component, D: Component, E: Component> ComponentBundle
+    for (A, B, C, D, E)
+{
     fn component_infos() -> Vec<ComponentInfo> {
         vec![
             ComponentInfo::of::<A>(),
@@ -143,41 +145,80 @@ impl<A: Component, B: Component, C: Component, D: Component, E: Component, F: Co
 {
     fn component_infos() -> Vec<ComponentInfo> {
         vec![
-            ComponentInfo::of::<A>(), ComponentInfo::of::<B>(),
-            ComponentInfo::of::<C>(), ComponentInfo::of::<D>(),
-            ComponentInfo::of::<E>(), ComponentInfo::of::<F>(),
+            ComponentInfo::of::<A>(),
+            ComponentInfo::of::<B>(),
+            ComponentInfo::of::<C>(),
+            ComponentInfo::of::<D>(),
+            ComponentInfo::of::<E>(),
+            ComponentInfo::of::<F>(),
         ]
     }
     fn push_into(self, archetype: &mut Archetype) {
-        archetype.column_mut(archetype.column_index(ComponentId::of::<A>()).unwrap()).push(self.0);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<B>()).unwrap()).push(self.1);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<C>()).unwrap()).push(self.2);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<D>()).unwrap()).push(self.3);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<E>()).unwrap()).push(self.4);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<F>()).unwrap()).push(self.5);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<A>()).unwrap())
+            .push(self.0);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<B>()).unwrap())
+            .push(self.1);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<C>()).unwrap())
+            .push(self.2);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<D>()).unwrap())
+            .push(self.3);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<E>()).unwrap())
+            .push(self.4);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<F>()).unwrap())
+            .push(self.5);
     }
 }
 
 // Implement for 7-tuple.
-impl<A: Component, B: Component, C: Component, D: Component, E: Component, F: Component, G: Component>
-    ComponentBundle for (A, B, C, D, E, F, G)
+impl<
+    A: Component,
+    B: Component,
+    C: Component,
+    D: Component,
+    E: Component,
+    F: Component,
+    G: Component,
+> ComponentBundle for (A, B, C, D, E, F, G)
 {
     fn component_infos() -> Vec<ComponentInfo> {
         vec![
-            ComponentInfo::of::<A>(), ComponentInfo::of::<B>(),
-            ComponentInfo::of::<C>(), ComponentInfo::of::<D>(),
-            ComponentInfo::of::<E>(), ComponentInfo::of::<F>(),
+            ComponentInfo::of::<A>(),
+            ComponentInfo::of::<B>(),
+            ComponentInfo::of::<C>(),
+            ComponentInfo::of::<D>(),
+            ComponentInfo::of::<E>(),
+            ComponentInfo::of::<F>(),
             ComponentInfo::of::<G>(),
         ]
     }
     fn push_into(self, archetype: &mut Archetype) {
-        archetype.column_mut(archetype.column_index(ComponentId::of::<A>()).unwrap()).push(self.0);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<B>()).unwrap()).push(self.1);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<C>()).unwrap()).push(self.2);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<D>()).unwrap()).push(self.3);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<E>()).unwrap()).push(self.4);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<F>()).unwrap()).push(self.5);
-        archetype.column_mut(archetype.column_index(ComponentId::of::<G>()).unwrap()).push(self.6);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<A>()).unwrap())
+            .push(self.0);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<B>()).unwrap())
+            .push(self.1);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<C>()).unwrap())
+            .push(self.2);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<D>()).unwrap())
+            .push(self.3);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<E>()).unwrap())
+            .push(self.4);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<F>()).unwrap())
+            .push(self.5);
+        archetype
+            .column_mut(archetype.column_index(ComponentId::of::<G>()).unwrap())
+            .push(self.6);
     }
 }
 
@@ -330,7 +371,9 @@ impl World {
 
     /// Iterate over all alive entities in the world.
     pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.archetypes.iter().flat_map(|arch| arch.entities().iter().copied())
+        self.archetypes
+            .iter()
+            .flat_map(|arch| arch.entities().iter().copied())
     }
 
     /// Find an entity by its raw index. Returns None if the entity is dead.
@@ -385,9 +428,8 @@ impl World {
             return id;
         }
 
-        let id = ArchetypeId(
-            u32::try_from(self.archetypes.len()).expect("archetype count overflow"),
-        );
+        let id =
+            ArchetypeId(u32::try_from(self.archetypes.len()).expect("archetype count overflow"));
 
         // Build infos ordered by the sorted component set.
         let mut ordered_infos = Vec::with_capacity(set.len());
@@ -433,11 +475,17 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Pos { x: f32, y: f32 }
+    struct Pos {
+        x: f32,
+        y: f32,
+    }
     impl Component for Pos {}
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Vel { dx: f32, dy: f32 }
+    struct Vel {
+        dx: f32,
+        dy: f32,
+    }
     impl Component for Vel {}
 
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -504,10 +552,8 @@ mod tests {
         assert_eq!(count, 2);
 
         // Only the (Pos, Vel) archetype has Vel.
-        let required_pv = ComponentSet::from_ids(vec![
-            ComponentId::of::<Pos>(),
-            ComponentId::of::<Vel>(),
-        ]);
+        let required_pv =
+            ComponentSet::from_ids(vec![ComponentId::of::<Pos>(), ComponentId::of::<Vel>()]);
         let count = world.query_archetypes(&required_pv, &excluded).count();
         assert_eq!(count, 1);
     }
@@ -533,7 +579,10 @@ mod tests {
         let mut world = World::new();
         let mut entities = Vec::new();
         for i in 0..1000 {
-            let e = world.spawn((Pos { x: i as f32, y: 0.0 },));
+            let e = world.spawn((Pos {
+                x: i as f32,
+                y: 0.0,
+            },));
             entities.push(e);
         }
         assert_eq!(world.entity_count(), 1000);

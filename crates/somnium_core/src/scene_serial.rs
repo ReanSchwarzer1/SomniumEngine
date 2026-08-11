@@ -22,9 +22,11 @@
 //! so geometry can be regenerated on load.
 #![allow(missing_docs)]
 
-use somnium_ecs::World;
-use crate::{LightComponent, LightType, MeshKind, Name, Parent, TerrainComponent, Transform};
+use crate::{
+    LightComponent, LightType, MeshKind, Name, Parent, TerrainComponent, Transform, WaterComponent,
+};
 use somnium_ecs::Entity;
+use somnium_ecs::World;
 
 // ─── Save ─────────────────────────────────────────────────────────────────
 
@@ -72,9 +74,9 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
             });
 
             let mesh_kind = world.get::<MeshKind>(entity).map(|mk| match mk {
-                MeshKind::Cube     => "Cube",
-                MeshKind::Sphere   => "Sphere",
-                MeshKind::Plane    => "Plane",
+                MeshKind::Cube => "Cube",
+                MeshKind::Sphere => "Sphere",
+                MeshKind::Plane => "Plane",
                 MeshKind::Cylinder => "Cylinder",
             });
 
@@ -95,6 +97,48 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                 })
             });
 
+            let water = world.get::<WaterComponent>(entity).map(|water| {
+                serde_json::json!({
+                    "water_id": water.water_id,
+                    "terrain_id": water.terrain_id,
+                    "preset": water.preset,
+                    "body_kind": water.body_kind,
+                    "surface_level": water.surface_level,
+                    "max_depth": water.max_depth,
+                    "bounds": water.bounds,
+                    "enabled": water.enabled,
+                    "mask_asset": somnium_renderer::water_body::GREAT_LAKES_MASK,
+                    "depth_asset": somnium_renderer::water_body::GREAT_LAKES_DEPTH,
+                    "shore_sdf_asset": somnium_renderer::water_body::GREAT_LAKES_SHORE_SDF,
+                    "deep_color": water.deep_color,
+                    "shallow_color": water.shallow_color,
+                    "edge_color": water.edge_color,
+                    "clarity": water.clarity,
+                    "edge_scale": water.edge_scale,
+                    "amplitude": water.amplitude,
+                    "coord_scale": water.coord_scale,
+                    "coord_offset": water.coord_offset,
+                    "wave_dir_a": water.wave_dir_a,
+                    "wave_dir_b": water.wave_dir_b,
+                    "wave_blend": water.wave_blend,
+                    "wave_length_a": water.wave_length_a,
+                    "wave_length_b": water.wave_length_b,
+                    "wave_speed": water.wave_speed,
+                    "wave_steepness": water.wave_steepness,
+                    "absorption": water.absorption,
+                    "scattering": water.scattering,
+                    "roughness": water.roughness,
+                    "anisotropy": water.anisotropy,
+                    "ssr_strength": water.ssr_strength,
+                    "spectrum_blend": water.spectrum_blend,
+                    "wind_speed": water.wind_speed,
+                    "foam_decay": water.foam_decay,
+                    "foam_threshold": water.foam_threshold,
+                    "caustic_strength": water.caustic_strength,
+                    "underwater_enabled": water.underwater_enabled,
+                })
+            });
+
             serde_json::json!({
                 "local_idx":        local_idx,
                 "name":             name,
@@ -106,15 +150,71 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                 "light":            light,
                 "mesh_kind":        mesh_kind,
                 "terrain":          terrain,
+                "water":            water,
                 "parent_local_idx": parent_local_idx,
             })
         })
         .collect();
 
     let scene = serde_json::json!({ "version": 1, "entities": serial });
-    let json =
-        serde_json::to_string_pretty(&scene).map_err(|e| format!("Serialize error: {e}"))?;
+    let json = serde_json::to_string_pretty(&scene).map_err(|e| format!("Serialize error: {e}"))?;
     std::fs::write(path, json).map_err(|e| format!("Write error: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Children, WorldTransform};
+
+    #[test]
+    fn water_round_trip_preserves_assets_parameters_and_parent() {
+        let mut world = World::new();
+        let terrain = world.spawn((
+            Transform::from_translation(glam::Vec3::ZERO),
+            Name::new("Terrain"),
+            WorldTransform::identity(),
+            TerrainComponent {
+                terrain_id: 4,
+                chunk_cells: 64,
+                grid_x: 16,
+                grid_z: 16,
+                cell_size: 1.0,
+                height_scale: 1.0,
+            },
+            Children::empty(),
+        ));
+        let water_component = WaterComponent::great_lakes(7, 4, [0.0, 0.0, 1024.0, 1024.0]);
+        let water = world.spawn((
+            Transform::from_translation(glam::Vec3::new(512.0, 15.0, 512.0)),
+            Name::new("Water"),
+            WorldTransform::identity(),
+            water_component,
+            Parent { entity: terrain },
+        ));
+        world.get_mut::<Children>(terrain).unwrap().push(water);
+        let path = std::env::temp_dir().join("somnium_water_roundtrip.somnium");
+        save_scene(&world, path.to_str().unwrap()).unwrap();
+        let scene = parse_scene(path.to_str().unwrap()).unwrap();
+        let entities = scene["entities"].as_array().unwrap();
+        let water = entities.iter().find(|e| e["name"] == "Water").unwrap();
+        assert_eq!(water["parent_local_idx"], 0);
+        assert_eq!(water["water"]["preset"], 1);
+        let surface_level = water["water"]["surface_level"].as_f64().unwrap();
+        assert!((surface_level - 16.1).abs() < 1.0e-5);
+        assert_eq!(water["water"]["max_depth"], 12.0);
+        assert_eq!(
+            water["water"]["mask_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_MASK
+        );
+        assert_eq!(
+            water["water"]["depth_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_DEPTH
+        );
+        assert_eq!(
+            water["water"]["shore_sdf_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_SHORE_SDF
+        );
+    }
 }
 
 // ─── Parse ────────────────────────────────────────────────────────────────
@@ -140,9 +240,9 @@ pub fn parse_scene(path: &str) -> Result<serde_json::Value, String> {
 /// Parse a mesh kind string from a scene file.
 pub fn mesh_kind_from_str(s: &str) -> Option<MeshKind> {
     match s {
-        "Cube"     => Some(MeshKind::Cube),
-        "Sphere"   => Some(MeshKind::Sphere),
-        "Plane"    => Some(MeshKind::Plane),
+        "Cube" => Some(MeshKind::Cube),
+        "Sphere" => Some(MeshKind::Sphere),
+        "Plane" => Some(MeshKind::Plane),
         "Cylinder" => Some(MeshKind::Cylinder),
         _ => None,
     }

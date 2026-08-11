@@ -32,21 +32,29 @@ impl NumericFieldMessage {
     }
 
     pub fn value_changed(dest: NodeHandle, value: f32) -> UiMessage {
-        UiMessage::new(dest, MessageDirection::FromWidget, Self::ValueChanged(value))
+        UiMessage::new(
+            dest,
+            MessageDirection::FromWidget,
+            Self::ValueChanged(value),
+        )
     }
 
     pub fn value_changing(dest: NodeHandle, value: f32) -> UiMessage {
-        UiMessage::new(dest, MessageDirection::FromWidget, Self::ValueChanging(value))
+        UiMessage::new(
+            dest,
+            MessageDirection::FromWidget,
+            Self::ValueChanging(value),
+        )
     }
 }
 
 pub struct NumericField {
-    pub value:       f32,
-    editing_text:    Option<String>,
-    pub px:          f32,
-    pub color:       [u8; 4],
-    pub font_id:     u8,
-    pub focused:     bool,
+    pub value: f32,
+    editing_text: Option<String>,
+    pub px: f32,
+    pub color: [u8; 4],
+    pub font_id: u8,
+    pub focused: bool,
     /// True from the moment the field gains focus until the first edit.
     ///
     /// Focusing pre-fills the edit buffer with the current value so it can be
@@ -55,18 +63,18 @@ pub struct NumericField {
     /// typing `7` committed `0.0007`, which looks exactly like a field that
     /// does not respond at all. The first keystroke now clears the buffer, the
     /// same select-all-on-focus every other editor does.
-    select_all:      bool,
+    select_all: bool,
     /// Value change per pixel of horizontal drag. Fields differ by orders of
     /// magnitude — chromatic aberration lives around 0.004 while a position is
     /// in metres — so one global rate would make most of them unusable.
-    pub drag_step:   f32,
+    pub drag_step: f32,
     /// Cursor x and field value at the moment the drag began. Steps are applied
     /// against this rather than accumulated, so the value cannot drift if
     /// something else writes to the field mid-drag.
-    drag_origin:     Option<(f32, f32)>,
+    drag_origin: Option<(f32, f32)>,
     /// Set once the pointer has moved far enough for the gesture to count as a
     /// scrub rather than a click.
-    scrubbing:       bool,
+    scrubbing: bool,
 }
 
 /// Pixels of travel before a press becomes a drag instead of a click. Without
@@ -75,7 +83,9 @@ const SCRUB_THRESHOLD: f32 = 3.0;
 
 impl NumericField {
     fn display_text(&self) -> String {
-        self.editing_text.clone().unwrap_or_else(|| format!("{:.3}", self.value))
+        self.editing_text
+            .clone()
+            .unwrap_or_else(|| format!("{:.3}", self.value))
     }
 }
 
@@ -83,20 +93,30 @@ impl Control for NumericField {
     // Governs whether the UI swallows keyboard input. Tied to the live edit
     // state rather than the widget type, so keys reach the game again once a
     // scrub has ended the text-edit session.
-    fn is_text_input(&self) -> bool { self.focused }
+    fn is_text_input(&self) -> bool {
+        self.focused
+    }
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let text = self.display_text();
-        let sz   = ctx.measure_text(&text, self.px, self.font_id);
+        let sz = ctx.measure_text(&text, self.px, self.font_id);
         Vec2::new(available.x.min(sz.x.max(60.0)), sz.y.max(self.px + 6.0))
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
-        let b   = widget.screen_bounds();
-        let bg  = if self.focused { [40, 40, 60, 255] } else { [28, 28, 28, 255] };
-        let bdr = if self.focused { [100, 140, 200, 255] } else { [60, 60, 60, 255] };
+        let b = widget.screen_bounds();
+        let bg = if self.focused {
+            [40, 40, 60, 255]
+        } else {
+            [28, 28, 28, 255]
+        };
+        let bdr = if self.focused {
+            [100, 140, 200, 255]
+        } else {
+            [60, 60, 60, 255]
+        };
         ctx.push_rect_filled(b, bg);
         ctx.push_rect_border(b, 1.0, bdr);
-        let text   = self.display_text();
+        let text = self.display_text();
         let origin = Vec2::new(b.x + 4.0, b.y + 3.0);
         // Selection highlight goes down before the glyphs so the text stays legible.
         if self.focused && self.select_all && !text.is_empty() {
@@ -117,8 +137,8 @@ impl Control for NumericField {
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
-        msg:    &mut UiMessage,
-        emit:   &mut Vec<UiMessage>,
+        msg: &mut UiMessage,
+        emit: &mut Vec<UiMessage>,
     ) {
         if let Some(d) = msg.data::<NumericFieldMessage>() {
             if let NumericFieldMessage::SetValue(v) = d {
@@ -137,8 +157,8 @@ impl Control for NumericField {
             match wmsg.clone() {
                 WidgetMessage::MouseDown { pos, .. } => {
                     self.drag_origin = Some((pos.x, self.value));
-                    self.scrubbing   = false;
-                    msg.handled      = true;
+                    self.scrubbing = false;
+                    msg.handled = true;
                 }
                 WidgetMessage::MouseMove { pos } => {
                     if let Some((start_x, start_value)) = self.drag_origin {
@@ -148,8 +168,8 @@ impl Control for NumericField {
                             // A scrub is not a text edit. Drop the focus state
                             // the press handed us, or the field would show a
                             // caret and a selection while being dragged.
-                            self.focused      = false;
-                            self.select_all   = false;
+                            self.focused = false;
+                            self.select_all = false;
                             self.editing_text = None;
                         }
                         if self.scrubbing {
@@ -166,21 +186,24 @@ impl Control for NumericField {
                 WidgetMessage::MouseUp { .. } => {
                     let was_scrubbing = self.scrubbing;
                     self.drag_origin = None;
-                    self.scrubbing   = false;
+                    self.scrubbing = false;
                     if was_scrubbing {
                         // Closes the gesture: this is the one the receiver
                         // turns into a single undo entry.
-                        emit.push(NumericFieldMessage::value_changed(widget.handle, self.value));
+                        emit.push(NumericFieldMessage::value_changed(
+                            widget.handle,
+                            self.value,
+                        ));
                         widget.invalidate_layout();
                         msg.handled = true;
                     }
                 }
                 WidgetMessage::Focus => {
-                    self.focused      = true;
+                    self.focused = true;
                     self.editing_text = Some(format!("{:.3}", self.value));
-                    self.select_all   = true;
+                    self.select_all = true;
                     widget.invalidate_layout();
-                    msg.handled       = true;
+                    msg.handled = true;
                 }
                 WidgetMessage::Unfocus => {
                     self.focused = false;
@@ -202,8 +225,9 @@ impl Control for NumericField {
                     if self.focused {
                         // Only clear on a character this field would actually
                         // accept, so a stray keypress does not wipe the value.
-                        let accepted =
-                            s.chars().any(|c| c.is_ascii_digit() || c == '.' || c == '-');
+                        let accepted = s
+                            .chars()
+                            .any(|c| c.is_ascii_digit() || c == '.' || c == '-');
                         if self.select_all && accepted {
                             self.editing_text = Some(String::new());
                             self.select_all = false;
@@ -244,9 +268,10 @@ impl Control for NumericField {
                                     if let Ok(v) = text.trim().parse::<f32>() {
                                         if v != self.value {
                                             self.value = v;
-                                            emit.push(
-                                                NumericFieldMessage::value_changed(widget.handle, v),
-                                            );
+                                            emit.push(NumericFieldMessage::value_changed(
+                                                widget.handle,
+                                                v,
+                                            ));
                                         }
                                     }
                                 }
@@ -254,8 +279,8 @@ impl Control for NumericField {
                                 msg.handled = true;
                             }
                             KeyCode::Escape => {
-                                self.focused      = false;
-                                self.select_all   = false;
+                                self.focused = false;
+                                self.select_all = false;
                                 self.editing_text = None;
                                 widget.invalidate_layout();
                                 msg.handled = true;
@@ -271,10 +296,10 @@ impl Control for NumericField {
 }
 
 pub struct NumericFieldBuilder {
-    widget:  WidgetBuilder,
-    value:   f32,
-    px:      f32,
-    color:   [u8; 4],
+    widget: WidgetBuilder,
+    value: f32,
+    px: f32,
+    color: [u8; 4],
     font_id: u8,
     drag_step: f32,
 }
@@ -283,32 +308,47 @@ impl NumericFieldBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
             widget,
-            value:   0.0,
-            px:      12.0,
-            color:   [200, 200, 200, 255],
+            value: 0.0,
+            px: 12.0,
+            color: [200, 200, 200, 255],
             font_id: 0,
             drag_step: 0.05,
         }
     }
 
-    pub fn with_value(mut self, v: f32) -> Self { self.value = v; self }
-    pub fn with_font_size(mut self, px: f32) -> Self { self.px = px; self }
-    pub fn with_font_id(mut self, id: u8) -> Self { self.font_id = id; self }
+    pub fn with_value(mut self, v: f32) -> Self {
+        self.value = v;
+        self
+    }
+    pub fn with_font_size(mut self, px: f32) -> Self {
+        self.px = px;
+        self
+    }
+    pub fn with_font_id(mut self, id: u8) -> Self {
+        self.font_id = id;
+        self
+    }
     /// Value change per pixel of horizontal drag-scrub.
-    pub fn with_drag_step(mut self, step: f32) -> Self { self.drag_step = step; self }
+    pub fn with_drag_step(mut self, step: f32) -> Self {
+        self.drag_step = step;
+        self
+    }
 
     pub fn build(self) -> UiNode {
-        UiNode::new(self.widget.build(), Box::new(NumericField {
-            value:        self.value,
-            editing_text: None,
-            px:           self.px,
-            color:        self.color,
-            font_id:      self.font_id,
-            focused:      false,
-            select_all:   false,
-            drag_step:    self.drag_step,
-            drag_origin:  None,
-            scrubbing:    false,
-        }))
+        UiNode::new(
+            self.widget.build(),
+            Box::new(NumericField {
+                value: self.value,
+                editing_text: None,
+                px: self.px,
+                color: self.color,
+                font_id: self.font_id,
+                focused: false,
+                select_all: false,
+                drag_step: self.drag_step,
+                drag_origin: None,
+                scrubbing: false,
+            }),
+        )
     }
 }

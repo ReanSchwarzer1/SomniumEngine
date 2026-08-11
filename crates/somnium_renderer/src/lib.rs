@@ -14,8 +14,8 @@ pub mod bindless;
 pub mod capture;
 pub mod cluster;
 pub mod command;
-pub mod culling;
 pub mod context;
+pub mod culling;
 pub mod geometry;
 pub mod indirect;
 pub mod instance;
@@ -27,6 +27,7 @@ pub mod renderer;
 pub mod shadow;
 pub mod terrain;
 pub mod texture_pool;
+pub mod water_body;
 
 pub use bindless::{GlobalResourcePool, MAX_BINDLESS_TEXTURES};
 pub use command::{DrawCommand, SortKey};

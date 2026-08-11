@@ -32,13 +32,12 @@
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
 
-/// Scale applied to image-based ambient.
+/// Scale applied to image-based ambient (Phase 25M-2).
 ///
-/// Physically this should be 1.0, but the engine has no ambient occlusion yet,
-/// so sky light reaches every surface unattenuated — including the insides of
-/// creases and anything sitting in the sun's shadow. At full strength that
-/// washes shadows out badly. Until SSAO (or a glTF occlusion map) lands, the
-/// indirect term is scaled back so shadow contrast survives.
+/// Set to 1.0 (physically correct). Screen-space ambient occlusion (GTAO),
+/// ReSTIR GI, and Lagarde specular occlusion now handle the shadowing of sky
+/// light in creases and occluded regions, so the old 0.35 scale-back fudge
+/// is no longer required.
 
 
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
@@ -53,7 +52,7 @@ fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
     return f0 * ab.x + ab.y;
 }
 
-/// Light transmitted through a thin surface (Phase 24S).
+/// Light transmitted through a thin, two-sided surface (Phase 24S/25M-2).
 ///
 /// Frostbite's approximation (Barré-Brisebois & Bouchard). A real subsurface
 /// solve is out of scope, but the visual signature of translucency is
@@ -75,25 +74,17 @@ fn transmitted_light(
         return vec3<f32>(0.0);
     }
 
-    /// Bends the transmitted direction back toward the surface normal, so the
-    /// glow wraps around the silhouette instead of appearing only where the
-    /// light is exactly behind.
-    const DISTORTION: f32 = 0.25;
-    /// Tightens the lobe. Higher means the glow appears only closer to
-    /// straight-through, which is what thin, dense material looks like.
-    const POWER: f32 = 4.0;
-    /// Ambient share, so a leaf in shade is still translucent rather than
-    /// switching off entirely when the sun is not behind it.
-    const AMBIENT: f32 = 0.15;
+    // UE's two-sided foliage model: ordinary reflection remains on the front,
+    // while a wrapped and energy-bounded lobe carries light through the back.
+    // There is intentionally no constant ambient term; that old term produced
+    // albedo-tinted glow even when no light crossed the leaf.
+    const WRAP: f32 = 0.5;
+    let back_wrap = saturate((-dot(surface.normal, light_dir) + WRAP)
+        / ((1.0 + WRAP) * (1.0 + WRAP)));
+    let view_scatter = pow(saturate(dot(surface.view_dir, -light_dir)), 4.0);
+    let scatter = mix(0.35, 1.0, view_scatter);
 
-    // The direction light takes leaving the far side.
-    let transmit_dir = normalize(-light_dir + surface.normal * DISTORTION);
-    let lobe = pow(saturate(dot(surface.view_dir, transmit_dir)), POWER);
-
-    // Tinted by albedo: light passing through a leaf picks up its colour, which
-    // is why backlit foliage reads more saturated than the same leaf lit from
-    // the front.
-    return light_color * (lobe + AMBIENT) * transmission * surface.albedo;
+    return light_color * surface.albedo * transmission * back_wrap * scatter;
 }
 
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
@@ -307,14 +298,22 @@ fn sample_shadow_cascade(
     // Offset along the surface normal, widened at grazing angles where one
     // texel spans more depth. Offsetting in the plane of the surface rather
     // than along depth is what avoids the acne/peter-panning trade entirely.
+    //
+    // Phase 25M-2B: quadratic ramp — the old linear `(1 + 2*(1-NdotL))` was
+    // too mild for the large texel sizes of outer cascades at grazing angles.
+    let grazing = 1.0 - n_dot_l;
     let offset_pos = world_pos
-        + normal * texel_world * (1.0 + 2.0 * (1.0 - n_dot_l)) * SHADOW_NORMAL_OFFSET_TEXELS;
+        + normal * texel_world * max(1.0, 4.0 * grazing * grazing) * SHADOW_NORMAL_OFFSET_TEXELS;
     let light_clip = light.view_proj[cascade] * vec4<f32>(offset_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    // A much smaller residual epsilon: the normal offset now does the work, and
-    // a large depth bias on top of it is what detaches a shadow from its caster.
+    // Phase 25M-2: the grazing-angle term belongs to the world-space
+    // geometric-normal offset above, not to a mixed-unit depth expression.
+    // Keep only a small residual depth epsilon. `texel_world` is measured in
+    // metres and cannot be multiplied directly into an NDC depth bias; doing
+    // so made the offset explode at grazing angles. The world-space normal
+    // offset above is the dimensionally correct grazing-angle treatment.
     let compare_depth = ndc.z - 0.0002;
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
@@ -390,6 +389,12 @@ fn contact_shadow(
     light_dir: vec3<f32>,
     pixel: vec2<f32>,
 ) -> f32 {
+    // CPU atmospheric transmittance is authoritative for whether direct
+    // sunlight still exists; an elevation threshold creates a twilight step.
+    if max(light.color.r, max(light.color.g, light.color.b)) <= 1.0e-6 {
+        return 1.0;
+    }
+
     let step_world = CONTACT_LENGTH / f32(CONTACT_STEPS);
 
     // Phase 25L: start the march off the surface, along the normal.
@@ -426,7 +431,19 @@ fn contact_shadow(
         // point and the light.
         let texel = vec2<i32>(uv * vec2<f32>(textureDimensions(scene_depth)));
         let scene_z = textureLoad(scene_depth, texel, 0);
-        let diff = ndc.z - scene_z;
+
+        // `CONTACT_THICKNESS` is metres. Comparing it to `ndc.z` made the
+        // accepted slab grow dramatically with distance because perspective
+        // depth is nonlinear; on landscape terrain, unrelated neighbouring
+        // triangles then counted as 5 cm blockers and stamped large polygonal
+        // shadows across the ground. Reconstruct the sampled surface and do
+        // the thickness test in view-space metres instead.
+        let scene_ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, scene_z, 1.0);
+        let scene_world_h = view.inv_view_proj * scene_ndc;
+        let scene_world = scene_world_h.xyz / scene_world_h.w;
+        let ray_view_depth = -(view.view * vec4<f32>(sample_pos, 1.0)).z;
+        let scene_view_depth = -(view.view * vec4<f32>(scene_world, 1.0)).z;
+        let diff = ray_view_depth - scene_view_depth;
 
         // The upper bound is what stops a surface far behind the ray from
         // registering as an occluder.
@@ -526,8 +543,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sharp detail at screen resolution, not cubemap resolution.
         let sun_dir = normalize(light.direction);
         let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
-        // See ibl_gen.wgsl: night is keyed to illuminance, not elevation.
-        let moon_dir = -sun_dir;
+        // Phase 25M-2D: physical moon direction from the simplified lunar
+        // orbital model in sun.rs, not the old `-sun_dir` full-moon hack.
+        let moon_dir = normalize(light.moon_direction);
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
         let detail = sky_detail(ray_dir, sun_dir, sun_illuminance, moon_dir, moon_strength);
 
@@ -583,22 +601,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     var geo_normal = normalize((instance.model * vec4<f32>(normal_interp, 0.0)).xyz);
 
+    // Hard-surface meshes bias along their real triangle plane. Terrain is the
+    // important exception: its central-difference vertex normals describe one
+    // continuous height field, while the per-face normal jumps at every fan
+    // triangle. Using that discontinuous normal for receiver bias made the
+    // shadow term reproduce the topology as large dark triangles. Terrain
+    // therefore uses the smooth geometric normal; normal maps remain excluded.
+    let face_cross = cross(p1 - p0, p2 - p0);
+    var shadow_normal = geo_normal;
+    if material.terrain_index < 0 && dot(face_cross, face_cross) > 1.0e-16 {
+        shadow_normal = normalize(face_cross);
+        if dot(shadow_normal, geo_normal) < 0.0 {
+            shadow_normal = -shadow_normal;
+        }
+    }
+
     let hit_point = p0 * bary.x + p1 * bary.y + p2 * bary.z;
 
     // Phase 17D: a double-sided surface can be seen from behind, where its
     // authored normal points away and every lighting term comes out dark. Flip
     // it toward the viewer. Only for materials flagged double-sided — doing it
     // unconditionally would light the inside of closed geometry.
-    // Phase 17E: face the normal toward the *sun*, not the viewer.
-    //
-    // Facing the viewer looks right until you stand between the sun and the
-    // surface: the flipped normal then points away from the light, N.L goes
-    // negative, and back-lit foliage renders black. Real leaves are thin and
-    // translucent, so both faces receive light — flipping toward the sun is the
-    // cheap stand-in for that, and it is what made a field of grass stop
-    // looking like a field of ash.
-    if (material.flags & 1u) != 0u && dot(geo_normal, normalize(light.direction)) < 0.0 {
+    // Phase 25M-2: face the material frame toward the viewer and handle light
+    // arriving from the back with the explicit two-sided transmission lobe.
+    // Keep the material frame tied to the visible face. Back lighting is an
+    // explicit transmission lobe; it must not flip normals as the sun sets.
+    let view_dir_early = normalize(view.camera_pos - hit_point);
+    if (material.flags & 1u) != 0u && dot(geo_normal, view_dir_early) < 0.0 {
         geo_normal = -geo_normal;
+        shadow_normal = -shadow_normal;
     }
 
     // TBN matrix (derived from edge vectors + UV deltas, no vertex tangents)
@@ -668,6 +699,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // PBR surface setup
     var surface: Surface;
     surface.albedo    = material.base_color.rgb;
+    surface.normal    = geo_normal;
     if material.albedo_map >= 0 {
         surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
     }
@@ -694,7 +726,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let bent_view = gtao.rgb * 2.0 - 1.0;
     let bent_world = normalize(
         (transpose(view.view) * vec4<f32>(bent_view, 0.0)).xyz);
-    surface.bent_normal = select(surface.normal, bent_world, length(bent_view) > 0.1);
+    surface.bent_normal = select(geo_normal, bent_world, length(bent_view) > 0.1);
 
     // Occlusion comes from its own texture, never from the metallic-roughness
     // map: glTF leaves that map's red channel undefined, and models that store
@@ -708,7 +740,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             textures[material.occlusion_map], default_sampler, uv).r;
     }
 
-    surface.normal = geo_normal;
     var normal_variance = 0.0;
     if material.normal_map >= 0 && tbn_valid {
         let nm_sample  = textureSample(textures[material.normal_map], default_sampler, uv).rgb;
@@ -756,15 +787,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let curve = clamp((uv.x - 0.5) * 2.0943951, -1.5707963, 1.5707963);
         // The axis along the card's length: perpendicular to both the face
         // normal and the direction the UV's x runs in.
-        let axis = normalize(cross(surface.normal, tangent));
-        let c = cos(curve);
-        let s = sin(curve);
-        // Rodrigues' rotation of the normal about that axis.
-        surface.normal = normalize(
-            surface.normal * c
-            + cross(axis, surface.normal) * s
-            + axis * dot(axis, surface.normal) * (1.0 - c)
-        );
+        let axis_raw = cross(surface.normal, tangent);
+        if dot(axis_raw, axis_raw) > 1.0e-12 {
+            let axis = normalize(axis_raw);
+            let c = cos(curve);
+            let s = sin(curve);
+            // Rodrigues' rotation of the normal about that axis.
+            surface.normal = normalize(
+                surface.normal * c
+                + cross(axis, surface.normal) * s
+                + axis * dot(axis, surface.normal) * (1.0 - c)
+            );
+        }
+    }
+
+    // Phase 25M-2: foliage roughness floor (night wet/metallic fix).
+    //
+    // Leaves are not mirrors — their waxy cuticle is rough, and at grazing
+    // angles the micro-roughness of surface irregularities dominates.
+    // Without this floor the environment specular (which is all that remains
+    // at night when diffuse goes to zero) makes grass read as wet metal.
+    if (material.flags & 2u) != 0u {
+        let foliage_ndv = abs(dot(surface.normal, view_dir_early));
+        let foliage_roughness_floor = mix(0.6, 0.35, foliage_ndv);
+        surface.roughness = max(surface.roughness, foliage_roughness_floor);
     }
 
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
@@ -810,7 +856,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // no depth bias and no peter-panning, and its penumbra comes from the sun's
     // actual angular size rather than from a filter chosen to look about right.
     let traced = textureLoad(restir_vis, pixel_coords, 0);
-    var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
+    // Bias follows the actual triangle plane, not interpolated vertex data, a
+    // normal map, or a foliage card's synthetic curvature.
+    var shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy);
     // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
     // into the shadow factor rather than added anywhere else, because that is
     // exactly what it is — a second occluder between this point and the sun,
@@ -852,6 +900,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // pixel — which is how the detail budget gets a number instead of a claim.
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
+    }
+
+    // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only
+    // while this debug view is active; zero means a non-terrain instance.
+    if light._pad2_z > 12.5 && light._pad2_z < 13.5 {
+        let lod = instance._padding;
+        if lod == 0u { return vec4<f32>(0.08, 0.08, 0.08, 1.0); }
+        let palette = array<vec3<f32>, 5>(
+            vec3<f32>(0.10, 0.85, 0.25), vec3<f32>(0.20, 0.55, 1.00),
+            vec3<f32>(0.85, 0.75, 0.10), vec3<f32>(1.00, 0.35, 0.08),
+            vec3<f32>(0.75, 0.12, 0.85)
+        );
+        return vec4<f32>(palette[min(lod - 1u, 4u)] * 4.0, 1.0);
+    }
+    // 14 = analytic triangle edges reconstructed from visibility barycentrics.
+    if light._pad2_z > 13.5 && light._pad2_z < 14.5 {
+        let edge = 1.0 - smoothstep(0.005, 0.025, min(bary.x, min(bary.y, bary.z)));
+        return vec4<f32>(vec3<f32>(edge * 4.0), 1.0);
+    }
+    // 15/16 = interpolated geometric normal / actual receiver-bias normal.
+    if light._pad2_z > 14.5 && light._pad2_z < 15.5 {
+        return vec4<f32>(geo_normal * 0.5 + 0.5, 1.0);
+    }
+    if light._pad2_z > 15.5 && light._pad2_z < 16.5 {
+        return vec4<f32>(shadow_normal * 0.5 + 0.5, 1.0);
+    }
+    // 17 = screen-space contact-shadow factor before cascade composition.
+    if light._pad2_z > 16.5 && light._pad2_z < 17.5 {
+        let contact = contact_shadow(hit_point, shadow_normal, normalize(light.direction), in.clip_pos.xy);
+        return vec4<f32>(vec3<f32>(contact), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
@@ -970,23 +1048,43 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let light_dir   = normalize(light.direction);
         let light_color = light.color;
 
-        // Phase 24E: the sun is a disc, not a point. A point source gives a
-        // highlight one pixel wide on anything smooth, which is among the
-        // clearest tells that an image is rendered rather than photographed.
-        let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
-            * light_color * shadow_factor;
+        // Phase 25M-2 (UE5 pattern): Directional Moonlight.
+        // In UE5, when the sun drops below the horizon, the moon acts as a secondary
+        // directional light (AtmosphereLightIndex 1), illuminating terrain and foliage from
+        // `moon_direction` with a cool blue tint (~0.15 lux).
+        var moonlight = vec3<f32>(0.0);
+        let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
+        let is_foliage = (material.flags & 2u) != 0u;
 
-        // Phase 24S. Deliberately *not* multiplied by the shadow factor: the
-        // whole point is light arriving through the surface from the side the
-        // shadow map says is dark. Attenuating it by the shadow would remove
-        // exactly the case the term exists for.
-        let transmitted = transmitted_light(
-            surface, light_dir, light_color, material.transmission);
-        // Phase 19: real environment lighting instead of a flat 3% fudge —
-        // this is what lets metals reflect the sky.
-        // Phase 24L: one texel of traced indirect, or alpha 0 when the pass is
-        // off or unsupported — in which case `evaluate_ibl` keeps the
-        // environment-map diffuse it always used.
+        if moon_strength > 0.0 && light.moon_intensity > 0.0 {
+            let moon_dir = normalize(light.moon_direction);
+            let moon_color = vec3<f32>(0.55, 0.72, 1.0) * light.moon_intensity * moon_strength;
+
+            // `evaluate_brdf` already contains N.L. The previous extra
+            // multiply squared the front-face response, while its attempted
+            // double-sided factor could not revive a back face after the BRDF
+            // had already returned zero.
+            moonlight = evaluate_brdf(surface, moon_dir) * moon_color;
+
+            // Transmitted moonlight for foliage leaves
+            if is_foliage && material.transmission > 0.0 {
+                moonlight += transmitted_light(surface, moon_dir, moon_color, material.transmission);
+            }
+        }
+
+        // Direct sunlight + directional moonlight
+        let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
+            * light_color * shadow_factor + moonlight;
+
+        // Transmitted sunlight follows the same atmospheric fade as every
+        // other direct term, with no independent elevation threshold.
+        var transmitted = vec3<f32>(0.0);
+        if sun_illuminance > 1.0e-6 {
+            transmitted = transmitted_light(
+                surface, light_dir, light_color, material.transmission);
+        }
+
         let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
         let ambient = evaluate_ibl(surface, gi_texel);
 

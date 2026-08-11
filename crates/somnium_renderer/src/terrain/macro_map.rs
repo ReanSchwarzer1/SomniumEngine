@@ -69,6 +69,7 @@ pub enum MacroBlendMode {
 pub const DEFAULT_MACRO_STRENGTH: f32 = 0.45;
 
 /// A generated macro map, ready to upload.
+#[derive(Clone)]
 pub struct MacroMap {
     /// `MACRO_SIZE² * 4` bytes, RGBA8, row-major.
     pub texels: Vec<u8>,
@@ -94,7 +95,8 @@ fn height_at(heights: &[f32], total_x: u32, total_z: u32, x: f32, z: f32) -> f32
 /// Two octaves of value noise at the wavelengths the detail layers cannot
 /// express — hundreds of metres and tens of metres.
 fn large_scale(u: f32, v: f32, seed: u32) -> f32 {
-    value_noise(u * 3.0, v * 3.0, seed) * 0.65 + value_noise(u * 11.0, v * 11.0, seed ^ 0x9E37) * 0.35
+    value_noise(u * 3.0, v * 3.0, seed) * 0.65
+        + value_noise(u * 11.0, v * 11.0, seed ^ 0x9E37) * 0.35
 }
 
 /// Build the macro map for a heightfield.
@@ -256,9 +258,7 @@ mod tests {
 
     /// Slope running up along +X, in raw units.
     fn ramp(n: u32, per_cell: f32) -> Vec<f32> {
-        (0..n * n)
-            .map(|i| (i % n) as f32 * per_cell)
-            .collect()
+        (0..n * n).map(|i| (i % n) as f32 * per_cell).collect()
     }
 
     /// A cone-shaped basin: lowest in the middle.
@@ -315,7 +315,10 @@ mod tests {
 
         let centre = lum(texel(&m, MACRO_SIZE / 2, MACRO_SIZE / 2));
         let rim = lum(texel(&m, MACRO_SIZE - 12, MACRO_SIZE / 2));
-        assert!(centre < rim, "basin centre {centre} not darker than rim {rim}");
+        assert!(
+            centre < rim,
+            "basin centre {centre} not darker than rim {rim}"
+        );
     }
 
     #[test]
@@ -324,7 +327,11 @@ mod tests {
         let flat_map = generate(&flat(n), n, n, 1.0, 1.0, 5);
         let steep = generate(&ramp(n, 4.0), n, n, 1.0, 1.0, 5);
         let a = |m: &MacroMap| texel(m, MACRO_SIZE / 2, MACRO_SIZE / 2)[3];
-        assert_eq!(a(&flat_map), 255, "flat ground should take the macro in full");
+        assert_eq!(
+            a(&flat_map),
+            255,
+            "flat ground should take the macro in full"
+        );
         assert!(
             a(&steep) < 200,
             "steep ground alpha {} did not back off",

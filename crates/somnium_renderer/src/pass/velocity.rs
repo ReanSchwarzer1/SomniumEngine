@@ -124,11 +124,7 @@ impl VelocityPass {
         &self.view
     }
 
-    fn alloc(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+    fn alloc(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Velocity"),
             size: wgpu::Extent3d {

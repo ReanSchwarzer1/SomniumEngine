@@ -88,10 +88,14 @@ impl MaterialPool {
     pub fn add_material(&mut self, queue: &wgpu::Queue, material: GpuMaterial) -> u32 {
         let id = self.materials.len() as u32;
         self.materials.push(material);
-        
+
         // Update the buffer
-        queue.write_buffer(&self.buffer, (id as usize * std::mem::size_of::<GpuMaterial>()) as u64, bytemuck::bytes_of(&material));
-        
+        queue.write_buffer(
+            &self.buffer,
+            (id as usize * std::mem::size_of::<GpuMaterial>()) as u64,
+            bytemuck::bytes_of(&material),
+        );
+
         id
     }
 }

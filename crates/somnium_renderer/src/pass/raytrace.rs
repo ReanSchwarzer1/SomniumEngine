@@ -157,7 +157,13 @@ impl RaytracePass {
 
         self.blas.insert(
             vertex_offset,
-            MeshBlas { blas, index_count, size, vertex_offset, index_offset },
+            MeshBlas {
+                blas,
+                index_count,
+                size,
+                vertex_offset,
+                index_offset,
+            },
         );
         self.pending_blas.push(vertex_offset);
     }
@@ -270,9 +276,7 @@ impl RaytracePass {
             // not a copy.
             let m = model.to_cols_array();
             let transform: [f32; 12] = [
-                m[0], m[4], m[8], m[12],
-                m[1], m[5], m[9], m[13],
-                m[2], m[6], m[10], m[14],
+                m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14],
             ];
 
             tlas[count as usize] = Some(wgpu::TlasInstance::new(
@@ -452,9 +456,11 @@ impl RtDebugPass {
         if !self.enabled {
             return;
         }
-        let (Some(pipeline), Some(layout), Some(params)) =
-            (self.pipeline.as_ref(), self.layout.as_ref(), self.params.as_ref())
-        else {
+        let (Some(pipeline), Some(layout), Some(params)) = (
+            self.pipeline.as_ref(),
+            self.layout.as_ref(),
+            self.params.as_ref(),
+        ) else {
             return;
         };
 

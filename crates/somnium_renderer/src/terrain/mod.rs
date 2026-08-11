@@ -30,7 +30,7 @@ pub mod textures;
 use std::collections::HashMap;
 
 use mesh::{EDGE_EAST, EDGE_NORTH, EDGE_SOUTH, EDGE_WEST, MAX_TERRAIN_LOD};
-use textures::{Splatmap, TerrainLayerTextures, LAYER_NAMES, TERRAIN_LAYER_COUNT};
+use textures::{LAYER_NAMES, Splatmap, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
 
 /// Static terrain configuration (Phase 14A-1). The matching ECS component
 /// `somnium_core::TerrainComponent` stores a copy of these plus the terrain id.
@@ -103,8 +103,39 @@ pub struct TerrainChunk {
 /// Offset value meaning "this chunk has no pool space".
 pub const UNALLOCATED: u32 = u32::MAX;
 
+fn chunk_crosses_water_surface(
+    chunk: &TerrainChunk,
+    chunk_world: f32,
+    shoreline_regions: &[crate::water_body::WaterBodyDescriptor],
+) -> bool {
+    let chunk_min_x = chunk.grid_pos[0] as f32 * chunk_world;
+    let chunk_min_z = chunk.grid_pos[1] as f32 * chunk_world;
+    let chunk_max_x = chunk_min_x + chunk_world;
+    let chunk_max_z = chunk_min_z + chunk_world;
+    shoreline_regions.iter().any(|water| {
+        let [water_min_x, water_min_z, water_max_x, water_max_z] = water.bounds;
+        let overlaps_xz = chunk_max_x >= water_min_x
+            && chunk_min_x <= water_max_x
+            && chunk_max_z >= water_min_z
+            && chunk_min_z <= water_max_z;
+        let wave_margin = water.amplitude.max(0.05);
+        overlaps_xz
+            && chunk.aabb_min.y <= water.surface_level + wave_margin
+            && chunk.aabb_max.y >= water.surface_level - wave_margin
+    })
+}
+
 /// Heightmap a new terrain loads unless told otherwise (Phase 25L).
-pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/heightmap.tbmp";
+pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/great_lakes/height.png";
+
+/// Authored low-frequency colour paired with [`DEFAULT_HEIGHTMAP`].
+pub const DEFAULT_MACRO_MAP: &str = "assets/terrain/great_lakes/macro_color.png";
+
+/// Great Lakes preset surface datum in terrain-local metres.
+pub const DEFAULT_WATER_LEVEL_METRES: f32 = 16.1;
+
+/// Maximum synthetic lake-bed depth in the baked preset.
+pub const DEFAULT_WATER_DEPTH_METRES: f32 = 12.0;
 
 /// Metres of relief the default heightmap's full range maps to.
 ///
@@ -112,7 +143,7 @@ pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/heightmap.tbmp";
 /// alpine — enough for the eight materials to separate by altitude and for
 /// slopes to reach the angles that put rock and gravel on the ground, without
 /// walls the camera cannot see over.
-pub const DEFAULT_RELIEF_METRES: f32 = 90.0;
+pub const DEFAULT_RELIEF_METRES: f32 = 105.0;
 
 /// A material layer (Phase 14A-2). Texture data lives in the shared
 /// `TerrainLayerTextures` arrays; this carries the per-layer parameters.
@@ -279,6 +310,9 @@ pub struct TerrainData {
     /// Phase 25D. `SOMNIUM_TERRAIN_MACRO=0` sets this to zero, which is the
     /// A/B — a strength of zero is exactly "no macro tier".
     pub macro_strength: f32,
+    /// Authored whole-landscape colour. When present this wins over the
+    /// procedural macro generator after terrain edits/rebuilds.
+    authored_macro: Option<macro_map::MacroMap>,
     /// Phase 25D: metres over which the per-pixel layer budget falls away.
     pub detail_fade_start: f32,
     pub detail_fade_end: f32,
@@ -412,6 +446,7 @@ impl TerrainData {
             } else {
                 macro_map::DEFAULT_MACRO_STRENGTH
             },
+            authored_macro: None,
             // Roughly: full detail out to the far edge of LOD 0, then a fall
             // to the dominant layers over the next few hundred metres. Past
             // `end` a pixel covers metres of ground and the layers it is
@@ -419,8 +454,7 @@ impl TerrainData {
             // `SOMNIUM_TERRAIN_DETAIL_FADE=0` pushes the fade past any real
             // view distance, which is the A/B for the budget: the shader keeps
             // its distance term and simply never reaches it.
-            detail_fade_start: if std::env::var("SOMNIUM_TERRAIN_DETAIL_FADE").as_deref()
-                == Ok("0")
+            detail_fade_start: if std::env::var("SOMNIUM_TERRAIN_DETAIL_FADE").as_deref() == Ok("0")
             {
                 1.0e9
             } else {
@@ -428,8 +462,7 @@ impl TerrainData {
             },
             detail_fade_end: 400.0,
             macro_dirty: true,
-            height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref()
-                != Ok("0"),
+            height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref() != Ok("0"),
             parallax_scale: if std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("0") {
                 0.0
             } else {
@@ -465,9 +498,7 @@ impl TerrainData {
         let [wx, wz] = self.desc.world_size();
         let origin = self.model.w_axis;
         GpuTerrainMaterial {
-            layer_tiling: std::array::from_fn(|i| {
-                self.layers.get(i).map_or(0.25, |l| l.tiling)
-            }),
+            layer_tiling: std::array::from_fn(|i| self.layers.get(i).map_or(0.25, |l| l.tiling)),
             brush: self.brush_cursor,
             albedo_maps: self.texture_ids.albedo,
             surface_maps: self.texture_ids.surface,
@@ -499,7 +530,11 @@ impl TerrainData {
             layer_parallax: std::array::from_fn(|i| {
                 self.layers.get(i).map_or(0.0, |l| l.blend.parallax_depth) * self.parallax_scale
             }),
-            parallax_steps: if self.parallax_scale > 0.0 { self.parallax_steps } else { 0 },
+            parallax_steps: if self.parallax_scale > 0.0 {
+                self.parallax_steps
+            } else {
+                0
+            },
             parallax_shadow_steps: self.parallax_shadow_steps,
             _pad4: [0; 2],
         }
@@ -568,16 +603,51 @@ impl TerrainData {
     /// that will disagree. When the UI phase lets a heightmap be chosen at
     /// creation, this becomes the default that dialog starts from.
     pub fn apply_default_relief(&mut self, amplitude: f32) -> String {
-        let path = std::env::var("SOMNIUM_HEIGHTMAP")
-            .unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
+        let path =
+            std::env::var("SOMNIUM_HEIGHTMAP").unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
         match self.load_heightmap_file(&path, amplitude) {
-            Ok(()) => path,
+            Ok(()) => {
+                if path == DEFAULT_HEIGHTMAP {
+                    if let Err(e) = self.load_authored_macro_file(DEFAULT_MACRO_MAP) {
+                        tracing::warn!("terrain: authored macro map unavailable ({e})");
+                    }
+                }
+                path
+            }
             Err(e) => {
                 tracing::info!("terrain: heightmap unavailable ({e}); procedural relief");
                 self.generate_relief(1337, amplitude);
                 "procedural".to_string()
             }
         }
+    }
+
+    /// Use an authored whole-terrain colour map instead of the procedural
+    /// landform tint. Alpha is a per-texel strength mask, so the Great Lakes
+    /// bake can exclude water pixels from ground colour.
+    pub fn load_authored_macro_file(&mut self, path: &str) -> Result<(), String> {
+        let image = image::open(path)
+            .map_err(|e| format!("{path}: {e}"))?
+            .to_rgba8();
+        let resized =
+            if image.width() == macro_map::MACRO_SIZE && image.height() == macro_map::MACRO_SIZE {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    macro_map::MACRO_SIZE,
+                    macro_map::MACRO_SIZE,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+        self.authored_macro = Some(macro_map::MacroMap {
+            texels: resized.into_raw(),
+            size: macro_map::MACRO_SIZE,
+        });
+        self.macro_mode = macro_map::MacroBlendMode::Lerp;
+        self.macro_strength = 0.68;
+        self.macro_dirty = true;
+        Ok(())
     }
 
     /// Fill the heightmap with procedural FBM relief (Phase 25L).
@@ -600,10 +670,10 @@ impl TerrainData {
     /// Scaled (world-space) height at an arbitrary terrain-local XZ position,
     /// bilinearly interpolated (Phase 14A-3 `world_height_at`).
     pub fn world_height_at(&self, local_x: f32, local_z: f32) -> f32 {
-        let fx = (local_x / self.desc.cell_size)
-            .clamp(0.0, (self.desc.total_vertices_x() - 1) as f32);
-        let fz = (local_z / self.desc.cell_size)
-            .clamp(0.0, (self.desc.total_vertices_z() - 1) as f32);
+        let fx =
+            (local_x / self.desc.cell_size).clamp(0.0, (self.desc.total_vertices_x() - 1) as f32);
+        let fz =
+            (local_z / self.desc.cell_size).clamp(0.0, (self.desc.total_vertices_z() - 1) as f32);
         let (x0, z0) = (fx.floor() as u32, fz.floor() as u32);
         let (tx, tz) = (fx - fx.floor(), fz - fz.floor());
 
@@ -621,7 +691,10 @@ impl TerrainData {
     /// Ground query for the foliage brush (Phase 17F).
     pub fn ground_sample(&self, local_x: f32, local_z: f32) -> foliage_paint::GroundSample {
         let s = self.surface_sample(local_x, local_z, 0);
-        foliage_paint::GroundSample { height: s.height, slope_cos: s.slope_cos }
+        foliage_paint::GroundSample {
+            height: s.height,
+            slope_cos: s.slope_cos,
+        }
     }
 
     /// Sample height, slope and paint-layer weight at a terrain-local point
@@ -633,14 +706,24 @@ impl TerrainData {
         // both axes because `world_height_at` already applies `height_scale`,
         // so the normal comes straight out of it.
         let d = self.desc.cell_size;
-        let hx = self.world_height_at(local_x + d, local_z) - self.world_height_at(local_x - d, local_z);
-        let hz = self.world_height_at(local_x, local_z + d) - self.world_height_at(local_x, local_z - d);
+        let hx =
+            self.world_height_at(local_x + d, local_z) - self.world_height_at(local_x - d, local_z);
+        let hz =
+            self.world_height_at(local_x, local_z + d) - self.world_height_at(local_x, local_z - d);
         let normal = glam::Vec3::new(-hx, 2.0 * d, -hz).normalize_or_zero();
         // Y of the unit normal IS the cosine of the slope from vertical.
-        let slope_cos = if normal == glam::Vec3::ZERO { 1.0 } else { normal.y.abs() };
+        let slope_cos = if normal == glam::Vec3::ZERO {
+            1.0
+        } else {
+            normal.y.abs()
+        };
 
         let layer_weight = self.layer_weight_at(local_x, local_z, layer);
-        foliage::SurfaceSample { height, slope_cos, layer_weight }
+        foliage::SurfaceSample {
+            height,
+            slope_cos,
+            layer_weight,
+        }
     }
 
     /// Splatmap weight of `layer` at a terrain-local point, `0..=1`.
@@ -669,14 +752,21 @@ impl TerrainData {
     ///
     /// Returns the samples and the world spacing between them.
     pub fn heightfield(&self) -> (Vec<f32>, u32, glam::Vec3) {
-        let n = collider::sample_count_for(self.desc.total_vertices_x().min(self.desc.total_vertices_z()));
+        let n = collider::sample_count_for(
+            self.desc
+                .total_vertices_x()
+                .min(self.desc.total_vertices_z()),
+        );
         let world = self.desc.world_size();
         let samples = collider::resample(n, world, |x, z| self.world_height_at(x, z));
         (samples, n, collider::heightfield_scale(world, n))
     }
 
     /// Scatter foliage over this terrain (Phase 17A).
-    pub fn scatter_foliage(&self, params: &foliage::FoliageParams) -> Vec<foliage::FoliageInstance> {
+    pub fn scatter_foliage(
+        &self,
+        params: &foliage::FoliageParams,
+    ) -> Vec<foliage::FoliageInstance> {
         foliage::scatter(params, self.desc.world_size(), |x, z| {
             self.surface_sample(x, z, params.layer)
         })
@@ -684,9 +774,14 @@ impl TerrainData {
 
     // ── Per-frame update ─────────────────────────────────────────────────────
 
-    /// Select per-chunk LODs from the camera position (terrain-local), clamp
-    /// neighbor differences to ≤ 1 level, and derive edge stitch masks.
-    pub fn select_lods(&mut self, local_camera_pos: glam::Vec3) {
+    /// Select per-chunk LODs from the camera position (terrain-local), retain
+    /// full detail where a water surface crosses the terrain, clamp neighbor
+    /// differences to ≤ 1 level, and derive edge stitch masks.
+    pub fn select_lods(
+        &mut self,
+        local_camera_pos: glam::Vec3,
+        shoreline_regions: &[crate::water_body::WaterBodyDescriptor],
+    ) {
         let [gx, gz] = self.desc.grid_size;
         let chunk_world = self.desc.chunk_cells as f32 * self.desc.cell_size;
 
@@ -700,6 +795,17 @@ impl TerrainData {
             let dist = local_camera_pos.distance(center).max(0.01);
             let lod_f = (dist / self.desc.lod_base_range).log2().floor();
             chunk.lod = lod_f.clamp(0.0, MAX_TERRAIN_LOD as f32) as u8;
+
+            // A coarser index buffer skips height vertices. Where a horizontal
+            // water plane cuts the terrain this turns the coastline into the
+            // large LOD-sized triangles seen in IV-I. Unreal's water/landscape
+            // integration similarly treats the intersection as authored
+            // high-detail data rather than letting generic distance LOD own it.
+            // Only chunks whose vertical range actually crosses an overlapping
+            // body's surface are pinned; open water and dry mountains keep LOD.
+            if chunk_crosses_water_surface(chunk, chunk_world, shoreline_regions) {
+                chunk.lod = 0;
+            }
         }
 
         // 2. Relax until adjacent chunks differ by at most one level.
@@ -712,7 +818,10 @@ impl TerrainData {
         loop {
             let mut changed = false;
             for i in 0..self.chunks.len() {
-                let (cx, cz) = (self.chunks[i].grid_pos[0] as i64, self.chunks[i].grid_pos[1] as i64);
+                let (cx, cz) = (
+                    self.chunks[i].grid_pos[0] as i64,
+                    self.chunks[i].grid_pos[1] as i64,
+                );
                 let mut min_neighbor = u8::MAX;
                 for (dx, dz) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
                     if let Some(l) = at(&self.chunks, cx + dx, cz + dz) {
@@ -731,7 +840,10 @@ impl TerrainData {
 
         // 3. Edge mask: stitch toward any strictly coarser neighbor.
         for i in 0..self.chunks.len() {
-            let (cx, cz) = (self.chunks[i].grid_pos[0] as i64, self.chunks[i].grid_pos[1] as i64);
+            let (cx, cz) = (
+                self.chunks[i].grid_pos[0] as i64,
+                self.chunks[i].grid_pos[1] as i64,
+            );
             let lod = self.chunks[i].lod;
             let mut mask = 0u8;
             for (dx, dz, bit) in [
@@ -761,14 +873,20 @@ impl TerrainData {
         rewritten: &mut Vec<u32>,
     ) {
         if std::mem::take(&mut self.macro_dirty) {
-            let map = macro_map::generate(
-                &self.heightmap,
-                self.desc.total_vertices_x(),
-                self.desc.total_vertices_z(),
-                self.desc.cell_size,
-                self.desc.height_scale,
-                0,
-            );
+            let generated;
+            let map = if let Some(authored) = self.authored_macro.as_ref() {
+                authored
+            } else {
+                generated = macro_map::generate(
+                    &self.heightmap,
+                    self.desc.total_vertices_x(),
+                    self.desc.total_vertices_z(),
+                    self.desc.cell_size,
+                    self.desc.height_scale,
+                    0,
+                );
+                &generated
+            };
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.macro_texture,
@@ -850,7 +968,8 @@ impl TerrainData {
                 continue; // pool full: this LOD/mask draws nothing this frame
             };
             pool.write_indices(queue, offset, &indices);
-            self.index_blocks.insert(key, (offset, indices.len() as u32));
+            self.index_blocks
+                .insert(key, (offset, indices.len() as u32));
         }
     }
 
@@ -956,9 +1075,9 @@ impl TerrainData {
         out.extend(self.splatmap.width.to_le_bytes());
         out.extend(self.splatmap.height.to_le_bytes());
         out.extend(bytemuck::cast_slice::<f32, u8>(&self.heightmap));
-        out.extend(bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(
-            &self.splatmap.data,
-        ));
+        out.extend(
+            bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(&self.splatmap.data),
+        );
         std::fs::write(path, out)
     }
 
@@ -1032,7 +1151,9 @@ mod tests {
         for cz in 0..gz {
             for cx in 0..gx {
                 let center = glam::Vec3::new(
-                    (cx as f32 + 0.5) * chunk_world, 0.0, (cz as f32 + 0.5) * chunk_world,
+                    (cx as f32 + 0.5) * chunk_world,
+                    0.0,
+                    (cz as f32 + 0.5) * chunk_world,
                 );
                 let dist = camera.distance(center).max(0.01);
                 let lod_f = (dist / desc.lod_base_range).log2().floor();
@@ -1084,5 +1205,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_overlapping_chunks_that_cross_the_water_surface_are_shoreline_chunks() {
+        let water = crate::water_body::WaterBodyDescriptor {
+            water_id: 0,
+            terrain_id: 0,
+            preset: 1,
+            surface_level: 15.0,
+            max_depth: 12.0,
+            bounds: [0.0, 0.0, 64.0, 64.0],
+            amplitude: 0.35,
+            wave_dir_a: [1.0, 0.0],
+            wave_dir_b: [0.0, 1.0],
+            wave_length_a: 18.0,
+            wave_length_b: 11.0,
+            wave_speed: 1.0,
+            wave_steepness: 0.95,
+        };
+        let chunk = |grid_pos, min_y, max_y| TerrainChunk {
+            grid_pos,
+            aabb_min: glam::Vec3::new(0.0, min_y, 0.0),
+            aabb_max: glam::Vec3::new(16.0, max_y, 16.0),
+            vertex_offset: UNALLOCATED,
+            dirty: false,
+            lod: 3,
+            edge_mask: 0,
+        };
+
+        assert!(chunk_crosses_water_surface(
+            &chunk([1, 2], 10.0, 20.0),
+            16.0,
+            &[water]
+        ));
+        assert!(!chunk_crosses_water_surface(
+            &chunk([1, 2], 20.0, 30.0),
+            16.0,
+            &[water]
+        ));
+        assert!(!chunk_crosses_water_surface(
+            &chunk([8, 8], 10.0, 20.0),
+            16.0,
+            &[water]
+        ));
     }
 }

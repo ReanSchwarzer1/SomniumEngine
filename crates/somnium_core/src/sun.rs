@@ -101,6 +101,11 @@ pub fn transmittance(sun_up: f32, altitude_km: f32) -> Vec3 {
     let horizon = ((sun_up + HORIZON_FADE) / (2.0 * HORIZON_FADE)).clamp(0.0, 1.0);
 
     let r = GROUND_RADIUS + altitude_km.max(0.0);
+    // Phase 25M-2: avoid integrating a below-ground ray during the soft
+    // disc/refraction fade at the horizon.
+    // The small below-horizon interval is an authored disc/refraction fade,
+    // not a ray that should be integrated through the planet. Reuse the
+    // grazing (mu=0) optical depth there and let `horizon` fade it to zero.
     let mu = sun_up.max(0.0);
     if hits_ground(r, mu) {
         return Vec3::ZERO;
@@ -113,7 +118,9 @@ pub fn transmittance(sun_up: f32, altitude_km: f32) -> Vec3 {
     for i in 0..STEPS {
         let t = (i as f32 + 0.5) * dt;
         // Law of cosines: the radius at distance `t` along the ray.
-        let ri = (r * r + t * t + 2.0 * r * t * mu).max(GROUND_RADIUS * GROUND_RADIUS).sqrt();
+        let ri = (r * r + t * t + 2.0 * r * t * mu)
+            .max(GROUND_RADIUS * GROUND_RADIUS)
+            .sqrt();
         optical_depth += extinction(ri - GROUND_RADIUS) * dt;
     }
 
@@ -168,7 +175,10 @@ mod tests {
         let mut mu = 1.0;
         while mu >= -0.05 {
             let lum = transmittance(mu, 0.0).length();
-            assert!(lum <= prev + 1e-6, "brightened at sun_up {mu}: {lum} > {prev}");
+            assert!(
+                lum <= prev + 1e-6,
+                "brightened at sun_up {mu}: {lum} > {prev}"
+            );
             prev = lum;
             mu -= 0.01;
         }

@@ -215,10 +215,8 @@ pub fn scatter(
 /// MurmurHash3, which mixes well enough that the four salted draws per cell are
 /// visually independent.
 fn hash3(x: u32, z: u32, seed: u32) -> u32 {
-    let mut h = x
-        .wrapping_mul(0x8DA6_B343)
-        ^ z.wrapping_mul(0xD824_2BA5)
-        ^ seed.wrapping_mul(0xF950_9C21);
+    let mut h =
+        x.wrapping_mul(0x8DA6_B343) ^ z.wrapping_mul(0xD824_2BA5) ^ seed.wrapping_mul(0xF950_9C21);
     h ^= h >> 16;
     h = h.wrapping_mul(0x85EB_CA6B);
     h ^= h >> 13;
@@ -239,11 +237,19 @@ mod tests {
 
     /// Flat, fully-planted ground: nothing is ever rejected.
     fn open_ground(_x: f32, _z: f32) -> SurfaceSample {
-        SurfaceSample { height: 0.0, slope_cos: 1.0, layer_weight: 1.0 }
+        SurfaceSample {
+            height: 0.0,
+            slope_cos: 1.0,
+            layer_weight: 1.0,
+        }
     }
 
     fn params() -> FoliageParams {
-        FoliageParams { density: 1.0, seed: 7, ..Default::default() }
+        FoliageParams {
+            density: 1.0,
+            seed: 7,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -259,18 +265,44 @@ mod tests {
     #[test]
     fn a_different_seed_produces_a_different_layout() {
         let a = scatter(&params(), [40.0, 40.0], open_ground);
-        let b = scatter(&FoliageParams { seed: 8, ..params() }, [40.0, 40.0], open_ground);
+        let b = scatter(
+            &FoliageParams {
+                seed: 8,
+                ..params()
+            },
+            [40.0, 40.0],
+            open_ground,
+        );
         assert_eq!(a.len(), b.len(), "seed must not change the cell count");
         assert_ne!(a, b);
     }
 
     #[test]
     fn density_drives_the_instance_count() {
-        let sparse = scatter(&FoliageParams { density: 0.25, ..params() }, [40.0, 40.0], open_ground);
-        let dense  = scatter(&FoliageParams { density: 4.0,  ..params() }, [40.0, 40.0], open_ground);
+        let sparse = scatter(
+            &FoliageParams {
+                density: 0.25,
+                ..params()
+            },
+            [40.0, 40.0],
+            open_ground,
+        );
+        let dense = scatter(
+            &FoliageParams {
+                density: 4.0,
+                ..params()
+            },
+            [40.0, 40.0],
+            open_ground,
+        );
         // 16x the density over the same area, so roughly 16x the instances.
         let ratio = dense.len() as f32 / sparse.len() as f32;
-        assert!((10.0..24.0).contains(&ratio), "ratio {ratio} from {} and {}", sparse.len(), dense.len());
+        assert!(
+            (10.0..24.0).contains(&ratio),
+            "ratio {ratio} from {} and {}",
+            sparse.len(),
+            dense.len()
+        );
     }
 
     #[test]
@@ -285,7 +317,10 @@ mod tests {
 
     #[test]
     fn the_slope_limit_is_honoured_exactly_at_the_boundary() {
-        let p = FoliageParams { max_slope_deg: 45.0, ..params() };
+        let p = FoliageParams {
+            max_slope_deg: 45.0,
+            ..params()
+        };
         let just_under = |_x: f32, _z: f32| SurfaceSample {
             height: 0.0,
             slope_cos: 44.0f32.to_radians().cos(), // shallower than the limit
@@ -307,7 +342,10 @@ mod tests {
             slope_cos: 1.0,
             layer_weight: 0.1,
         };
-        let p = FoliageParams { min_layer_weight: 0.5, ..params() };
+        let p = FoliageParams {
+            min_layer_weight: 0.5,
+            ..params()
+        };
         assert!(scatter(&p, [40.0, 40.0], unpainted).is_empty());
     }
 
@@ -318,7 +356,10 @@ mod tests {
             slope_cos: 1.0,
             layer_weight: 1.0,
         };
-        let p = FoliageParams { ground_offset: 0.25, ..params() };
+        let p = FoliageParams {
+            ground_offset: 0.25,
+            ..params()
+        };
         for i in scatter(&p, [40.0, 40.0], hilly) {
             let expected = i.position.x * 0.1 + i.position.z * 0.2 + 0.25;
             assert!((i.position.y - expected).abs() < 1e-3);
@@ -335,12 +376,20 @@ mod tests {
 
     #[test]
     fn scale_and_yaw_stay_in_range() {
-        let p = FoliageParams { scale_min: 0.5, scale_max: 2.0, ..params() };
+        let p = FoliageParams {
+            scale_min: 0.5,
+            scale_max: 2.0,
+            ..params()
+        };
         let out = scatter(&p, [40.0, 40.0], open_ground);
         assert!(out.len() > 100, "need a decent sample");
         for i in &out {
             assert!((0.5..=2.0).contains(&i.scale), "scale {}", i.scale);
-            assert!((0.0..std::f32::consts::TAU).contains(&i.yaw), "yaw {}", i.yaw);
+            assert!(
+                (0.0..std::f32::consts::TAU).contains(&i.yaw),
+                "yaw {}",
+                i.yaw
+            );
         }
         // A single fixed yaw would make the field read as cloned billboards.
         let distinct = out.windows(2).filter(|w| w[0].yaw != w[1].yaw).count();
@@ -349,7 +398,11 @@ mod tests {
 
     #[test]
     fn an_inverted_scale_range_is_accepted() {
-        let p = FoliageParams { scale_min: 2.0, scale_max: 0.5, ..params() };
+        let p = FoliageParams {
+            scale_min: 2.0,
+            scale_max: 0.5,
+            ..params()
+        };
         for i in scatter(&p, [40.0, 40.0], open_ground) {
             assert!((0.5..=2.0).contains(&i.scale), "scale {}", i.scale);
         }
@@ -357,14 +410,29 @@ mod tests {
 
     #[test]
     fn the_cap_coarsens_the_grid_rather_than_truncating_it() {
-        let p = FoliageParams { density: 100.0, max_instances: 500, ..params() };
+        let p = FoliageParams {
+            density: 100.0,
+            max_instances: 500,
+            ..params()
+        };
         let out = scatter(&p, [100.0, 100.0], open_ground);
         assert!(out.len() <= 500, "cap exceeded: {}", out.len());
-        assert!(out.len() > 250, "cap wasted most of its budget: {}", out.len());
+        assert!(
+            out.len() > 250,
+            "cap wasted most of its budget: {}",
+            out.len()
+        );
         // Truncation would fill one edge and leave the far side empty, so check
         // the far quadrant is populated too.
-        let far = out.iter().filter(|i| i.position.x > 50.0 && i.position.z > 50.0).count();
-        assert!(far > out.len() / 8, "far quadrant nearly empty: {far} of {}", out.len());
+        let far = out
+            .iter()
+            .filter(|i| i.position.x > 50.0 && i.position.z > 50.0)
+            .count();
+        assert!(
+            far > out.len() / 8,
+            "far quadrant nearly empty: {far} of {}",
+            out.len()
+        );
     }
 
     #[test]
@@ -387,13 +455,30 @@ mod tests {
     fn moving_the_centre_does_not_reshuffle_the_overlap() {
         // Cells keep absolute indices, so instances common to both discs must
         // be identical — otherwise grass would visibly crawl as you walk.
-        let base = FoliageParams { density: 1.0, radius: 20.0, ..params() };
-        let a = scatter(&FoliageParams { center: [40.0, 40.0], ..base }, [200.0, 200.0], open_ground);
-        let b = scatter(&FoliageParams { center: [50.0, 40.0], ..base }, [200.0, 200.0], open_ground);
+        let base = FoliageParams {
+            density: 1.0,
+            radius: 20.0,
+            ..params()
+        };
+        let a = scatter(
+            &FoliageParams {
+                center: [40.0, 40.0],
+                ..base
+            },
+            [200.0, 200.0],
+            open_ground,
+        );
+        let b = scatter(
+            &FoliageParams {
+                center: [50.0, 40.0],
+                ..base
+            },
+            [200.0, 200.0],
+            open_ground,
+        );
 
         let key = |i: &FoliageInstance| (i.position.x.to_bits(), i.position.z.to_bits());
-        let set_b: std::collections::HashMap<_, _> =
-            b.iter().map(|i| (key(i), *i)).collect();
+        let set_b: std::collections::HashMap<_, _> = b.iter().map(|i| (key(i), *i)).collect();
         let mut shared = 0;
         for i in &a {
             if let Some(m) = set_b.get(&key(i)) {
@@ -402,7 +487,10 @@ mod tests {
                 assert_eq!(i.scale, m.scale, "scale changed for a shared instance");
             }
         }
-        assert!(shared > 50, "discs should overlap heavily, shared = {shared}");
+        assert!(
+            shared > 50,
+            "discs should overlap heavily, shared = {shared}"
+        );
     }
 
     #[test]
@@ -423,25 +511,66 @@ mod tests {
 
     #[test]
     fn a_zero_radius_still_covers_the_whole_terrain() {
-        let p = FoliageParams { density: 1.0, radius: 0.0, ..params() };
+        let p = FoliageParams {
+            density: 1.0,
+            radius: 0.0,
+            ..params()
+        };
         let out = scatter(&p, [40.0, 40.0], open_ground);
         assert!(out.len() > 1_000, "full coverage gave {}", out.len());
     }
 
     #[test]
     fn degenerate_inputs_produce_nothing_instead_of_panicking() {
-        assert!(scatter(&FoliageParams { density: 0.0, ..params() }, [40.0, 40.0], open_ground).is_empty());
-        assert!(scatter(&FoliageParams { density: -1.0, ..params() }, [40.0, 40.0], open_ground).is_empty());
+        assert!(
+            scatter(
+                &FoliageParams {
+                    density: 0.0,
+                    ..params()
+                },
+                [40.0, 40.0],
+                open_ground
+            )
+            .is_empty()
+        );
+        assert!(
+            scatter(
+                &FoliageParams {
+                    density: -1.0,
+                    ..params()
+                },
+                [40.0, 40.0],
+                open_ground
+            )
+            .is_empty()
+        );
         assert!(scatter(&params(), [0.0, 40.0], open_ground).is_empty());
         assert!(scatter(&params(), [40.0, -5.0], open_ground).is_empty());
-        assert!(scatter(&FoliageParams { max_instances: 0, ..params() }, [40.0, 40.0], open_ground).is_empty());
+        assert!(
+            scatter(
+                &FoliageParams {
+                    max_instances: 0,
+                    ..params()
+                },
+                [40.0, 40.0],
+                open_ground
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn coverage_is_even_across_the_terrain() {
         // Stratification is the whole reason for the jittered grid: independent
         // uniform sampling leaves visible clumps and bald patches.
-        let out = scatter(&FoliageParams { density: 1.0, ..params() }, [40.0, 40.0], open_ground);
+        let out = scatter(
+            &FoliageParams {
+                density: 1.0,
+                ..params()
+            },
+            [40.0, 40.0],
+            open_ground,
+        );
         let mut quadrants = [0usize; 4];
         for i in &out {
             let q = (i.position.x > 20.0) as usize + 2 * (i.position.z > 20.0) as usize;
@@ -450,7 +579,10 @@ mod tests {
         let expected = out.len() as f32 / 4.0;
         for (q, n) in quadrants.iter().enumerate() {
             let ratio = *n as f32 / expected;
-            assert!((0.8..1.2).contains(&ratio), "quadrant {q} holds {n}, expected ~{expected}");
+            assert!(
+                (0.8..1.2).contains(&ratio),
+                "quadrant {q} holds {n}, expected ~{expected}"
+            );
         }
     }
 }

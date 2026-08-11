@@ -86,7 +86,10 @@ impl Control for Slider {
         );
 
         // Handle.
-        ctx.push_rect_filled(Rect::new(handle_x, b.y + 2.0, HANDLE_W, b.h - 4.0), self.fill);
+        ctx.push_rect_filled(
+            Rect::new(handle_x, b.y + 2.0, HANDLE_W, b.h - 4.0),
+            self.fill,
+        );
     }
 
     fn handle_routed_message(
@@ -103,7 +106,9 @@ impl Control for Slider {
             return;
         }
 
-        let Some(wmsg) = msg.data::<WidgetMessage>() else { return };
+        let Some(wmsg) = msg.data::<WidgetMessage>() else {
+            return;
+        };
         let bounds = widget.screen_bounds();
         match wmsg {
             WidgetMessage::MouseDown { pos, .. } => {

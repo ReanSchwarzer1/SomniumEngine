@@ -7,14 +7,16 @@
 //! that lets the main thread discard results that were obsoleted by an edit
 //! while the worker was still meshing.
 
-use crate::chunk::{chunk_origin, chunks_touching_voxel, ChunkCoord, CHUNK_SIZE, PADDED_CHUNK_SIZE};
-use crate::mesh::{mesh_chunk, ChunkMeshData, MAX_LOD};
+use crate::chunk::{
+    CHUNK_SIZE, ChunkCoord, PADDED_CHUNK_SIZE, chunk_origin, chunks_touching_voxel,
+};
+use crate::mesh::{ChunkMeshData, MAX_LOD, mesh_chunk};
 use crate::terrain::TerrainConfig;
 use crate::voxel::Voxel;
 use glam::{IVec3, Vec3};
 use ndshape::{RuntimeShape, Shape};
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// Tuning knobs for the chunk streaming system.
 #[derive(Debug, Clone)]
@@ -200,10 +202,7 @@ impl VoxelWorld {
                     MAX_LOD
                 };
                 for cy in self.config.min_chunk_y..=self.config.max_chunk_y {
-                    desired.insert(
-                        IVec3::new(cam_chunk_x + dx, cy, cam_chunk_z + dz),
-                        lod,
-                    );
+                    desired.insert(IVec3::new(cam_chunk_x + dx, cy, cam_chunk_z + dz), lod);
                 }
             }
         }
@@ -269,7 +268,12 @@ impl VoxelWorld {
             let voxels = generate_padded(&terrain, &edits, coord);
             let mesh = mesh_chunk(&voxels, lod);
             // Receiver gone only during engine shutdown — safe to ignore.
-            let _ = tx.send(TaskResult { coord, lod, version, mesh });
+            let _ = tx.send(TaskResult {
+                coord,
+                lod,
+                version,
+                mesh,
+            });
         });
     }
 }
@@ -281,9 +285,12 @@ fn snapshot_edits(edits: &HashMap<IVec3, Voxel>, coord: ChunkCoord) -> HashMap<I
     edits
         .iter()
         .filter(|(p, _)| {
-            p.x >= min.x && p.x <= max.x
-                && p.y >= min.y && p.y <= max.y
-                && p.z >= min.z && p.z <= max.z
+            p.x >= min.x
+                && p.x <= max.x
+                && p.y >= min.y
+                && p.y <= max.y
+                && p.z >= min.z
+                && p.z <= max.z
         })
         .map(|(p, v)| (*p, *v))
         .collect()
@@ -368,7 +375,11 @@ mod tests {
         // Place a floating stone block well above the terrain surface.
         world.set_voxel(IVec3::new(5, 25, 5), Voxel::Stone);
         let upd = pump(&mut world, Vec3::ZERO);
-        let remeshed: Vec<_> = upd.ready.iter().filter(|c| c.coord == IVec3::ZERO).collect();
+        let remeshed: Vec<_> = upd
+            .ready
+            .iter()
+            .filter(|c| c.coord == IVec3::ZERO)
+            .collect();
         assert_eq!(remeshed.len(), 1, "edited chunk should remesh exactly once");
         assert_eq!(world.get_voxel(IVec3::new(5, 25, 5)), Voxel::Stone);
     }

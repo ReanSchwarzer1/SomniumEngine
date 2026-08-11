@@ -22,21 +22,31 @@ pub const NUM_CASCADES: usize = 4;
 
 /// Cascade viewport regions within the atlas (x, y, w, h).
 pub const CASCADE_VIEWPORTS: [(f32, f32, f32, f32); 4] = [
-    (0.0,                  0.0,                  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (CASCADE_SIZE as f32,  0.0,                  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (0.0,                  CASCADE_SIZE as f32,  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (CASCADE_SIZE as f32,  CASCADE_SIZE as f32,  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
+    (0.0, 0.0, CASCADE_SIZE as f32, CASCADE_SIZE as f32),
+    (
+        CASCADE_SIZE as f32,
+        0.0,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
+    (
+        0.0,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
+    (
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
 ];
 
 /// UV offsets for each cascade in atlas space (used in shading.wgsl).
-pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
-    (0.0, 0.0),
-    (0.5, 0.0),
-    (0.0, 0.5),
-    (0.5, 0.5),
-];
+pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)];
 
-/// GPU-uploadable directional light struct (320 bytes, std140-aligned).
+/// GPU-uploadable directional light struct (336 bytes, std140-aligned).
 ///
 /// Layout:
 /// ```text
@@ -48,8 +58,11 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
 /// offset 288 :  cascade_splits vec4<f32>         (16 bytes)  view-space far Z per cascade
 /// offset 304 :  shadow_map_size f32              ( 4 bytes)  total atlas size in texels
 /// offset 308 :  ibl_intensity f32                (4 bytes)
-/// offset 312 :  _pad2         [f32; 2]           (8 bytes)
-///              total                             320 bytes
+/// offset 312 :  sun_angular_radius f32           (4 bytes)  Phase 24E
+/// offset 316 :  _pad2         f32                (4 bytes)  debug flag
+/// offset 320 :  moon_direction vec3<f32>         (12 bytes) Phase 25M-2
+/// offset 332 :  _pad3         f32                (4 bytes)
+///              total                             336 bytes
 /// ```
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -75,6 +88,10 @@ pub struct GpuDirectionalLight {
     /// remaining padding, so no pass needed a layout change.
     pub sun_angular_radius: f32,
     pub _pad2: f32,
+    /// Moon direction in world space, normalised (Phase 25M-2).
+    pub moon_direction: [f32; 3],
+    /// Directional moonlight illuminance in lux (Phase 25M-2).
+    pub moon_intensity: f32,
 }
 
 impl Default for GpuDirectionalLight {
@@ -93,11 +110,72 @@ impl Default for GpuDirectionalLight {
             view_proj: [identity; 4],
             cascade_splits: [5.0, 20.0, 50.0, 100.0],
             shadow_map_size: ATLAS_SIZE as f32,
-            ibl_intensity: 0.35,
+            ibl_intensity: 1.0,
             // 0.53° diameter → 0.00463 rad radius.
             sun_angular_radius: 0.004_654,
             _pad2: 0.0,
+            moon_direction: [0.0, -1.0, 0.0],
+            moon_intensity: 0.010,
         }
+    }
+}
+
+/// Direction toward the moon in world space, normalised.
+///
+/// Phase 25M-2D: a simplified but physically-based model. The real moon orbits
+/// the Earth every 29.53 days (synodic period) in a plane tilted ~5.14° from
+/// the ecliptic.
+///
+/// - `sun_direction`: normalised direction toward the sun.
+/// - `time_days`: total engine time in fractional days (e.g. `engine_seconds / 86400`).
+///
+/// Phase zero is a full moon (`moon = -sun`), half a synodic period is a new
+/// moon (`moon = sun`), and the quarter phases lie approximately 90 degrees
+/// from the sun. This is an appearance model, not an ephemeris.
+#[must_use]
+pub fn moon_direction(sun_direction: glam::Vec3, time_days: f64) -> glam::Vec3 {
+    use std::f64::consts::TAU;
+
+    const SYNODIC_PERIOD: f64 = 29.530588; // days
+    const INCLINATION: f64 = 5.14_f64; // degrees
+
+    let phase_frac = (time_days / SYNODIC_PERIOD).fract();
+    let phase_angle = phase_frac * TAU;
+
+    let sun = sun_direction.normalize_or(glam::Vec3::Y);
+    let up_hint = if sun.dot(glam::Vec3::Y).abs() > 0.99 {
+        glam::Vec3::Z
+    } else {
+        glam::Vec3::Y
+    };
+    let right = sun.cross(up_hint).normalize();
+    let up = right.cross(sun).normalize();
+
+    let incl_rad = (INCLINATION as f32).to_radians();
+    let cos_phase = (phase_angle as f32).cos();
+    let sin_phase = (phase_angle as f32).sin();
+
+    let moon =
+        -sun * cos_phase + right * sin_phase * incl_rad.cos() + up * sin_phase * incl_rad.sin();
+
+    moon.normalize()
+}
+
+#[cfg(test)]
+mod moon_tests {
+    use super::*;
+
+    #[test]
+    fn phase_zero_places_a_full_moon_opposite_the_sun() {
+        let sun = glam::Vec3::new(0.3, 0.8, -0.2).normalize();
+        assert!(moon_direction(sun, 0.0).dot(-sun) > 0.9999);
+    }
+
+    #[test]
+    fn half_a_synodic_period_places_a_new_moon_near_the_sun() {
+        let sun = glam::Vec3::new(0.3, 0.8, -0.2).normalize();
+        let moon = moon_direction(sun, 29.530588 * 0.5);
+        assert!(moon.dot(sun) > 0.9999);
     }
 }
 

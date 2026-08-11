@@ -25,8 +25,12 @@ impl Control for Button {
         for &ch in &widget.children {
             ctx.measure_child(ch, available);
             let ds = ctx.desired_size(ch);
-            if ds.x > desired.x { desired.x = ds.x; }
-            if ds.y > desired.y { desired.y = ds.y; }
+            if ds.x > desired.x {
+                desired.x = ds.x;
+            }
+            if ds.y > desired.y {
+                desired.y = ds.y;
+            }
         }
         desired
     }
@@ -48,8 +52,8 @@ impl Control for Button {
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
-        msg:    &mut UiMessage,
-        emit:   &mut Vec<UiMessage>,
+        msg: &mut UiMessage,
+        emit: &mut Vec<UiMessage>,
     ) {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
@@ -91,7 +95,9 @@ pub struct ButtonBuilder {
 }
 
 impl ButtonBuilder {
-    pub fn new(widget: WidgetBuilder) -> Self { Self { widget } }
+    pub fn new(widget: WidgetBuilder) -> Self {
+        Self { widget }
+    }
 
     pub fn build(self) -> UiNode {
         UiNode::new(self.widget.build(), Box::new(Button { is_pressed: false }))

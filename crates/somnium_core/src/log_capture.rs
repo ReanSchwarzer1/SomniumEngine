@@ -8,15 +8,15 @@
 //! Reference: Fyrox `editor/src/log.rs` — `LogSettings` ring buffer concept
 //! adapted for the `tracing` crate.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use tracing::{Level, Subscriber};
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 /// A single captured log entry.
 pub struct LogEntry {
     /// "info" | "warn" | "error"
-    pub level:   &'static str,
+    pub level: &'static str,
     /// The formatted log message text.
     pub message: String,
 }
@@ -30,14 +30,17 @@ impl<S: Subscriber> Layer<S> for LogCaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let level = match *event.metadata().level() {
             Level::ERROR => "error",
-            Level::WARN  => "warn",
-            Level::INFO  => "info",
-            _ => return,  // skip DEBUG / TRACE
+            Level::WARN => "warn",
+            Level::INFO => "info",
+            _ => return, // skip DEBUG / TRACE
         };
         let mut vis = MessageVisitor(String::new());
         event.record(&mut vis);
         if !vis.0.is_empty() {
-            let _ = self.tx.send(LogEntry { level, message: vis.0 });
+            let _ = self.tx.send(LogEntry {
+                level,
+                message: vis.0,
+            });
         }
     }
 }

@@ -47,18 +47,13 @@ const VERTEX_SIZE: u64 = std::mem::size_of::<GizmoVertex>() as u64;
 
 // ─── Geometry generation ──────────────────────────────────────────────────────
 
-const RED:   [f32; 3] = [0.90, 0.20, 0.20];
+const RED: [f32; 3] = [0.90, 0.20, 0.20];
 const GREEN: [f32; 3] = [0.20, 0.90, 0.20];
-const BLUE:  [f32; 3] = [0.20, 0.20, 0.90];
+const BLUE: [f32; 3] = [0.20, 0.20, 0.90];
 
 /// Append an arrow along `dir` (shaft + 8-sided cone) to the geometry vectors.
 /// All units are in gizmo-local space where the gizmo fits inside a unit sphere.
-fn push_arrow(
-    verts: &mut Vec<GizmoVertex>,
-    inds: &mut Vec<u32>,
-    dir: glam::Vec3,
-    color: [f32; 3],
-) {
+fn push_arrow(verts: &mut Vec<GizmoVertex>, inds: &mut Vec<u32>, dir: glam::Vec3, color: [f32; 3]) {
     const SHAFT_START: f32 = 0.13;
     const SHAFT_END: f32 = 0.78;
     const SHAFT_W: f32 = 0.04;
@@ -74,7 +69,10 @@ fn push_arrow(
     for x in [SHAFT_START, SHAFT_END] {
         for (sy, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             let p = rot * glam::Vec3::new(x, sy * SHAFT_W, sz * SHAFT_W);
-            verts.push(GizmoVertex { position: p.to_array(), color });
+            verts.push(GizmoVertex {
+                position: p.to_array(),
+                color,
+            });
         }
     }
     // 4 side quads (skip end caps — shaft obscures them).
@@ -89,11 +87,17 @@ fn push_arrow(
     for i in 0..SIDES {
         let angle = std::f32::consts::TAU * i as f32 / SIDES as f32;
         let p = rot * glam::Vec3::new(CONE_START, CONE_R * angle.cos(), CONE_R * angle.sin());
-        verts.push(GizmoVertex { position: p.to_array(), color });
+        verts.push(GizmoVertex {
+            position: p.to_array(),
+            color,
+        });
     }
     let apex_idx = verts.len() as u32;
     let apex = rot * glam::Vec3::new(CONE_END, 0.0, 0.0);
-    verts.push(GizmoVertex { position: apex.to_array(), color });
+    verts.push(GizmoVertex {
+        position: apex.to_array(),
+        color,
+    });
 
     for i in 0..SIDES {
         let j = (i + 1) % SIDES;
@@ -120,8 +124,14 @@ fn push_ring(
         let (c, s) = (a.cos(), a.sin());
         let pi = rot * glam::Vec3::new(c * INNER_R, s * INNER_R, 0.0);
         let po = rot * glam::Vec3::new(c * OUTER_R, s * OUTER_R, 0.0);
-        verts.push(GizmoVertex { position: pi.to_array(), color });
-        verts.push(GizmoVertex { position: po.to_array(), color });
+        verts.push(GizmoVertex {
+            position: pi.to_array(),
+            color,
+        });
+        verts.push(GizmoVertex {
+            position: po.to_array(),
+            color,
+        });
     }
     for i in 0..SEGS {
         let j = (i + 1) % SEGS;
@@ -152,7 +162,10 @@ fn push_scale_arm(
     for x in [SHAFT_START, SHAFT_END] {
         for (sy, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             let p = rot * glam::Vec3::new(x, sy * SHAFT_W, sz * SHAFT_W);
-            verts.push(GizmoVertex { position: p.to_array(), color });
+            verts.push(GizmoVertex {
+                position: p.to_array(),
+                color,
+            });
         }
     }
     for i in 0..4u32 {
@@ -171,7 +184,10 @@ fn push_scale_arm(
         for &y in &ys {
             for &z in &zs {
                 let p = rot * glam::Vec3::new(x, y, z);
-                verts.push(GizmoVertex { position: p.to_array(), color });
+                verts.push(GizmoVertex {
+                    position: p.to_array(),
+                    color,
+                });
             }
         }
     }
@@ -256,32 +272,31 @@ impl GizmoPass {
         surface_format: wgpu::TextureFormat,
         view_buffer: &wgpu::Buffer,
     ) -> Self {
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Gizmo Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Gizmo Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         // Params buffer: 64 bytes (one Mat4), identity at start.
         let params_buffer = {
@@ -325,7 +340,9 @@ impl GizmoPass {
                 usage: wgpu::BufferUsages::VERTEX,
                 mapped_at_creation: true,
             });
-            buf.slice(..).get_mapped_range_mut().copy_from_slice(vb_data);
+            buf.slice(..)
+                .get_mapped_range_mut()
+                .copy_from_slice(vb_data);
             buf.unmap();
             buf
         };
@@ -338,7 +355,9 @@ impl GizmoPass {
                 usage: wgpu::BufferUsages::INDEX,
                 mapped_at_creation: true,
             });
-            buf.slice(..).get_mapped_range_mut().copy_from_slice(ib_data);
+            buf.slice(..)
+                .get_mapped_range_mut()
+                .copy_from_slice(ib_data);
             buf.unmap();
             buf
         };
@@ -426,8 +445,8 @@ impl GizmoPass {
     ) {
         let index_range = match mode {
             GizmoMode::Translate => self.translate_indices.clone(),
-            GizmoMode::Rotate    => self.rotate_indices.clone(),
-            GizmoMode::Scale     => self.scale_indices.clone(),
+            GizmoMode::Rotate => self.rotate_indices.clone(),
+            GizmoMode::Scale => self.scale_indices.clone(),
         };
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -467,15 +486,33 @@ pub fn gizmo_hit_test(
     // Generous AABBs for picking (handles + heads).
     let (x_aabb, y_aabb, z_aabb) = match mode {
         GizmoMode::Translate | GizmoMode::Scale => (
-            (glam::Vec3::new(0.10, -0.10, -0.10), glam::Vec3::new(1.05, 0.10, 0.10)),
-            (glam::Vec3::new(-0.10, 0.10, -0.10), glam::Vec3::new(0.10, 1.05, 0.10)),
-            (glam::Vec3::new(-0.10, -0.10, 0.10), glam::Vec3::new(0.10, 0.10, 1.05)),
+            (
+                glam::Vec3::new(0.10, -0.10, -0.10),
+                glam::Vec3::new(1.05, 0.10, 0.10),
+            ),
+            (
+                glam::Vec3::new(-0.10, 0.10, -0.10),
+                glam::Vec3::new(0.10, 1.05, 0.10),
+            ),
+            (
+                glam::Vec3::new(-0.10, -0.10, 0.10),
+                glam::Vec3::new(0.10, 0.10, 1.05),
+            ),
         ),
         GizmoMode::Rotate => (
             // Annular region around ring plane: thin slab in X, ring radius ≈ 0.84.
-            (glam::Vec3::new(-0.10, -0.92, -0.92), glam::Vec3::new(0.10, 0.92, 0.92)),
-            (glam::Vec3::new(-0.92, -0.10, -0.92), glam::Vec3::new(0.92, 0.10, 0.92)),
-            (glam::Vec3::new(-0.92, -0.92, -0.10), glam::Vec3::new(0.92, 0.92, 0.10)),
+            (
+                glam::Vec3::new(-0.10, -0.92, -0.92),
+                glam::Vec3::new(0.10, 0.92, 0.92),
+            ),
+            (
+                glam::Vec3::new(-0.92, -0.10, -0.92),
+                glam::Vec3::new(0.92, 0.10, 0.92),
+            ),
+            (
+                glam::Vec3::new(-0.92, -0.92, -0.10),
+                glam::Vec3::new(0.92, 0.92, 0.10),
+            ),
         ),
     };
 
@@ -495,22 +532,33 @@ pub fn gizmo_hit_test(
     best.map(|(a, _)| a)
 }
 
-fn ray_aabb(
-    origin: glam::Vec3,
-    dir: glam::Vec3,
-    mn: glam::Vec3,
-    mx: glam::Vec3,
-) -> Option<f32> {
+fn ray_aabb(origin: glam::Vec3, dir: glam::Vec3, mn: glam::Vec3, mx: glam::Vec3) -> Option<f32> {
     let inv = glam::Vec3::new(
-        if dir.x.abs() > 1e-9 { 1.0 / dir.x } else { f32::INFINITY },
-        if dir.y.abs() > 1e-9 { 1.0 / dir.y } else { f32::INFINITY },
-        if dir.z.abs() > 1e-9 { 1.0 / dir.z } else { f32::INFINITY },
+        if dir.x.abs() > 1e-9 {
+            1.0 / dir.x
+        } else {
+            f32::INFINITY
+        },
+        if dir.y.abs() > 1e-9 {
+            1.0 / dir.y
+        } else {
+            f32::INFINITY
+        },
+        if dir.z.abs() > 1e-9 {
+            1.0 / dir.z
+        } else {
+            f32::INFINITY
+        },
     );
     let t1 = (mn - origin) * inv;
     let t2 = (mx - origin) * inv;
     let tmin = t1.min(t2);
     let tmax = t1.max(t2);
     let enter = tmin.x.max(tmin.y).max(tmin.z);
-    let exit  = tmax.x.min(tmax.y).min(tmax.z);
-    if exit >= enter && exit > 0.0 { Some(enter.max(0.0)) } else { None }
+    let exit = tmax.x.min(tmax.y).min(tmax.z);
+    if exit >= enter && exit > 0.0 {
+        Some(enter.max(0.0))
+    } else {
+        None
+    }
 }

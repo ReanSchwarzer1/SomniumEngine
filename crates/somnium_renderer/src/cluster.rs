@@ -291,7 +291,10 @@ fn assign_froxels(
         // Clamp so the flat list can never overrun the GPU buffer.
         let remaining = MAX_LIGHT_INDICES as u32 - running;
         let count = c.min(remaining);
-        offsets.push(ClusterOffset { offset: running, count });
+        offsets.push(ClusterOffset {
+            offset: running,
+            count,
+        });
         running += count;
     }
     let total_indices = running as usize;
@@ -451,7 +454,11 @@ impl ClusterGrid {
             bytemuck::cast_slice(&lights[..num_lights]),
         );
         if !self.index_list.is_empty() {
-            queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.index_list));
+            queue.write_buffer(
+                &self.index_buffer,
+                0,
+                bytemuck::cast_slice(&self.index_list),
+            );
         }
         queue.write_buffer(&self.offset_buffer, 0, bytemuck::cast_slice(&self.offsets));
     }
@@ -521,7 +528,10 @@ mod tests {
         let mut offsets = Vec::new();
         let mut running = 0u32;
         for list in &froxel_lists {
-            offsets.push(ClusterOffset { offset: running, count: list.len() as u32 });
+            offsets.push(ClusterOffset {
+                offset: running,
+                count: list.len() as u32,
+            });
             index_list.extend_from_slice(list);
             running += list.len() as u32;
         }
@@ -541,17 +551,29 @@ mod tests {
             light([4.0, 3.0, 2.0], 12.0),
             light([-4.0, 6.0, 1.0], 20.0),
             light([0.0, 0.0, -50.0], 5.0),
-            light([0.0, 0.0, 500.0], 1.0),   // behind camera
-            light([200.0, 0.0, 0.0], 2.0),   // off to the side
+            light([0.0, 0.0, 500.0], 1.0), // behind camera
+            light([200.0, 0.0, 0.0], 2.0), // off to the side
         ];
 
-        let (ref_idx, ref_off) =
-            reference_assign(&lights, view, proj, sw, sh, 0.1, 1000.0, grid_w, grid_h, total);
+        let (ref_idx, ref_off) = reference_assign(
+            &lights, view, proj, sw, sh, 0.1, 1000.0, grid_w, grid_h, total,
+        );
 
         let (mut counts, mut offsets, mut index_list) = (Vec::new(), Vec::new(), Vec::new());
         assign_froxels(
-            &lights, view, proj, sw, sh, 0.1, 1000.0, grid_w, grid_h, total,
-            &mut counts, &mut offsets, &mut index_list,
+            &lights,
+            view,
+            proj,
+            sw,
+            sh,
+            0.1,
+            1000.0,
+            grid_w,
+            grid_h,
+            total,
+            &mut counts,
+            &mut offsets,
+            &mut index_list,
         );
 
         assert_eq!(offsets.len(), ref_off.len(), "froxel table size");
@@ -564,8 +586,19 @@ mod tests {
         let (view, proj) = test_view_proj();
         let (mut counts, mut offsets, mut index_list) = (Vec::new(), Vec::new(), Vec::new());
         assign_froxels(
-            &[], view, proj, 1920.0, 1080.0, 0.1, 1000.0, 60, 34, 60 * 34 * 24,
-            &mut counts, &mut offsets, &mut index_list,
+            &[],
+            view,
+            proj,
+            1920.0,
+            1080.0,
+            0.1,
+            1000.0,
+            60,
+            34,
+            60 * 34 * 24,
+            &mut counts,
+            &mut offsets,
+            &mut index_list,
         );
         assert!(index_list.is_empty());
         assert!(offsets.iter().all(|o| o.count == 0));
@@ -582,13 +615,27 @@ mod tests {
 
         let (mut counts, mut offsets, mut index_list) = (Vec::new(), Vec::new(), Vec::new());
         assign_froxels(
-            &lights, view, proj, 1920.0, 1080.0, 0.1, 1000.0, grid_w, grid_h, total,
-            &mut counts, &mut offsets, &mut index_list,
+            &lights,
+            view,
+            proj,
+            1920.0,
+            1080.0,
+            0.1,
+            1000.0,
+            grid_w,
+            grid_h,
+            total,
+            &mut counts,
+            &mut offsets,
+            &mut index_list,
         );
 
         for o in &offsets {
             let end = (o.offset + o.count) as usize;
-            assert!(end <= index_list.len(), "froxel slot runs past the index list");
+            assert!(
+                end <= index_list.len(),
+                "froxel slot runs past the index list"
+            );
             for &li in &index_list[o.offset as usize..end] {
                 assert!((li as usize) < lights.len(), "bogus light index {li}");
             }
@@ -603,6 +650,9 @@ mod tests {
         let grid_w = 3840u32.div_ceil(TILE_SIZE);
         let grid_h = 2160u32.div_ceil(TILE_SIZE);
         let total = (grid_w * grid_h * NUM_DEPTH_SLICES) as usize;
-        assert!(total <= MAX_FROXELS, "4K grid is {total}, exceeds MAX_FROXELS {MAX_FROXELS}");
+        assert!(
+            total <= MAX_FROXELS,
+            "4K grid is {total}, exceeds MAX_FROXELS {MAX_FROXELS}"
+        );
     }
 }

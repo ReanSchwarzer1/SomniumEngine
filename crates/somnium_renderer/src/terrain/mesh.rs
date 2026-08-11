@@ -62,10 +62,10 @@ pub fn build_chunk_vertices(
             let h = height_at(xi, zi) * height_scale;
 
             // Finite differences from neighboring heights (Phase 14B-1 formula).
-            let dx = (height_at(xi + 1, zi) - height_at(xi - 1, zi)) * height_scale
-                / (2.0 * cell_size);
-            let dz = (height_at(xi, zi + 1) - height_at(xi, zi - 1)) * height_scale
-                / (2.0 * cell_size);
+            let dx =
+                (height_at(xi + 1, zi) - height_at(xi - 1, zi)) * height_scale / (2.0 * cell_size);
+            let dz =
+                (height_at(xi, zi + 1) - height_at(xi, zi - 1)) * height_scale / (2.0 * cell_size);
             let normal = glam::Vec3::new(-dx, 1.0, -dz).normalize();
 
             vertices.push(Vertex {
@@ -205,13 +205,15 @@ mod tests {
             let x = i % 65;
             let z = i / 65;
             if x == 0 {
-                assert_eq!(z % 2, 0, "fine-only vertex (0, {z}) referenced on stitched edge");
+                assert_eq!(
+                    z % 2,
+                    0,
+                    "fine-only vertex (0, {z}) referenced on stitched edge"
+                );
             }
         }
         // Unstitched east edge keeps full resolution: odd-z verts referenced.
-        let east_odd = indices
-            .iter()
-            .any(|&i| i % 65 == 64 && (i / 65) % 2 == 1);
+        let east_odd = indices.iter().any(|&i| i % 65 == 64 && (i / 65) % 2 == 1);
         assert!(east_odd, "unstitched edge lost resolution");
     }
 
@@ -241,6 +243,30 @@ mod tests {
             let wb = b[(z * 65) as usize];
             assert_eq!(ea.position, wb.position);
             assert_eq!(ea.normal, wb.normal);
+        }
+    }
+
+    #[test]
+    fn sinusoidal_hill_has_continuous_finite_normals_across_chunks() {
+        let n = 129u32;
+        let mut heightmap = vec![0.0f32; (n * n) as usize];
+        for z in 0..n {
+            for x in 0..n {
+                let xf = x as f32 / (n - 1) as f32 * std::f32::consts::TAU;
+                let zf = z as f32 / (n - 1) as f32 * std::f32::consts::TAU;
+                heightmap[(z * n + x) as usize] = (xf.sin() * zf.sin() + 1.0) * 0.5;
+            }
+        }
+        let a = build_chunk_vertices(&heightmap, n, n, 64, [0, 0], 1.0, 20.0);
+        let b = build_chunk_vertices(&heightmap, n, n, 64, [1, 0], 1.0, 20.0);
+        for z in 0..65u32 {
+            let left = a[(z * 65 + 64) as usize];
+            let right = b[(z * 65) as usize];
+            assert_eq!(left.position, right.position);
+            assert_eq!(left.normal, right.normal);
+            let normal = glam::Vec3::from(left.normal);
+            assert!(normal.is_finite());
+            assert!((normal.length() - 1.0).abs() < 1e-5);
         }
     }
 }

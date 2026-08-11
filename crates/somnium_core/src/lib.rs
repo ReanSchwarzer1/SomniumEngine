@@ -51,6 +51,7 @@ pub mod context;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
 pub mod scene_serial;
@@ -61,13 +62,16 @@ pub mod time;
 
 pub use app::{Engine, GameApp};
 pub use config::EngineConfig;
-pub use context::EngineContext;
+pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
-    CreateEntityCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
+    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
     ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
 };
 pub use error::EngineError;
 pub use event::{EngineEvent, InputState};
+pub use landscape::{
+    BuiltLandscape, DEFAULT_LANDSCAPE_VERSION, DefaultLandscapePreset, create_default_landscape,
+};
 pub use scene_serial::{parse_scene, save_scene};
 pub use time::TimeState;
 
@@ -78,7 +82,6 @@ pub use winit::keyboard::KeyCode;
 // Re-export core ECS types so game code can use them from `somnium_core`.
 pub use somnium_ecs::{Component, ComponentBundle, Entity, World};
 pub use somnium_ecs::{ComponentId, ComponentSet};
-
 
 /// ECS Component for a mesh instance.
 #[derive(Debug, Clone, Copy)]
@@ -206,6 +209,8 @@ pub struct LightComponent {
     pub inner_angle: f32,
     /// Spot outer cone half-angle (radians). Zero intensity at this edge.
     pub outer_angle: f32,
+    /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.010 lux.
+    pub moon_intensity: f32,
 }
 
 impl LightComponent {
@@ -246,6 +251,7 @@ impl LightComponent {
             range: 0.0,
             inner_angle: 0.0,
             outer_angle: 0.0,
+            moon_intensity: 0.010,
         }
     }
 
@@ -260,6 +266,7 @@ impl LightComponent {
             range,
             inner_angle: 0.0,
             outer_angle: 0.0,
+            moon_intensity: 0.0,
         }
     }
 
@@ -274,6 +281,7 @@ impl LightComponent {
             range,
             inner_angle,
             outer_angle,
+            moon_intensity: 0.0,
         }
     }
 }
@@ -460,7 +468,10 @@ pub struct VoxelTerrainComponent {
 
 impl Default for VoxelTerrainComponent {
     fn default() -> Self {
-        Self { radius_chunks: 5, seed: 1337 }
+        Self {
+            radius_chunks: 5,
+            seed: 1337,
+        }
     }
 }
 impl somnium_ecs::Component for VoxelTerrainComponent {}
@@ -629,18 +640,16 @@ pub struct PostProcessComponent {
     pub fxaa_enabled: bool,
     /// Scene-wide strength of image-based (indirect) light (Phase 22C).
     ///
-    /// Phase 19 replaced a flat 3% ambient with full sky irradiance, but with
-    /// no ambient occlusion that light reaches shadowed surfaces unattenuated
-    /// and washes shadows out. This used to be a hardcoded `0.35` in three
-    /// shaders; it is a dial now so the trade-off between flat-and-bright and
-    /// contrasty-and-dark is the artist's to make until SSAO lands.
+    /// Phase 25M-2: physically neutral by default. GTAO, material occlusion,
+    /// specular occlusion, and ReSTIR GI now provide the indirect-light
+    /// visibility that the old pre-AO `0.35` workaround was waiting for.
     pub ibl_intensity: f32,
 }
 
 impl Default for PostProcessComponent {
     fn default() -> Self {
         Self {
-            ibl_intensity: 0.35,
+            ibl_intensity: 1.0,
             ev100: light_units::ev100::SUNLIGHT,
             aperture_f_stops: 16.0,
             shutter_speed_s: 1.0 / 100.0,
@@ -784,12 +793,20 @@ impl PostProcessComponent {
 
     /// Vignette strength to send to the renderer (0 when disabled).
     pub fn effective_vignette(&self) -> f32 {
-        if self.vignette_enabled { self.vignette_strength.max(0.0) } else { 0.0 }
+        if self.vignette_enabled {
+            self.vignette_strength.max(0.0)
+        } else {
+            0.0
+        }
     }
 
     /// Chromatic-aberration strength to send to the renderer (0 when disabled).
     pub fn effective_ca(&self) -> f32 {
-        if self.ca_enabled { self.ca_strength.max(0.0) } else { 0.0 }
+        if self.ca_enabled {
+            self.ca_strength.max(0.0)
+        } else {
+            0.0
+        }
     }
 }
 impl somnium_ecs::Component for PostProcessComponent {}
@@ -910,7 +927,7 @@ pub fn propagate_transforms(world: &mut World) {
     let mut stack: Vec<(Entity, glam::Mat4)> = Vec::new();
     for &(entity, local_mat) in &all_entities {
         let is_root = match world.get::<Parent>(entity) {
-            None    => true,
+            None => true,
             Some(p) => p.entity == Entity::DANGLING || !world.is_alive(p.entity),
         };
         if is_root {
@@ -938,7 +955,9 @@ pub fn propagate_transforms(world: &mut World) {
     // Phase 2 — write WorldTransform. All immutable borrows from phase 1 are
     // released here; &mut self borrows are safe.
     for (entity, world_mat) in stack {
-        let _ = world.get_mut::<WorldTransform>(entity).map(|wt| wt.0 = world_mat);
+        let _ = world
+            .get_mut::<WorldTransform>(entity)
+            .map(|wt| wt.0 = world_mat);
     }
 }
 
@@ -952,7 +971,7 @@ pub struct ParticleState {
     /// World-space velocity (m/s).
     pub velocity: glam::Vec3,
     /// Current age in seconds (0 = just born).
-    pub age:      f32,
+    pub age: f32,
     /// Total lifetime in seconds.
     pub lifetime: f32,
 }
@@ -966,53 +985,52 @@ pub struct ParticleState {
 pub struct ParticleEmitter {
     // ── Emitter parameters ────────────────────────────────────────────────────
     /// Maximum number of live particles at once.
-    pub max_particles:  u32,
+    pub max_particles: u32,
     /// New particles spawned per second.
-    pub spawn_rate:     f32,
+    pub spawn_rate: f32,
     /// Each particle's lifetime in seconds.
-    pub lifetime:       f32,
+    pub lifetime: f32,
     /// Initial speed in m/s (direction is randomized within `spread_angle`).
-    pub initial_speed:  f32,
+    pub initial_speed: f32,
     /// Cone half-angle (radians) for direction randomization (0 = straight up).
-    pub spread_angle:   f32,
+    pub spread_angle: f32,
     /// Particle size at birth (metres, billboard half-width).
-    pub size_start:     f32,
+    pub size_start: f32,
     /// Particle size at end of life.
-    pub size_end:       f32,
+    pub size_end: f32,
     /// Linear RGBA color at birth.
-    pub color_start:    [f32; 4],
+    pub color_start: [f32; 4],
     /// Linear RGBA color at end of life.
-    pub color_end:      [f32; 4],
+    pub color_end: [f32; 4],
     /// Downward gravity acceleration (m/s²).
-    pub gravity:        f32,
+    pub gravity: f32,
 
     // ── Runtime state (not user-facing) ──────────────────────────────────────
     /// Live particles owned by this emitter.
-    pub particles:       Vec<ParticleState>,
+    pub particles: Vec<ParticleState>,
     /// Fractional carry-over for sub-frame spawning.
-    pub spawn_accum:     f32,
+    pub spawn_accum: f32,
 }
 
 impl Default for ParticleEmitter {
     fn default() -> Self {
         Self {
             max_particles: 1000,
-            spawn_rate:    100.0,
-            lifetime:      3.0,
+            spawn_rate: 100.0,
+            lifetime: 3.0,
             initial_speed: 5.0,
-            spread_angle:  0.8,
-            size_start:    1.0,
-            size_end:      0.2,
-            color_start:   [1.0, 0.4, 0.1, 1.0],
-            color_end:     [0.2, 0.0, 0.0, 0.0],
-            gravity:       1.0,
-            particles:     Vec::new(),
-            spawn_accum:   0.0,
+            spread_angle: 0.8,
+            size_start: 1.0,
+            size_end: 0.2,
+            color_start: [1.0, 0.4, 0.1, 1.0],
+            color_end: [0.2, 0.0, 0.0, 0.0],
+            gravity: 1.0,
+            particles: Vec::new(),
+            spawn_accum: 0.0,
         }
     }
 }
 impl somnium_ecs::Component for ParticleEmitter {}
-
 
 /// Simulate all particle emitters and return a flat list of GPU instances.
 ///
@@ -1034,19 +1052,22 @@ pub fn simulate_particles(
 
     for entity in emitter_entities {
         // Borrow world piecemeal to satisfy the borrow checker.
-        let origin = world.get::<WorldTransform>(entity)
+        let origin = world
+            .get::<WorldTransform>(entity)
             .map(|wt| glam::Vec3::new(wt.0.w_axis.x, wt.0.w_axis.y, wt.0.w_axis.z))
             .or_else(|| world.get::<Transform>(entity).map(|t| t.translation))
             .unwrap_or(glam::Vec3::ZERO);
 
-        let Some(emitter) = world.get_mut::<ParticleEmitter>(entity) else { continue };
+        let Some(emitter) = world.get_mut::<ParticleEmitter>(entity) else {
+            continue;
+        };
 
         // ── 1. Advance existing particles ─────────────────────────────────────
         let gravity = emitter.gravity;
         emitter.particles.retain_mut(|p| {
             p.age += dt;
             p.velocity.y -= gravity * dt;
-            p.position   += p.velocity * dt;
+            p.position += p.velocity * dt;
             p.age < p.lifetime
         });
 
@@ -1054,33 +1075,37 @@ pub fn simulate_particles(
         emitter.spawn_accum += emitter.spawn_rate * dt;
         let to_spawn = emitter.spawn_accum.floor() as u32;
         emitter.spawn_accum -= to_spawn as f32;
-        let available = emitter.max_particles.saturating_sub(emitter.particles.len() as u32);
+        let available = emitter
+            .max_particles
+            .saturating_sub(emitter.particles.len() as u32);
         let count = to_spawn.min(available);
 
-        let speed         = emitter.initial_speed;
-        let spread        = emitter.spread_angle;
-        let lifetime      = emitter.lifetime;
+        let speed = emitter.initial_speed;
+        let spread = emitter.spread_angle;
+        let lifetime = emitter.lifetime;
 
         for i in 0..count {
             // Deterministic LCG pseudo-random — good enough for particles.
-            let seed = frame.wrapping_mul(1_000_003).wrapping_add((i as u64).wrapping_mul(6_364_136_223_846_793_005));
-            let r1 = ((seed >> 33) & 0xFFFF) as f32 / 65535.0;       // 0..1
+            let seed = frame
+                .wrapping_mul(1_000_003)
+                .wrapping_add((i as u64).wrapping_mul(6_364_136_223_846_793_005));
+            let r1 = ((seed >> 33) & 0xFFFF) as f32 / 65535.0; // 0..1
             let r2 = ((seed >> 17) & 0xFFFF) as f32 / 65535.0 * 2.0 * std::f32::consts::PI;
             let theta = r1 * spread;
             let dir = glam::Vec3::new(theta.sin() * r2.cos(), theta.cos(), theta.sin() * r2.sin());
             emitter.particles.push(ParticleState {
                 position: origin,
                 velocity: dir * speed,
-                age:      0.0,
+                age: 0.0,
                 lifetime,
             });
         }
 
         // ── 3. Emit GPU instances ─────────────────────────────────────────────
-        let size_start   = emitter.size_start;
-        let size_end     = emitter.size_end;
-        let color_start  = emitter.color_start;
-        let color_end    = emitter.color_end;
+        let size_start = emitter.size_start;
+        let size_end = emitter.size_end;
+        let color_start = emitter.color_start;
+        let color_end = emitter.color_end;
 
         for p in &emitter.particles {
             let frac = (p.age / p.lifetime).clamp(0.0, 1.0);
@@ -1105,8 +1130,24 @@ pub fn simulate_particles(
 // ── Water Component ─────────────────────────────────────────────────────────
 
 /// Configuration for the procedural water shader (Phase 13).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterComponent {
+    /// Stable handle into renderer-owned `WaterBodyData`.
+    pub water_id: u32,
+    /// Renderer terrain whose local space and bathymetry this body follows.
+    pub terrain_id: u32,
+    /// 0 = legacy/unset, 1 = baked Great Lakes lake preset.
+    pub preset: u32,
+    /// 0 = lake. Reserved for ocean and river body types.
+    pub body_kind: u32,
+    /// Surface datum in the parent terrain's local metres.
+    pub surface_level: f32,
+    /// Deepest baked point below the datum.
+    pub max_depth: f32,
+    /// Terrain-local `[min_x, min_z, max_x, max_z]` coverage bounds.
+    pub bounds: [f32; 4],
+    /// Rendering/gameplay enable flag stored as a scalar for scene stability.
+    pub enabled: bool,
     /// Deep water color.
     pub deep_color: [f32; 4],
     /// Shallow water color (near edges/shore).
@@ -1129,11 +1170,49 @@ pub struct WaterComponent {
     pub wave_dir_b: [f32; 2],
     /// Wave blending factor.
     pub wave_blend: f32,
+    /// Dominant Gerstner wavelength in metres.
+    pub wave_length_a: f32,
+    /// Secondary Gerstner wavelength in metres.
+    pub wave_length_b: f32,
+    /// Multiplier on deep-water dispersion speed.
+    pub wave_speed: f32,
+    /// Horizontal Gerstner displacement, clamped below breaking.
+    pub wave_steepness: f32,
+    /// RGB Beer-Lambert absorption coefficients in inverse metres.
+    pub absorption: [f32; 3],
+    /// RGB single-scattering coefficients in inverse metres.
+    pub scattering: [f32; 3],
+    /// Water microfacet roughness.
+    pub roughness: f32,
+    /// Henyey-Greenstein forward-scattering asymmetry.
+    pub anisotropy: f32,
+    /// Screen-space reflection contribution before environment fallback.
+    pub ssr_strength: f32,
+    /// Blend from deterministic Gerstner (0) to the two-cascade spectral tier (1).
+    pub spectrum_blend: f32,
+    /// Authored wind speed for cinematic wave presets, metres per second.
+    pub wind_speed: f32,
+    /// Seconds for crest foam history to decay toward zero.
+    pub foam_decay: f32,
+    /// Jacobian compression threshold that begins crest foam.
+    pub foam_threshold: f32,
+    /// Multiplier for underwater projected caustics.
+    pub caustic_strength: f32,
+    /// Whether this body participates in the underwater medium pass.
+    pub underwater_enabled: bool,
 }
 
 impl Default for WaterComponent {
     fn default() -> Self {
         Self {
+            water_id: u32::MAX,
+            terrain_id: u32::MAX,
+            preset: 0,
+            body_kind: 0,
+            surface_level: 0.0,
+            max_depth: 0.0,
+            bounds: [-10.0, -10.0, 10.0, 10.0],
+            enabled: true,
             deep_color: [0.01, 0.05, 0.15, 0.9],
             shallow_color: [0.1, 0.4, 0.6, 0.5],
             edge_color: [0.8, 0.9, 1.0, 1.0],
@@ -1145,6 +1224,77 @@ impl Default for WaterComponent {
             wave_dir_a: [1.0, 0.0],
             wave_dir_b: [0.0, 1.0],
             wave_blend: 0.5,
+            wave_length_a: 18.0,
+            wave_length_b: 11.0,
+            wave_speed: 1.0,
+            wave_steepness: 0.35,
+            absorption: [0.18, 0.055, 0.025],
+            scattering: [0.012, 0.035, 0.055],
+            roughness: 0.12,
+            anisotropy: 0.35,
+            ssr_strength: 0.85,
+            spectrum_blend: 0.75,
+            wind_speed: 8.0,
+            foam_decay: 0.9,
+            foam_threshold: 0.08,
+            caustic_strength: 1.0,
+            underwater_enabled: true,
+        }
+    }
+}
+
+impl WaterComponent {
+    /// The authored Phase IV Great Lakes body paired with a 1024 m terrain.
+    pub fn great_lakes(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
+        Self {
+            water_id,
+            terrain_id,
+            preset: 1,
+            body_kind: 0,
+            surface_level: somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES,
+            max_depth: somnium_renderer::terrain::DEFAULT_WATER_DEPTH_METRES,
+            bounds,
+            amplitude: 0.35,
+            coord_scale: [1.0, 1.0],
+            wave_dir_a: [0.944, 0.330],
+            wave_dir_b: [-0.243, 0.970],
+            wave_length_a: 18.0,
+            wave_length_b: 11.0,
+            wave_speed: 0.85,
+            wave_steepness: 0.42,
+            edge_color: [0.88, 0.96, 1.0, 1.0],
+            edge_scale: 1.35,
+            absorption: [0.22, 0.070, 0.032],
+            scattering: [0.016, 0.045, 0.065],
+            roughness: 0.16,
+            anisotropy: 0.45,
+            ssr_strength: 0.9,
+            spectrum_blend: 0.64,
+            wind_speed: 7.5,
+            foam_decay: 0.9,
+            foam_threshold: 0.08,
+            caustic_strength: 0.85,
+            underwater_enabled: true,
+            ..Self::default()
+        }
+    }
+
+    /// Renderer-facing descriptor; large textures and query arrays stay out of ECS.
+    pub fn descriptor(self) -> somnium_renderer::water_body::WaterBodyDescriptor {
+        somnium_renderer::water_body::WaterBodyDescriptor {
+            water_id: self.water_id,
+            terrain_id: self.terrain_id,
+            preset: self.preset,
+            surface_level: self.surface_level,
+            max_depth: self.max_depth,
+            bounds: self.bounds,
+            amplitude: self.amplitude,
+            wave_dir_a: self.wave_dir_a,
+            wave_dir_b: self.wave_dir_b,
+            wave_length_a: self.wave_length_a,
+            wave_length_b: self.wave_length_b,
+            wave_speed: self.wave_speed,
+            wave_steepness: self.wave_steepness,
         }
     }
 }
@@ -1154,6 +1304,11 @@ impl somnium_ecs::Component for WaterComponent {}
 #[cfg(test)]
 mod camera_speed_tests {
     use super::*;
+
+    #[test]
+    fn directional_light_uses_the_accepted_moonlight_default() {
+        assert_eq!(LightComponent::directional(100_000.0).moon_intensity, 0.010);
+    }
 
     #[test]
     fn slider_ends_map_to_the_configured_range() {

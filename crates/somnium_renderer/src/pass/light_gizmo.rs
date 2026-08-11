@@ -69,8 +69,14 @@ const MARKER_SIZE: f32 = 0.25;
 const DIR_ARROW_LEN: f32 = 2.0;
 
 fn push_line(out: &mut Vec<LineVertex>, a: glam::Vec3, b: glam::Vec3, color: [f32; 3]) {
-    out.push(LineVertex { position: a.to_array(), color });
-    out.push(LineVertex { position: b.to_array(), color });
+    out.push(LineVertex {
+        position: a.to_array(),
+        color,
+    });
+    out.push(LineVertex {
+        position: b.to_array(),
+        color,
+    });
 }
 
 /// A closed circle centred at `center`, spanned by the orthonormal pair `u`/`v`.
@@ -100,9 +106,24 @@ fn push_wire_sphere(out: &mut Vec<LineVertex>, center: glam::Vec3, radius: f32, 
 
 /// Small axis cross marking the light's origin.
 fn push_marker(out: &mut Vec<LineVertex>, center: glam::Vec3, size: f32, color: [f32; 3]) {
-    push_line(out, center - glam::Vec3::X * size, center + glam::Vec3::X * size, color);
-    push_line(out, center - glam::Vec3::Y * size, center + glam::Vec3::Y * size, color);
-    push_line(out, center - glam::Vec3::Z * size, center + glam::Vec3::Z * size, color);
+    push_line(
+        out,
+        center - glam::Vec3::X * size,
+        center + glam::Vec3::X * size,
+        color,
+    );
+    push_line(
+        out,
+        center - glam::Vec3::Y * size,
+        center + glam::Vec3::Y * size,
+        color,
+    );
+    push_line(
+        out,
+        center - glam::Vec3::Z * size,
+        center + glam::Vec3::Z * size,
+        color,
+    );
 }
 
 /// A cone opening from `apex` along `dir` with the given half-angle.
@@ -227,20 +248,19 @@ impl LightGizmoPass {
         surface_format: wgpu::TextureFormat,
         view_buffer: &wgpu::Buffer,
     ) -> Self {
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Light Gizmo Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Light Gizmo Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Light Gizmo Bind Group"),
@@ -314,7 +334,12 @@ impl LightGizmoPass {
             cache: None,
         });
 
-        Self { pipeline, bind_group, vertex_buffer, capacity: INITIAL_CAPACITY }
+        Self {
+            pipeline,
+            bind_group,
+            vertex_buffer,
+            capacity: INITIAL_CAPACITY,
+        }
     }
 
     /// Upload `lines` and draw them over `surface_view`. No-op when empty.
@@ -407,7 +432,14 @@ mod tests {
         // which is what makes the gizmo show the light's true reach.
         let d = desc(LightGizmoKind::Spot);
         let mut out = Vec::new();
-        push_cone(&mut out, d.position, glam::Vec3::NEG_Y, d.outer_angle, d.range, [1.0; 3]);
+        push_cone(
+            &mut out,
+            d.position,
+            glam::Vec3::NEG_Y,
+            d.outer_angle,
+            d.range,
+            [1.0; 3],
+        );
         for v in &out {
             let p = glam::Vec3::from_array(v.position);
             let dist = (p - d.position).length();
@@ -440,7 +472,10 @@ mod tests {
         d.direction = glam::Vec3::ZERO;
         let lines = build_light_gizmo_lines(&[d]);
         for v in &lines {
-            assert!(v.position.iter().all(|c| c.is_finite()), "non-finite vertex");
+            assert!(
+                v.position.iter().all(|c| c.is_finite()),
+                "non-finite vertex"
+            );
         }
     }
 }

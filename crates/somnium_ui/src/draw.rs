@@ -5,7 +5,7 @@
 // DrawingContext produces CPU-side vertex/index lists consumed by UiPass.
 
 use crate::{
-    font::{FontAtlas, FONT_ATLAS_TEXTURE_ID},
+    font::{FONT_ATLAS_TEXTURE_ID, FontAtlas},
     types::Rect,
 };
 use glam::Vec2;
@@ -15,17 +15,25 @@ use glam::Vec2;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub pos:   [f32; 2],
-    pub uv:    [f32; 2],
-    pub color: [u8; 4],  // RGBA, premultiplied alpha
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+    pub color: [u8; 4], // RGBA, premultiplied alpha
 }
 
 impl Vertex {
     pub fn colored(pos: Vec2, color: [u8; 4]) -> Self {
-        Self { pos: pos.into(), uv: [0.0, 0.0], color }
+        Self {
+            pos: pos.into(),
+            uv: [0.0, 0.0],
+            color,
+        }
     }
     pub fn textured(pos: Vec2, uv: Vec2, color: [u8; 4]) -> Self {
-        Self { pos: pos.into(), uv: uv.into(), color }
+        Self {
+            pos: pos.into(),
+            uv: uv.into(),
+            color,
+        }
     }
 }
 
@@ -33,11 +41,11 @@ impl Vertex {
 /// All draws are alpha-blended. Texture = None means use solid color from vertex.
 #[derive(Clone, Debug)]
 pub struct DrawCommand {
-    pub clip_rect:    Rect,
+    pub clip_rect: Rect,
     /// wgpu texture-view index into UiPass's texture array (None = white 1×1 pixel).
-    pub texture_id:   Option<u32>,
+    pub texture_id: Option<u32>,
     pub index_offset: u32,
-    pub index_count:  u32,
+    pub index_count: u32,
 }
 
 /// Accumulated draw list for one UI frame.
@@ -46,11 +54,11 @@ pub struct DrawCommand {
 /// then uploads `vertices` and `indices` to GPU and issues one draw per command.
 /// `font_atlas` persists across frames (not cleared by `clear()`).
 pub struct DrawingContext {
-    pub vertices:   Vec<Vertex>,
-    pub indices:    Vec<u32>,
-    pub commands:   Vec<DrawCommand>,
-    clip_stack:     Vec<Rect>,
-    current_clip:   Rect,
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub commands: Vec<DrawCommand>,
+    clip_stack: Vec<Rect>,
+    current_clip: Rect,
     pub font_atlas: FontAtlas,
 }
 
@@ -58,12 +66,12 @@ impl DrawingContext {
     pub fn new(screen_w: f32, screen_h: f32) -> Self {
         let root_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
         Self {
-            vertices:    Vec::new(),
-            indices:     Vec::new(),
-            commands:    Vec::new(),
-            clip_stack:  Vec::new(),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            commands: Vec::new(),
+            clip_stack: Vec::new(),
             current_clip: root_clip,
-            font_atlas:  FontAtlas::new(),
+            font_atlas: FontAtlas::new(),
         }
     }
 
@@ -116,22 +124,25 @@ impl DrawingContext {
         let base = self.vertices.len() as u32;
         let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
         self.vertices.extend_from_slice(&[
-            Vertex::colored(Vec2::new(x,     y    ), color),
-            Vertex::colored(Vec2::new(x + w, y    ), color),
+            Vertex::colored(Vec2::new(x, y), color),
+            Vertex::colored(Vec2::new(x + w, y), color),
             Vertex::colored(Vec2::new(x + w, y + h), color),
-            Vertex::colored(Vec2::new(x,     y + h), color),
+            Vertex::colored(Vec2::new(x, y + h), color),
         ]);
-        self.push_indices(base,   base+1, base+2);
-        self.push_indices(base+2, base+3, base  );
+        self.push_indices(base, base + 1, base + 2);
+        self.push_indices(base + 2, base + 3, base);
     }
 
     /// Solid-color border (outline only).
     pub fn push_rect_border(&mut self, rect: Rect, thickness: f32, color: [u8; 4]) {
         let t = thickness;
-        self.push_rect_filled(Rect::new(rect.x,             rect.y,             rect.w,     t    ), color); // top
-        self.push_rect_filled(Rect::new(rect.x,             rect.y + rect.h - t, rect.w,    t    ), color); // bottom
-        self.push_rect_filled(Rect::new(rect.x,             rect.y + t,         t,    rect.h - 2.0*t), color); // left
-        self.push_rect_filled(Rect::new(rect.x + rect.w - t, rect.y + t,         t, rect.h - 2.0*t), color); // right
+        self.push_rect_filled(Rect::new(rect.x, rect.y, rect.w, t), color); // top
+        self.push_rect_filled(Rect::new(rect.x, rect.y + rect.h - t, rect.w, t), color); // bottom
+        self.push_rect_filled(Rect::new(rect.x, rect.y + t, t, rect.h - 2.0 * t), color); // left
+        self.push_rect_filled(
+            Rect::new(rect.x + rect.w - t, rect.y + t, t, rect.h - 2.0 * t),
+            color,
+        ); // right
     }
 
     /// Render a run of text using the font atlas.
@@ -139,21 +150,16 @@ impl DrawingContext {
     /// `origin` is the top-left corner of the text block (above the ascenders).
     /// Glyphs are rasterized on first use and cached in the atlas permanently.
     /// Emits `DrawCommand` entries with `texture_id = Some(FONT_ATLAS_TEXTURE_ID)`.
-    pub fn push_text(
-        &mut self,
-        text:    &str,
-        origin:  Vec2,
-        font_id: u8,
-        px:      f32,
-        color:   [u8; 4],
-    ) {
+    pub fn push_text(&mut self, text: &str, origin: Vec2, font_id: u8, px: f32, color: [u8; 4]) {
         // Ascent: distance from top-of-line to baseline (positive).
         let ascent = self.font_atlas.ascent(px, font_id);
         let baseline_y = origin.y + ascent;
         let mut cursor_x = origin.x;
 
         for ch in text.chars() {
-            if ch == '\n' { continue; } // multi-line not yet supported in single Text widget
+            if ch == '\n' {
+                continue;
+            } // multi-line not yet supported in single Text widget
             let Some(info) = self.font_atlas.get_or_rasterize(ch, px, font_id) else {
                 cursor_x += px * 0.5;
                 continue;
@@ -192,12 +198,12 @@ impl DrawingContext {
         let base = self.vertices.len() as u32;
         let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
         self.vertices.extend_from_slice(&[
-            Vertex::textured(Vec2::new(x,     y    ), uv[0], color),
-            Vertex::textured(Vec2::new(x + w, y    ), uv[1], color),
+            Vertex::textured(Vec2::new(x, y), uv[0], color),
+            Vertex::textured(Vec2::new(x + w, y), uv[1], color),
             Vertex::textured(Vec2::new(x + w, y + h), uv[2], color),
-            Vertex::textured(Vec2::new(x,     y + h), uv[3], color),
+            Vertex::textured(Vec2::new(x, y + h), uv[3], color),
         ]);
-        self.push_indices(base,   base+1, base+2);
-        self.push_indices(base+2, base+3, base  );
+        self.push_indices(base, base + 1, base + 2);
+        self.push_indices(base + 2, base + 3, base);
     }
 }

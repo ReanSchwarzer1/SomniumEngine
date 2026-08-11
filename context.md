@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-09  
-> **Current phase:** 14 SSS (heightmap terrain — COMPLETE; chunked CDLOD-style heightmap, splatmap PBR painting, sculpting brushes, editor terrain mode. Voxel world also complete, §19)  
+> **Last updated:** 2026-08-11
+> **Current phase:** Phase IV complete (IV-A through IV-J)
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -1217,16 +1217,15 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
+| 25M-2 | 🟡 Automated complete | **Sunset & Night Sky Visual Fixes, audited 2026-08-11.** **(A)** The authoritative `PostProcessComponent` default is now `ibl_intensity = 1.0`. **(B)** CSMs include a 1 km caster-depth extension patterned after Flax's extended CSM culling range; receiver bias uses the true triangle plane, and contact-shadow thickness is compared in linear view-space metres instead of nonlinear NDC depth. **(C)** Stars use 3×3×3 neighbour evaluation, smooth angular falloff, a magnitude distribution and Milky Way concentration. **(D)** The lunar orbit has a 29.53-day synodic period and 5.14° inclination; the disc uses the real 0.2666° angular radius, tangent-plane sphere normal, phase lighting and limb darkening, with default illuminance tuned to 0.010 lux. **(E)** Palette vegetation retains its foliage/double-sided/transmission semantics, faces its geometric normal toward the viewer, uses wrapped backside transmission without an ambient albedo glow, and has a roughness floor. Moon BRDF evaluation no longer applies N·L twice, and ReSTIR GI invalidates materially changed light history, rejects unsupported emissive hits, and falls back to night IBL when sunlight is zero. Automated tests pass; night appearance is user-confirmed, while the daytime shadow correction awaits the same on-screen confirmation. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ✅ Complete (macro tier + detail budget; no toroidal clipmap — see §25.13) | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
 | 25G | ⬜ Planned | **Biplanar upgrade for cliffs.** Triplanar projection already runs on steep slopes, but it costs three sample sets per map. Biplanar takes the two dominant axes instead of three, at close to the same quality for two thirds of the taps — which matters once 25D and 25F have multiplied the sample count. Reference: `bevy-plugins/bevy_triplanar_splatting-main/src/shaders/biplanar.wgsl`. |
-| 25H | ✅ Complete | **Parallax occlusion on detail materials.** Terrain is the surface most often viewed at a grazing angle, and a flat normal map reads as a decal on a plane exactly there. POM against the detail height map (already loaded for 25E, so no new texture budget) gives rock and gravel real silhouette displacement. Bound to the detail clipmap's inner rings only, since it is worthless past a few metres. |
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
-| 25M-2 | ⬜ Planned | **What 25M left behind.** Five faults visible once the sun stopped lighting the world from underground, four with a cause confirmed in the source. **(A)** Dusk is all orange with black shadows because `ibl_intensity` is still **0.35** — a fudge whose own comment says it is waiting for ambient occlusion, which the engine has had since 24I, 25K and 24L. **(B)** Blocky terrain shadows at a low sun: `cascade.rs` builds `near = 0, far = 4 * radius` with the eye at `centre + light_dir * radius * 2`, so a caster outside that slab is simply absent from the map — the hard straight boundaries are missing casters, not filtering. UE fits caster extent along the light axis separately; O3DE scales bias by `tanθ` and prefers normal-offset. **(C)** Stars are rectangles: `star_field` clips a star to the cubic cell that owns it, and `pow(dot, 40000)` in fp32 is a step function, so a cell-clipped step is a rectangle. **(D)** There is no moon — only a `pow(dot, 700)` halo with no disc, phase or limb darkening. **(E)** At night the only surviving term is cubemap specular, so everything reads as wet metal; check first whether the environment cubemap is even regenerated when the sun moves. See §25.15.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
@@ -3285,7 +3284,191 @@ with `SOMNIUM_SUN_ELEVATION`.
 
 ---
 
+### 25.16 Phase 25M-2 audit and correction — 2026-08-11
+
+The completion handover was checked against both call sites and the cited
+reference implementations. The broad A–D work was present, but several details
+meant the night result could still be black, green or unstable:
+
+- The renderer's `ibl_intensity = 1.0` initializer was overwritten every frame
+  by `PostProcessComponent::default()`, which was still 0.35. The component is
+  the authoritative default and is now 1.0.
+- `evaluate_brdf` already contains N·L, so the moon path's second N·L made its
+  response N·L² and its attempted backside factor could never revive a backface.
+  The moon now follows the same single-evaluation contract as the sun.
+- Two-sided foliage was oriented toward the sun. Once the sun crossed the
+  horizon this turned the geometric normal downward, also corrupting moonlight
+  and shadow bias. It is now oriented toward the viewer, shadow lookup uses the
+  unperturbed geometric normal, and the transmission lobe follows Unreal's
+  wrapped backside-lighting shape without the old constant green ambient term.
+- The foliage palette changed imported `BLEND` materials to `MASK` but did not
+  preserve their vegetation semantics. Those materials now become foliage,
+  double-sided and (when the source supplies no value) 50% transmissive; alpha
+  sidecar detection also sets the foliage flag its own comment promised.
+- ReSTIR GI reservoirs survived material changes to sun direction and colour,
+  preserving daytime green bounce into a night frame. An accumulated 0.25° or
+  2% colour change now invalidates GI history before temporal or spatial reuse;
+  the threshold preserves reuse while the sun animates smoothly.
+- The one-bounce GI estimator only samples direct sunlight at its bounce point.
+  At night it nevertheless wrote an alpha-valid black result, replacing sky
+  IBL, while rare emissive-mesh hits became the moving yellow/green fireflies.
+  Zero-sun frames now emit an invalid traced result so IBL remains active, and
+  emissive hits are rejected as in Bevy Solari until they can be importance
+  sampled instead of discovered by chance.
+- The earlier CSM change projected only receiver-frustum corners and therefore
+  could not discover off-frustum casters. Cascades now reserve a 1 km depth
+  extension, following Flax's extended directional-shadow culling range. The
+  erroneous conversion of a world-space texel length directly into NDC depth
+  was removed; world-space geometric-normal offset remains the grazing bias.
+- The moon threshold represented a disc about six times too wide and its sphere
+  normal was not tangent at the limb. It now uses a 0.2666° angular radius and a
+  tangent-plane reconstruction with derivative antialiasing.
+- The moonlight default is 0.010 lux at all three authoritative initialization
+  layers (scene component, renderer state and GPU-light fallback), matching the
+  user-accepted night capture.
+- The remaining daytime polygons were not PCF resolution or terrain parallax.
+  Receiver offset was using an interpolated vertex normal mislabeled as
+  `geo_normal`, which can push a lookup behind its own coarse terrain triangle;
+  it now uses the true face normal. Contact shadows also compared their 5 cm
+  thickness against nonlinear NDC depth, turning that threshold into many
+  metres across a landscape. They now reconstruct scene depth and compare
+  linear view-space metres.
+- Below-horizon solar transmittance again clamps the LUT direction to the
+  horizon while the separate horizon fade switches direct sunlight off. This
+  avoids integrating a ray pinned to the planet surface.
+
+`cargo check --bin hello_engine` and the automated suites pass, including shader
+validation and lunar full/new-moon direction tests. Workspace-wide
+`cargo fmt --all -- --check` still reports pre-existing formatting drift in
+unrelated files. A deterministic −10° capture before the GI correction showed
+the reported moving yellow/green emissive blotches; the same capture afterward
+has stable IBL fill without them. Its telemetry was `terrain px=921600, mesh
+px=0`: although 18,278 foliage instances and both grass assets loaded, that
+camera did not place foliage in the visibility buffer. Final foliage and +2°
+dusk-shadow acceptance therefore remain and this phase is not marked visually
+complete until those checks are recorded.
+
+---
+
+## 17.17 Phase IV-A–IV-E — Great Lakes landscape and finite water
+
+**Completed 2026-08-11.** The default heightmap is now a deterministic
+1025×1025 16-bit derivative of Motion Forge Pictures' FLOAT32 Great Lakes EXR.
+The importer preserves floating-point EXR channels, verifies the audited source
+range, area-resamples height, masks water out of the sRGB macro-colour map, and
+bakes a 2048×2048 water mask, shoreline SDF, and 0–12 m synthetic bathymetry.
+The baked dry terrain floor is 0.35 m above its original 15 m extraction datum.
+The accepted default runtime water level is 16.1 m, which keeps the visible
+surface above the residual terrain-grid intersection while the authored wet mask
+still prevents water from spreading across dry land. This avoids coplanar
+ground and water.
+
+The daytime triangle-shaped terrain shadows were not present in the source
+height field. Phase 25M-2 had made shadow receiver bias use a per-face normal for
+all geometry, turning each terrain triangle into a different bias plane. Terrain
+now uses its continuous interpolated geometric normal; ordinary meshes retain
+the face-normal path. Debug modes 13–17 expose terrain LOD, triangle edges,
+geometric and receiver-bias normals, shadow factor, and contact-shadow factor.
+
+`WaterComponent` is now a small serializable ECS handle containing its terrain
+relationship, preset, body kind, bounds, datum, maximum depth, enabled state,
+and editable optics/wave settings. Heavy mask/depth/SDF CPU and GPU data lives
+in the renderer's `WaterBodyRegistry`. Default startup and **Create → Terrain**
+both create a `Terrain` and child `Water` hierarchy; composite create/delete
+undo, duplication, inspection, serialization, and resource reconciliation are
+tested. Asset provenance is in `assets/terrain/great_lakes/README.md`; reference
+patterns are in `ATTRIBUTION.md` §13.31.
+
+Validation: `cargo check --workspace --all-targets`; 202 renderer tests, 31 core
+tests, and 3 UI tests pass in release mode. The importer was executed twice and
+all output hashes matched. Current release-mode live wgpu evidence is organized
+under `dev records/phase IV` rather than in the repository root.
+
+**IV-D/E completed 2026-08-11.** The broad terrain-sized water plane is gone.
+Each body builds a compact 2 m terrain-local mesh only over wet coarse cells,
+then the full-resolution baked mask/depth/SDF performs exact fragment coverage.
+The same deterministic four-band Gerstner contract drives the WGSL surface and
+CPU surface-height/normal/depth/velocity/containment queries. Water writes
+surface coverage plus motion vectors, and TAA uses those vectors only on water
+while preserving opaque depth reprojection elsewhere.
+
+Surface optics now use validated screen-space refraction, reconstructed
+Beer–Lambert path length, RGB absorption and single scattering, dielectric
+`F0 = 0.02037`, GGX sun/moon/environment lighting, bounded SSR with environment
+fallback, and SDF shoreline foam. Complete normal/ORM mip chains plus
+pixel-footprint slope filtering prevent distant sparkle and Gerstner
+cross-hatching. Wave and optical authoring values persist through ECS scene
+serialization and their primary controls are available in the Water inspector.
+
+Validation: `cargo check --workspace --all-targets`; 204 renderer tests, 31 core
+tests, and 3 UI tests pass in release mode. Live wgpu post-TAA day and -20° sun
+captures are `dev records/phase IV/IV-D-E/IV-D-E_day_post-TAA.png` and
+`dev records/phase IV/IV-D-E/IV-D-E_night_post-TAA.png`.
+
+**IV-F/G/H completed 2026-08-11.** The cinematic water tier now owns two
+deterministic GPU inverse-FFT cascades (256² over 192 m and 512² over 53 m).
+The compute chain evolves a wind spectrum, executes radix-2 ping-pong inverse
+transforms, and writes displacement, gradients, horizontal-displacement
+Jacobian, and temporally decayed foam history. Gerstner remains the deterministic
+baseline and CPU-query contract. Serialized water authoring now includes
+spectral blend, wind speed, foam decay/threshold, caustic strength, and an
+underwater enable. Crest folding, shoreline SDF/depth, and wet-sand darkening
+share one foam signal.
+
+The post-TAA underwater HDR pass selects the finite body beneath the camera,
+uses a smooth per-pixel near-plane submersion mask, reconstructs the submerged
+ray segment, and applies RGB extinction, HG in-scattering, fog, sun/moon shafts,
+and depth/turbidity-faded bed caustics. The surface renders two-sided with an
+underside/TIR transition. Its transition and shaft WGSL is original and does
+not translate the Shadertoy-cited helpers found in Wicked's underwater shader.
+
+`DefaultLandscapePreset` v1 now owns the default terrain descriptor, Great
+Lakes relief/material threshold, transforms, water datum, camera, and post
+process. Normal startup and **Create → Terrain** both call
+`create_default_landscape`; editor creation remains one undoable transaction
+containing separate Terrain and Water entities. The old `WaterPlane` path is
+removed. Release validation passed 33 core tests, 208 renderer tests, 9 shader
+module tests, 3 UI tests, and every remaining workspace target. Live evidence
+is `dev records/phase IV/IV-F-G-H/IV-F-G-H_surface_day.png`,
+`IV-G_underwater_deep.png`, and `IV-G_waterline_transition.png` in that folder.
+
+**IV-I/J completed 2026-08-11.** The default scene adds Opus Poly's CC BY 4.0
+Gislinge Viking Boat as an unchanged 29,035-triangle multi-node GLB with its
+embedded materials and a separate stable Jolt proxy hull. Fixed-step
+environment simulation runs at 60 Hz in both Editing and Playing. Eight hull samples use the existing deterministic CPU
+water query for distributed buoyancy, drag, and propulsion; the resulting
+heading and speed drive analytic Kelvin-angle wake arms and prop-wash foam in
+the water pass. The viewport toolbar now exposes Play, Pause/Resume, and Stop;
+pausing freezes gameplay, physics, particles, and water time, while stopping
+restores the vessel pose and clears velocities before live editor preview resumes.
+From Play until Stop, including a paused play session, the renderer suppresses
+the grid, transform and light gizmos, selection outline, and terrain/foliage
+authoring cursors so the viewport contains only player-visible scene content.
+
+Water's near-shore presentation now retains the 2048² source contour and uses a
+bilinearly reconstructed, derivative-antialiased SDF boundary, a two-cell
+raster guard ring, 1.5 m under-terrain dilation, a foam width in world metres,
+scene-depth contact foam, noise-broken breakers, and a three-band rotated normal
+detail stack with distance fade. Terrain chunks whose vertical range crosses
+the water datum are held at LOD 0; neighbor relaxation preserves crack-free
+transitions outside the shore band. The full-resolution terrain depth now hides
+the dilated surface, so coarse distance-LOD facets cannot define the visible
+shore. This visually softens the terrain/water intersection without changing
+the licensed source elevation data or allowing visible water onto dry terrain.
+Complete vessel provenance,
+license, hash, scale, and render/physics separation notes live in
+`assets/models/gislinge_viking_boat/README.md`; future screenshots belong in
+`dev records/phase IV/IV-I-J/`, never the repository root. The current
+post-TAA shoreline validation is
+`dev records/phase IV/IV-I-J/IV-I-J_shoreline_lod_validation.png`.
+
 ## 18. Known Issues & Active Bugs
+
+**RESOLVED — finite water coverage and query contract (IV-D).** The renderer
+now consumes the Great Lakes bounds, wet/dry mask, depth map, and shoreline SDF
+directly. A compact wet-cell mesh bounds raster work; full-resolution mask
+sampling owns the exact shoreline. CPU gameplay queries share the shader's wave
+parameters and shore attenuation.
 
 **RESOLVED — shattered foliage (visibility-buffer id packing).** The visibility
 buffer packed instance id and primitive id into one `R32Uint`, which forces a
