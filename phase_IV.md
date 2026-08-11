@@ -35,7 +35,7 @@ The Great Lakes asset improves art direction and supplies natural basins, but Ph
 
 ### 2.2 Direct EXR loading is currently unsafe
 
-`Height Map.exr` is a 2048×2048, one-channel, 32-bit float OpenEXR. Somnium's current generic height-image path preserves `Luma16`, but sends every other dynamic image through `to_luma8()`. Loading the EXR directly would therefore reduce it to 256 height levels and can create visible terraces.
+`Height Map.exr` is a 2048×2048, one-channel, 32-bit float OpenEXR. Somnium's current generic height-image path preserves `Luma16`, but sends every other dynamic image through `to_luma8()`. Because the source occupies only part of the nominal `0..1` range, direct loading would retain only about 47 distinct levels. At 90 m relief that is approximately 1.9 m per step—enough to manufacture severe visible terraces from a smooth source.
 
 Phase IV must add a FLOAT32-aware import path and a regression test before changing `DEFAULT_HEIGHTMAP`.
 
@@ -82,6 +82,7 @@ Water must not replace the opaque terrain primitive in the visibility buffer. Re
 - It does not own a finite footprint, water mask, bathymetry, volume containment, motion vectors, persistent simulation state, or gameplay queries.
 - Water is absent from Create-menu authoring, undo snapshots, scene serialization, and inspector plumbing.
 - Texture binding is demo-global rather than water-body-owned.
+- `WaterPass::record` currently creates material/instance buffers and bind groups for every water draw every frame; persistent per-body GPU resources are a prerequisite for FFT/history work.
 
 ## 5. Requirements
 
@@ -112,7 +113,7 @@ Water must not replace the opaque terrain primitive in the visibility buffer. Re
 
 ### 6.1 ECS and renderer ownership
 
-`WaterBodyComponent` remains small and copyable. It identifies renderer-owned `WaterBodyData` and carries stable authoring settings:
+The existing `WaterComponent` should evolve rather than be discarded. `WaterBodyComponent` below is the conceptual target name; keep the public name or provide a serialized migration if renaming would break scenes. The component remains small and copyable, identifies renderer-owned `WaterBodyData`, and carries stable authoring settings:
 
 - `water_id`;
 - body kind (`Lake`, later `Ocean` and `River`);
@@ -182,16 +183,16 @@ HDR ping-pong is preferred over repeated full-resolution copies. The current exp
 
 ### 6.4 Finite surface geometry
 
-The Great Lakes default uses a camera-projected grid clipped by body bounds and the persistent water mask. It is not a `MeshKind::Plane`:
+The preferred Great Lakes design is a finite, camera-relative, terrain-aligned patch/clipmap clipped by body bounds and the persistent water mask. It is not a `MeshKind::Plane`:
 
-- the projected grid concentrates vertices near the camera;
+- clipmap rings concentrate vertices near the camera while preserving a stable terrain/water correspondence;
 - large waves displace vertices in world space;
 - fine waves move into gradient/normal and roughness representation with distance;
 - depth test plus mask prevents water over dry terrain;
 - shore-wave amplitude fades with bathymetric depth;
 - grid edge displacement is suppressed or skirted to avoid cracks.
 
-A camera-centered clipmap remains a fallback if projected-grid clipping proves unstable at grazing views. This decision is made with an A/B capture and GPU timing, not preference.
+Wicked/ACIII-style projected-grid rendering remains an explicit prototype and is likely preferable for a later infinite-ocean mode. Phase IV-D compares both approaches at grazing views, shorelines, partial submersion, and in GPU timings before locking the finite-lake implementation.
 
 ## 7. Great Lakes asset pipeline
 
@@ -258,7 +259,7 @@ A camera-centered clipmap remains a fallback if projected-grid clipping proves u
 
 **Work**
 
-- Replace the demo's mesh-plus-`WaterComponent` convention with `WaterBodyComponent` and renderer-owned `WaterBodyData`.
+- Evolve the demo's mesh-plus-`WaterComponent` convention into a finite water-body component and renderer-owned `WaterBodyData`; rename only with a scene migration.
 - Add Water to the Create system if independent bodies are desired; **Create → Terrain** always creates the companion default water child.
 - Add Outliner hierarchy, inspector groups, undo/redo, duplicate/delete, and scene serialization.
 - Move water texture/resource creation out of `hello_engine` and into renderer asset ownership.
@@ -274,7 +275,7 @@ A camera-centered clipmap remains a fallback if projected-grid clipping proves u
 
 **Work**
 
-- Implement projected-grid and mask clipping.
+- Prototype terrain-aligned clipmap and projected-grid surfaces, then select the finite-lake path from captured correctness and timing evidence.
 - Produce water coverage, surface depth, normals, and motion vectors.
 - Add CPU/gameplay queries: `surface_height`, `surface_normal`, `depth`, `velocity`, and `contains_point`.
 - Use deterministic Gerstner waves as the first queryable displacement layer.
@@ -332,6 +333,7 @@ A camera-centered clipmap remains a fallback if projected-grid clipping proves u
 - Render the water underside with refraction/reflection and total-internal-reflection behavior.
 - Add depth-faded projected caustics as the portable baseline.
 - Reuse volumetric shadow/light-shaft infrastructure for submerged shafts where stable.
+- Implement original WGSL math for transition/distortion/light shafts; do not inherit Wicked's Shadertoy-cited Brown–Conrady and stylized god-ray helper code by accident.
 - Keep RGB coefficients data-driven so a later spectral approximation can replace them without changing the ECS contract.
 
 **Exit gate**
@@ -465,6 +467,49 @@ Reference implementations are architectural/pattern sources only. No third-party
 - AMD GPUOpen, [FidelityFX Stochastic Screen Space Reflections](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/stochastic-screen-space-reflections/).
 - Monzon et al. (2024), [*Real-Time Underwater Spectral Rendering*](https://diglib.eg.org/items/1316f247-e9a8-48fe-8754-f3276191e6b5), DOI `10.1111/cgf.15009`.
 - Jeschke et al., [*Water Surface Wavelets*](https://research.nvidia.com/labs/prl/shallow-water-simulation/) — long-term interaction reference.
+
+### Local reference file index
+
+These files were read in the supplied repositories. They are pattern references, not copy sources.
+
+**Wicked Engine — MIT, copyright Turánszki János**
+
+- `New_Engines/WickedEngine-master/WickedEngine/wiOcean.h` and `wiOcean.cpp`: spectrum parameters, Phillips initialization, displacement resources, demand-gated readback, draw grids.
+- `New_Engines/WickedEngine-master/WickedEngine/wiFFTGenerator.*`: 512² inverse-FFT compute scheduling.
+- `New_Engines/WickedEngine-master/WickedEngine/shaders/oceanSimulatorCS.hlsl`: time evolution and height/horizontal-displacement packing.
+- `.../oceanUpdateDisplacementMapCS.hlsl`: spatial displacement output.
+- `.../oceanUpdateGradientFoldingCS.hlsl`: gradient and Jacobian folding/foam signal.
+- `.../oceanSurfaceVS.hlsl`, `oceanSurfaceHF.hlsli`, and `oceanSurfacePS.hlsl`: projected grid, distance filtering, reflection/refraction, thickness, extinction, and foam.
+- `.../underwaterCS.hlsl`: per-pixel waterline, Beer–Lambert attenuation, HG sun in-scattering, and HDR underwater composition.
+- `.../wiScene.cpp` and `wiRenderPath3D.cpp`: ocean lifecycle, ripple injection, and pass placement.
+
+Somnium should translate the FFT/optics/pass patterns but reject Wicked's global singleton ownership; a Somnium ECS entity owns each finite body's runtime state.
+
+**Bevy Water — MIT OR Apache-2.0, Robert G. Jakabosky/bevy_water authors**
+
+- `bevy-plugins/bevy_water-main/src/water.rs`, `wave.rs`, and `water/material.rs`.
+- `bevy-plugins/bevy_water-main/assets/shaders/water_vertex.wgsl`, `water_fragment.wgsl`, and `water_functions.wgsl`.
+
+Relevant patterns are matched CPU/WGSL wave queries, quality-dependent tiled geometry, crossfaded wave directions, and depth-driven Beer colour. Somnium already cites/adapts this reference for the current water pass; Phase IV extends that path.
+
+**Jolt Physics — MIT, copyright Jorrit Rouwe**
+
+- Workspace `example_repo/JoltPhysics-master/JoltPhysics-master/Samples/Tests/Water/WaterShapeTest.cpp`.
+- Workspace `example_repo/JoltPhysics-master/JoltPhysics-master/Samples/Tests/Water/BoatTest.cpp`.
+
+Relevant patterns are sensor/broadphase water volumes, shared sampled surface position/normal, deterministic contact order, buoyancy/drag impulses, and submerged-only propulsion.
+
+**CDLOD — MIT, copyright Filip Strugar**
+
+- `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` and `CDLOD-master/README.md`.
+
+Relevant future pattern: continuous distance morphing to a coarser regular grid. Somnium already has area-filtered import, coherent central-difference normals, and stitched indices, so morphing is a later LOD-quality option rather than a prerequisite for the Great Lakes import.
+
+**Falco Engine — provenance unresolved**
+
+- `New_Engines/FalcoEngine/.../Engine/Components/Water.*` and `StandardWater.shader` corroborate editor serialization, mirrored reflection, depth refraction, foam, and caustics.
+
+No controlling top-level license was found in the supplied tree. Do not translate Falco source unless its provenance is resolved.
 
 ## 13. Definition of done
 
