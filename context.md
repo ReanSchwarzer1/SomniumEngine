@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-09  
-> **Current phase:** 14 SSS (heightmap terrain — COMPLETE; chunked CDLOD-style heightmap, splatmap PBR painting, sculpting brushes, editor terrain mode. Voxel world also complete, §19)  
+> **Last updated:** 2026-08-11
+> **Current phase:** 25M-2 (sunset/night fixes audited; automated verification complete, final visual acceptance pending)
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -1217,7 +1217,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
-| 25M-2 | ✅ Complete | **Sunset & Night Sky Visual Fixes.** **(A)** `ibl_intensity` default raised from 0.35 to 1.0 (GTAO/specular occlusion handle ambient fill). **(B)** CSM near/far plane extended via scene-extent projection along light axis (Flax Engine pattern); grazing-angle normal offset bias strengthened to quadratic ramp. **(C)** Stars rewritten with 3×3×3 cell neighborhood evaluation, smoothstep angular falloff, exponential magnitude distribution, and Milky Way density concentration. **(D)** Physical lunar orbital model added in `shadow::moon_direction` (29.53d synodic period, 5.14° inclination); moon disc shaded with local sphere normal, sun lighting phase, and limb darkening. **(E)** Foliage roughness floor (`mix(0.6, 0.35, NdotV)`) added to prevent wet/metallic specular sheen at night. |
+| 25M-2 | 🟡 Automated complete | **Sunset & Night Sky Visual Fixes, audited 2026-08-11.** **(A)** The authoritative `PostProcessComponent` default is now `ibl_intensity = 1.0`. **(B)** CSMs include a 1 km caster-depth extension patterned after Flax's extended CSM culling range; world-space geometric-normal offset remains the grazing-angle bias mechanism. **(C)** Stars use 3×3×3 neighbour evaluation, smooth angular falloff, a magnitude distribution and Milky Way concentration. **(D)** The lunar orbit has a 29.53-day synodic period and 5.14° inclination; the disc now uses the real 0.2666° angular radius, a tangent-plane sphere normal, phase lighting and limb darkening. **(E)** Palette vegetation retains its foliage/double-sided/transmission semantics, faces its geometric normal toward the viewer, uses wrapped backside transmission without an ambient albedo glow, and has a roughness floor. Moon BRDF evaluation no longer applies N·L twice, shadow lookup bias uses the geometric normal, and ReSTIR GI invalidates materially changed light history, rejects unsupported emissive hits, and falls back to night IBL when sunlight is zero. Automated tests pass; the −10° capture removes the moving yellow/green GI blotches, but the test camera recorded zero foliage pixels, so foliage framing and dusk shadow acceptance remain. |
 | 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
 | 25D | ✅ Complete (macro tier + detail budget; no toroidal clipmap — see §25.13) | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
@@ -1226,7 +1226,6 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
-| 25M-2 | ⬜ Planned | **What 25M left behind.** Five faults visible once the sun stopped lighting the world from underground, four with a cause confirmed in the source. **(A)** Dusk is all orange with black shadows because `ibl_intensity` is still **0.35** — a fudge whose own comment says it is waiting for ambient occlusion, which the engine has had since 24I, 25K and 24L. **(B)** Blocky terrain shadows at a low sun: `cascade.rs` builds `near = 0, far = 4 * radius` with the eye at `centre + light_dir * radius * 2`, so a caster outside that slab is simply absent from the map — the hard straight boundaries are missing casters, not filtering. UE fits caster extent along the light axis separately; O3DE scales bias by `tanθ` and prefers normal-offset. **(C)** Stars are rectangles: `star_field` clips a star to the cubic cell that owns it, and `pow(dot, 40000)` in fp32 is a step function, so a cell-clipped step is a rectangle. **(D)** There is no moon — only a `pow(dot, 700)` halo with no disc, phase or limb darkening. **(E)** At night the only surviving term is cubemap specular, so everything reads as wet metal; check first whether the environment cubemap is even regenerated when the sun moves. See §25.15.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 
@@ -3282,6 +3281,62 @@ auto-exposure; the screenshots now show it is real and not a capture artefact.
 that may explain part of A). C and D are self-contained and can go last, since
 they are appearance rather than correctness. Each is independently capturable
 with `SOMNIUM_SUN_ELEVATION`.
+
+---
+
+### 25.16 Phase 25M-2 audit and correction — 2026-08-11
+
+The completion handover was checked against both call sites and the cited
+reference implementations. The broad A–D work was present, but several details
+meant the night result could still be black, green or unstable:
+
+- The renderer's `ibl_intensity = 1.0` initializer was overwritten every frame
+  by `PostProcessComponent::default()`, which was still 0.35. The component is
+  the authoritative default and is now 1.0.
+- `evaluate_brdf` already contains N·L, so the moon path's second N·L made its
+  response N·L² and its attempted backside factor could never revive a backface.
+  The moon now follows the same single-evaluation contract as the sun.
+- Two-sided foliage was oriented toward the sun. Once the sun crossed the
+  horizon this turned the geometric normal downward, also corrupting moonlight
+  and shadow bias. It is now oriented toward the viewer, shadow lookup uses the
+  unperturbed geometric normal, and the transmission lobe follows Unreal's
+  wrapped backside-lighting shape without the old constant green ambient term.
+- The foliage palette changed imported `BLEND` materials to `MASK` but did not
+  preserve their vegetation semantics. Those materials now become foliage,
+  double-sided and (when the source supplies no value) 50% transmissive; alpha
+  sidecar detection also sets the foliage flag its own comment promised.
+- ReSTIR GI reservoirs survived material changes to sun direction and colour,
+  preserving daytime green bounce into a night frame. An accumulated 0.25° or
+  2% colour change now invalidates GI history before temporal or spatial reuse;
+  the threshold preserves reuse while the sun animates smoothly.
+- The one-bounce GI estimator only samples direct sunlight at its bounce point.
+  At night it nevertheless wrote an alpha-valid black result, replacing sky
+  IBL, while rare emissive-mesh hits became the moving yellow/green fireflies.
+  Zero-sun frames now emit an invalid traced result so IBL remains active, and
+  emissive hits are rejected as in Bevy Solari until they can be importance
+  sampled instead of discovered by chance.
+- The earlier CSM change projected only receiver-frustum corners and therefore
+  could not discover off-frustum casters. Cascades now reserve a 1 km depth
+  extension, following Flax's extended directional-shadow culling range. The
+  erroneous conversion of a world-space texel length directly into NDC depth
+  was removed; world-space geometric-normal offset remains the grazing bias.
+- The moon threshold represented a disc about six times too wide and its sphere
+  normal was not tangent at the limb. It now uses a 0.2666° angular radius and a
+  tangent-plane reconstruction with derivative antialiasing.
+- Below-horizon solar transmittance again clamps the LUT direction to the
+  horizon while the separate horizon fade switches direct sunlight off. This
+  avoids integrating a ray pinned to the planet surface.
+
+`cargo check --bin hello_engine` and the automated suites pass, including shader
+validation and lunar full/new-moon direction tests. Workspace-wide
+`cargo fmt --all -- --check` still reports pre-existing formatting drift in
+unrelated files. A deterministic −10° capture before the GI correction showed
+the reported moving yellow/green emissive blotches; the same capture afterward
+has stable IBL fill without them. Its telemetry was `terrain px=921600, mesh
+px=0`: although 18,278 foliage instances and both grass assets loaded, that
+camera did not place foliage in the visibility buffer. Final foliage and +2°
+dusk-shadow acceptance therefore remain and this phase is not marked visually
+complete until those checks are recorded.
 
 ---
 

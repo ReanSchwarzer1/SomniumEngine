@@ -404,6 +404,16 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let coord = vec2<i32>(gid.xy);
     let index = gid.y * dims.x + gid.x;
+
+    // This NO_WORLD_CACHE estimator can only light a bounce point from the
+    // directional sun. Once atmospheric transmittance switches the sun off,
+    // a black reservoir is not a measurement of the night sky: replacing IBL
+    // with it makes every diffuse surface black. Empty both reservoir stages;
+    // pass 2 writes alpha zero so shading keeps environment diffuse instead.
+    if gi_luma(light.color) <= 1.0e-6 {
+        gi_b[index] = gi_empty();
+        return;
+    }
     var seed = index * 9781u + gi.frame * 6271u + 17u;
 
     let surface = gi_primary_surface(coord, dims);
@@ -417,8 +427,12 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dir = gi_sample_cosine(surface.normal, &seed);
     let origin = surface.pos + surface.normal * 0.05;
     let hit = gi_trace(origin, dir, 0.05, gi.max_distance);
-    if hit.hit {
-        let radiance = gi_direct_at(hit.pos, hit.normal, hit.albedo) + hit.emissive;
+    // Bevy Solari's NO_WORLD_CACHE path rejects emissive hits. This estimator
+    // does not importance-sample emissive geometry, so retaining the extremely
+    // rare hits produces high-variance fireflies that wander under temporal
+    // and spatial reuse. Emissive GI needs a light-sampling strategy of its own.
+    if hit.hit && all(hit.emissive <= vec3<f32>(0.0)) {
+        let radiance = gi_direct_at(hit.pos, hit.normal, hit.albedo);
         let p_hat = gi_luma(radiance);
         if p_hat > 0.0 {
             r.sample_pos = hit.pos;
@@ -473,6 +487,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let coord = vec2<i32>(gid.xy);
     let index = gid.y * dims.x + gid.x;
+
+    if gi_luma(light.color) <= 1.0e-6 {
+        gi_a[index] = gi_empty();
+        textureStore(out_tex, coord, vec4<f32>(0.0));
+        return;
+    }
     var seed = index * 26699u + gi.frame * 15487u + 91u;
 
     let surface = gi_primary_surface(coord, dims);

@@ -52,7 +52,7 @@ fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
     return f0 * ab.x + ab.y;
 }
 
-/// Light transmitted through a thin surface (Phase 24S).
+/// Light transmitted through a thin, two-sided surface (Phase 24S/25M-2).
 ///
 /// Frostbite's approximation (Barré-Brisebois & Bouchard). A real subsurface
 /// solve is out of scope, but the visual signature of translucency is
@@ -74,25 +74,17 @@ fn transmitted_light(
         return vec3<f32>(0.0);
     }
 
-    /// Bends the transmitted direction back toward the surface normal, so the
-    /// glow wraps around the silhouette instead of appearing only where the
-    /// light is exactly behind.
-    const DISTORTION: f32 = 0.25;
-    /// Tightens the lobe. Higher means the glow appears only closer to
-    /// straight-through, which is what thin, dense material looks like.
-    const POWER: f32 = 4.0;
-    /// Ambient share, so a leaf in shade is still translucent rather than
-    /// switching off entirely when the sun is not behind it.
-    const AMBIENT: f32 = 0.15;
+    // UE's two-sided foliage model: ordinary reflection remains on the front,
+    // while a wrapped and energy-bounded lobe carries light through the back.
+    // There is intentionally no constant ambient term; that old term produced
+    // albedo-tinted glow even when no light crossed the leaf.
+    const WRAP: f32 = 0.5;
+    let back_wrap = saturate((-dot(surface.normal, light_dir) + WRAP)
+        / ((1.0 + WRAP) * (1.0 + WRAP)));
+    let view_scatter = pow(saturate(dot(surface.view_dir, -light_dir)), 4.0);
+    let scatter = mix(0.35, 1.0, view_scatter);
 
-    // The direction light takes leaving the far side.
-    let transmit_dir = normalize(-light_dir + surface.normal * DISTORTION);
-    let lobe = pow(saturate(dot(surface.view_dir, transmit_dir)), POWER);
-
-    // Tinted by albedo: light passing through a leaf picks up its colour, which
-    // is why backlit foliage reads more saturated than the same leaf lit from
-    // the front.
-    return light_color * (lobe + AMBIENT) * transmission * surface.albedo;
+    return light_color * surface.albedo * transmission * back_wrap * scatter;
 }
 
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
@@ -316,15 +308,13 @@ fn sample_shadow_cascade(
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
     let atlas_coord = atlas_uv(cascade, uv);
-    // Phase 25M-2 (UE5 pattern): Slope-Scaled Depth Bias.
-    //
-    // A constant depth bias is insufficient on steep terrain slopes at grazing
-    // sun angles, causing depth values across a single shadow map texel to cross
-    // the surface and produce blocky staircase self-shadowing. Slope bias scales
-    // depth offset dynamically with surface inclination relative to the light.
-    let slope = sqrt(saturate(1.0 - n_dot_l * n_dot_l)) / max(n_dot_l, 0.001);
-    let slope_bias = 0.0002 + 0.0012 * slope * texel_world;
-    let compare_depth = ndc.z - slope_bias;
+    // Phase 25M-2: the grazing-angle term belongs to the world-space
+    // geometric-normal offset above, not to a mixed-unit depth expression.
+    // Keep only a small residual depth epsilon. `texel_world` is measured in
+    // metres and cannot be multiplied directly into an NDC depth bias; doing
+    // so made the offset explode at grazing angles. The world-space normal
+    // offset above is the dimensionally correct grazing-angle treatment.
+    let compare_depth = ndc.z - 0.0002;
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || compare_depth > 1.0 {
         return 1.0;
@@ -399,8 +389,9 @@ fn contact_shadow(
     light_dir: vec3<f32>,
     pixel: vec2<f32>,
 ) -> f32 {
-    // Guard against marching when light (sun) is below horizon
-    if light_dir.y <= -0.02 {
+    // CPU atmospheric transmittance is authoritative for whether direct
+    // sunlight still exists; an elevation threshold creates a twilight step.
+    if max(light.color.r, max(light.color.g, light.color.b)) <= 1.0e-6 {
         return 1.0;
     }
 
@@ -604,15 +595,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // authored normal points away and every lighting term comes out dark. Flip
     // it toward the viewer. Only for materials flagged double-sided — doing it
     // unconditionally would light the inside of closed geometry.
-    // Phase 17E: face the normal toward the *sun*, not the viewer.
-    //
-    // Facing the viewer looks right until you stand between the sun and the
-    // surface: the flipped normal then points away from the light, N.L goes
-    // negative, and back-lit foliage renders black. Real leaves are thin and
-    // translucent, so both faces receive light — flipping toward the sun is the
-    // cheap stand-in for that, and it is what made a field of grass stop
-    // looking like a field of ash.
-    if (material.flags & 1u) != 0u && dot(geo_normal, normalize(light.direction)) < 0.0 {
+    // Phase 25M-2: face the material frame toward the viewer and handle light
+    // arriving from the back with the explicit two-sided transmission lobe.
+    // Keep the material frame tied to the visible face. Back lighting is an
+    // explicit transmission lobe; it must not flip normals as the sun sets.
+    let view_dir_early = normalize(view.camera_pos - hit_point);
+    if (material.flags & 1u) != 0u && dot(geo_normal, view_dir_early) < 0.0 {
         geo_normal = -geo_normal;
     }
 
@@ -683,6 +671,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // PBR surface setup
     var surface: Surface;
     surface.albedo    = material.base_color.rgb;
+    surface.normal    = geo_normal;
     if material.albedo_map >= 0 {
         surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
     }
@@ -709,7 +698,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let bent_view = gtao.rgb * 2.0 - 1.0;
     let bent_world = normalize(
         (transpose(view.view) * vec4<f32>(bent_view, 0.0)).xyz);
-    surface.bent_normal = select(surface.normal, bent_world, length(bent_view) > 0.1);
+    surface.bent_normal = select(geo_normal, bent_world, length(bent_view) > 0.1);
 
     // Occlusion comes from its own texture, never from the metallic-roughness
     // map: glTF leaves that map's red channel undefined, and models that store
@@ -723,7 +712,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             textures[material.occlusion_map], default_sampler, uv).r;
     }
 
-    surface.normal = geo_normal;
     var normal_variance = 0.0;
     if material.normal_map >= 0 && tbn_valid {
         let nm_sample  = textureSample(textures[material.normal_map], default_sampler, uv).rgb;
@@ -771,15 +759,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let curve = clamp((uv.x - 0.5) * 2.0943951, -1.5707963, 1.5707963);
         // The axis along the card's length: perpendicular to both the face
         // normal and the direction the UV's x runs in.
-        let axis = normalize(cross(surface.normal, tangent));
-        let c = cos(curve);
-        let s = sin(curve);
-        // Rodrigues' rotation of the normal about that axis.
-        surface.normal = normalize(
-            surface.normal * c
-            + cross(axis, surface.normal) * s
-            + axis * dot(axis, surface.normal) * (1.0 - c)
-        );
+        let axis_raw = cross(surface.normal, tangent);
+        if dot(axis_raw, axis_raw) > 1.0e-12 {
+            let axis = normalize(axis_raw);
+            let c = cos(curve);
+            let s = sin(curve);
+            // Rodrigues' rotation of the normal about that axis.
+            surface.normal = normalize(
+                surface.normal * c
+                + cross(axis, surface.normal) * s
+                + axis * dot(axis, surface.normal) * (1.0 - c)
+            );
+        }
     }
 
     // Phase 25M-2: foliage roughness floor (night wet/metallic fix).
@@ -789,7 +780,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Without this floor the environment specular (which is all that remains
     // at night when diffuse goes to zero) makes grass read as wet metal.
     if (material.flags & 2u) != 0u {
-        let foliage_ndv = max(dot(surface.normal, normalize(view.camera_pos - hit_point)), 0.0);
+        let foliage_ndv = abs(dot(surface.normal, view_dir_early));
         let foliage_roughness_floor = mix(0.6, 0.35, foliage_ndv);
         surface.roughness = max(surface.roughness, foliage_roughness_floor);
     }
@@ -837,7 +828,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // no depth bias and no peter-panning, and its penumbra comes from the sun's
     // actual angular size rather than from a filter chosen to look about right.
     let traced = textureLoad(restir_vis, pixel_coords, 0);
-    var shadow_factor = sample_shadow(hit_point, surface.normal, view_depth, in.clip_pos.xy);
+    // Bias follows geometry, not a normal map or a foliage card's synthetic
+    // curvature, both of which can point outside the actual caster.
+    var shadow_factor = sample_shadow(hit_point, geo_normal, view_depth, in.clip_pos.xy);
     // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
     // into the shadow factor rather than added anywhere else, because that is
     // exactly what it is — a second occluder between this point and the sun,
@@ -1010,20 +1003,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let moon_dir = normalize(light.moon_direction);
             let moon_color = vec3<f32>(0.55, 0.72, 1.0) * light.moon_intensity * moon_strength;
 
-            var moon_self_shadow = 1.0;
-            var moon_ndotl = max(dot(surface.normal, moon_dir), 0.0);
-
-            if is_foliage {
-                // Foliage uses double-sided wrapped lighting so leaves receive moonlight
-                // from both top and bottom faces, preventing pitch-black foliage at night.
-                moon_ndotl = max(dot(surface.normal, moon_dir), 0.0) + 0.35 * max(dot(-surface.normal, moon_dir), 0.0);
-            } else {
-                let moon_geo_ndotl = saturate(dot(geo_normal, moon_dir));
-                moon_self_shadow = smoothstep(0.0, 0.05, moon_geo_ndotl);
-            }
-
-            moon_ndotl = moon_ndotl * moon_self_shadow;
-            moonlight = evaluate_brdf(surface, moon_dir) * moon_color * moon_ndotl;
+            // `evaluate_brdf` already contains N.L. The previous extra
+            // multiply squared the front-face response, while its attempted
+            // double-sided factor could not revive a back face after the BRDF
+            // had already returned zero.
+            moonlight = evaluate_brdf(surface, moon_dir) * moon_color;
 
             // Transmitted moonlight for foliage leaves
             if is_foliage && material.transmission > 0.0 {
@@ -1035,9 +1019,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor + moonlight;
 
-        // Transmitted sunlight (only when sun is above horizon)
+        // Transmitted sunlight follows the same atmospheric fade as every
+        // other direct term, with no independent elevation threshold.
         var transmitted = vec3<f32>(0.0);
-        if light_dir.y > -0.02 {
+        if sun_illuminance > 1.0e-6 {
             transmitted = transmitted_light(
                 surface, light_dir, light_color, material.transmission);
         }

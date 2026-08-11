@@ -202,6 +202,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             // blade edges crisp without eroding thin tips.
             m.alpha_cutoff = 0.5;
             m.double_sided = true;
+            m.foliage = true;
             // A sidecar cutout mask means foliage: thin, and translucent.
             // The glTF carries no transmission factor for these assets, and
             // inferring it from the same convention is better than leaving

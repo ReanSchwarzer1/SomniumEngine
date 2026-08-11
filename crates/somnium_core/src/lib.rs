@@ -634,18 +634,16 @@ pub struct PostProcessComponent {
     pub fxaa_enabled: bool,
     /// Scene-wide strength of image-based (indirect) light (Phase 22C).
     ///
-    /// Phase 19 replaced a flat 3% ambient with full sky irradiance, but with
-    /// no ambient occlusion that light reaches shadowed surfaces unattenuated
-    /// and washes shadows out. This used to be a hardcoded `0.35` in three
-    /// shaders; it is a dial now so the trade-off between flat-and-bright and
-    /// contrasty-and-dark is the artist's to make until SSAO lands.
+    /// Phase 25M-2: physically neutral by default. GTAO, material occlusion,
+    /// specular occlusion, and ReSTIR GI now provide the indirect-light
+    /// visibility that the old pre-AO `0.35` workaround was waiting for.
     pub ibl_intensity: f32,
 }
 
 impl Default for PostProcessComponent {
     fn default() -> Self {
         Self {
-            ibl_intensity: 0.35,
+            ibl_intensity: 1.0,
             ev100: light_units::ev100::SUNLIGHT,
             aperture_f_stops: 16.0,
             shutter_speed_s: 1.0 / 100.0,

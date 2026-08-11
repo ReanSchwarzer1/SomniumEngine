@@ -25,6 +25,13 @@ pub const SHADOW_DISTANCE: f32 = 100.0;
 /// Blend factor for the PSS formula: 0.0 = pure uniform, 1.0 = pure logarithmic.
 const LAMBDA: f32 = 0.5;
 
+/// Extra caster depth on both sides of a cascade receiver slab.
+///
+/// Low-elevation sunlight can project a kilometre-scale terrain caster into a
+/// receiver only tens of metres from the camera. Flax uses the same 1 km
+/// extension for its CSM culling volume (`ShadowsPass.cpp::cullRangeExtent`).
+const CASTER_DEPTH_EXTENSION: f32 = 1000.0;
+
 /// Per-cascade result: view-projection matrix + view-space far depth.
 #[derive(Clone, Copy)]
 pub struct CascadeData {
@@ -140,24 +147,14 @@ fn cascade_vp(
 
     // Light view: look from "above" the center along the light direction.
     //
-    // Phase 25M-2B: at low sun angles the sub-frustum's bounding sphere
-    // doesn't contain shadow casters that sit far "behind" it in the light
-    // direction. Instead of a fixed `radius * 2` pullback, project all 8
-    // sub-frustum corners along the light axis and push the light eye back
-    // far enough to capture the full scene extent. Clamped to 8× radius to
-    // avoid degenerate projections. (Reference: Flax Engine CSM extends the
-    // near plane by ~1 km for the same reason — `cullRangeExtent`.)
-    let center_proj = center.dot(light_dir);
-    let mut min_proj = f32::MAX;
-    let mut max_proj = f32::MIN;
-    for c in &all_corners {
-        let p = c.dot(light_dir);
-        min_proj = min_proj.min(p);
-        max_proj = max_proj.max(p);
-    }
-    let back = (center_proj - min_proj)
-        .max(radius * 2.0)   // never less than the old behaviour
-        .min(radius * 8.0);  // prevent degenerate projections
+    // Phase 25M-2B: at low sun angles the sub-frustum's receiver sphere does
+    // not contain casters far behind it along the light direction. Extend the
+    // depth slab using Flax's kilometre-scale CSM culling range pattern.
+    // Frustum corners contain receivers, not off-frustum casters. Projecting
+    // those same corners and clamping with `max(radius * 2)` was a no-op: their
+    // axial extent cannot exceed the bounding-sphere radius. Extend the light
+    // slab explicitly so low-sun terrain casters remain inside it.
+    let back = radius * 2.0 + CASTER_DEPTH_EXTENSION;
     let light_eye = center + light_dir * back;
     let light_view = Mat4::look_at_rh(light_eye, center, up);
 
@@ -175,7 +172,7 @@ fn cascade_vp(
     let bottom = -radius + offset_y;
     let top    =  radius + offset_y;
     let near   = 0.0_f32;
-    let far    = back + (max_proj - center_proj).max(radius);
+    let far    = back + radius * 2.0 + CASTER_DEPTH_EXTENSION;
 
     let light_proj = ortho_rh_zo(left, right, bottom, top, near, far);
     light_proj * light_view

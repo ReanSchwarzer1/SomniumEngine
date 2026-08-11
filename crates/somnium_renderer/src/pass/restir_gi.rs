@@ -78,6 +78,9 @@ pub struct RestirGiPass {
     dirty: bool,
     frame: u32,
     history_valid: bool,
+    /// Lighting represented by the temporal reservoirs. A materially changed
+    /// sun must discard history so daytime bounce cannot bleed into night.
+    last_light: Option<([f32; 3], [f32; 3])>,
     supported: bool,
     pub enabled: bool,
     /// Scales the indirect contribution. Exposed so the A/B can vary the
@@ -117,6 +120,7 @@ impl RestirGiPass {
             dirty: false,
             frame: 0,
             history_valid: false,
+            last_light: None,
             supported,
             // On wherever the hardware allows it. `SOMNIUM_RESTIR_GI=0` is the
             // A/B against the environment map's constant diffuse, and a device
@@ -425,11 +429,37 @@ impl RestirGiPass {
         vis_view: &wgpu::TextureView,
         view_proj: glam::Mat4,
         camera_pos: glam::Vec3,
+        light_direction: glam::Vec3,
+        light_color: glam::Vec3,
         width: u32,
         height: u32,
     ) {
         if !self.active() {
             return;
+        }
+        let light_key = (light_direction.to_array(), light_color.to_array());
+        let light_changed = self.last_light.is_none_or(|(old_direction, old_color)| {
+            const MAX_ANGLE_RADIANS: f32 = 0.25_f32.to_radians();
+            const MAX_RELATIVE_COLOR_CHANGE: f32 = 0.02;
+
+            let old_direction = glam::Vec3::from_array(old_direction).normalize_or_zero();
+            let direction = light_direction.normalize_or_zero();
+            let direction_changed = old_direction.dot(direction) < MAX_ANGLE_RADIANS.cos();
+
+            let old_color = glam::Vec3::from_array(old_color);
+            let color_scale = old_color
+                .abs()
+                .max(light_color.abs())
+                .max_element()
+                .max(1.0);
+            let color_changed = (old_color - light_color).abs().max_element()
+                > color_scale * MAX_RELATIVE_COLOR_CHANGE;
+
+            direction_changed || color_changed
+        });
+        if light_changed {
+            self.history_valid = false;
+            self.last_light = Some(light_key);
         }
         self.ensure_bind(device, tlas, depth_view, vis_view);
         let (Some(initial), Some(spatial), Some(params), Some(bind)) = (

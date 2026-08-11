@@ -1196,8 +1196,11 @@ and its LUT sizes were adopted; both are covered by §13.27's terms.
 
 | Piece | Reference Engine / Paper |
 |---|---|
-| CSM Near/Far Scene Extent Projection | **Flax Engine** (`Source/Engine/Renderer/ShadowsPass.cpp` — `cullRangeExtent` near plane pullback for low sun shadow stability) |
+| CSM Caster-Depth Extension | **Flax Engine** (`Source/Engine/Renderer/ShadowsPass.cpp` — the 1000 m `cullRangeExtent` used to expand directional-shadow caster culling beyond the camera receiver volume) |
 | Star Field 3×3×3 Neighborhood & Magnitude Distribution | **SpartanEngine** (`data/shaders/sky/skysphere.hlsl` — multi-cell neighborhood sampling, exponential magnitude distribution, galactic plane density concentration) |
 | Celestial Sphere Unit Vector & Phase Shading | **O3DE** (`Gems/Stars/Assets/Shaders/Stars/Stars.azsl` & `StarsComponentController.cpp` — spherical coordinate mapping, point spread & limb darkening) |
 | Grazing Angle Shadow Normal Bias | **Karis 2013 / Frostbite PBR** — quadratic normal offset scaling based on texel world size and incidence cosine |
+| Two-Sided Foliage Transmission | **Unreal Engine 5** (`Engine/Shaders/Private/ShadingModels.ush` — `TwoSidedBxDF` wrapped backside N·L and view-dependent scatter pattern; translated to Somnium's WGSL material path) |
+| Curved Foliage Shading Normal | **SpartanEngine** (`data/shaders/g_buffer.hlsl` — face-signed, camera-relative foliage normal bending pattern; adapted to preserve a separate geometric normal for shadow lookup) |
+| ReSTIR GI Night Fallback & Light-Change Invalidation | **Bevy Solari** (`crates/bevy_solari/src/realtime/restir_gi.wgsl` — reservoir roles/reuse flow and rejecting emissive hits in `generate_initial_reservoir`); Somnium's zero-sun IBL fallback plus direction/colour history key are original integration work |
 

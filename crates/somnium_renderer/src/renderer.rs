@@ -1817,6 +1817,8 @@ impl SomniumRenderer {
                     &self.vis_pass.view,
                     self.view_proj,
                     self.camera_pos,
+                    self.light_direction,
+                    self.light_color,
                     ctx.config.width,
                     ctx.config.height,
                 );

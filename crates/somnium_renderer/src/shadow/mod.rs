@@ -36,7 +36,7 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
     (0.5, 0.5),
 ];
 
-/// GPU-uploadable directional light struct (320 bytes, std140-aligned).
+/// GPU-uploadable directional light struct (336 bytes, std140-aligned).
 ///
 /// Layout:
 /// ```text
@@ -118,6 +118,10 @@ impl Default for GpuDirectionalLight {
 ///
 /// - `sun_direction`: normalised direction toward the sun.
 /// - `time_days`: total engine time in fractional days (e.g. `engine_seconds / 86400`).
+///
+/// Phase zero is a full moon (`moon = -sun`), half a synodic period is a new
+/// moon (`moon = sun`), and the quarter phases lie approximately 90 degrees
+/// from the sun. This is an appearance model, not an ephemeris.
 #[must_use]
 pub fn moon_direction(sun_direction: glam::Vec3, time_days: f64) -> glam::Vec3 {
     use std::f64::consts::TAU;
@@ -146,6 +150,24 @@ pub fn moon_direction(sun_direction: glam::Vec3, time_days: f64) -> glam::Vec3 {
         + up * sin_phase * incl_rad.sin();
 
     moon.normalize()
+}
+
+#[cfg(test)]
+mod moon_tests {
+    use super::*;
+
+    #[test]
+    fn phase_zero_places_a_full_moon_opposite_the_sun() {
+        let sun = glam::Vec3::new(0.3, 0.8, -0.2).normalize();
+        assert!(moon_direction(sun, 0.0).dot(-sun) > 0.9999);
+    }
+
+    #[test]
+    fn half_a_synodic_period_places_a_new_moon_near_the_sun() {
+        let sun = glam::Vec3::new(0.3, 0.8, -0.2).normalize();
+        let moon = moon_direction(sun, 29.530588 * 0.5);
+        assert!(moon.dot(sun) > 0.9999);
+    }
 }
 
 

@@ -353,19 +353,16 @@ fn moon_disc_shade(
     moon_dir: vec3<f32>,
     moon_strength: f32,
 ) -> vec3<f32> {
-    // ~1.6° radius (~3.2° diameter) for a clearly visible, striking moon disc.
-    const MOON_COS_RADIUS: f32 = 0.9996;
+    // The Moon's real mean angular radius (~0.2666 degrees).
+    const MOON_COS_RADIUS: f32 = 0.99998916;
 
     let cos_moon = dot(dir, moon_dir);
     if cos_moon <= MOON_COS_RADIUS {
         return vec3<f32>(0.0);
     }
 
-    // Disc-local coordinate: how far from center and which direction.
-    let edge = saturate((cos_moon - MOON_COS_RADIUS) / (1.0 - MOON_COS_RADIUS));
-    // Soft anti-aliased edge.
-    let soft_edge = saturate(2.0 * (cos_moon - MOON_COS_RADIUS) / (1.0 - MOON_COS_RADIUS));
-    let limb = (0.35 + 0.65 * sqrt(edge)) * soft_edge;
+    // Tangent-plane radius of the real 0.2666-degree disc.
+    let sin_radius = sqrt(max(1.0 - MOON_COS_RADIUS * MOON_COS_RADIUS, 1.0e-12));
 
     // Build a tangent frame on the moon disc.
     let moon_up = normalize(cross(moon_dir, select(
@@ -375,14 +372,18 @@ fn moon_disc_shade(
     )));
     let moon_right = cross(moon_up, moon_dir);
 
-    let to_pixel = normalize(dir - moon_dir * cos_moon);
-    let r_on_disc = sqrt(1.0 - edge);
-    let disc_x = dot(to_pixel, moon_right) * r_on_disc;
-    let disc_y = dot(to_pixel, moon_up) * r_on_disc;
+    let tangent_offset = dir - moon_dir * cos_moon;
+    let disc_x = dot(tangent_offset, moon_right) / sin_radius;
+    let disc_y = dot(tangent_offset, moon_up) / sin_radius;
+    let radius_sq = saturate(disc_x * disc_x + disc_y * disc_y);
+    let centre_axis = sqrt(max(1.0 - radius_sq, 0.0));
+    let edge_width = max(fwidth(cos_moon), 1.0e-7);
+    let disc_mask = smoothstep(MOON_COS_RADIUS, MOON_COS_RADIUS + edge_width, cos_moon);
+    let limb = (0.35 + 0.65 * centre_axis) * disc_mask;
 
     // Reconstruct 3D sphere surface normal.
     let moon_normal = normalize(
-        moon_dir + moon_right * disc_x + moon_up * disc_y
+        moon_dir * centre_axis + moon_right * disc_x + moon_up * disc_y
     );
 
     // Procedural lunar surface features (Maria, Terrae, Craters)

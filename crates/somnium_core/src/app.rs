@@ -1653,6 +1653,16 @@ impl<G: GameApp> Engine<G> {
                 if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
                     m.alpha_cutoff = 0.5;
                 }
+                // Palette entries are known vegetation. Re-routing a material
+                // to the opaque visibility path must retain the semantic data
+                // that activates curved normals, the roughness floor, and
+                // two-sided transmission in deferred shading. Limit this to
+                // the originally blended pieces so opaque trunks stay solid.
+                m.foliage = true;
+                m.double_sided = true;
+                if m.transmission <= 0.0 {
+                    m.transmission = 0.5;
+                }
             }
         }
 
