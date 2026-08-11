@@ -206,7 +206,7 @@ pub struct LightComponent {
     pub inner_angle: f32,
     /// Spot outer cone half-angle (radians). Zero intensity at this edge.
     pub outer_angle: f32,
-    /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.03 lux.
+    /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.010 lux.
     pub moon_intensity: f32,
 }
 
@@ -248,7 +248,7 @@ impl LightComponent {
             range: 0.0,
             inner_angle: 0.0,
             outer_angle: 0.0,
-            moon_intensity: 0.03,
+            moon_intensity: 0.010,
         }
     }
 
@@ -1157,6 +1157,11 @@ impl somnium_ecs::Component for WaterComponent {}
 #[cfg(test)]
 mod camera_speed_tests {
     use super::*;
+
+    #[test]
+    fn directional_light_uses_the_accepted_moonlight_default() {
+        assert_eq!(LightComponent::directional(100_000.0).moon_intensity, 0.010);
+    }
 
     #[test]
     fn slider_ends_map_to_the_configured_range() {

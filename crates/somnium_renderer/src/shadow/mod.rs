@@ -105,7 +105,7 @@ impl Default for GpuDirectionalLight {
             sun_angular_radius: 0.004_654,
             _pad2: 0.0,
             moon_direction: [0.0, -1.0, 0.0],
-            moon_intensity: 0.03,
+            moon_intensity: 0.010,
         }
     }
 }

@@ -507,7 +507,7 @@ impl SomniumRenderer {
             light_direction: default_dir,
             ibl_intensity: 1.0,
             light_color: default_color,
-            moon_intensity: 0.03,
+            moon_intensity: 0.010,
             cascade_debug: false,
             shading_mode: 0,
             local_lights: Vec::new(),

@@ -431,7 +431,19 @@ fn contact_shadow(
         // point and the light.
         let texel = vec2<i32>(uv * vec2<f32>(textureDimensions(scene_depth)));
         let scene_z = textureLoad(scene_depth, texel, 0);
-        let diff = ndc.z - scene_z;
+
+        // `CONTACT_THICKNESS` is metres. Comparing it to `ndc.z` made the
+        // accepted slab grow dramatically with distance because perspective
+        // depth is nonlinear; on landscape terrain, unrelated neighbouring
+        // triangles then counted as 5 cm blockers and stamped large polygonal
+        // shadows across the ground. Reconstruct the sampled surface and do
+        // the thickness test in view-space metres instead.
+        let scene_ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, scene_z, 1.0);
+        let scene_world_h = view.inv_view_proj * scene_ndc;
+        let scene_world = scene_world_h.xyz / scene_world_h.w;
+        let ray_view_depth = -(view.view * vec4<f32>(sample_pos, 1.0)).z;
+        let scene_view_depth = -(view.view * vec4<f32>(scene_world, 1.0)).z;
+        let diff = ray_view_depth - scene_view_depth;
 
         // The upper bound is what stops a surface far behind the ray from
         // registering as an occluder.
@@ -589,6 +601,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     var geo_normal = normalize((instance.model * vec4<f32>(normal_interp, 0.0)).xyz);
 
+    // A receiver bias must follow the triangle plane, not the interpolated
+    // vertex normal used for smooth shading. The latter can point behind the
+    // actual face on coarse terrain, so an outward-looking offset moves the
+    // lookup underneath its own triangle and creates hard triangular acne.
+    // Keep this normal separate: terrain and normal maps still shade smoothly.
+    let face_cross = cross(p1 - p0, p2 - p0);
+    var shadow_normal = geo_normal;
+    if dot(face_cross, face_cross) > 1.0e-16 {
+        shadow_normal = normalize(face_cross);
+        if dot(shadow_normal, geo_normal) < 0.0 {
+            shadow_normal = -shadow_normal;
+        }
+    }
+
     let hit_point = p0 * bary.x + p1 * bary.y + p2 * bary.z;
 
     // Phase 17D: a double-sided surface can be seen from behind, where its
@@ -602,6 +628,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir_early = normalize(view.camera_pos - hit_point);
     if (material.flags & 1u) != 0u && dot(geo_normal, view_dir_early) < 0.0 {
         geo_normal = -geo_normal;
+        shadow_normal = -shadow_normal;
     }
 
     // TBN matrix (derived from edge vectors + UV deltas, no vertex tangents)
@@ -828,9 +855,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // no depth bias and no peter-panning, and its penumbra comes from the sun's
     // actual angular size rather than from a filter chosen to look about right.
     let traced = textureLoad(restir_vis, pixel_coords, 0);
-    // Bias follows geometry, not a normal map or a foliage card's synthetic
-    // curvature, both of which can point outside the actual caster.
-    var shadow_factor = sample_shadow(hit_point, geo_normal, view_depth, in.clip_pos.xy);
+    // Bias follows the actual triangle plane, not interpolated vertex data, a
+    // normal map, or a foliage card's synthetic curvature.
+    var shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy);
     // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
     // into the shadow factor rather than added anywhere else, because that is
     // exactly what it is — a second occluder between this point and the sun,
