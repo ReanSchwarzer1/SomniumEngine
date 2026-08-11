@@ -1,7 +1,7 @@
 # Phase IV — Great Lakes Landscape and Black Flag Water
 
 **Project:** Somnium Engine  
-**Status:** IV-A, IV-B, and IV-C complete; IV-D next
+**Status:** IV-A through IV-E complete; IV-F next
 **Plan date:** 2026-08-11  
 **Codename:** Black Flag  
 **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -17,8 +17,8 @@ Phase IV will replace the current demo terrain/water pairing with one shared, pr
 - application startup and **Create → Terrain** call one landscape factory, so they cannot drift;
 - asset and reference provenance is recorded in `assets/LICENSE.md` and `ATTRIBUTION.md` before the new default ships.
 
-IV-A through IV-C were implemented on 2026-08-11. The remaining sections are
-the active plan beginning with IV-D.
+IV-A through IV-E were implemented on 2026-08-11. The remaining sections are
+the active plan beginning with IV-F.
 
 Live wgpu evidence: [`phase_iv_default_validation.png`](phase_iv_default_validation.png)
 was captured from release frame 12 after the Great Lakes default and portable
@@ -287,8 +287,8 @@ editable optics/wave fields. Renderer-owned `WaterBodyData` now loads the lake
 mask/depth/SDF textures. The default scene and Create → Terrain spawn a separate
 child `Water` entity; hierarchy, inspector editing, duplicate/delete,
 composite undo/redo, scene serialization, and renderer-resource reconciliation
-are covered by tests. The temporary broad render mesh remains until IV-D, where
-the stored mask and bounds become explicit finite surface coverage.
+are covered by tests. IV-D replaced the temporary broad render mesh with an
+explicit finite, mask-clipped surface.
 
 **Work**
 
@@ -306,6 +306,24 @@ the stored mask and bounds become explicit finite surface coverage.
 
 ### IV-D — Finite surface, depth, and query contract
 
+**Status: DONE — 2026-08-11**
+
+The renderer now builds a compact terrain-local 2 m lake grid containing only
+coarse cells touched by the baked wet mask. The fragment pass samples the
+full-resolution mask, depth, and shoreline SDF, so the coarse mesh cannot cut
+out narrow inlets and dry pixels never receive water. `WaterBodyRegistry`
+provides deterministic surface height, normal, depth, velocity, XZ coverage,
+and point-containment queries from the same four-band Gerstner parameters used
+by WGSL. Shore depth attenuates displacement and derivatives before both CPU
+and GPU evaluation.
+
+The water pass writes an `Rgba16Float` surface-data target and overwrites the
+global `Rg16Float` velocity only where water is present. TAA consumes these
+water motion vectors while retaining the established depth reprojection for
+opaque pixels. Camera-distance and pixel-footprint filtering move unresolved
+wave slope energy into roughness, eliminating distant cross-hatching in the
+post-TAA validation capture.
+
 **Work**
 
 - Prototype terrain-aligned clipmap and projected-grid surfaces, then select the finite-lake path from captured correctness and timing evidence.
@@ -321,6 +339,24 @@ the stored mask and bounds become explicit finite surface coverage.
 - TAA remains stable during camera and wave motion.
 
 ### IV-E — Physically coherent surface optics
+
+**Status: DONE — 2026-08-11**
+
+The finite pass now uses dielectric `F0 = 0.02037`, GGX sun/moon highlights,
+prefiltered environment reflection, and bounded SSR with confidence/edge fade
+and environment fallback. Refraction candidates are rejected when opaque depth
+is missing or lies in front of the surface. Reconstructed path length drives
+RGB Beer–Lambert extinction and approximate Henyey–Greenstein single
+scattering; shore SDF supplies a depth-aware edge-foam term. Normal and ORM
+textures carry a complete CPU-generated mip chain so minification cannot
+reintroduce salt-and-pepper sparkle.
+
+The ECS and scene format persist wavelengths, speed, steepness, absorption,
+scattering, roughness, anisotropy, and SSR strength. The Water inspector exposes
+the primary motion and reflection controls. Release-mode live wgpu captures at
+day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
+`phase_iv_de_validation_taa2.png` and
+`phase_iv_de_validation_night.png` record the post-TAA evidence.
 
 **Work**
 

@@ -17,10 +17,10 @@
 //! * **Borrow checker enforced** — Rust guarantees that game code
 //!   cannot hold these references beyond the callback scope.
 
-use somnium_ecs::World;
-use somnium_renderer::{RenderContext, SomniumRenderer};
-use somnium_physics::world::PhysicsWorld;
 use somnium_audio::engine::AudioEngine;
+use somnium_ecs::World;
+use somnium_physics::world::PhysicsWorld;
+use somnium_renderer::{RenderContext, SomniumRenderer};
 use somnium_ui::UiManager;
 
 use crate::config::EngineConfig;
@@ -51,7 +51,7 @@ pub struct EngineContext<'a> {
 
     /// The high-level Somnium Renderer for submitting draw commands. Optional if headless.
     pub renderer: Option<&'a mut SomniumRenderer>,
-    
+
     /// The currently selected entity.
     pub selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
 

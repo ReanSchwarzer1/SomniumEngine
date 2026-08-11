@@ -38,8 +38,8 @@ impl Control for ScrollViewer {
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
-        msg:    &mut UiMessage,
-        _emit:  &mut Vec<UiMessage>,
+        msg: &mut UiMessage,
+        _emit: &mut Vec<UiMessage>,
     ) {
         if let Some(WidgetMessage::MouseWheel { delta, .. }) = msg.data::<WidgetMessage>() {
             let delta = *delta;
@@ -55,9 +55,14 @@ pub struct ScrollViewerBuilder {
 }
 
 impl ScrollViewerBuilder {
-    pub fn new(widget: WidgetBuilder) -> Self { Self { widget } }
+    pub fn new(widget: WidgetBuilder) -> Self {
+        Self { widget }
+    }
 
     pub fn build(self) -> crate::node::UiNode {
-        UiNode::new(self.widget.build(), Box::new(ScrollViewer { scroll_y: 0.0 }))
+        UiNode::new(
+            self.widget.build(),
+            Box::new(ScrollViewer { scroll_y: 0.0 }),
+        )
     }
 }

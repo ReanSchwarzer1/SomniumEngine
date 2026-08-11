@@ -121,6 +121,8 @@ impl TaaPass {
                     },
                     count: None,
                 },
+                texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
 
@@ -259,13 +261,16 @@ impl TaaPass {
         let x = halton(i + 1, 2) - 0.5;
         let y = halton(i + 1, 3) - 0.5;
         // One pixel in NDC is 2 / resolution.
-        glam::Vec2::new(
-            x * 2.0 / width as f32,
-            y * 2.0 / height as f32,
-        )
+        glam::Vec2::new(x * 2.0 / width as f32, y * 2.0 / height as f32)
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) {
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) {
         let (history, history_views) = Self::make_history(device, format, width, height);
         self.history = history;
         self.history_views = history_views;
@@ -282,9 +287,17 @@ impl TaaPass {
         device: &wgpu::Device,
         current_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
+        velocity_view: &wgpu::TextureView,
+        water_surface_view: &wgpu::TextureView,
     ) {
         if self.bind_groups.is_none() {
-            self.rebuild(device, current_view, depth_view);
+            self.rebuild(
+                device,
+                current_view,
+                depth_view,
+                velocity_view,
+                water_surface_view,
+            );
         }
     }
 
@@ -294,6 +307,8 @@ impl TaaPass {
         device: &wgpu::Device,
         current_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
+        velocity_view: &wgpu::TextureView,
+        water_surface_view: &wgpu::TextureView,
     ) {
         let make = |read: usize| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -323,6 +338,14 @@ impl TaaPass {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: self.exposure_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(velocity_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(water_surface_view),
                     },
                 ],
             })
@@ -379,7 +402,11 @@ impl TaaPass {
                 .zip(self.prev_view_proj.to_cols_array().iter())
                 .map(|(a, b)| (a - b).abs())
                 .sum();
-            tracing::info!("taa frame {}: |unjittered - prev| = {:e}", self.frame_index, d);
+            tracing::info!(
+                "taa frame {}: |unjittered - prev| = {:e}",
+                self.frame_index,
+                d
+            );
         }
         let bind_groups = self.bind_groups.as_ref()?;
 

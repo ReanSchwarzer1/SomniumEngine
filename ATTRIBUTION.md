@@ -993,6 +993,9 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/terrain/heightmap.rs` | CDLOD source-sample/cell convention retained; Phase IV FLOAT32 EXR channel preservation and precision validation are original |
 | `somnium_asset/examples/bake_great_lakes.rs` | Original deterministic import recipe: area resampling, plateau mask extraction, chamfer shoreline distance, and synthetic bathymetry (Phase IV-B) |
 | `somnium_renderer/src/water_body.rs` | Renderer-owned water resources following Somnium's existing `TerrainData` handle pattern; ECS/render split cross-checked against bevy_water (Phase IV-C) |
+| `somnium_renderer/src/water_body.rs` (IV-D) | GPU Gems Ch. 1 Gerstner displacement/analytic derivatives plus bevy_water's CPU/GPU query-parity pattern; Somnium's finite wet-cell mesh, baked mask/depth/SDF sampling, registry API, and Rust implementation are original |
+| `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (IV-D/E) | Wicked Engine ocean resource/query ownership and pre-water composition ordering; GPU Gems water math; established Beer–Lambert, Henyey–Greenstein, Fresnel, and GGX models. WGSL bindings, finite-body MRT, validated refraction, SSR fallback, filtering, and integration are original |
+| `somnium_renderer/src/pass/taa.rs`, `shaders/taa.wgsl` (IV-D) | Existing Somnium TAA retained for opaque pixels; water-only motion-vector selection and surface coverage target are original integration work |
 | `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
 | `somnium_renderer/src/terrain/brush.rs` | Fyrox `brushstroke/brushraster.rs` falloff + hardness remap; stamp flow from `brushstroke/mod.rs` (Phase 14 SSS) |
 | `somnium_renderer/src/terrain/textures.rs` | Original procedural PBR layers; array-texture layout from bevy_triplanar_splatting (Phase 14 SSS) |
@@ -1220,4 +1223,15 @@ and its LUT sizes were adopted; both are covered by §13.27's terms.
 | Smooth terrain shadow receiver bias | The Phase 25M-2 Karis/Frostbite grazing-angle bias remains, but terrain now supplies its continuous interpolated geometric normal instead of the per-triangle plane. This correction is original and follows the analytic-hill evidence rather than a copied engine implementation. |
 | ECS water authoring versus renderer ownership | **bevy_water** (`src/lib.rs`, `src/water.rs`, `src/water/material.rs`, MIT/Apache-2.0) was read to confirm the separation between ECS authoring data and render-owned images/material state. Somnium implements its own compact `WaterComponent`, `WaterBodyRegistry`, resource formats, hierarchy, commands, and serialization. |
 | Later spectral/underwater architecture research | **Wicked Engine** (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, `shaders/underwaterCS.hlsl`, MIT) was studied for Phase IV-D onward. No FFT, ocean, or underwater shader code was translated in IV-A–IV-C; those citations are recorded now so later implementation does not silently inherit them. |
+
+### 13.32 Finite water and coherent surface optics (Phase IV-D–IV-E)
+
+| Piece | Reference / adaptation boundary |
+|---|---|
+| Deterministic Gerstner displacement and analytic derivatives | Mark Finch, NVIDIA GPU Gems Ch. 1, *Effective Water Simulation from Physical Models*. Somnium re-derived the equations in Rust and WGSL, uses its own four-band parameters, shore attenuation, velocity output, and query API; no source was copied. |
+| CPU/GPU surface-query parity | **bevy_water** (`src/wave.rs`, `src/water.rs`, MIT OR Apache-2.0) demonstrated the value of evaluating compatible wave math on CPU and GPU. Somnium's descriptor, registry ownership, bilinear bathymetry sampling, containment, and motion-vector contract are original. |
+| Resource ownership and future spectrum boundary | **Wicked Engine** (`wiOcean.cpp/.h`, `wiFFTGenerator.cpp/.h`, MIT) informed the separation of persistent ocean resources, displacement/gradient data, and CPU queries/readback. IV-D remains deterministic Gerstner rather than translating Wicked's FFT implementation. |
+| Surface/volume pass ordering | Epic's official *Single Layer Water* documentation and Wicked Engine's pre-water/underwater composition were used as architecture references. Somnium retains opaque terrain depth/color beneath a separate finite water pass and writes its own HDR/surface/velocity MRTs. |
+| Refraction and volumetric colour | Beer–Lambert extinction and Henyey–Greenstein phase are standard published models. Somnium reconstructs a bounded RGB path length from its depth/bathymetry, validates displaced UVs against opaque depth, and falls back to the unperturbed sample. |
+| Reflection | Standard dielectric Fresnel (`F0 = 0.02037`) and GGX are used with Somnium's existing physical sun/moon/environment data. The bounded screen-space march, confidence fade, environment fallback, and distance/footprint anti-aliasing are original WGSL integration. |
 

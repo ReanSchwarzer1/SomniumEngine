@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-11
-> **Current phase:** Phase IV-C complete; IV-D finite water surface and query contract next
+> **Current phase:** Phase IV-E complete; IV-F multi-scale waves, shoreline, and foam next
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -3350,7 +3350,7 @@ complete until those checks are recorded.
 
 ---
 
-## 17.17 Phase IV-A–IV-C — Great Lakes landscape foundation
+## 17.17 Phase IV-A–IV-E — Great Lakes landscape and finite water
 
 **Completed 2026-08-11.** The default heightmap is now a deterministic
 1025×1025 16-bit derivative of Motion Forge Pictures' FLOAT32 Great Lakes EXR.
@@ -3381,15 +3381,34 @@ tests, and 3 UI tests pass in release mode. The importer was executed twice and
 all output hashes matched. `phase_iv_default_validation.png` is the release-mode
 frame-12 live wgpu capture.
 
+**IV-D/E completed 2026-08-11.** The broad terrain-sized water plane is gone.
+Each body builds a compact 2 m terrain-local mesh only over wet coarse cells,
+then the full-resolution baked mask/depth/SDF performs exact fragment coverage.
+The same deterministic four-band Gerstner contract drives the WGSL surface and
+CPU surface-height/normal/depth/velocity/containment queries. Water writes
+surface coverage plus motion vectors, and TAA uses those vectors only on water
+while preserving opaque depth reprojection elsewhere.
+
+Surface optics now use validated screen-space refraction, reconstructed
+Beer–Lambert path length, RGB absorption and single scattering, dielectric
+`F0 = 0.02037`, GGX sun/moon/environment lighting, bounded SSR with environment
+fallback, and SDF shoreline foam. Complete normal/ORM mip chains plus
+pixel-footprint slope filtering prevent distant sparkle and Gerstner
+cross-hatching. Wave and optical authoring values persist through ECS scene
+serialization and their primary controls are available in the Water inspector.
+
+Validation: `cargo check --workspace --all-targets`; 204 renderer tests, 31 core
+tests, and 3 UI tests pass in release mode. Live wgpu post-TAA day and -20° sun
+captures are `phase_iv_de_validation_taa2.png` and
+`phase_iv_de_validation_night.png`.
+
 ## 18. Known Issues & Active Bugs
 
-**ACTIVE — Phase IV-C water data is finite, but the IV-D render surface is not
-yet mask-clipped.** The ECS component and renderer registry own the Great Lakes
-bounds, wet/dry mask, depth map, and shoreline SDF. The current water draw still
-uses a broad terrain-sized mesh and relies on the baked dry-ground clearance and
-depth test to hide dry regions. IV-D must consume the mask explicitly, replace
-the temporary mesh with the selected finite surface representation, and expose
-the gameplay depth/containment query contract.
+**RESOLVED — finite water coverage and query contract (IV-D).** The renderer
+now consumes the Great Lakes bounds, wet/dry mask, depth map, and shoreline SDF
+directly. A compact wet-cell mesh bounds raster work; full-resolution mask
+sampling owns the exact shoreline. CPU gameplay queries share the shader's wave
+parameters and shore attenuation.
 
 **RESOLVED — shattered foliage (visibility-buffer id packing).** The visibility
 buffer packed instance id and primitive id into one `R32Uint`, which forces a

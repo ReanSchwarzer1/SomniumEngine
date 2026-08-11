@@ -44,6 +44,10 @@ struct TaaParams {
 @group(0) @binding(4) var<uniform> taa: TaaParams;
 /// Auto-exposure result; `[0]` is the linear multiplier (Phase 24A-3).
 @group(0) @binding(5) var<storage, read> metered: array<f32, 2>;
+/// Screen velocity. Water overwrites its pixels after the static-depth pass.
+@group(0) @binding(6) var velocity_tex: texture_2d<f32>;
+/// RG = encoded water normal, B = linear depth, A = water coverage.
+@group(0) @binding(7) var water_surface_tex: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -277,7 +281,14 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         return vec4<f32>(current, 1.0);
     }
     let prev_ndc = prev_clip.xy / prev_clip.w;
-    let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+    let depth_prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+    // Water has no entry in the opaque depth buffer, and its vertices move
+    // even while the camera is still. The water pass therefore writes the
+    // same prev-current UV convention as the velocity pass and marks coverage
+    // in a separate target. All opaque pixels keep the proven depth path.
+    let water_coverage = textureLoad(water_surface_tex, coord, 0).a;
+    let water_velocity = textureLoad(velocity_tex, coord, 0).xy;
+    let prev_uv = select(depth_prev_uv, in.uv + water_velocity, water_coverage > 0.5);
 
     // Off screen last frame: there is no history to reuse.
     if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0))

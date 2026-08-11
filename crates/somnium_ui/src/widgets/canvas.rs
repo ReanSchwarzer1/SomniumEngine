@@ -26,7 +26,7 @@ impl Control for Canvas {
         let oy = widget.actual_local_position.y;
         for &ch in &widget.children {
             let pos = ctx.desired_local_position(ch);
-            let ds  = ctx.desired_size(ch);
+            let ds = ctx.desired_size(ch);
             ctx.arrange_child(ch, Rect::new(ox + pos.x, oy + pos.y, ds.x, ds.y));
         }
         final_size
@@ -39,9 +39,10 @@ impl Control for Canvas {
     fn handle_routed_message(
         &mut self,
         _widget: &mut Widget,
-        _msg:    &mut UiMessage,
-        _emit:   &mut Vec<UiMessage>,
-    ) {}
+        _msg: &mut UiMessage,
+        _emit: &mut Vec<UiMessage>,
+    ) {
+    }
 }
 
 pub struct CanvasBuilder {
@@ -49,7 +50,9 @@ pub struct CanvasBuilder {
 }
 
 impl CanvasBuilder {
-    pub fn new(widget: WidgetBuilder) -> Self { Self { widget } }
+    pub fn new(widget: WidgetBuilder) -> Self {
+        Self { widget }
+    }
 
     pub fn build(self) -> UiNode {
         UiNode::new(self.widget.build(), Box::new(Canvas))

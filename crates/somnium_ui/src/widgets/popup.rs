@@ -54,8 +54,8 @@ impl Control for Popup {
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
-        msg:    &mut UiMessage,
-        emit:   &mut Vec<UiMessage>,
+        msg: &mut UiMessage,
+        emit: &mut Vec<UiMessage>,
     ) {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
@@ -100,12 +100,14 @@ pub struct PopupBuilder {
 }
 
 impl PopupBuilder {
-    pub fn new(widget: WidgetBuilder) -> Self { Self { widget } }
+    pub fn new(widget: WidgetBuilder) -> Self {
+        Self { widget }
+    }
 
     pub fn build(self) -> UiNode {
         UiNode::new(
             self.widget.with_visibility(false).build(),
-            Box::new(Popup { is_open: false })
+            Box::new(Popup { is_open: false }),
         )
     }
 }

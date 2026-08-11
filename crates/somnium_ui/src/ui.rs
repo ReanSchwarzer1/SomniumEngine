@@ -30,19 +30,25 @@ pub type NodePool = Pool<UiNode>;
 // Internal concrete handle type (what Pool<UiNode> uses).
 type IH = crate::pool::Handle<UiNode>;
 
-#[inline] fn to_ih(h: NodeHandle) -> IH { h.transmute() }
-#[inline] fn to_nh(h: IH) -> NodeHandle { h.transmute() }
+#[inline]
+fn to_ih(h: NodeHandle) -> IH {
+    h.transmute()
+}
+#[inline]
+fn to_nh(h: IH) -> NodeHandle {
+    h.transmute()
+}
 
 pub struct UserInterface {
-    pub nodes:       NodePool,
-    root_ih:         IH,
+    pub nodes: NodePool,
+    root_ih: IH,
     pub screen_size: Vec2,
-    message_queue:   VecDeque<UiMessage>,
-    pub draw_ctx:    DrawingContext,
-    pub cursor_pos:  Vec2,
-    focused_ih:      IH,
+    message_queue: VecDeque<UiMessage>,
+    pub draw_ctx: DrawingContext,
+    pub cursor_pos: Vec2,
+    focused_ih: IH,
     #[allow(dead_code)]
-    captured_ih:     IH,
+    captured_ih: IH,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
 }
@@ -52,9 +58,9 @@ impl UserInterface {
         let mut nodes: NodePool = Pool::new();
         let root_widget = {
             let mut w = Widget::default();
-            w.name        = "Root".into();
-            w.width       = screen_w;
-            w.height      = screen_h;
+            w.name = "Root".into();
+            w.width = screen_w;
+            w.height = screen_h;
             // clip_bounds must be initialised to the screen rect so the first
             // arrange pass produces a non-zero clip for all descendants.
             w.clip_bounds = crate::types::Rect::new(0.0, 0.0, screen_w, screen_h);
@@ -74,7 +80,9 @@ impl UserInterface {
         }
     }
 
-    pub fn root(&self) -> NodeHandle { to_nh(self.root_ih) }
+    pub fn root(&self) -> NodeHandle {
+        to_nh(self.root_ih)
+    }
 
     /// Set the viewport handle so mouse events in the viewport area pass through to the game.
     pub fn set_viewport_handle(&mut self, handle: NodeHandle) {
@@ -99,12 +107,11 @@ impl UserInterface {
 
     pub fn add_node(&mut self, mut node: UiNode, parent: NodeHandle) -> NodeHandle {
         let parent_ih = to_ih(parent);
-        node.widget.parent   = parent;
+        node.widget.parent = parent;
         // Initialise clip_bounds to the full screen so the first arrange pass
         // computes a correct non-zero clip rect for every node.
-        node.widget.clip_bounds = crate::types::Rect::new(
-            0.0, 0.0, self.screen_size.x, self.screen_size.y,
-        );
+        node.widget.clip_bounds =
+            crate::types::Rect::new(0.0, 0.0, self.screen_size.x, self.screen_size.y);
         let handle_ih = self.nodes.spawn(node);
         let handle_nh = to_nh(handle_ih);
         // BUG-010 fix: set widget.handle so that FromWidget messages (Button/Menu clicks)
@@ -123,12 +130,18 @@ impl UserInterface {
 
     pub fn remove_node(&mut self, handle: NodeHandle) {
         let handle_ih = to_ih(handle);
-        let children: Vec<NodeHandle> = self.nodes.try_borrow(handle_ih)
+        let children: Vec<NodeHandle> = self
+            .nodes
+            .try_borrow(handle_ih)
             .map(|n| n.widget.children.clone())
             .unwrap_or_default();
-        for ch in children { self.remove_node(ch); }
+        for ch in children {
+            self.remove_node(ch);
+        }
         // Read parent_nh before any mutable borrow to avoid aliasing conflict.
-        let parent_nh = self.nodes.try_borrow(handle_ih)
+        let parent_nh = self
+            .nodes
+            .try_borrow(handle_ih)
             .map(|n| n.widget.parent)
             .unwrap_or(NodeHandle::NONE);
         if let Ok(p) = self.nodes.try_borrow_mut(to_ih(parent_nh)) {
@@ -137,7 +150,9 @@ impl UserInterface {
         }
         let _ = self.nodes.try_free(handle_ih);
         // Propagate invalidation up so ancestors remeasure after child removal.
-        if parent_nh.is_some() { self.invalidate_ancestors(parent_nh); }
+        if parent_nh.is_some() {
+            self.invalidate_ancestors(parent_nh);
+        }
     }
 
     /// Walk from `start` toward the root, invalidating each ancestor's layout.
@@ -153,7 +168,9 @@ impl UserInterface {
                 }
                 Err(_) => return,
             };
-            if !parent.is_some() { return; }
+            if !parent.is_some() {
+                return;
+            }
             current = parent;
         }
     }
@@ -188,34 +205,46 @@ impl UserInterface {
         let snap = match self.nodes.try_borrow(handle) {
             Ok(n) => WidgetSnap {
                 measure_valid: n.widget.measure_valid,
-                prev_measure:  n.widget.prev_measure,
-                visibility:    n.widget.visibility,
-                desired_size:  n.widget.desired_size,
-                margin:        n.widget.margin,
-                width:         n.widget.width,
-                height:        n.widget.height,
-                min_size:      n.widget.min_size,
-                max_size:      n.widget.max_size,
+                prev_measure: n.widget.prev_measure,
+                visibility: n.widget.visibility,
+                desired_size: n.widget.desired_size,
+                margin: n.widget.margin,
+                width: n.widget.width,
+                height: n.widget.height,
+                min_size: n.widget.min_size,
+                max_size: n.widget.max_size,
             },
             Err(_) => return Vec2::ZERO,
         };
 
-        if snap.measure_valid && snap.prev_measure == available { return snap.desired_size; }
-        if !snap.visibility { return Vec2::ZERO; }
+        if snap.measure_valid && snap.prev_measure == available {
+            return snap.desired_size;
+        }
+        if !snap.visibility {
+            return Vec2::ZERO;
+        }
 
         let margin = snap.margin;
-        let inner  = (available - Vec2::new(margin.h(), margin.v())).max(Vec2::ZERO);
+        let inner = (available - Vec2::new(margin.h(), margin.v())).max(Vec2::ZERO);
 
         // --- Call control.measure_override (no pool borrows held) ---
         let widget_snap_copy = snap; // move; borrow is gone
         let desired = {
             // Build layout input: respect explicit width/height from widget.
             let constrained_inner = Vec2::new(
-                if widget_snap_copy.width.is_nan() { inner.x } else { widget_snap_copy.width },
-                if widget_snap_copy.height.is_nan() { inner.y } else { widget_snap_copy.height },
+                if widget_snap_copy.width.is_nan() {
+                    inner.x
+                } else {
+                    widget_snap_copy.width
+                },
+                if widget_snap_copy.height.is_nan() {
+                    inner.y
+                } else {
+                    widget_snap_copy.height
+                },
             );
-            let constrained = constrained_inner
-                .clamp(widget_snap_copy.min_size, widget_snap_copy.max_size);
+            let constrained =
+                constrained_inner.clamp(widget_snap_copy.min_size, widget_snap_copy.max_size);
 
             // Get raw pointers — pool borrow already released.
             let (widget_ptr, control_ptr) = {
@@ -224,14 +253,21 @@ impl UserInterface {
                 let c = node.control.as_ref() as *const dyn Control;
                 (w, c)
             };
-            let mut ctx = LayoutCtx { ui_ptr: self as *mut Self };
+            let mut ctx = LayoutCtx {
+                ui_ptr: self as *mut Self,
+            };
             // SAFETY: widget_ptr is stable in pool record; ctx has raw ptr not a borrow.
             // control.measure_override may call ctx.measure_child for other handles.
-            let mut raw = unsafe { (*control_ptr).measure_override(&*widget_ptr, &mut ctx, constrained) };
+            let mut raw =
+                unsafe { (*control_ptr).measure_override(&*widget_ptr, &mut ctx, constrained) };
 
             // Apply explicit size overrides.
-            if !widget_snap_copy.width.is_nan()  { raw.x = widget_snap_copy.width; }
-            if !widget_snap_copy.height.is_nan() { raw.y = widget_snap_copy.height; }
+            if !widget_snap_copy.width.is_nan() {
+                raw.x = widget_snap_copy.width;
+            }
+            if !widget_snap_copy.height.is_nan() {
+                raw.y = widget_snap_copy.height;
+            }
             raw.clamp(widget_snap_copy.min_size, widget_snap_copy.max_size)
         };
 
@@ -240,8 +276,8 @@ impl UserInterface {
 
         // --- Commit ---
         let node = self.nodes.borrow_mut(handle);
-        node.widget.prev_measure  = available;
-        node.widget.desired_size  = desired_with_margin;
+        node.widget.prev_measure = available;
+        node.widget.desired_size = desired_with_margin;
         node.widget.measure_valid = true;
         desired_with_margin
     }
@@ -262,41 +298,53 @@ impl UserInterface {
 
     pub(crate) fn arrange_node(&mut self, handle: IH, final_rect: Rect) {
         let parent_clip = self.get_parent_clip(handle);
-        
+
         // --- Read snapshot ---
         let snap = match self.nodes.try_borrow(handle) {
             Ok(n) => ArrangeSnap {
                 arrange_valid: n.widget.arrange_valid,
-                prev_arrange:  n.widget.prev_arrange,
-                visibility:    n.widget.visibility,
-                margin:        n.widget.margin,
-                h_align:       n.widget.horizontal_alignment,
-                v_align:       n.widget.vertical_alignment,
-                desired_size:  n.widget.desired_size,
-                width:         n.widget.width,
-                height:        n.widget.height,
-                min_size:      n.widget.min_size,
-                max_size:      n.widget.max_size,
+                prev_arrange: n.widget.prev_arrange,
+                visibility: n.widget.visibility,
+                margin: n.widget.margin,
+                h_align: n.widget.horizontal_alignment,
+                v_align: n.widget.vertical_alignment,
+                desired_size: n.widget.desired_size,
+                width: n.widget.width,
+                height: n.widget.height,
+                min_size: n.widget.min_size,
+                max_size: n.widget.max_size,
                 clip_to_bounds: n.widget.clip_to_bounds,
             },
             Err(_) => return,
         };
 
-        if snap.arrange_valid && snap.prev_arrange == final_rect { return; }
-        if !snap.visibility { return; }
+        if snap.arrange_valid && snap.prev_arrange == final_rect {
+            return;
+        }
+        if !snap.visibility {
+            return;
+        }
 
-        let margin  = snap.margin;
-        let avail   = Vec2::new(
+        let margin = snap.margin;
+        let avail = Vec2::new(
             (final_rect.w - margin.h()).max(0.0),
             (final_rect.h - margin.v()).max(0.0),
         );
         let desired_inner = snap.desired_size - Vec2::new(margin.h(), margin.v());
 
         let mut size = avail;
-        if snap.h_align != HorizontalAlignment::Stretch { size.x = size.x.min(desired_inner.x); }
-        if snap.v_align != VerticalAlignment::Stretch   { size.y = size.y.min(desired_inner.y); }
-        if !snap.width.is_nan()  { size.x = snap.width; }
-        if !snap.height.is_nan() { size.y = snap.height; }
+        if snap.h_align != HorizontalAlignment::Stretch {
+            size.x = size.x.min(desired_inner.x);
+        }
+        if snap.v_align != VerticalAlignment::Stretch {
+            size.y = size.y.min(desired_inner.y);
+        }
+        if !snap.width.is_nan() {
+            size.x = snap.width;
+        }
+        if !snap.height.is_nan() {
+            size.y = snap.height;
+        }
         size = size.clamp(snap.min_size, snap.max_size);
         size.x = size.x.ceil();
         size.y = size.y.ceil();
@@ -307,14 +355,14 @@ impl UserInterface {
                 origin.x += (avail.x - size.x) * 0.5;
             }
             HorizontalAlignment::Right => origin.x += avail.x - size.x,
-            HorizontalAlignment::Left  => {}
+            HorizontalAlignment::Left => {}
         }
         match snap.v_align {
             VerticalAlignment::Center | VerticalAlignment::Stretch => {
                 origin.y += (avail.y - size.y) * 0.5;
             }
             VerticalAlignment::Bottom => origin.y += avail.y - size.y,
-            VerticalAlignment::Top    => {}
+            VerticalAlignment::Top => {}
         }
         origin.x = origin.x.floor();
         origin.y = origin.y.floor();
@@ -331,15 +379,17 @@ impl UserInterface {
             let (widget_ptr, control_ptr) = {
                 let node = self.nodes.borrow_mut(handle);
                 node.widget.actual_local_position = origin;
-                node.widget.actual_local_size     = size;
-                node.widget.clip_bounds           = node_clip;
-                node.widget.prev_arrange          = final_rect;
-                node.widget.arrange_valid         = true;
+                node.widget.actual_local_size = size;
+                node.widget.clip_bounds = node_clip;
+                node.widget.prev_arrange = final_rect;
+                node.widget.arrange_valid = true;
                 let w = &node.widget as *const Widget;
                 let c = node.control.as_ref() as *const dyn Control;
                 (w, c)
             };
-            let mut ctx = LayoutCtx { ui_ptr: self as *mut Self };
+            let mut ctx = LayoutCtx {
+                ui_ptr: self as *mut Self,
+            };
             // SAFETY: see measure_node. control.arrange_override calls ctx.arrange_child
             // for child handles — no aliased borrows.
             unsafe { (*control_ptr).arrange_override(&*widget_ptr, &mut ctx, size) }
@@ -361,17 +411,28 @@ impl UserInterface {
     }
 
     fn pick_node(&self, handle: IH, pt: Vec2) -> IH {
-        let node = match self.nodes.try_borrow(handle) { Ok(n) => n, Err(_) => return IH::NONE };
-        if !node.widget.global_visibility || !node.widget.hit_test_visibility || !node.widget.enabled {
+        let node = match self.nodes.try_borrow(handle) {
+            Ok(n) => n,
+            Err(_) => return IH::NONE,
+        };
+        if !node.widget.global_visibility
+            || !node.widget.hit_test_visibility
+            || !node.widget.enabled
+        {
             return IH::NONE;
         }
         let children = node.widget.children.clone();
         let _ = node;
         for ch_nh in children.iter().rev() {
             let p = self.pick_node(to_ih(*ch_nh), pt);
-            if p.is_some() { return p; }
+            if p.is_some() {
+                return p;
+            }
         }
-        let node = match self.nodes.try_borrow(handle) { Ok(n) => n, Err(_) => return IH::NONE };
+        let node = match self.nodes.try_borrow(handle) {
+            Ok(n) => n,
+            Err(_) => return IH::NONE,
+        };
         if node.widget.clip_bounds.contains(pt) && node.widget.screen_bounds().contains(pt) {
             handle
         } else {
@@ -383,7 +444,9 @@ impl UserInterface {
     // Focus / capture
     // -----------------------------------------------------------------------
 
-    pub fn focused(&self) -> NodeHandle { to_nh(self.focused_ih) }
+    pub fn focused(&self) -> NodeHandle {
+        to_nh(self.focused_ih)
+    }
 
     pub fn set_focus(&mut self, handle: NodeHandle) {
         self.focused_ih = to_ih(handle);
@@ -412,16 +475,26 @@ impl UserInterface {
                     loop {
                         let mut emit = Vec::new();
                         let parent_nh = if let Ok(node) = self.nodes.try_borrow_mut(current_ih) {
-                            let widget_ptr  = &mut node.widget  as *mut Widget;
+                            let widget_ptr = &mut node.widget as *mut Widget;
                             let control_ptr = node.control.as_mut() as *mut dyn Control;
-                            unsafe { (*control_ptr).handle_routed_message(&mut *widget_ptr, &mut msg, &mut emit); }
+                            unsafe {
+                                (*control_ptr).handle_routed_message(
+                                    &mut *widget_ptr,
+                                    &mut msg,
+                                    &mut emit,
+                                );
+                            }
                             node.widget.parent
                         } else {
                             break;
                         };
-                        for e in emit { self.message_queue.push_back(e); }
+                        for e in emit {
+                            self.message_queue.push_back(e);
+                        }
                         // If handled or no parent, stop bubbling.
-                        if msg.handled || !parent_nh.is_some() { break; }
+                        if msg.handled || !parent_nh.is_some() {
+                            break;
+                        }
                         current_ih = to_ih(parent_nh);
                     }
                 }
@@ -451,24 +524,36 @@ impl UserInterface {
             }
             Err(_) => return,
         };
-        let gv = self.nodes.try_borrow(handle).map(|n| n.widget.global_visibility).unwrap_or(false);
-        for ch in children { self.update_global_visibility(to_ih(ch), gv); }
+        let gv = self
+            .nodes
+            .try_borrow(handle)
+            .map(|n| n.widget.global_visibility)
+            .unwrap_or(false);
+        for ch in children {
+            self.update_global_visibility(to_ih(ch), gv);
+        }
     }
 
     fn draw_node(&mut self, handle: IH) {
         let (clip, children) = match self.nodes.try_borrow(handle) {
-            Ok(n) if n.widget.global_visibility => (n.widget.clip_bounds, n.widget.children.clone()),
+            Ok(n) if n.widget.global_visibility => {
+                (n.widget.clip_bounds, n.widget.children.clone())
+            }
             _ => return,
         };
         self.draw_ctx.push_clip_rect(clip);
         {
             let node = self.nodes.borrow_mut(handle);
-            let widget_ptr  = &node.widget as *const Widget;
+            let widget_ptr = &node.widget as *const Widget;
             let control_ptr = node.control.as_ref() as *const dyn Control;
             // SAFETY: widget lives in pool record, draw_ctx is a separate allocation.
-            unsafe { (*control_ptr).draw(&*widget_ptr, &mut self.draw_ctx); }
+            unsafe {
+                (*control_ptr).draw(&*widget_ptr, &mut self.draw_ctx);
+            }
         }
-        for ch in children { self.draw_node(to_ih(ch)); }
+        for ch in children {
+            self.draw_node(to_ih(ch));
+        }
         self.draw_ctx.pop_clip_rect();
     }
 
@@ -494,8 +579,8 @@ impl UserInterface {
         self.screen_size = Vec2::new(w, h);
         // Update root widget dimensions.
         if let Ok(root) = self.nodes.try_borrow_mut(self.root_ih) {
-            root.widget.width       = w;
-            root.widget.height      = h;
+            root.widget.width = w;
+            root.widget.height = h;
             root.widget.clip_bounds = crate::types::Rect::new(0.0, 0.0, w, h);
         }
         // BUG-009 fix: Invalidate ALL nodes in the tree, not just root.
@@ -518,7 +603,9 @@ impl UserInterface {
 
     /// Remove all children of a node (recursive).
     pub fn clear_children(&mut self, handle: NodeHandle) {
-        let children = self.nodes.try_borrow(to_ih(handle))
+        let children = self
+            .nodes
+            .try_borrow(to_ih(handle))
             .map(|n| n.widget.children.clone())
             .unwrap_or_default();
         for ch in children {
@@ -589,7 +676,11 @@ impl UserInterface {
                     if matches!(state, ElementState::Pressed) {
                         let old = to_nh(self.focused_ih);
                         if old.is_some() {
-                            self.send(UiMessage::new(old, MessageDirection::ToWidget, WidgetMessage::Unfocus));
+                            self.send(UiMessage::new(
+                                old,
+                                MessageDirection::ToWidget,
+                                WidgetMessage::Unfocus,
+                            ));
                             self.focused_ih = IH::NONE;
                         }
                     }
@@ -599,7 +690,11 @@ impl UserInterface {
                 if matches!(state, ElementState::Pressed) {
                     let old = to_nh(self.focused_ih);
                     if old != hit && old.is_some() {
-                        self.send(UiMessage::new(old, MessageDirection::ToWidget, WidgetMessage::Unfocus));
+                        self.send(UiMessage::new(
+                            old,
+                            MessageDirection::ToWidget,
+                            WidgetMessage::Unfocus,
+                        ));
                     }
                     self.focused_ih = to_ih(hit);
                     // Focus is re-sent even when this widget already held it. A
@@ -608,7 +703,11 @@ impl UserInterface {
                     // here would leave it impossible to click back into typing.
                     // Re-focusing an already-focused field also re-selects its
                     // contents, which is what clicking one should do anyway.
-                    self.send(UiMessage::new(hit, MessageDirection::ToWidget, WidgetMessage::Focus));
+                    self.send(UiMessage::new(
+                        hit,
+                        MessageDirection::ToWidget,
+                        WidgetMessage::Focus,
+                    ));
                 }
 
                 // Press captures the mouse; release delivers to the capturing
@@ -618,13 +717,25 @@ impl UserInterface {
                 let (target, wmsg) = match state {
                     ElementState::Pressed => {
                         self.captured_ih = to_ih(hit);
-                        (hit, WidgetMessage::MouseDown { pos, button: *button })
+                        (
+                            hit,
+                            WidgetMessage::MouseDown {
+                                pos,
+                                button: *button,
+                            },
+                        )
                     }
                     ElementState::Released => {
                         let captured = to_nh(self.captured_ih);
                         self.captured_ih = IH::NONE;
                         let target = if captured.is_some() { captured } else { hit };
-                        (target, WidgetMessage::MouseUp { pos, button: *button })
+                        (
+                            target,
+                            WidgetMessage::MouseUp {
+                                pos,
+                                button: *button,
+                            },
+                        )
                     }
                 };
                 self.send(UiMessage::new(target, MessageDirection::ToWidget, wmsg));
@@ -640,11 +751,14 @@ impl UserInterface {
                 }
                 if hit.is_some() {
                     let d = match delta {
-                        MouseScrollDelta::LineDelta(_, y)  => *y * 20.0,
-                        MouseScrollDelta::PixelDelta(p)    => p.y as f32,
+                        MouseScrollDelta::LineDelta(_, y) => *y * 20.0,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
                     };
-                    self.send(UiMessage::new(hit, MessageDirection::ToWidget,
-                        WidgetMessage::MouseWheel { pos, delta: d }));
+                    self.send(UiMessage::new(
+                        hit,
+                        MessageDirection::ToWidget,
+                        WidgetMessage::MouseWheel { pos, delta: d },
+                    ));
                     return true;
                 }
                 false
@@ -670,8 +784,11 @@ impl UserInterface {
                         if let Some(text) = &key_ev.text {
                             let s = text.to_string();
                             if !s.is_empty() && !s.chars().all(|c| c.is_control()) {
-                                self.send(UiMessage::new(focused, MessageDirection::ToWidget,
-                                    WidgetMessage::Text(s)));
+                                self.send(UiMessage::new(
+                                    focused,
+                                    MessageDirection::ToWidget,
+                                    WidgetMessage::Text(s),
+                                ));
                             }
                         }
                     }
@@ -690,28 +807,28 @@ impl UserInterface {
 // ---------------------------------------------------------------------------
 struct WidgetSnap {
     measure_valid: bool,
-    prev_measure:  Vec2,
-    visibility:    bool,
-    desired_size:  Vec2,
-    margin:        crate::types::Thickness,
-    width:         f32,
-    height:        f32,
-    min_size:      Vec2,
-    max_size:      Vec2,
+    prev_measure: Vec2,
+    visibility: bool,
+    desired_size: Vec2,
+    margin: crate::types::Thickness,
+    width: f32,
+    height: f32,
+    min_size: Vec2,
+    max_size: Vec2,
 }
 
 struct ArrangeSnap {
-    arrange_valid:  bool,
-    prev_arrange:   Rect,
-    visibility:     bool,
-    margin:         crate::types::Thickness,
-    h_align:        HorizontalAlignment,
-    v_align:        VerticalAlignment,
-    desired_size:   Vec2,
-    width:          f32,
-    height:         f32,
-    min_size:       Vec2,
-    max_size:       Vec2,
+    arrange_valid: bool,
+    prev_arrange: Rect,
+    visibility: bool,
+    margin: crate::types::Thickness,
+    h_align: HorizontalAlignment,
+    v_align: VerticalAlignment,
+    desired_size: Vec2,
+    width: f32,
+    height: f32,
+    min_size: Vec2,
+    max_size: Vec2,
     clip_to_bounds: bool,
 }
 
@@ -747,7 +864,8 @@ impl Control for RootControl {
     fn handle_routed_message(
         &mut self,
         _widget: &mut Widget,
-        _msg:    &mut UiMessage,
-        _emit:   &mut Vec<UiMessage>,
-    ) {}
+        _msg: &mut UiMessage,
+        _emit: &mut Vec<UiMessage>,
+    ) {
+    }
 }

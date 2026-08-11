@@ -181,8 +181,8 @@ pub fn kelvin_to_rgb(kelvin: f32) -> glam::Vec3 {
         138.517_73 * (t - 10.0).ln() - 305.044_79
     };
 
-    let srgb = glam::Vec3::new(red, green, blue).clamp(glam::Vec3::ZERO, glam::Vec3::splat(255.0))
-        / 255.0;
+    let srgb =
+        glam::Vec3::new(red, green, blue).clamp(glam::Vec3::ZERO, glam::Vec3::splat(255.0)) / 255.0;
 
     // The fit is in sRGB; shading works in linear, so decode. Skipping this is
     // a subtle and very common bug — it makes warm lights far too saturated.
@@ -228,10 +228,16 @@ mod tests {
     #[test]
     fn sunny_sixteen_lands_on_ev15() {
         let ev = ev100_from_camera(16.0, 1.0 / 125.0, 100.0);
-        assert!((ev - 15.0).abs() < 0.05, "f/16 1/125 ISO100 gave EV100 {ev}, expected ~15");
+        assert!(
+            (ev - 15.0).abs() < 0.05,
+            "f/16 1/125 ISO100 gave EV100 {ev}, expected ~15"
+        );
 
         let rule_of_thumb = ev100_from_camera(16.0, 1.0 / 100.0, 100.0);
-        assert!((rule_of_thumb - 14.64).abs() < 0.05, "sunny-16 rule gave {rule_of_thumb}");
+        assert!(
+            (rule_of_thumb - 14.64).abs() < 0.05,
+            "sunny-16 rule gave {rule_of_thumb}"
+        );
     }
 
     /// Opening the aperture one stop (f/16 → f/11.3) halves the EV, and halving
@@ -276,7 +282,10 @@ mod tests {
     fn moonlight_metered_for_daylight_is_black() {
         let luminance = lux::FULL_MOON / PI;
         let exposed = luminance * exposure_from_ev100(ev100::SUNLIGHT);
-        assert!(exposed < 0.001, "moonlight at daylight exposure gave {exposed}");
+        assert!(
+            exposed < 0.001,
+            "moonlight at daylight exposure gave {exposed}"
+        );
     }
 
     /// A 60 W-equivalent bulb is ~800 lm; at 1 m that should read as a sane
@@ -306,8 +315,14 @@ mod tests {
         let neutral = kelvin_to_rgb(6_600.0);
         let cool = kelvin_to_rgb(kelvin::BLUE_SKY);
 
-        assert!(warm.x > warm.z, "tungsten should be red-dominant, got {warm:?}");
-        assert!(cool.z > cool.x, "blue sky should be blue-dominant, got {cool:?}");
+        assert!(
+            warm.x > warm.z,
+            "tungsten should be red-dominant, got {warm:?}"
+        );
+        assert!(
+            cool.z > cool.x,
+            "blue sky should be blue-dominant, got {cool:?}"
+        );
         assert!(
             (neutral.x - neutral.z).abs() < 0.2,
             "6600 K should be near neutral, got {neutral:?}",

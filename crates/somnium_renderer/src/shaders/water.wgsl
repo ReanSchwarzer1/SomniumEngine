@@ -1,84 +1,174 @@
-// ── View Uniform ─────────────────────────────────────────────────────────────
+// Somnium Engine — finite lake surface and physically coherent optics (IV-D/E).
+//
+// Gerstner dispersion/query parity follows the published GPU Gems water pattern;
+// resource/query ownership was cross-checked against Wicked Engine wiOcean and
+// bevy_water (MIT / Apache-2.0). The WGSL and integration are original.
+
 struct View {
-    view_proj:     mat4x4<f32>,
+    view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    view_matrix:   mat4x4<f32>,
-    camera_pos:    vec3<f32>,
-    _padding:      f32,
-    time:          f32,
-    _pad1:         vec2<f32>,
+    view_matrix: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    _padding: f32,
+    time: f32,
+    _pad1: vec2<f32>,
 }
 
-@group(0) @binding(0) var<storage, read> view: View;
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
+struct DirectionalLight {
+    direction: vec3<f32>,
+    _pad0: f32,
+    color: vec3<f32>,
+    _pad1: f32,
+    view_proj: array<mat4x4<f32>, 4>,
+    cascade_splits: vec4<f32>,
+    shadow_map_size: f32,
+    ibl_intensity: f32,
+    sun_angular_radius: f32,
+    _pad2_z: f32,
+    moon_direction: vec3<f32>,
+    moon_intensity: f32,
+}
 
-// ── Water Component ─────────────────────────────────────────────────────────
+struct WaterFrameData {
+    current_view_proj: mat4x4<f32>,
+    previous_view_proj: mat4x4<f32>,
+    current_time: f32,
+    previous_time: f32,
+    history_valid: f32,
+    _pad: f32,
+}
+
 struct WaterMaterial {
     deep_color: vec4<f32>,
     shallow_color: vec4<f32>,
     edge_color: vec4<f32>,
-    clarity: f32,
-    edge_scale: f32,
-    amplitude: f32,
-    coord_scale: vec2<f32>,
-    coord_offset: vec2<f32>,
+    absorption_roughness: vec4<f32>,
+    scattering_anisotropy: vec4<f32>,
+    bounds: vec4<f32>,
+    surface_params: vec4<f32>,
     wave_dir_a: vec2<f32>,
     wave_dir_b: vec2<f32>,
-    wave_blend: f32,
+    wave_params: vec4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> material: WaterMaterial;
-
-// ── Instance Data ───────────────────────────────────────────────────────────
 struct Instance {
     model: mat4x4<f32>,
-    _pad: vec4<f32>, // matching alignment
+    _pad: vec4<f32>,
 }
+
+@group(0) @binding(0) var<storage, read> view: View;
+@group(0) @binding(1) var depth_texture: texture_depth_2d;
+@group(0) @binding(2) var<storage, read> light: DirectionalLight;
+@group(0) @binding(3) var shadow_atlas: texture_depth_2d;
+@group(0) @binding(4) var shadow_sampler: sampler_comparison;
+@group(0) @binding(5) var env_cube: texture_cube<f32>;
+@group(0) @binding(6) var env_sampler: sampler;
+@group(0) @binding(7) var scene_color: texture_2d<f32>;
+@group(0) @binding(8) var<uniform> frame: WaterFrameData;
+
+@group(1) @binding(0) var<uniform> material: WaterMaterial;
+@group(1) @binding(1) var body_mask: texture_2d<f32>;
+@group(1) @binding(2) var body_depth: texture_2d<f32>;
+@group(1) @binding(3) var shore_sdf: texture_2d<f32>;
 
 @group(2) @binding(0) var<storage, read> instances: array<Instance>;
 
-// ── Textures ────────────────────────────────────────────────────────────────
 @group(3) @binding(0) var tex_base_color: texture_2d<f32>;
 @group(3) @binding(1) var tex_normal: texture_2d<f32>;
 @group(3) @binding(2) var tex_orm: texture_2d<f32>;
 @group(3) @binding(3) var sampler_linear: sampler;
 
-// -- Sun, shadows, environment, scene colour (Phase 22) ----------------------
-// Layout mirrors `DirectionalLight` in shading.wgsl so the same GPU buffer
-// serves both passes. The water used to invent its own light vector, which is
-// why its highlight never agreed with the rest of the frame.
-struct DirectionalLight {
-    direction:       vec3<f32>,   // points TOWARD the sun
-    _pad0:           f32,
-    color:           vec3<f32>,
-    _pad1:           f32,
-    view_proj:       array<mat4x4<f32>, 4>,
-    cascade_splits:  vec4<f32>,
-    shadow_map_size: f32,
-    ibl_intensity:   f32,
-    sun_angular_radius:         f32,
-    _pad2_z:         f32,
-    moon_direction:  vec3<f32>,
-    moon_intensity:  f32,
+const PI: f32 = 3.14159265359;
+const TAU: f32 = 6.28318530718;
+const ENV_MAX_MIP: f32 = 5.0;
+const F0_WATER: vec3<f32> = vec3<f32>(0.02037);
+
+fn body_texel(uv: vec2<f32>, dimensions: vec2<u32>) -> vec2<i32> {
+    let limit = vec2<f32>(dimensions - vec2<u32>(1u));
+    return vec2<i32>(round(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * limit));
 }
 
-@group(0) @binding(2) var<storage, read> light: DirectionalLight;
-@group(0) @binding(3) var shadow_atlas:   texture_depth_2d;
-@group(0) @binding(4) var shadow_sampler: sampler_comparison;
-@group(0) @binding(5) var env_cube:       texture_cube<f32>;
-@group(0) @binding(6) var env_sampler:    sampler;
-@group(0) @binding(7) var scene_color:    texture_2d<f32>;
+fn mask_at(uv: vec2<f32>) -> f32 {
+    return textureLoad(body_mask, body_texel(uv, textureDimensions(body_mask)), 0).r;
+}
 
-const PI: f32 = 3.14159265;
-/// Highest mip of the prefiltered environment cubemap (matches ibl.rs).
-const ENV_MAX_MIP: f32 = 5.0;
-/// Beyond this many metres of water the transmitted light is entirely
-/// scattering. Capping stops open water -- where the depth buffer still holds
-/// the far plane -- from reporting a depth of thousands of units.
-const MAX_WATER_DEPTH: f32 = 60.0;
-/// Spectral absorption of clear seawater, roughly in the observed ratio: red is
-/// swallowed first, blue travels furthest. Scaled by the material's clarity.
-const ABSORPTION: vec3<f32> = vec3<f32>(0.45, 0.10, 0.045);
+fn depth_at(uv: vec2<f32>) -> f32 {
+    return textureLoad(body_depth, body_texel(uv, textureDimensions(body_depth)), 0).r;
+}
+
+fn sdf_at(uv: vec2<f32>) -> f32 {
+    return textureLoad(shore_sdf, body_texel(uv, textureDimensions(shore_sdf)), 0).r;
+}
+
+fn local_coord(uv: vec2<f32>) -> vec2<f32> {
+    return mix(material.bounds.xy, material.bounds.zw, uv);
+}
+
+struct WaveSample {
+    displacement: vec3<f32>,
+    normal: vec3<f32>,
+    velocity: vec3<f32>,
+}
+
+fn safe_dir(v: vec2<f32>) -> vec2<f32> {
+    let length_squared = dot(v, v);
+    return select(vec2<f32>(1.0, 0.0), v * inverseSqrt(length_squared), length_squared > 1e-8);
+}
+
+fn evaluate_waves(p: vec2<f32>, time: f32, shore: f32) -> WaveSample {
+    let a = safe_dir(material.wave_dir_a);
+    let b = safe_dir(material.wave_dir_b);
+    let dirs = array<vec2<f32>, 4>(
+        a,
+        b,
+        safe_dir(a + vec2<f32>(-b.y, b.x) * 0.35),
+        safe_dir(b - vec2<f32>(-a.y, a.x) * 0.25),
+    );
+    let wavelengths = array<f32, 4>(
+        max(material.wave_params.x, 0.5),
+        max(material.wave_params.y, 0.5),
+        max(material.wave_params.x, 0.5) * 0.50,
+        max(material.wave_params.y, 0.5) * 0.70,
+    );
+    let weights = array<f32, 4>(0.55, 0.25, 0.13, 0.07);
+    let total_amplitude = material.surface_params.z * shore;
+    let speed = material.wave_params.z;
+    let steepness = clamp(material.wave_params.w, 0.0, 0.95);
+    var displacement = vec3<f32>(0.0);
+    var dx = vec3<f32>(1.0, 0.0, 0.0);
+    var dz = vec3<f32>(0.0, 0.0, 1.0);
+    var velocity = vec3<f32>(0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let dir = dirs[i];
+        let amplitude = total_amplitude * weights[i];
+        let k = TAU / wavelengths[i];
+        let omega = sqrt(9.81 * k) * speed;
+        let phase = k * dot(dir, p) + omega * time;
+        let s = sin(phase);
+        let c = cos(phase);
+        displacement += vec3<f32>(
+            steepness * amplitude * dir.x * c,
+            amplitude * s,
+            steepness * amplitude * dir.y * c,
+        );
+        dx += vec3<f32>(
+            -steepness * amplitude * k * dir.x * dir.x * s,
+            amplitude * k * dir.x * c,
+            -steepness * amplitude * k * dir.x * dir.y * s,
+        );
+        dz += vec3<f32>(
+            -steepness * amplitude * k * dir.x * dir.y * s,
+            amplitude * k * dir.y * c,
+            -steepness * amplitude * k * dir.y * dir.y * s,
+        );
+        velocity += vec3<f32>(
+            -steepness * amplitude * dir.x * omega * s,
+            amplitude * omega * c,
+            -steepness * amplitude * dir.y * omega * s,
+        );
+    }
+    return WaveSample(displacement, normalize(cross(dz, dx)), velocity);
+}
 
 fn get_cascade_index(view_depth: f32) -> u32 {
     if view_depth < light.cascade_splits.x { return 0u; }
@@ -88,127 +178,116 @@ fn get_cascade_index(view_depth: f32) -> u32 {
 }
 
 fn atlas_uv(cascade: u32, uv: vec2<f32>) -> vec2<f32> {
-    var offsets = array<vec2<f32>, 4>(
+    let offsets = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0), vec2<f32>(0.5, 0.0),
         vec2<f32>(0.0, 0.5), vec2<f32>(0.5, 0.5),
     );
     return uv * 0.5 + offsets[cascade];
 }
 
-/// 3x3 PCF against the cascade atlas. Same scheme as shading.wgsl so the water
-/// and the geometry under it agree on where the shadow edge falls.
 fn sample_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
-    let cascade    = get_cascade_index(view_depth);
-    let light_clip = light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
-    let ndc        = light_clip.xyz / light_clip.w;
-
-    let uv            = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    let atlas_coord   = atlas_uv(cascade, uv);
-    let compare_depth = ndc.z;
-
-    if any(atlas_coord < vec2<f32>(0.0)) || any(atlas_coord > vec2<f32>(1.0)) || compare_depth > 1.0 {
+    let cascade = get_cascade_index(view_depth);
+    let clip = light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = atlas_uv(cascade, vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5));
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
         return 1.0;
     }
-
-    let texel_size = 1.0 / light.shadow_map_size;
-    var shadow = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            shadow += textureSampleCompare(
+    let texel = 1.0 / light.shadow_map_size;
+    var result = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            result += textureSampleCompare(
                 shadow_atlas, shadow_sampler,
-                atlas_coord + offset, compare_depth,
+                uv + vec2<f32>(f32(x), f32(y)) * texel, ndc.z,
             );
         }
     }
-    return shadow / 9.0;
+    return result / 9.0;
 }
 
-// ── Noise Functions ─────────────────────────────────────────────────────────
-fn random2d(v: vec2<f32>) -> f32 {
-    return fract(sin(dot(v, vec2<f32>(12.9898,78.233))) * 43758.5453123);
+fn reconstruct_world(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let world = view.inv_view_proj * ndc;
+    return world.xyz / world.w;
 }
 
-fn random2di(v: vec2<f32>) -> f32 {
-    return random2d(floor(v));
+fn project_uv(world: vec3<f32>) -> vec3<f32> {
+    let clip = frame.current_view_proj * vec4<f32>(world, 1.0);
+    let ndc = clip.xyz / clip.w;
+    return vec3<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, ndc.z);
 }
 
-fn cubic_hermite_curve_2d(x: vec2<f32>) -> vec2<f32> {
-    return smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), x);
+fn view_depth(world: vec3<f32>) -> f32 {
+    return -(view.view_matrix * vec4<f32>(world, 1.0)).z;
 }
 
-fn vnoise2d(v: vec2<f32>) -> f32 {
-    let i = floor(v);
-    let f = fract(v);
-    let a = random2di(i);
-    let b = random2di(i + vec2<f32>(1.0, 0.0));
-    let c = random2di(i + vec2<f32>(0.0, 1.0));
-    let d = random2di(i + vec2<f32>(1.0, 1.0));
-    let u = cubic_hermite_curve_2d(f);
-    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+fn edge_confidence(uv: vec2<f32>) -> f32 {
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    return smoothstep(0.0, 0.08, edge);
 }
 
-fn fbm_half(v2: vec2<f32>) -> f32 {
-    let m2 = mat2x2<f32>(vec2<f32>(0.8, 0.6), vec2<f32>(-0.6, 0.8));
-    var p = v2;
-    var f = 0.5000 * vnoise2d(p); p = m2 * p * 2.02;
-    f = f + 0.2500 * vnoise2d(p);
-    return f / 0.9375;
-}
-
-fn fbm(v2: vec2<f32>) -> f32 {
-    let m2 = mat2x2<f32>(vec2<f32>(0.8, 0.6), vec2<f32>(-0.6, 0.8));
-    var p = v2;
-    var f = 0.5000 * vnoise2d(p); p = m2 * p * 2.02;
-    f = f + 0.2500 * vnoise2d(p); p = m2 * p * 2.03;
-    f = f + 0.1250 * vnoise2d(p); p = m2 * p * 2.01;
-    f = f + 0.0625 * vnoise2d(p);
-    return f / 0.9375;
-}
-
-// ── Water Functions ─────────────────────────────────────────────────────────
-fn wave(p: vec2<f32>) -> f32 {
-    let time = view.time * 0.5 + 23.0;
-    let time_x = time / 1.0;
-    let time_y = time / 0.5;
-    let wave_len_x = 2.0;
-    let wave_len_y = 5.0;
-    let wave_y = cos(p.y / wave_len_y + time_y);
-    let wave_x = smoothstep(1.0, 0.0, abs(sin(p.x / wave_len_x + wave_y + time_x)));
-    let n = fbm(p) / 2.0 - 1.0;
-    return wave_x + n;
-}
-
-fn sample_directional_wave(p: vec2<f32>, time: f32, dir: vec2<f32>) -> f32 {
-    let rotated_p = vec2<f32>(
-        -(p.x * dir.x + p.y * dir.y),
-        p.y * dir.x - p.x * dir.y
-    );
-    var result = wave((rotated_p - time) * 0.3) * 0.3;
-    result = result + wave((rotated_p + time) * 0.4) * 0.3;
-    result = result + wave((rotated_p + time) * 0.5) * 0.2;
-    result = result + wave((rotated_p - time) * 0.6) * 0.2;
-    return result;
-}
-
-const FADE_IN: f32 = 0.85;
-
-fn get_wave_height(p: vec2<f32>) -> f32 {
-    let time = view.time / 2.0;
-    var wave_b = sample_directional_wave(p, time, material.wave_dir_b);
-    if material.wave_blend < FADE_IN {
-        let wave_a = sample_directional_wave(p, time, material.wave_dir_a);
-        let blend = smoothstep(0.0, FADE_IN, material.wave_blend);
-        wave_b = mix(wave_a, wave_b, blend);
+// Portable SSR tier: bounded linear world-space march with depth validation.
+// Hidden/off-screen regions intentionally return zero confidence and fall back
+// to the prefiltered environment rather than leaving reflection holes.
+fn trace_ssr(origin: vec3<f32>, direction: vec3<f32>) -> vec4<f32> {
+    var distance_along = 0.35;
+    for (var i = 0u; i < 28u; i = i + 1u) {
+        distance_along += mix(0.35, 2.5, f32(i) / 27.0);
+        let ray_point = origin + direction * distance_along;
+        let projected = project_uv(ray_point);
+        if projected.z <= 0.0 || projected.z >= 1.0
+            || any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) {
+            break;
+        }
+        let dimensions = textureDimensions(depth_texture);
+        let coord = body_texel(projected.xy, dimensions);
+        let scene_depth = textureLoad(depth_texture, coord, 0);
+        if scene_depth < 0.9999 {
+            let scene_world = reconstruct_world(projected.xy, scene_depth);
+            let delta = view_depth(ray_point) - view_depth(scene_world);
+            let thickness = 0.12 + distance_along * 0.012;
+            if delta >= 0.0 && delta < thickness {
+                let confidence = edge_confidence(projected.xy)
+                    * (1.0 - f32(i) / 28.0);
+                let color = textureSampleLevel(scene_color, sampler_linear, projected.xy, 0.0).rgb;
+                return vec4<f32>(color, confidence);
+            }
+        }
     }
-    return material.amplitude * wave_b;
+    return vec4<f32>(0.0);
 }
 
-fn uv_to_coord(uv: vec2<f32>) -> vec2<f32> {
-    return material.coord_offset + (uv * material.coord_scale);
+fn fresnel_schlick(cosine: f32) -> vec3<f32> {
+    return F0_WATER + (vec3<f32>(1.0) - F0_WATER) * pow(1.0 - cosine, 5.0);
 }
 
-// ── Vertex Shader ───────────────────────────────────────────────────────────
+fn hg_phase(g: f32, cos_theta: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cos_theta, 1e-4), 1.5));
+}
+
+fn direct_specular(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let ndotl = max(dot(n, l), 0.0);
+    let ndotv = max(dot(n, v), 1e-4);
+    if ndotl <= 0.0 { return vec3<f32>(0.0); }
+    let h = normalize(v + l);
+    let ndoth = max(dot(n, h), 0.0);
+    let vdoth = max(dot(v, h), 0.0);
+    let alpha = roughness * roughness;
+    let alpha2 = alpha * alpha;
+    let widened = clamp(alpha + light.sun_angular_radius * 0.5, alpha, 1.0);
+    let widened2 = widened * widened;
+    let denominator = ndoth * ndoth * (widened2 - 1.0) + 1.0;
+    let d = widened2 / max(PI * denominator * denominator, 1e-6);
+    let k = alpha * 0.5;
+    let gv = ndotv / (ndotv * (1.0 - k) + k);
+    let gl = ndotl / (ndotl * (1.0 - k) + k);
+    let f = fresnel_schlick(vdoth);
+    let energy = alpha2 / max(widened2, 1e-8);
+    return d * gv * gl * f * radiance * ndotl * energy / max(4.0 * ndotv * ndotl, 1e-4);
+}
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -220,210 +299,157 @@ struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) base_world_position: vec3<f32>,
+    @location(2) screen_velocity: vec2<f32>,
 }
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    let instance = instances[in.instance_index];
-    let world_pos_4 = instance.model * vec4<f32>(in.position, 1.0);
-    
-    let w_pos = uv_to_coord(in.uv);
-    let height = get_wave_height(w_pos);
-    
-    // Normal is straight up initially
-    let world_position = world_pos_4.xyz + vec3<f32>(0.0, 1.0, 0.0) * height;
-    
-    var out: VertexOutput;
-    out.world_position = world_position;
-    out.uv = in.uv;
-    out.base_world_position = world_pos_4.xyz;
-    out.clip_pos = view.view_proj * vec4<f32>(world_position, 1.0);
-    return out;
+fn vs_main(input: VertexInput) -> VertexOutput {
+    let instance = instances[input.instance_index];
+    let depth = depth_at(input.uv);
+    let shore = smoothstep(0.25, 2.0, depth);
+    let p = local_coord(input.uv);
+    let current_wave = evaluate_waves(p, frame.current_time, shore);
+    let previous_wave = evaluate_waves(p, frame.previous_time, shore);
+    let base_world = (instance.model * vec4<f32>(input.position, 1.0)).xyz;
+    let current_world = base_world + (instance.model * vec4<f32>(current_wave.displacement, 0.0)).xyz;
+    let previous_world = base_world + (instance.model * vec4<f32>(previous_wave.displacement, 0.0)).xyz;
+    let current_clip = frame.current_view_proj * vec4<f32>(current_world, 1.0);
+    let previous_clip = frame.previous_view_proj * vec4<f32>(previous_world, 1.0);
+    let current_ndc = current_clip.xy / current_clip.w;
+    let previous_ndc = previous_clip.xy / previous_clip.w;
+    var output: VertexOutput;
+    output.world_position = current_world;
+    output.uv = input.uv;
+    output.screen_velocity = select(
+        vec2<f32>(0.0),
+        (previous_ndc - current_ndc) * vec2<f32>(0.5, -0.5),
+        frame.history_valid > 0.5 && previous_clip.w > 0.0,
+    );
+    output.clip_pos = view.view_proj * vec4<f32>(current_world, 1.0);
+    return output;
 }
 
-// ── Fragment Shader ─────────────────────────────────────────────────────────
-
-// Convert depth texture value to linear View-Z.
-fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
-    return 0.0; // we'll implement this properly below.
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    // Encoded XZ normal, linear view depth, coverage.
+    @location(1) surface: vec4<f32>,
+    @location(2) velocity: vec2<f32>,
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let w_pos = uv_to_coord(in.uv);
-    let height = get_wave_height(w_pos);
-    
-    // Reconstruct true per-pixel world position to fix triangle faceting
-    let true_world_position = in.base_world_position + vec3<f32>(0.0, 1.0, 0.0) * height;
-    
-    // Compute analytical normal
-    let delta = 0.5;
-    let height_dx = get_wave_height(w_pos + vec2<f32>(delta, 0.0));
-    let height_dz = get_wave_height(w_pos + vec2<f32>(0.0, delta));
-    let world_normal = normalize(vec3<f32>(height - height_dx, delta, height - height_dz));
-    
-    let tangent = normalize(vec3<f32>(delta, height_dx - height, 0.0));
-    let bitangent = normalize(vec3<f32>(0.0, height_dz - height, delta));
-    let tbn = mat3x3<f32>(tangent, bitangent, world_normal);
-    
-    // Dual panning to break up tiling
-    let time_offset1 = view.time * vec2<f32>(0.015, 0.01);
-    let time_offset2 = view.time * vec2<f32>(-0.01, 0.02);
-    
-    let tex_uv1 = w_pos * 0.4 + time_offset1;
-    let tex_uv2 = w_pos * 0.3 + time_offset2;
-    
-    // Sample textures twice and blend
-    let base_color1 = textureSample(tex_base_color, sampler_linear, tex_uv1).rgb;
-    let base_color2 = textureSample(tex_base_color, sampler_linear, tex_uv2).rgb;
-    let base_color = mix(base_color1, base_color2, 0.5);
-    
-    let normal_map1 = textureSample(tex_normal, sampler_linear, tex_uv1).xyz * 2.0 - 1.0;
-    let normal_map2 = textureSample(tex_normal, sampler_linear, tex_uv2).xyz * 2.0 - 1.0;
-    let normal_map = normalize(normal_map1 + normal_map2);
-    
-    let orm1 = textureSample(tex_orm, sampler_linear, tex_uv1);
-    let orm2 = textureSample(tex_orm, sampler_linear, tex_uv2);
-    let orm = mix(orm1, orm2, 0.5);
-    
-    // Mix the geometric normal with the normal map for a balanced look
-    let raw_pbr_normal = normalize(tbn * normal_map);
-    let pbr_normal = normalize(mix(world_normal, raw_pbr_normal, 0.6)); // softened normal map intensity
-    
-    // -- Scene behind the surface --------------------------------------------
-    let tex_coords  = vec2<i32>(in.clip_pos.xy);
-    let screen_size = vec2<f32>(textureDimensions(depth_texture));
-    let screen_uv   = in.clip_pos.xy / screen_size;
+fn fs_main(input: VertexOutput) -> FragmentOutput {
+    if mask_at(input.uv) < 0.5 {
+        discard;
+    }
+    let authored_depth = depth_at(input.uv);
+    if authored_depth <= 0.001 {
+        discard;
+    }
+    let shore = smoothstep(0.25, 2.0, authored_depth);
+    let water_coord = local_coord(input.uv);
+    let wave = evaluate_waves(water_coord, frame.current_time, shore);
+    let water_view_depth = view_depth(input.world_position);
 
-    let opaque_depth_ndc = textureLoad(depth_texture, tex_coords, 0);
-    let ndc_opaque = vec4<f32>(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0, opaque_depth_ndc, 1.0);
-    var world_opaque = view.inv_view_proj * ndc_opaque;
-    world_opaque = world_opaque / world_opaque.w;
+    // A displaced vertex surface can keep its large silhouette waves, while
+    // its sub-pixel slope energy must migrate into roughness. Otherwise the
+    // regular Gerstner bands turn into a distant cross-hatch under highlights.
+    let metres_per_pixel = max(length(dpdx(water_coord)), length(dpdy(water_coord)));
+    let shortest_wave = max(min(material.wave_params.x, material.wave_params.y) * 0.70, 0.5);
+    let slope_resolve = 1.0 - smoothstep(shortest_wave * 0.035, shortest_wave * 0.18,
+        metres_per_pixel);
+    let distance_resolve = 1.0 - smoothstep(120.0, 420.0, water_view_depth);
+    let resolved_wave_normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), wave.normal,
+        min(slope_resolve, distance_resolve)));
 
-    // The depth buffer clears to 1.0, so anything at the far plane means there
-    // is no geometry under the water at all. That case needs saying out loud:
-    // otherwise the "refracted" sample is the sky, and enough of it survives in
-    // the blue channel to turn open ocean into a swimming pool.
-    let has_backdrop = opaque_depth_ndc < 0.9999;
-
-    // Distance the view ray travels through water before hitting anything.
-    // `raw` still drives the shoreline term, which wants the true value; the
-    // capped one drives absorption, where an uncapped far-plane reading used to
-    // force every open-water pixel to the same flat "infinitely deep" colour.
-    let raw_depth_diff = select(
-        MAX_WATER_DEPTH,
-        max(distance(true_world_position, world_opaque.xyz), 0.0),
-        has_backdrop,
-    );
-    let depth_diff = min(raw_depth_diff, MAX_WATER_DEPTH);
-
-    // -- Surface vectors -------------------------------------------------------
-    let n = pbr_normal;
-    let v = normalize(view.camera_pos - true_world_position);
-    let l = normalize(light.direction);
-    let h = normalize(l + v);
-
-    let ndotl = max(dot(n, l), 0.0);
+    let texture_time = frame.current_time;
+    let detail_uv_a = local_coord(input.uv) * 0.035 + vec2<f32>(0.012, 0.008) * texture_time;
+    let detail_uv_b = local_coord(input.uv) * 0.061 + vec2<f32>(-0.009, 0.015) * texture_time;
+    let normal_a = textureSample(tex_normal, sampler_linear, detail_uv_a).xyz * 2.0 - 1.0;
+    let normal_b = textureSample(tex_normal, sampler_linear, detail_uv_b).xyz * 2.0 - 1.0;
+    let detail_normal = normalize(normal_a + normal_b);
+    let tangent = normalize(vec3<f32>(resolved_wave_normal.y, -resolved_wave_normal.x, 0.0));
+    let bitangent = normalize(cross(resolved_wave_normal, tangent));
+    let mapped = normalize(mat3x3<f32>(tangent, bitangent, resolved_wave_normal) * detail_normal);
+    // Move sub-pixel wave energy into roughness with distance instead of
+    // letting unresolved normals become a white moiré pattern at the horizon.
+    let detail_strength = 0.35 * (1.0 - smoothstep(100.0, 450.0, water_view_depth));
+    let n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
+    let v = normalize(view.camera_pos - input.world_position);
     let ndotv = max(dot(n, v), 1e-4);
-    let ndoth = max(dot(n, h), 0.0);
-    let vdoth = max(dot(v, h), 0.0);
+    let screen_size = vec2<f32>(textureDimensions(depth_texture));
+    let screen_uv = input.clip_pos.xy / screen_size;
+    let coord = vec2<i32>(input.clip_pos.xy);
+    let base_depth = textureLoad(depth_texture, coord, 0);
+    let base_has_backdrop = base_depth < 0.9999;
+    let base_world = reconstruct_world(screen_uv, min(base_depth, 0.9999));
 
-    let view_pos   = view.view_matrix * vec4<f32>(true_world_position, 1.0);
-    let view_depth = -view_pos.z; // right-handed: Z is negative in front of camera
-    let shadow     = sample_shadow(true_world_position, view_depth);
+    // Refract, then reject samples that are sky, in front of the surface, or
+    // reveal foreground. Invalid displacement falls back to the unperturbed UV.
+    let refract_offset = n.xz * (0.010 + 0.022 * shore) / (1.0 + water_view_depth * 0.015);
+    let candidate_uv = clamp(screen_uv + refract_offset, vec2<f32>(0.0), vec2<f32>(1.0));
+    let candidate_coord = body_texel(candidate_uv, textureDimensions(depth_texture));
+    let candidate_depth = textureLoad(depth_texture, candidate_coord, 0);
+    let candidate_world = reconstruct_world(candidate_uv, min(candidate_depth, 0.9999));
+    let candidate_valid = candidate_depth < 0.9999
+        && view_depth(candidate_world) > water_view_depth + 0.03;
+    let refr_uv = select(screen_uv, candidate_uv, candidate_valid);
+    let refracted = textureSampleLevel(scene_color, sampler_linear, refr_uv, 0.0).rgb;
 
-    // Sky irradiance for the diffuse and scattering terms: the roughest mip of
-    // the prefiltered environment, looked up straight up.
-    let sky_irradiance = textureSampleLevel(
-        env_cube, env_sampler, vec3<f32>(0.0, 1.0, 0.0), ENV_MAX_MIP,
-    ).rgb * light.ibl_intensity;
+    let backdrop_distance = select(authored_depth, distance(input.world_position, base_world), base_has_backdrop);
+    let path_length = clamp(min(backdrop_distance, authored_depth / max(abs(dot(n, v)), 0.18)), 0.0, 60.0);
+    let clarity_scale = mix(1.8, 0.45, clamp(material.surface_params.x, 0.0, 1.0));
+    let sigma_a = max(material.absorption_roughness.rgb * clarity_scale, vec3<f32>(1e-5));
+    let sigma_s = max(material.scattering_anisotropy.rgb * clarity_scale, vec3<f32>(0.0));
+    let sigma_t = sigma_a + sigma_s;
+    let transmittance = exp(-sigma_t * path_length);
 
-    // -- Transmitted: what comes up through the surface ------------------------
-    // Refraction offsets the scene lookup by the surface normal's horizontal
-    // component, so whatever is under the water wobbles with the waves. The
-    // divisor keeps distant water from smearing.
-    let refract_offset = n.xz * 0.03 / (1.0 + view_depth * 0.02);
-    let refr_uv    = clamp(screen_uv + refract_offset, vec2<f32>(0.0), vec2<f32>(1.0));
-    let refracted  = textureSampleLevel(scene_color, sampler_linear, refr_uv, 0.0).rgb;
-
-    // Beer-Lambert, per channel: red is absorbed first, which is what gives deep
-    // water its blue-green cast instead of a flat painted-on blue.
-    // With no backdrop nothing is transmitted at all — all of it is scattering.
-    let absorption = select(
-        vec3<f32>(0.0),
-        exp(-depth_diff * max(material.clarity, 0.0) * ABSORPTION),
-        has_backdrop,
-    );
-
-    // Subsurface scattering: light that entered, bounced and came back out. The
-    // base-colour texture modulates it by luminance, so the artwork still adds
-    // detail without fighting the water's hue.
-    let detail  = 0.75 + 0.5 * dot(base_color, vec3<f32>(0.3333));
-    // 1/PI is the Lambert normalisation; the sky term is radiance from the
-    // cubemap, and irradiance over a hemisphere is PI times that, so the two
-    // cancel. The previous 0.25 and 0.5 were hand-tuned against a sun that no
-    // longer exists.
-    let scatter = material.deep_color.rgb * detail
-        * (light.color * ndotl * shadow / PI + sky_irradiance);
-
-    var transmitted = mix(scatter, refracted * material.shallow_color.rgb, absorption);
-
-    // Shoreline foam where the water meets geometry.
-    let foam = material.edge_color.rgb
-        * (light.color * shadow / PI + sky_irradiance);
-    transmitted = mix(foam, transmitted, smoothstep(0.0, max(material.edge_scale, 1e-3), raw_depth_diff));
-
-    // -- Reflected: sky and sun off the surface --------------------------------
-    let roughness = clamp(orm.g, 0.02, 1.0);
-    let a  = roughness * roughness;
-    let a2 = a * a;
-
-    // Phase 24W: the sun is a disc, not a point. On a near-mirror surface a
-    // point source drives GGX toward a singularity — an unbounded spike on a
-    // few pixels, which is what made sunlit water blow out. Widening the lobe
-    // by the sun's angular radius spreads that spike over the area the source
-    // actually covers, turning it into a glitter path rather than a hole in the
-    // image, and the energy term keeps the total reflected light unchanged.
-    let a_sun   = clamp(a + light.sun_angular_radius * 0.5, a, 1.0);
-    let a2_sun  = a_sun * a_sun;
-    let sun_energy = a2 / max(a2_sun, 1e-8);
-
-    // GGX normal distribution.
-    let d_denom  = ndoth * ndoth * (a2_sun - 1.0) + 1.0;
-    let dist_ggx = a2_sun / (PI * d_denom * d_denom);
-
-    // Smith geometry term. This was missing, so the specular had no shadowing or
-    // masking and the trailing `* 2.0` was compensating for it.
-    let k   = a * 0.5;
-    let g_v = ndotv / (ndotv * (1.0 - k) + k);
-    let g_l = ndotl / (ndotl * (1.0 - k) + k);
-    let geom = g_v * g_l;
-
-    // Water's index of refraction gives F0 = 0.02.
-    let f0     = vec3<f32>(0.02);
-    let f_spec = f0 + (1.0 - f0) * pow(1.0 - vdoth, 5.0);
-    // The reflection uses the view angle, not the half-vector: looking straight
-    // down you see into the water, at grazing angles it turns into a mirror.
-    // This Fresnel split is most of what makes water read as water.
-    let f_env  = f0 + (1.0 - f0) * pow(1.0 - ndotv, 5.0);
-
-    let r   = reflect(-v, n);
-    let env = textureSampleLevel(env_cube, env_sampler, r, roughness * ENV_MAX_MIP).rgb
+    let sun_l = normalize(light.direction);
+    let moon_l = normalize(light.moon_direction);
+    let shadow = sample_shadow(input.world_position, water_view_depth);
+    let phase_g = clamp(material.scattering_anisotropy.a, -0.8, 0.8);
+    let sun_scatter = light.color * max(dot(n, sun_l), 0.0) * shadow
+        * hg_phase(phase_g, dot(-v, sun_l));
+    let moon_color = vec3<f32>(max(light.moon_intensity, 0.0));
+    let moon_scatter = moon_color * max(dot(n, moon_l), 0.0)
+        * hg_phase(phase_g, dot(-v, moon_l));
+    let env_up = textureSampleLevel(env_cube, env_sampler, vec3<f32>(0.0, 1.0, 0.0), ENV_MAX_MIP).rgb
         * light.ibl_intensity;
+    let single_scatter = (vec3<f32>(1.0) - transmittance)
+        * sigma_s / max(sigma_t, vec3<f32>(1e-5))
+        * (sun_scatter + moon_scatter + env_up);
+    let tint = mix(material.shallow_color.rgb, material.deep_color.rgb,
+        smoothstep(0.5, max(material.surface_params.y * 6.0, 2.0), authored_depth));
+    var transmitted = refracted * tint * transmittance + single_scatter;
 
-    // Sun glint. The old clamp at 40 was written when the sun was an arbitrary
-    // multiplier of about 5; against a sky that now measures thousands of cd/m²
-    // it crushed the glint to nothing. The disc widening above bounds the peak
-    // on physical grounds instead of by an arbitrary ceiling.
-    let sun_spec = (dist_ggx * geom * f_spec)
-        / max(4.0 * ndotv * ndotl, 1e-4)
-        * light.color * ndotl * shadow * sun_energy;
+    let shore_distance = abs(sdf_at(input.uv));
+    let foam_amount = (1.0 - smoothstep(0.0, max(material.surface_params.y, 0.5), shore_distance))
+        * (0.55 + 0.45 * sin(frame.current_time * 1.8 + shore_distance * 2.0));
+    transmitted = mix(transmitted, material.edge_color.rgb * (env_up + vec3<f32>(0.08)), foam_amount);
 
-    let final_color = mix(transmitted, env, f_env) + sun_spec;
+    let roughness_map = 0.5 * (
+        textureSample(tex_orm, sampler_linear, detail_uv_a).g
+        + textureSample(tex_orm, sampler_linear, detail_uv_b).g);
+    let unresolved_energy = 1.0 - min(slope_resolve, distance_resolve);
+    let distance_roughness = unresolved_energy * 0.28;
+    let roughness = clamp(
+        material.absorption_roughness.a + roughness_map * 0.08 + distance_roughness,
+        0.04,
+        0.65,
+    );
+    let reflection_dir = reflect(-v, n);
+    let environment = textureSampleLevel(env_cube, env_sampler, reflection_dir, roughness * ENV_MAX_MIP).rgb
+        * light.ibl_intensity;
+    let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
+    let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
+    let reflected = mix(environment, ssr.rgb, ssr_weight);
+    let fresnel = fresnel_schlick(ndotv);
+    let direct = direct_specular(n, v, sun_l, light.color * shadow, roughness)
+        + direct_specular(n, v, moon_l, moon_color, max(roughness, 0.06));
+    let final_color = transmitted * (vec3<f32>(1.0) - fresnel) + reflected * fresnel + direct;
 
-    // Keep the result inside Rgba16Float's finite range. Water is the most
-    // mirror-like surface in the scene, so it is the most likely to overshoot,
-    // and an Inf here would propagate into TAA's blend as NaN.
-    return vec4<f32>(min(final_color, vec3<f32>(60000.0)), 1.0);
+    return FragmentOutput(
+        vec4<f32>(min(final_color, vec3<f32>(60000.0)), 1.0),
+        vec4<f32>(n.xz * 0.5 + 0.5, min(water_view_depth, 60000.0), 1.0),
+        clamp(input.screen_velocity, vec2<f32>(-1.0), vec2<f32>(1.0)),
+    );
 }

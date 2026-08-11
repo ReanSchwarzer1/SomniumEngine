@@ -201,7 +201,7 @@ pub struct SomniumRenderer {
 
     /// Phase 13: Water pass.
     pub water_pass: crate::pass::water::WaterPass,
-    water_queue: Vec<(glam::Mat4, crate::pass::water::WaterMaterialData, u32, u32, u32)>,
+    water_queue: Vec<(u32, glam::Mat4, crate::pass::water::WaterMaterialData, u32, u32, u32)>,
 
     /// Phase 25A-2: per-terrain splat/layer parameters read by `shading.wgsl`.
     terrain_materials: crate::material::pool::TerrainMaterialPool,
@@ -479,7 +479,12 @@ impl SomniumRenderer {
         let default_dir   = glam::Vec3::new(1.0, 2.0, -1.0).normalize();
         let default_color = glam::Vec3::splat(5.0);
 
-        let water_pass = crate::pass::water::WaterPass::new(&ctx.device, HDR_FORMAT);
+        let water_pass = crate::pass::water::WaterPass::new(
+            &ctx.device,
+            HDR_FORMAT,
+            ctx.config.width,
+            ctx.config.height,
+        );
         let water_textures_bind_group = Some(
             crate::pass::water::create_default_texture_bind_group(
                 &ctx.device,
@@ -1157,15 +1162,18 @@ impl SomniumRenderer {
                     .expect("ReSTIR GI always allocates its radiance target"),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
-            self.taa_pass.rebuild(
-                &ctx.device,
-                &self.postprocess_pass.hdr_view,
-                &self.vis_pass.depth_view,
-            );
             self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.cas_pass.resize(&ctx.device, ctx.config.format, width, height);
             self.velocity_pass
                 .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
+            self.water_pass.resize(&ctx.device, width, height);
+            self.taa_pass.rebuild(
+                &ctx.device,
+                &self.postprocess_pass.hdr_view,
+                &self.vis_pass.depth_view,
+                self.velocity_pass.view(),
+                self.water_pass.surface_view(),
+            );
             self.motion_blur_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
@@ -1226,13 +1234,14 @@ impl SomniumRenderer {
     /// Submit a water rendering command.
     pub fn add_water(
         &mut self,
+        water_id: u32,
         transform: glam::Mat4,
         water: crate::pass::water::WaterMaterialData,
         vertex_offset: u32,
         index_offset: u32,
         index_count: u32,
     ) {
-        self.water_queue.push((transform, water, vertex_offset, index_offset, index_count));
+        self.water_queue.push((water_id, transform, water, vertex_offset, index_offset, index_count));
     }
 
     /// Allocate a stable ECS-visible water handle.
@@ -1250,6 +1259,43 @@ impl SomniumRenderer {
             self.water_bodies.create_or_replace(ctx, descriptor)?;
         }
         Ok(())
+    }
+
+    /// Upload the compact mask-derived surface mesh for a water body.
+    pub fn upload_water_body_mesh(
+        &mut self,
+        ctx: &RenderContext,
+        water_id: u32,
+    ) -> Result<crate::geometry::MeshAllocation, String> {
+        let (vertices, indices) = self
+            .water_bodies
+            .get(water_id)
+            .ok_or_else(|| format!("water body {water_id} is not loaded"))?
+            .finite_mesh(2.0);
+        if indices.is_empty() {
+            return Err(format!("water body {water_id} mask produced no triangles"));
+        }
+        Ok(self.geometry.upload_mesh(&ctx.queue, &vertices, &indices, 0))
+    }
+
+    /// Query the same deterministic surface used by the GPU water shader.
+    pub fn query_water_surface(
+        &self,
+        water_id: u32,
+        terrain_local_xz: glam::Vec2,
+        time: f32,
+    ) -> Option<crate::water_body::WaterSurfaceSample> {
+        self.water_bodies.sample_surface(water_id, terrain_local_xz, time)
+    }
+
+    /// Test whether a terrain-local point lies inside the displaced water volume.
+    pub fn water_contains_point(
+        &self,
+        water_id: u32,
+        terrain_local_point: glam::Vec3,
+        time: f32,
+    ) -> bool {
+        self.water_bodies.contains_point(water_id, terrain_local_point, time)
     }
 
     /// Create a new heightmap terrain (Phase 14) and return its terrain id.
@@ -1959,7 +2005,11 @@ impl SomniumRenderer {
         // An A/B of the shading path should not have to see through any of
         // those.
         let capture_now = self.capture.tick();
-        if capture_now {
+        let capture_after_water =
+            std::env::var("SOMNIUM_CAPTURE_AFTER_WATER").as_deref() == Ok("1");
+        let capture_after_taa =
+            std::env::var("SOMNIUM_CAPTURE_AFTER_TAA").as_deref() == Ok("1");
+        if capture_now && !capture_after_water && !capture_after_taa {
             // The switches an A/B is meant to be varying, recorded with the
             // capture so a null result can be told from a switch that never
             // reached the pass — which is what the first run of this test hit.
@@ -2012,6 +2062,7 @@ impl SomniumRenderer {
         // writes depth before the water pass, because the visibility pass does.
 
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
+        self.water_pass.clear_surface(&mut encoder);
         if !self.water_queue.is_empty() {
             // Phase 22: water refracts what is behind it, so it needs the scene
             // colour as a texture. A pass cannot sample its own render target,
@@ -2039,12 +2090,32 @@ impl SomniumRenderer {
                 &self.ibl_pass.cube_view,
                 &self.ibl_pass.sampler,
                 &self.postprocess_pass.scene_copy_view,
+                self.velocity_pass.view(),
+                self.view_proj_unjittered,
+                self.time,
                 &self.geometry.vertex_buffer,
                 &self.geometry.index_buffer,
                 self.water_textures_bind_group.as_ref(),
+                &self.water_bodies,
                 &self.water_queue,
             );
             self.profiler.end(&mut encoder);
+        }
+
+        if capture_now && capture_after_water && !capture_after_taa {
+            tracing::info!(
+                "CAPTURE-WATER bodies={} draws={}",
+                self.water_bodies.active_count(),
+                self.water_queue.len(),
+            );
+            self.capture.record(
+                &ctx.device,
+                &mut encoder,
+                &self.postprocess_pass.hdr_texture,
+                &self.vis_pass.texture,
+                ctx.config.width,
+                ctx.config.height,
+            );
         }
 
         // ── 7.6 Phase 21: blended geometry → HDR texture ─────────────────────
@@ -2094,6 +2165,8 @@ impl SomniumRenderer {
             &ctx.device,
             &self.postprocess_pass.hdr_view,
             &self.vis_pass.depth_view,
+            self.velocity_pass.view(),
+            self.water_pass.surface_view(),
         );
         // Both matrices: the jittered one matches the depth buffer this frame,
         // the unjittered one matches the resolved history. See `TaaPass::record`.
@@ -2135,6 +2208,23 @@ impl SomniumRenderer {
                 self.taa_pass.resolved_texture(written).as_image_copy(),
                 self.postprocess_pass.hdr_texture.as_image_copy(),
                 self.postprocess_pass.hdr_texture.size(),
+            );
+        }
+
+        if capture_now && capture_after_taa {
+            tracing::info!(
+                "CAPTURE-TAA water_bodies={} water_draws={} taa={}",
+                self.water_bodies.active_count(),
+                self.water_queue.len(),
+                self.taa_pass.enabled(),
+            );
+            self.capture.record(
+                &ctx.device,
+                &mut encoder,
+                &self.postprocess_pass.hdr_texture,
+                &self.vis_pass.texture,
+                ctx.config.width,
+                ctx.config.height,
             );
         }
 

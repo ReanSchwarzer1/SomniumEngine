@@ -27,7 +27,11 @@ impl<T> Handle<T> {
 
     #[inline]
     pub(crate) fn new(index: u32, generation: u32) -> Self {
-        Self { index, generation, _marker: PhantomData }
+        Self {
+            index,
+            generation,
+            _marker: PhantomData,
+        }
     }
 
     #[inline]
@@ -50,12 +54,18 @@ impl<T> Handle<T> {
     /// Used to bridge between opaque handle aliases (e.g. NodeHandle) and Pool<UiNode>.
     #[inline]
     pub fn transmute<U>(&self) -> Handle<U> {
-        Handle { index: self.index, generation: self.generation, _marker: PhantomData }
+        Handle {
+            index: self.index,
+            generation: self.generation,
+            _marker: PhantomData,
+        }
     }
 }
 
 impl<T> Clone for Handle<T> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 impl<T> Copy for Handle<T> {}
 
@@ -67,7 +77,9 @@ impl<T> PartialEq for Handle<T> {
 impl<T> Eq for Handle<T> {}
 
 impl<T> Default for Handle<T> {
-    fn default() -> Self { Self::NONE }
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl<T> fmt::Display for Handle<T> {
@@ -87,7 +99,10 @@ struct PoolRecord<T> {
 
 impl<T> Default for PoolRecord<T> {
     fn default() -> Self {
-        Self { generation: INVALID_GENERATION, payload: None }
+        Self {
+            generation: INVALID_GENERATION,
+            payload: None,
+        }
     }
 }
 
@@ -105,9 +120,9 @@ pub enum PoolError {
 impl fmt::Display for PoolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidIndex(i)      => write!(f, "pool: invalid index {i}"),
+            Self::InvalidIndex(i) => write!(f, "pool: invalid index {i}"),
             Self::InvalidGeneration(g) => write!(f, "pool: stale generation {g}"),
-            Self::Empty(i)             => write!(f, "pool: empty record at {i}"),
+            Self::Empty(i) => write!(f, "pool: empty record at {i}"),
         }
     }
 }
@@ -124,16 +139,24 @@ pub struct Pool<T> {
 }
 
 impl<T> Default for Pool<T> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> Pool<T> {
     pub fn new() -> Self {
-        Self { records: Vec::new(), free_stack: Vec::new() }
+        Self {
+            records: Vec::new(),
+            free_stack: Vec::new(),
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { records: Vec::with_capacity(capacity), free_stack: Vec::new() }
+        Self {
+            records: Vec::with_capacity(capacity),
+            free_stack: Vec::new(),
+        }
     }
 
     // --- mutation ---
@@ -150,7 +173,10 @@ impl<T> Pool<T> {
         } else {
             let index = self.records.len() as u32;
             let generation = 1;
-            self.records.push(PoolRecord { generation, payload: Some(value) });
+            self.records.push(PoolRecord {
+                generation,
+                payload: Some(value),
+            });
             Handle::new(index, generation)
         }
     }
@@ -161,12 +187,16 @@ impl<T> Pool<T> {
 
     pub fn try_free(&mut self, handle: Handle<T>) -> Result<T, PoolError> {
         let index = handle.index as usize;
-        let record = self.records.get_mut(index)
+        let record = self
+            .records
+            .get_mut(index)
             .ok_or(PoolError::InvalidIndex(handle.index))?;
         if record.generation != handle.generation {
             return Err(PoolError::InvalidGeneration(handle.generation));
         }
-        let payload = record.payload.take()
+        let payload = record
+            .payload
+            .take()
             .ok_or(PoolError::Empty(handle.index))?;
         self.free_stack.push(handle.index);
         Ok(payload)
@@ -179,21 +209,29 @@ impl<T> Pool<T> {
     }
 
     pub fn borrow_mut(&mut self, handle: Handle<T>) -> &mut T {
-        self.try_borrow_mut(handle).expect("borrow_mut: invalid handle")
+        self.try_borrow_mut(handle)
+            .expect("borrow_mut: invalid handle")
     }
 
     pub fn try_borrow(&self, handle: Handle<T>) -> Result<&T, PoolError> {
-        let record = self.records.get(handle.index as usize)
+        let record = self
+            .records
+            .get(handle.index as usize)
             .ok_or(PoolError::InvalidIndex(handle.index))?;
         if record.generation != handle.generation {
             return Err(PoolError::InvalidGeneration(handle.generation));
         }
-        record.payload.as_ref().ok_or(PoolError::Empty(handle.index))
+        record
+            .payload
+            .as_ref()
+            .ok_or(PoolError::Empty(handle.index))
     }
 
     pub fn try_borrow_mut(&mut self, handle: Handle<T>) -> Result<&mut T, PoolError> {
         let index = handle.index;
-        let record = self.records.get_mut(index as usize)
+        let record = self
+            .records
+            .get_mut(index as usize)
             .ok_or(PoolError::InvalidIndex(index))?;
         if record.generation != handle.generation {
             return Err(PoolError::InvalidGeneration(handle.generation));
@@ -205,7 +243,8 @@ impl<T> Pool<T> {
 
     #[inline]
     pub fn is_valid_handle(&self, handle: Handle<T>) -> bool {
-        self.records.get(handle.index as usize)
+        self.records
+            .get(handle.index as usize)
             .map(|r| r.payload.is_some() && r.generation == handle.generation)
             .unwrap_or(false)
     }
@@ -247,14 +286,18 @@ impl<T> Pool<T> {
 
     pub fn pair_iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
         self.records.iter().enumerate().filter_map(|(i, r)| {
-            r.payload.as_ref().map(|p| (Handle::new(i as u32, r.generation), p))
+            r.payload
+                .as_ref()
+                .map(|p| (Handle::new(i as u32, r.generation), p))
         })
     }
 
     pub fn pair_iter_mut(&mut self) -> impl Iterator<Item = (Handle<T>, &mut T)> {
         self.records.iter_mut().enumerate().filter_map(|(i, r)| {
             let g = r.generation;
-            r.payload.as_mut().map(move |p| (Handle::new(i as u32, g), p))
+            r.payload
+                .as_mut()
+                .map(move |p| (Handle::new(i as u32, g), p))
         })
     }
 

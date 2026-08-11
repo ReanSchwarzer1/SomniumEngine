@@ -22,10 +22,11 @@
 //! so geometry can be regenerated on load.
 #![allow(missing_docs)]
 
-use somnium_ecs::World;
-use crate::{LightComponent, LightType, MeshKind, Name, Parent, TerrainComponent, Transform,
-    WaterComponent};
+use crate::{
+    LightComponent, LightType, MeshKind, Name, Parent, TerrainComponent, Transform, WaterComponent,
+};
 use somnium_ecs::Entity;
+use somnium_ecs::World;
 
 // ─── Save ─────────────────────────────────────────────────────────────────
 
@@ -73,9 +74,9 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
             });
 
             let mesh_kind = world.get::<MeshKind>(entity).map(|mk| match mk {
-                MeshKind::Cube     => "Cube",
-                MeshKind::Sphere   => "Sphere",
-                MeshKind::Plane    => "Plane",
+                MeshKind::Cube => "Cube",
+                MeshKind::Sphere => "Sphere",
+                MeshKind::Plane => "Plane",
                 MeshKind::Cylinder => "Cylinder",
             });
 
@@ -120,6 +121,15 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                     "wave_dir_a": water.wave_dir_a,
                     "wave_dir_b": water.wave_dir_b,
                     "wave_blend": water.wave_blend,
+                    "wave_length_a": water.wave_length_a,
+                    "wave_length_b": water.wave_length_b,
+                    "wave_speed": water.wave_speed,
+                    "wave_steepness": water.wave_steepness,
+                    "absorption": water.absorption,
+                    "scattering": water.scattering,
+                    "roughness": water.roughness,
+                    "anisotropy": water.anisotropy,
+                    "ssr_strength": water.ssr_strength,
                 })
             });
 
@@ -141,8 +151,7 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
         .collect();
 
     let scene = serde_json::json!({ "version": 1, "entities": serial });
-    let json =
-        serde_json::to_string_pretty(&scene).map_err(|e| format!("Serialize error: {e}"))?;
+    let json = serde_json::to_string_pretty(&scene).map_err(|e| format!("Serialize error: {e}"))?;
     std::fs::write(path, json).map_err(|e| format!("Write error: {e}"))
 }
 
@@ -158,8 +167,14 @@ mod tests {
             Transform::from_translation(glam::Vec3::ZERO),
             Name::new("Terrain"),
             WorldTransform::identity(),
-            TerrainComponent { terrain_id: 4, chunk_cells: 64, grid_x: 16, grid_z: 16,
-                cell_size: 1.0, height_scale: 1.0 },
+            TerrainComponent {
+                terrain_id: 4,
+                chunk_cells: 64,
+                grid_x: 16,
+                grid_z: 16,
+                cell_size: 1.0,
+                height_scale: 1.0,
+            },
             Children::empty(),
         ));
         let water_component = WaterComponent::great_lakes(7, 4, [0.0, 0.0, 1024.0, 1024.0]);
@@ -180,9 +195,18 @@ mod tests {
         assert_eq!(water["water"]["preset"], 1);
         assert_eq!(water["water"]["surface_level"], 15.0);
         assert_eq!(water["water"]["max_depth"], 12.0);
-        assert_eq!(water["water"]["mask_asset"], somnium_renderer::water_body::GREAT_LAKES_MASK);
-        assert_eq!(water["water"]["depth_asset"], somnium_renderer::water_body::GREAT_LAKES_DEPTH);
-        assert_eq!(water["water"]["shore_sdf_asset"], somnium_renderer::water_body::GREAT_LAKES_SHORE_SDF);
+        assert_eq!(
+            water["water"]["mask_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_MASK
+        );
+        assert_eq!(
+            water["water"]["depth_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_DEPTH
+        );
+        assert_eq!(
+            water["water"]["shore_sdf_asset"],
+            somnium_renderer::water_body::GREAT_LAKES_SHORE_SDF
+        );
     }
 }
 
@@ -209,9 +233,9 @@ pub fn parse_scene(path: &str) -> Result<serde_json::Value, String> {
 /// Parse a mesh kind string from a scene file.
 pub fn mesh_kind_from_str(s: &str) -> Option<MeshKind> {
     match s {
-        "Cube"     => Some(MeshKind::Cube),
-        "Sphere"   => Some(MeshKind::Sphere),
-        "Plane"    => Some(MeshKind::Plane),
+        "Cube" => Some(MeshKind::Cube),
+        "Sphere" => Some(MeshKind::Sphere),
+        "Plane" => Some(MeshKind::Plane),
         "Cylinder" => Some(MeshKind::Cylinder),
         _ => None,
     }

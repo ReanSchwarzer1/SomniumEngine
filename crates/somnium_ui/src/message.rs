@@ -7,8 +7,8 @@ use glam::Vec2;
 use std::any::Any;
 
 // Re-export so widget modules can import from here.
-pub use winit::keyboard::KeyCode;
 pub use winit::event::MouseButton;
+pub use winit::keyboard::KeyCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageDirection {
@@ -19,7 +19,7 @@ pub enum MessageDirection {
 impl MessageDirection {
     pub fn reverse(self) -> Self {
         match self {
-            Self::ToWidget   => Self::FromWidget,
+            Self::ToWidget => Self::FromWidget,
             Self::FromWidget => Self::ToWidget,
         }
     }
@@ -32,10 +32,10 @@ pub struct UiNodeTag;
 pub type NodeHandle = Handle<UiNodeTag>;
 
 pub struct UiMessage {
-    pub handled:     bool,
+    pub handled: bool,
     pub destination: NodeHandle,
-    pub direction:   MessageDirection,
-    pub data:        Box<dyn Any + Send>,
+    pub direction: MessageDirection,
+    pub data: Box<dyn Any + Send>,
 }
 
 impl UiMessage {
@@ -44,7 +44,12 @@ impl UiMessage {
         direction: MessageDirection,
         data: T,
     ) -> Self {
-        Self { handled: false, destination, direction, data: Box::new(data) }
+        Self {
+            handled: false,
+            destination,
+            direction,
+            data: Box::new(data),
+        }
     }
 
     pub fn data<T: 'static>(&self) -> Option<&T> {
@@ -56,10 +61,10 @@ impl UiMessage {
 /// Port of: WidgetMessage in fyrox-ui/src/widget.rs
 #[derive(Debug, Clone)]
 pub enum WidgetMessage {
-    MouseDown   { pos: Vec2, button: MouseButton },
-    MouseUp     { pos: Vec2, button: MouseButton },
-    MouseMove   { pos: Vec2 },
-    MouseWheel  { pos: Vec2, delta: f32 },
+    MouseDown { pos: Vec2, button: MouseButton },
+    MouseUp { pos: Vec2, button: MouseButton },
+    MouseMove { pos: Vec2 },
+    MouseWheel { pos: Vec2, delta: f32 },
     MouseEnter,
     MouseLeave,
     KeyDown(KeyCode),
@@ -77,10 +82,18 @@ pub enum WidgetMessage {
 
 impl WidgetMessage {
     pub fn mouse_down(dest: NodeHandle, pos: Vec2, button: MouseButton) -> UiMessage {
-        UiMessage::new(dest, MessageDirection::FromWidget, Self::MouseDown { pos, button })
+        UiMessage::new(
+            dest,
+            MessageDirection::FromWidget,
+            Self::MouseDown { pos, button },
+        )
     }
     pub fn mouse_up(dest: NodeHandle, pos: Vec2, button: MouseButton) -> UiMessage {
-        UiMessage::new(dest, MessageDirection::FromWidget, Self::MouseUp { pos, button })
+        UiMessage::new(
+            dest,
+            MessageDirection::FromWidget,
+            Self::MouseUp { pos, button },
+        )
     }
     pub fn click(dest: NodeHandle) -> UiMessage {
         UiMessage::new(dest, MessageDirection::FromWidget, Self::Click)
