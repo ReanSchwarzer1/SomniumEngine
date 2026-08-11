@@ -469,10 +469,8 @@ impl GameApp for HelloGame {
         // no test. Spawned with MeshKind only, so the same auto-attach path the
         // editor's Create menu uses supplies the mesh and material.
         if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
-            // Remove the demo's water and helmet. Both sit at Y=0 and both have
-            // confounded this test repeatedly — the water plane is coplanar with
-            // any ground at Y=0 and z-fights it, and the helmet sits below a
-            // raised ground so it cannot cast onto it. What is left is a plane
+            // Remove the helmet, which sits below a raised ground and therefore
+            // cannot cast onto it. What is left is a plane
             // and a cube and nothing else, so a shadow either appears or does not.
             let name_req = ComponentSet::from_ids(vec![ComponentId::of::<Name>()]);
             let mut doomed = Vec::new();
@@ -484,7 +482,7 @@ impl GameApp for HelloGame {
                 for row in 0..archetype.len() {
                     let n = unsafe { archetype.column(n_col).get::<Name>(row) };
                     let s = n.as_str();
-                    if s == "WaterPlane" || s.contains("Helmet") || s.contains("helmet") {
+                    if s.contains("Helmet") || s.contains("helmet") {
                         doomed.push(archetype.entities()[row]);
                     }
                 }
@@ -495,9 +493,7 @@ impl GameApp for HelloGame {
 
             ctx.world.spawn((
                 Transform {
-                    // Y=6, not 0: the demo's WaterPlane also sits at Y=0, and
-                    // two coplanar surfaces z-fight — which made every capture
-                    // of this scene a mix of both.
+                    // The isolated ground stays at the origin for a stable test.
                     translation: Vec3::new(0.0, 0.0, 0.0),
                     rotation: glam::Quat::IDENTITY,
                     scale: Vec3::new(40.0, 1.0, 40.0),
@@ -561,198 +557,215 @@ impl GameApp for HelloGame {
         let flat_terrain = terrain_mode != "1";
         if terrain_mode != "0" && terrain_mode != "none" {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
-                use somnium_renderer::terrain::{TerrainDescriptor, brush};
-                let desc = if flat_terrain {
-                    TerrainDescriptor::default()
-                } else {
-                    TerrainDescriptor {
-                        grid_size: [4, 4],
-                        ..Default::default()
-                    }
-                };
-                let terrain_id = renderer.create_terrain(render_ctx, desc);
-                let [wx, wz] = desc.world_size();
-
-                // Phase 25L: real relief, so the eight materials have altitudes
-                // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
-                // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
-                // terrain gets procedural FBM hills, which is still landscape
-                // rather than the flat plain every earlier test scene used.
-                let mut foliage_camera: Option<Vec3> = None;
                 if flat_terrain {
-                    let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
-                        .ok()
-                        .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(somnium_renderer::terrain::DEFAULT_RELIEF_METRES);
-                    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
-                        // The same path Create > Terrain takes, so the demo
-                        // scene and an editor-created terrain cannot diverge.
-                        terrain.apply_default_relief(amplitude);
-                        // Assign all eight materials by altitude and slope.
-                        brush::auto_splat(terrain, amplitude * 0.62);
-
-                        // `SOMNIUM_FOLIAGE=1` scatters foliage without the
-                        // editor (Phase 17E). Painting by hand was the only way
-                        // to get a plant on screen, which meant the foliage
-                        // shading work could not be *seen*, let alone measured
-                        // — the reason the 17E remainder sat open. Strokes are
-                        // deterministic, so an A/B of a shading change is a
-                        // like-for-like comparison.
-                        if std::env::var("SOMNIUM_FOLIAGE").as_deref() == Ok("1") {
-                            use somnium_renderer::terrain::foliage_paint::{self, FoliageBrush};
-                            let [wx, wz] = desc.world_size();
-                            let mut painted = std::mem::take(&mut terrain.painted_foliage);
-                            let mut stroke = 0u32;
-
-                            // Ground cover over a patch in front of the camera,
-                            // then a few trees standing in it.
-                            for (kind, radius, density, single, count) in
-                                [(0u8, 26.0f32, 2.5f32, false, 12), (1u8, 1.0, 1.0, true, 6)]
+                    match somnium_core::create_default_landscape(renderer, render_ctx) {
+                        Ok(built) => {
+                            let preset = built.preset;
+                            let water_component = built.water.water;
+                            let terrain = built.terrain.respawn(&mut ctx.world);
+                            let mut water_snapshot = built.water;
+                            water_snapshot.parent = Some(Parent { entity: terrain });
+                            let water = water_snapshot.respawn(&mut ctx.world);
+                            ctx.world.get_mut::<Children>(terrain).unwrap().push(water);
+                            self.camera.position = preset.camera_position;
+                            self.camera.yaw = preset.camera_yaw_degrees;
+                            self.camera.pitch = preset.camera_pitch_degrees;
+                            if let (Ok(viewpoint), Some(water_component)) =
+                                (std::env::var("SOMNIUM_WATER_VIEW"), water_component)
                             {
-                                let brush = FoliageBrush {
-                                    kind,
-                                    radius,
-                                    density,
-                                    single,
-                                    max_slope_deg: 35.0,
-                                    ..Default::default()
-                                };
-                                for i in 0..count {
-                                    let t = i as f32 / count as f32;
-                                    let cx = wx * (0.34 + 0.30 * t);
-                                    let cz = wz * (0.40 + 0.16 * ((i % 4) as f32 / 4.0));
-                                    stroke += 1;
-                                    foliage_paint::paint(
-                                        &mut painted,
-                                        &brush,
-                                        [cx, cz],
-                                        stroke,
-                                        |x, z| terrain.ground_sample(x, z),
+                                if let Some((local_xz, depth)) =
+                                    renderer.deepest_water_point(water_component.water_id)
+                                {
+                                    let surface = renderer
+                                        .query_water_surface(
+                                            water_component.water_id,
+                                            local_xz,
+                                            0.0,
+                                        )
+                                        .map_or(water_component.surface_level, |sample| {
+                                            sample.height
+                                        });
+                                    let eye_y = match viewpoint.as_str() {
+                                        "underwater" => surface - (depth * 0.22).clamp(1.5, 4.0),
+                                        "waterline" => surface,
+                                        _ => surface + 2.0,
+                                    };
+                                    self.camera.position = Vec3::new(
+                                        preset.terrain_translation.x + local_xz.x,
+                                        preset.terrain_translation.y + eye_y,
+                                        preset.terrain_translation.z + local_xz.y,
                                     );
+                                    self.camera.yaw = -35.0;
+                                    self.camera.pitch =
+                                        if viewpoint == "underwater" { 5.0 } else { 0.0 };
+                                    info!(%viewpoint, depth, "Deterministic water validation viewpoint active");
                                 }
                             }
-                            info!("Foliage scattered: {} instances", painted.len());
-                            terrain.painted_foliage = painted;
-
-                            // Stand in it. Foliage is culled past 120 m (17G)
-                            // and a tuft is sub-pixel from the landscape camera,
-                            // so judging leaf shading needs eye level.
-                            let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
-                            let ground = terrain.world_height_at(lx, lz);
-                            foliage_camera =
-                                Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                            info!("Default landscape preset v{} active", preset.version);
                         }
-
-                        // The same eye-level stance without the foliage, for
-                        // judging the ground itself. Every terrain texturing
-                        // phase since 25F has had to be judged on a hillside a
-                        // kilometre away, where a material transition is a few
-                        // pixels wide and a height blend is invisible — the
-                        // features live at metres and the demo camera does not.
-                        if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
-                            let [wx, wz] = desc.world_size();
-                            let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
-                            let ground = terrain.world_height_at(lx, lz);
-                            foliage_camera =
-                                Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
-                        }
+                        Err(error) => tracing::warn!("Default landscape creation failed: {error}"),
                     }
-                    // The default camera sits at y = 2, which is now inside a
-                    // hillside rather than above a plain. Put it over the
-                    // terrain looking down the slope.
-                    self.camera.position = foliage_camera
-                        .unwrap_or_else(|| Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45));
-                    self.camera.yaw = -90.0;
-                    self.camera.pitch = if foliage_camera.is_some() {
-                        -6.0
+                } else {
+                    use somnium_renderer::terrain::{TerrainDescriptor, brush};
+                    let desc = if flat_terrain {
+                        TerrainDescriptor::default()
                     } else {
-                        -22.0
+                        TerrainDescriptor {
+                            grid_size: [4, 4],
+                            ..Default::default()
+                        }
                     };
-                }
+                    let terrain_id = renderer.create_terrain(render_ctx, desc);
+                    let [wx, wz] = desc.world_size();
 
-                if let Some(terrain) = renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain) {
-                    // Sculpt a hill and a valley to exercise the brush paths.
-                    let raise = brush::TerrainBrush {
-                        mode: brush::BrushMode::Raise,
-                        radius: 30.0,
-                        strength: 1.0,
-                        ..Default::default()
-                    };
-                    for _ in 0..40 {
-                        brush::apply_sculpt(terrain, &raise, wx * 0.3, wz * 0.3, 0.1);
-                    }
-                    let lower = brush::TerrainBrush {
-                        mode: brush::BrushMode::Lower,
-                        ..raise
-                    };
-                    for _ in 0..20 {
-                        brush::apply_sculpt(terrain, &lower, wx * 0.7, wz * 0.7, 0.1);
-                    }
-                    brush::auto_splat(terrain, 10.0);
-                }
+                    // Phase 25L: real relief, so the eight materials have altitudes
+                    // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
+                    // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
+                    // terrain gets procedural FBM hills, which is still landscape
+                    // rather than the flat plain every earlier test scene used.
+                    let mut foliage_camera: Option<Vec3> = None;
+                    if flat_terrain {
+                        let amplitude = std::env::var("SOMNIUM_TERRAIN_RELIEF")
+                            .ok()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(somnium_renderer::terrain::DEFAULT_RELIEF_METRES);
+                        if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                            // The same path Create > Terrain takes, so the demo
+                            // scene and an editor-created terrain cannot diverge.
+                            terrain.apply_default_relief(amplitude);
+                            // Assign all eight materials by altitude and slope.
+                            brush::auto_splat(terrain, amplitude * 0.62);
 
-                let terrain_entity = ctx.world.spawn((
-                    Transform::from_translation(Vec3::new(
-                        -wx * 0.5,
-                        if flat_terrain { 0.0 } else { -6.0 },
-                        -wz * 0.5,
-                    )),
-                    Name::new("Terrain"),
-                    WorldTransform::identity(),
-                    somnium_core::TerrainComponent {
-                        terrain_id,
-                        chunk_cells: desc.chunk_cells,
-                        grid_x: desc.grid_size[0],
-                        grid_z: desc.grid_size[1],
-                        cell_size: desc.cell_size,
-                        height_scale: desc.height_scale,
-                    },
-                    // Phase 17E: painted foliage only submits when the
-                    // terrain entity carries an enabled FoliageComponent.
-                    somnium_core::FoliageComponent {
-                        enabled: foliage_camera.is_some(),
-                        ..Default::default()
-                    },
-                    Children::empty(),
-                ));
-                if flat_terrain {
-                    let water_id = renderer.allocate_water_body_id();
-                    let water = somnium_core::WaterComponent::great_lakes(
-                        water_id,
-                        terrain_id,
-                        [0.0, 0.0, wx, wz],
-                    );
-                    if let Err(error) = renderer.ensure_water_body(render_ctx, water.descriptor()) {
-                        tracing::warn!("Great Lakes water data unavailable: {error}");
+                            // `SOMNIUM_FOLIAGE=1` scatters foliage without the
+                            // editor (Phase 17E). Painting by hand was the only way
+                            // to get a plant on screen, which meant the foliage
+                            // shading work could not be *seen*, let alone measured
+                            // — the reason the 17E remainder sat open. Strokes are
+                            // deterministic, so an A/B of a shading change is a
+                            // like-for-like comparison.
+                            if std::env::var("SOMNIUM_FOLIAGE").as_deref() == Ok("1") {
+                                use somnium_renderer::terrain::foliage_paint::{
+                                    self, FoliageBrush,
+                                };
+                                let [wx, wz] = desc.world_size();
+                                let mut painted = std::mem::take(&mut terrain.painted_foliage);
+                                let mut stroke = 0u32;
+
+                                // Ground cover over a patch in front of the camera,
+                                // then a few trees standing in it.
+                                for (kind, radius, density, single, count) in
+                                    [(0u8, 26.0f32, 2.5f32, false, 12), (1u8, 1.0, 1.0, true, 6)]
+                                {
+                                    let brush = FoliageBrush {
+                                        kind,
+                                        radius,
+                                        density,
+                                        single,
+                                        max_slope_deg: 35.0,
+                                        ..Default::default()
+                                    };
+                                    for i in 0..count {
+                                        let t = i as f32 / count as f32;
+                                        let cx = wx * (0.34 + 0.30 * t);
+                                        let cz = wz * (0.40 + 0.16 * ((i % 4) as f32 / 4.0));
+                                        stroke += 1;
+                                        foliage_paint::paint(
+                                            &mut painted,
+                                            &brush,
+                                            [cx, cz],
+                                            stroke,
+                                            |x, z| terrain.ground_sample(x, z),
+                                        );
+                                    }
+                                }
+                                info!("Foliage scattered: {} instances", painted.len());
+                                terrain.painted_foliage = painted;
+
+                                // Stand in it. Foliage is culled past 120 m (17G)
+                                // and a tuft is sub-pixel from the landscape camera,
+                                // so judging leaf shading needs eye level.
+                                let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
+                                let ground = terrain.world_height_at(lx, lz);
+                                foliage_camera =
+                                    Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                            }
+
+                            // The same eye-level stance without the foliage, for
+                            // judging the ground itself. Every terrain texturing
+                            // phase since 25F has had to be judged on a hillside a
+                            // kilometre away, where a material transition is a few
+                            // pixels wide and a height blend is invisible — the
+                            // features live at metres and the demo camera does not.
+                            if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
+                                let [wx, wz] = desc.world_size();
+                                let (lx, lz) = (wx * 0.34, wz * 0.40 + 14.0);
+                                let ground = terrain.world_height_at(lx, lz);
+                                foliage_camera =
+                                    Some(Vec3::new(lx - wx * 0.5, ground + 1.6, lz - wz * 0.5));
+                            }
+                        }
+                        // The default camera sits at y = 2, which is now inside a
+                        // hillside rather than above a plain. Put it over the
+                        // terrain looking down the slope.
+                        self.camera.position = foliage_camera
+                            .unwrap_or_else(|| Vec3::new(0.0, amplitude * 1.15 + 30.0, wz * 0.45));
+                        self.camera.yaw = -90.0;
+                        self.camera.pitch = if foliage_camera.is_some() {
+                            -6.0
+                        } else {
+                            -22.0
+                        };
                     }
-                    let allocation = renderer
-                        .upload_water_body_mesh(render_ctx, water_id)
-                        .expect("Great Lakes finite water mesh");
-                    let water_entity = ctx.world.spawn((
+
+                    if let Some(terrain) =
+                        renderer.terrain_mut(terrain_id).filter(|_| !flat_terrain)
+                    {
+                        // Sculpt a hill and a valley to exercise the brush paths.
+                        let raise = brush::TerrainBrush {
+                            mode: brush::BrushMode::Raise,
+                            radius: 30.0,
+                            strength: 1.0,
+                            ..Default::default()
+                        };
+                        for _ in 0..40 {
+                            brush::apply_sculpt(terrain, &raise, wx * 0.3, wz * 0.3, 0.1);
+                        }
+                        let lower = brush::TerrainBrush {
+                            mode: brush::BrushMode::Lower,
+                            ..raise
+                        };
+                        for _ in 0..20 {
+                            brush::apply_sculpt(terrain, &lower, wx * 0.7, wz * 0.7, 0.1);
+                        }
+                        brush::auto_splat(terrain, 10.0);
+                    }
+
+                    let _terrain_entity = ctx.world.spawn((
                         Transform::from_translation(Vec3::new(
-                            wx * 0.5,
-                            water.surface_level,
-                            wz * 0.5,
+                            -wx * 0.5,
+                            if flat_terrain { 0.0 } else { -6.0 },
+                            -wz * 0.5,
                         )),
-                        MeshComponent {
-                            vertex_offset: allocation.vertex_offset,
-                            index_offset: allocation.index_offset,
-                            index_count: allocation.index_count,
-                        },
-                        water,
-                        Name::new("Water"),
+                        Name::new("Terrain"),
                         WorldTransform::identity(),
-                        MeshKind::Plane,
-                        Parent {
-                            entity: terrain_entity,
+                        somnium_core::TerrainComponent {
+                            terrain_id,
+                            chunk_cells: desc.chunk_cells,
+                            grid_x: desc.grid_size[0],
+                            grid_z: desc.grid_size[1],
+                            cell_size: desc.cell_size,
+                            height_scale: desc.height_scale,
                         },
+                        // Phase 17E: painted foliage only submits when the
+                        // terrain entity carries an enabled FoliageComponent.
+                        somnium_core::FoliageComponent {
+                            enabled: foliage_camera.is_some(),
+                            ..Default::default()
+                        },
+                        Children::empty(),
                     ));
-                    ctx.world
-                        .get_mut::<Children>(terrain_entity)
-                        .unwrap()
-                        .push(water_entity);
+                    info!("Heightmap terrain smoke test active ({}x{} m)", wx, wz);
                 }
-                info!("Heightmap terrain smoke test active ({}x{} m)", wx, wz);
             }
         }
 
@@ -856,7 +869,7 @@ impl GameApp for HelloGame {
             Transform::from_translation(Vec3::ZERO),
             Name::new("Post Processing"),
             WorldTransform::identity(),
-            somnium_core::PostProcessComponent::default(),
+            somnium_core::DefaultLandscapePreset::current().post_process,
         ));
 
         ctx.physics.optimize_broad_phase();
@@ -1330,6 +1343,18 @@ impl GameApp for HelloGame {
                                 water.wave_length_b,
                                 water.wave_speed,
                                 water.wave_steepness,
+                            ],
+                            simulation_params: [
+                                water.spectrum_blend,
+                                water.wind_speed,
+                                water.foam_decay,
+                                water.foam_threshold,
+                            ],
+                            volume_params: [
+                                water.caustic_strength,
+                                f32::from(u8::from(water.underwater_enabled)),
+                                0.0,
+                                0.0,
                             ],
                         },
                         mesh.vertex_offset,

@@ -48,12 +48,12 @@ impl Voxel {
     /// bakes these into the palette texture sampled by the shading pass.
     pub fn palette_color(self) -> [u8; 4] {
         match self {
-            Voxel::Air   => [0, 0, 0, 255],
+            Voxel::Air => [0, 0, 0, 255],
             Voxel::Grass => [96, 156, 58, 255],
-            Voxel::Dirt  => [124, 92, 64, 255],
+            Voxel::Dirt => [124, 92, 64, 255],
             Voxel::Stone => [128, 128, 132, 255],
-            Voxel::Sand  => [212, 196, 144, 255],
-            Voxel::Snow  => [235, 240, 245, 255],
+            Voxel::Sand => [212, 196, 144, 255],
+            Voxel::Snow => [235, 240, 245, 255],
         }
     }
 }

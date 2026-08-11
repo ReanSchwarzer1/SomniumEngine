@@ -62,10 +62,10 @@ pub fn build_chunk_vertices(
             let h = height_at(xi, zi) * height_scale;
 
             // Finite differences from neighboring heights (Phase 14B-1 formula).
-            let dx = (height_at(xi + 1, zi) - height_at(xi - 1, zi)) * height_scale
-                / (2.0 * cell_size);
-            let dz = (height_at(xi, zi + 1) - height_at(xi, zi - 1)) * height_scale
-                / (2.0 * cell_size);
+            let dx =
+                (height_at(xi + 1, zi) - height_at(xi - 1, zi)) * height_scale / (2.0 * cell_size);
+            let dz =
+                (height_at(xi, zi + 1) - height_at(xi, zi - 1)) * height_scale / (2.0 * cell_size);
             let normal = glam::Vec3::new(-dx, 1.0, -dz).normalize();
 
             vertices.push(Vertex {
@@ -205,13 +205,15 @@ mod tests {
             let x = i % 65;
             let z = i / 65;
             if x == 0 {
-                assert_eq!(z % 2, 0, "fine-only vertex (0, {z}) referenced on stitched edge");
+                assert_eq!(
+                    z % 2,
+                    0,
+                    "fine-only vertex (0, {z}) referenced on stitched edge"
+                );
             }
         }
         // Unstitched east edge keeps full resolution: odd-z verts referenced.
-        let east_odd = indices
-            .iter()
-            .any(|&i| i % 65 == 64 && (i / 65) % 2 == 1);
+        let east_odd = indices.iter().any(|&i| i % 65 == 64 && (i / 65) % 2 == 1);
         assert!(east_odd, "unstitched edge lost resolution");
     }
 

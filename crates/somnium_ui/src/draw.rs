@@ -5,7 +5,7 @@
 // DrawingContext produces CPU-side vertex/index lists consumed by UiPass.
 
 use crate::{
-    font::{FontAtlas, FONT_ATLAS_TEXTURE_ID},
+    font::{FONT_ATLAS_TEXTURE_ID, FontAtlas},
     types::Rect,
 };
 use glam::Vec2;

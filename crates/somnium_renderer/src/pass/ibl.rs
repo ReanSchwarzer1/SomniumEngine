@@ -207,7 +207,10 @@ impl IblPass {
             label: Some("IBL Sky BG"),
             layout: &sky_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(atmosphere.transmittance_view()),
@@ -227,9 +230,18 @@ impl IblPass {
             label: Some("IBL Prefilter BG"),
             layout: &prefilter_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&mip0_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&mip0_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         });
 
@@ -280,7 +292,8 @@ impl IblPass {
         };
 
         let sky_pipeline = make_pipeline("IBL Sky Pipeline", &sky_bgl, "fs_sky");
-        let prefilter_pipeline = make_pipeline("IBL Prefilter Pipeline", &prefilter_bgl, "fs_prefilter");
+        let prefilter_pipeline =
+            make_pipeline("IBL Prefilter Pipeline", &prefilter_bgl, "fs_prefilter");
 
         Self {
             cubemap,

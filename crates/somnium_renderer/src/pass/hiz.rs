@@ -123,7 +123,12 @@ impl HiZPass {
         let down_pipeline = make_pipeline("Hi-Z Downsample", &down_layout, "downsample");
 
         let (texture, view, mip_views, bind_groups) = Self::make_resources(
-            device, width, height, depth_view, &copy_layout, &down_layout,
+            device,
+            width,
+            height,
+            depth_view,
+            &copy_layout,
+            &down_layout,
         );
 
         // Phase 24AC. The bind-group layout would fail outright on a device
@@ -133,7 +138,14 @@ impl HiZPass {
             >= crate::pass::spd::MIPS_PER_DISPATCH;
         let spd = if spd_supported {
             let mut p = crate::pass::spd::SpdPass::new(device);
-            p.build(device, queue, &mip_views, width, height, mip_count(width, height));
+            p.build(
+                device,
+                queue,
+                &mip_views,
+                width,
+                height,
+                mip_count(width, height),
+            );
             Some(p)
         } else {
             tracing::info!(
@@ -145,8 +157,16 @@ impl HiZPass {
         let use_spd = spd.is_some() && std::env::var("SOMNIUM_SPD").as_deref() != Ok("0");
 
         Self {
-            copy_pipeline, down_pipeline, copy_layout, down_layout,
-            texture, view, mip_views, bind_groups, width, height,
+            copy_pipeline,
+            down_pipeline,
+            copy_layout,
+            down_layout,
+            texture,
+            view,
+            mip_views,
+            bind_groups,
+            width,
+            height,
             spd,
             use_spd,
         }
@@ -172,7 +192,12 @@ impl HiZPass {
         depth_view: &wgpu::TextureView,
     ) {
         let (texture, view, mip_views, bind_groups) = Self::make_resources(
-            device, width, height, depth_view, &self.copy_layout, &self.down_layout,
+            device,
+            width,
+            height,
+            depth_view,
+            &self.copy_layout,
+            &self.down_layout,
         );
         self.texture = texture;
         self.view = view;
@@ -182,7 +207,12 @@ impl HiZPass {
         self.height = height;
         if let Some(spd) = self.spd.as_mut() {
             spd.build(
-                device, queue, &self.mip_views, width, height, mip_count(width, height),
+                device,
+                queue,
+                &self.mip_views,
+                width,
+                height,
+                mip_count(width, height),
             );
         }
     }
@@ -223,14 +253,23 @@ impl HiZPass {
         depth_view: &wgpu::TextureView,
         copy_layout: &wgpu::BindGroupLayout,
         down_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::Texture, wgpu::TextureView, Vec<wgpu::TextureView>, Vec<wgpu::BindGroup>) {
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        Vec<wgpu::TextureView>,
+        Vec<wgpu::BindGroup>,
+    ) {
         let width = width.max(1);
         let height = height.max(1);
         let levels = mip_count(width, height);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Hi-Z Pyramid"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -268,7 +307,9 @@ impl HiZPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&mip_views[level as usize]),
+                            resource: wgpu::BindingResource::TextureView(
+                                &mip_views[level as usize],
+                            ),
                         },
                     ],
                 })

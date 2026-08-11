@@ -86,7 +86,9 @@ fn inner_id<T: 'static>() -> u32 {
     // Per-T static, created via monomorphisation.
     static ID_MAP: OnceLock<std::sync::Mutex<HashMap<TypeId, u32>>> = OnceLock::new();
     let map = ID_MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard
         .entry(TypeId::of::<T>())
         .or_insert_with(|| COUNTER.fetch_add(1, AtomicOrdering::Relaxed))
@@ -133,7 +135,9 @@ impl ComponentInfo {
     ///
     /// `ptr` must point to a valid, initialised `T`.
     unsafe fn drop_impl<T>(ptr: *mut u8) {
-        unsafe { std::ptr::drop_in_place(ptr.cast::<T>()); }
+        unsafe {
+            std::ptr::drop_in_place(ptr.cast::<T>());
+        }
     }
 }
 
@@ -266,10 +270,7 @@ mod tests {
 
     #[test]
     fn component_set_contains() {
-        let set = ComponentSet::from_ids(vec![
-            ComponentId::of::<Pos>(),
-            ComponentId::of::<Vel>(),
-        ]);
+        let set = ComponentSet::from_ids(vec![ComponentId::of::<Pos>(), ComponentId::of::<Vel>()]);
         assert!(set.contains(ComponentId::of::<Pos>()));
         assert!(set.contains(ComponentId::of::<Vel>()));
         assert!(!set.contains(ComponentId::of::<Health>()));

@@ -117,7 +117,10 @@ fn terrain_heightfield_collider() {
         object_layer: LAYER_NON_MOVING,
         ..Default::default()
     });
-    assert!(!odd.is_valid(), "a non-power-of-two field should be refused");
+    assert!(
+        !odd.is_valid(),
+        "a non-power-of-two field should be refused"
+    );
 
     // Too few samples for the declared side length: reading it would run off
     // the end of the slice.

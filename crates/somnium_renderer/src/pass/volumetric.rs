@@ -298,7 +298,10 @@ impl VolumetricPass {
             label: Some("Volumetric BG"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(transmittance),
@@ -315,7 +318,10 @@ impl VolumetricPass {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&self.view),
                 },
-                wgpu::BindGroupEntry { binding: 5, resource: light_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: light_buffer.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(shadow_atlas),
@@ -348,7 +354,9 @@ impl VolumetricPass {
         sun_direction: glam::Vec3,
         sun_illuminance: glam::Vec3,
     ) {
-        let Some(bind_group) = self.bind_group.as_ref() else { return };
+        let Some(bind_group) = self.bind_group.as_ref() else {
+            return;
+        };
         if !self.enabled {
             return;
         }
@@ -389,7 +397,11 @@ impl VolumetricPass {
         // One thread per froxel *column*: each walks its own depth, because the
         // integral along a ray is sequential and sharing the throughput across
         // slices is what makes it one pass instead of 32.
-        pass.dispatch_workgroups(VOLUME_SIZE.width.div_ceil(8), VOLUME_SIZE.height.div_ceil(8), 1);
+        pass.dispatch_workgroups(
+            VOLUME_SIZE.width.div_ceil(8),
+            VOLUME_SIZE.height.div_ceil(8),
+            1,
+        );
         drop(pass);
 
         // Keep this frame for the next one. 32x32x32 RGBA16F is 256 KB, so the

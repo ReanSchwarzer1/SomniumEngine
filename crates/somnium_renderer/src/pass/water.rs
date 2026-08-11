@@ -10,11 +10,26 @@ pub struct WaterMaterialData {
     pub surface_params: [f32; 4], // clarity, edge scale, amplitude, SSR strength
     pub wave_dir_a: [f32; 2],
     pub wave_dir_b: [f32; 2],
-    pub wave_params: [f32; 4], // wavelengths A/B, speed, steepness
+    pub wave_params: [f32; 4],       // wavelengths A/B, speed, steepness
+    pub simulation_params: [f32; 4], // spectral blend, wind speed, foam decay/threshold
+    pub volume_params: [f32; 4],     // caustics, underwater enabled, reserved
 }
 
 const WATER_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const VELOCITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+
+fn spectral_texture_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -39,6 +54,7 @@ pub struct WaterPass {
     previous_view_proj: glam::Mat4,
     previous_time: f32,
     history_valid: bool,
+    pub spectrum: crate::pass::water_spectrum::WaterSpectrumPass,
 }
 
 /// Build the shared water-material textures once for the renderer. Coverage,
@@ -48,6 +64,7 @@ pub fn create_default_texture_bind_group(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
+    spectrum_views: [(&wgpu::TextureView, &wgpu::TextureView); 2],
 ) -> wgpu::BindGroup {
     fn view(
         device: &wgpu::Device,
@@ -166,6 +183,22 @@ pub fn create_default_texture_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[0].0),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[0].1),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[1].0),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[1].1),
             },
         ],
     })
@@ -385,6 +418,10 @@ impl WaterPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    spectral_texture_layout(4),
+                    spectral_texture_layout(5),
+                    spectral_texture_layout(6),
+                    spectral_texture_layout(7),
                 ],
             });
 
@@ -466,6 +503,7 @@ impl WaterPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let spectrum = crate::pass::water_spectrum::WaterSpectrumPass::new(device);
         Self {
             pipeline,
             view_bind_group_layout,
@@ -478,6 +516,7 @@ impl WaterPass {
             previous_view_proj: glam::Mat4::IDENTITY,
             previous_time: 0.0,
             history_valid: false,
+            spectrum,
         }
     }
 
@@ -560,6 +599,16 @@ impl WaterPass {
             return;
         }
 
+        // The cascades are shared, so the first visible body's authored wind
+        // and foam controls define this frame's ocean state. Per-body blend
+        // remains in the material and can still disable spectral displacement.
+        let effective_simulation = self.spectrum.record(
+            queue,
+            encoder,
+            current_time,
+            water_queue[0].2.simulation_params,
+        );
+
         queue.write_buffer(
             &self.frame_buffer,
             0,
@@ -631,7 +680,9 @@ impl WaterPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&mat_buffer, 0, bytemuck::bytes_of(water));
+            let mut gpu_water = *water;
+            gpu_water.simulation_params = effective_simulation;
+            queue.write_buffer(&mat_buffer, 0, bytemuck::bytes_of(&gpu_water));
 
             let mat_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Water Mat Bind Group"),
@@ -743,7 +794,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_their_sixteen_byte_wgsl_layouts() {
-        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 144);
+        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 176);
         assert_eq!(std::mem::size_of::<WaterFrameData>(), 144);
         assert_eq!(std::mem::size_of::<WaterMaterialData>() % 16, 0);
     }

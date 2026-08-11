@@ -13,24 +13,24 @@ use crate::{
     bindless::GlobalResourcePool,
     command::DrawCommand,
     context::RenderContext,
-    material::{hlms::MaterialSystem, pool::{GpuMaterial, MaterialPool}},
-    texture_pool::TexturePool,
+    geometry::GeometryPool,
+    instance::InstancePool,
+    material::{
+        hlms::MaterialSystem,
+        pool::{GpuMaterial, MaterialPool},
+    },
     pass::{
         gizmo::{GizmoMode, GizmoPass},
         grid::GridPass,
         outline::OutlinePass,
         particle::{GpuParticle, ParticlePass},
-        postprocess::{PostProcessPass, HDR_FORMAT},
+        postprocess::{HDR_FORMAT, PostProcessPass},
         shading::ShadingPass,
         shadow::ShadowPass,
         visibility::VisibilityBufferPass,
     },
-    geometry::GeometryPool,
-    instance::InstancePool,
-    shadow::{
-        ShadowMapResources, GpuDirectionalLight, ATLAS_SIZE,
-        cascade::compute_cascades,
-    },
+    shadow::{ATLAS_SIZE, GpuDirectionalLight, ShadowMapResources, cascade::compute_cascades},
+    texture_pool::TexturePool,
 };
 use somnium_ui::UiManager;
 use winit::window::Window;
@@ -46,12 +46,12 @@ const MAX_INSTANCES_FOR_CLUSTERING: u32 = 8;
 /// Everything the ECS layer needs to spawn one entity from an uploaded scene node.
 #[derive(Debug, Clone)]
 pub struct UploadedNode {
-    pub entity_name:   String,
+    pub entity_name: String,
     pub vertex_offset: u32,
-    pub index_offset:  u32,
-    pub index_count:   u32,
-    pub material_id:   u32,
-    pub transform:     glam::Mat4,
+    pub index_offset: u32,
+    pub index_count: u32,
+    pub material_id: u32,
+    pub transform: glam::Mat4,
 }
 
 /// The primary renderer struct.
@@ -100,7 +100,7 @@ pub struct SomniumRenderer {
 
     /// When true, the shading pass tints pixels by cascade index (debug overlay).
     cascade_debug: bool,
-    
+
     /// Phase 13D: 0 = PBR, 1 = Cel-shading.
     pub shading_mode: u32,
     /// Phase 13C: Accumulated local lights for the frame.
@@ -201,7 +201,19 @@ pub struct SomniumRenderer {
 
     /// Phase 13: Water pass.
     pub water_pass: crate::pass::water::WaterPass,
-    water_queue: Vec<(u32, glam::Mat4, crate::pass::water::WaterMaterialData, u32, u32, u32)>,
+    water_queue: Vec<(
+        u32,
+        glam::Mat4,
+        crate::pass::water::WaterMaterialData,
+        u32,
+        u32,
+        u32,
+    )>,
+    underwater_pass: crate::pass::underwater::UnderwaterPass,
+    /// Active finite body at the camera XZ, if any.
+    pub underwater_body: Option<u32>,
+    /// Smooth 0..1 camera submersion reported to gameplay/editor systems.
+    pub camera_submersion: f32,
 
     /// Phase 25A-2: per-terrain splat/layer parameters read by `shading.wgsl`.
     terrain_materials: crate::material::pool::TerrainMaterialPool,
@@ -284,9 +296,9 @@ pub struct SomniumRenderer {
 impl SomniumRenderer {
     /// Initialize the renderer using the provided `RenderContext`.
     pub fn new(ctx: &RenderContext) -> Self {
-        let geometry      = GeometryPool::new(&ctx.device);
+        let geometry = GeometryPool::new(&ctx.device);
         let materials_pool = MaterialPool::new(&ctx.device);
-        let instances     = InstancePool::new(&ctx.device);
+        let instances = InstancePool::new(&ctx.device);
 
         // Phase 11D/13: View buffer expanded to 224 bytes to include raw `view` matrix and `time`.
         let view_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -326,8 +338,7 @@ impl SomniumRenderer {
 
         // Phase 24A-3: built before the post-process pass, which binds its
         // result buffer.
-        let mut auto_exposure_pass =
-            crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
+        let mut auto_exposure_pass = crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
 
         // Phase 24J: acceleration structures. Constructed even when the device
         // lacks ray query — the pass then does nothing, which keeps the call
@@ -361,12 +372,18 @@ impl SomniumRenderer {
 
         // Phase 24Z: depth of field, driven by the same aperture as exposure.
         let dof_pass = crate::pass::dof::DofPass::new(
-            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+            &ctx.device,
+            HDR_FORMAT,
+            ctx.config.width,
+            ctx.config.height,
         );
 
         // Phase 24T: built before the post-process pass, which samples its result.
         let bloom_pass = crate::pass::bloom::BloomPass::new(
-            &ctx.device, HDR_FORMAT, ctx.config.width, ctx.config.height,
+            &ctx.device,
+            HDR_FORMAT,
+            ctx.config.width,
+            ctx.config.height,
         );
 
         // Phase 11.5K: Post-process pass owns the Rgba16Float HDR render target.
@@ -381,9 +398,8 @@ impl SomniumRenderer {
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
         // Phase 24I: screen-space occlusion, consumed by the shading pass.
-        let gtao_pass = crate::pass::gtao::GtaoPass::new(
-            &ctx.device, ctx.config.width, ctx.config.height,
-        );
+        let gtao_pass =
+            crate::pass::gtao::GtaoPass::new(&ctx.device, ctx.config.width, ctx.config.height);
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let mut taa_pass = crate::pass::taa::TaaPass::new(
@@ -394,15 +410,18 @@ impl SomniumRenderer {
             auto_exposure_pass.exposure_buffer(),
         );
 
-
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
-            &ctx.device, ctx.config.format, &global_pool.view_proj_buffer,
+            &ctx.device,
+            ctx.config.format,
+            &global_pool.view_proj_buffer,
         );
 
         // Phase 13E: light gizmos (drawn to the swapchain like the transform gizmo).
         let light_gizmo_pass = crate::pass::light_gizmo::LightGizmoPass::new(
-            &ctx.device, ctx.config.format, &global_pool.view_proj_buffer,
+            &ctx.device,
+            ctx.config.format,
+            &global_pool.view_proj_buffer,
         );
 
         // Phase 11.5J: GPU billboard particle pass.
@@ -434,10 +453,16 @@ impl SomniumRenderer {
         let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &atmosphere_pass);
 
         let vis_pass = VisibilityBufferPass::new(
-            &ctx.device, ctx.config.width, ctx.config.height, &global_pool.layout,
+            &ctx.device,
+            ctx.config.width,
+            ctx.config.height,
+            &global_pool.layout,
         );
         let hiz_pass = crate::pass::hiz::HiZPass::new(
-            &ctx.device, &ctx.queue, ctx.config.width, ctx.config.height,
+            &ctx.device,
+            &ctx.queue,
+            ctx.config.width,
+            ctx.config.height,
             &vis_pass.depth_view,
         );
         let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
@@ -445,7 +470,7 @@ impl SomniumRenderer {
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
-            HDR_FORMAT,   // shading writes to the Rgba16Float HDR texture
+            HDR_FORMAT, // shading writes to the Rgba16Float HDR texture
             &vis_pass.view,
             &shadow_resources.atlas_depth_view,
             &shadow_resources.comparison_sampler,
@@ -476,7 +501,7 @@ impl SomniumRenderer {
         let texture_pool = TexturePool::new(&ctx.device);
 
         // Default sun direction (normalized (1,2,-1)) and white light at intensity 5.
-        let default_dir   = glam::Vec3::new(1.0, 2.0, -1.0).normalize();
+        let default_dir = glam::Vec3::new(1.0, 2.0, -1.0).normalize();
         let default_color = glam::Vec3::splat(5.0);
 
         let water_pass = crate::pass::water::WaterPass::new(
@@ -485,13 +510,14 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
-        let water_textures_bind_group = Some(
-            crate::pass::water::create_default_texture_bind_group(
+        let water_textures_bind_group =
+            Some(crate::pass::water::create_default_texture_bind_group(
                 &ctx.device,
                 &ctx.queue,
                 &water_pass.tex_bind_group_layout,
-            ),
-        );
+                water_pass.spectrum.views(),
+            ));
+        let underwater_pass = crate::pass::underwater::UnderwaterPass::new(&ctx.device, HDR_FORMAT);
 
         // Phase 24AD. Built here rather than inside the struct literal because
         // it borrows the visibility pass's depth view, which the literal moves.
@@ -515,9 +541,9 @@ impl SomniumRenderer {
             instances,
             view_matrix: glam::Mat4::IDENTITY,
             proj_matrix: glam::Mat4::IDENTITY,
-            view_proj:   glam::Mat4::IDENTITY,
-            camera_pos:  glam::Vec3::ZERO,
-            time:        0.0,
+            view_proj: glam::Mat4::IDENTITY,
+            camera_pos: glam::Vec3::ZERO,
+            time: 0.0,
             light_direction: default_dir,
             ibl_intensity: 1.0,
             light_color: default_color,
@@ -571,7 +597,10 @@ impl SomniumRenderer {
             vignette_strength: 0.0,
             chromatic_aberration: 0.0,
             fxaa_pass: crate::pass::fxaa::FxaaPass::new(
-                &ctx.device, ctx.config.format, ctx.config.width, ctx.config.height,
+                &ctx.device,
+                ctx.config.format,
+                ctx.config.width,
+                ctx.config.height,
             ),
             fxaa_enabled: true,
             gizmo_pass,
@@ -607,6 +636,9 @@ impl SomniumRenderer {
             supports_gpu_driven: ctx.supports_gpu_driven(),
             water_pass,
             water_queue: Vec::new(),
+            underwater_pass,
+            underwater_body: None,
+            camera_submersion: 0.0,
             terrain_materials,
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
@@ -660,125 +692,143 @@ impl SomniumRenderer {
             }
         }
 
-        let texture_indices: Vec<Option<i32>> = scene.textures.iter().enumerate().map(|(tex_index, tex)| {
-            // Full mip chain. Without it, minified textures alias badly — the
-            // sampler asks for trilinear filtering but a single level leaves
-            // nothing to filter between, so detailed materials shimmer at
-            // distance and read as noise.
-            let levels = build_mip_chain(&tex.data, tex.width, tex.height);
-            let mip_level_count = levels.len() as u32;
+        let texture_indices: Vec<Option<i32>> = scene
+            .textures
+            .iter()
+            .enumerate()
+            .map(|(tex_index, tex)| {
+                // Full mip chain. Without it, minified textures alias badly — the
+                // sampler asks for trilinear filtering but a single level leaves
+                // nothing to filter between, so detailed materials shimmer at
+                // distance and read as noise.
+                let levels = build_mip_chain(&tex.data, tex.width, tex.height);
+                let mip_level_count = levels.len() as u32;
 
-            let wgpu_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Scene Texture"),
-                size: wgpu::Extent3d {
-                    width: tex.width, height: tex.height, depth_or_array_layers: 1,
-                },
-                mip_level_count,
-                sample_count:     1,
-                dimension:        wgpu::TextureDimension::D2,
-                format:           if is_colour.get(tex_index).copied().unwrap_or(true) {
-                    wgpu::TextureFormat::Rgba8UnormSrgb
-                } else {
-                    wgpu::TextureFormat::Rgba8Unorm
-                },
-                usage:            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats:     &[],
-            });
-
-            for (level, (lw, lh, data)) in levels.iter().enumerate() {
-                // write_texture requires rows padded to COPY_BYTES_PER_ROW_ALIGNMENT.
-                let row_bytes  = lw * 4;
-                let align      = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-                let padded_row = row_bytes.div_ceil(align) * align;
-
-                let upload: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
-                    std::borrow::Cow::Borrowed(data)
-                } else {
-                    let mut buf = vec![0u8; padded_row as usize * *lh as usize];
-                    for row in 0..*lh as usize {
-                        let src = row * row_bytes as usize;
-                        let dst = row * padded_row as usize;
-                        buf[dst..dst + row_bytes as usize]
-                            .copy_from_slice(&data[src..src + row_bytes as usize]);
-                    }
-                    std::borrow::Cow::Owned(buf)
-                };
-
-                ctx.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture:   &wgpu_tex,
-                        mip_level: level as u32,
-                        origin:    wgpu::Origin3d::ZERO,
-                        aspect:    wgpu::TextureAspect::All,
+                let wgpu_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Scene Texture"),
+                    size: wgpu::Extent3d {
+                        width: tex.width,
+                        height: tex.height,
+                        depth_or_array_layers: 1,
                     },
-                    &upload,
-                    wgpu::TexelCopyBufferLayout {
-                        offset:         0,
-                        bytes_per_row:  Some(padded_row),
-                        rows_per_image: Some(*lh),
+                    mip_level_count,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: if is_colour.get(tex_index).copied().unwrap_or(true) {
+                        wgpu::TextureFormat::Rgba8UnormSrgb
+                    } else {
+                        wgpu::TextureFormat::Rgba8Unorm
                     },
-                    wgpu::Extent3d { width: *lw, height: *lh, depth_or_array_layers: 1 },
-                );
-            }
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
 
-            let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
-            Some(self.add_texture(ctx, view) as i32)
-        }).collect();
+                for (level, (lw, lh, data)) in levels.iter().enumerate() {
+                    // write_texture requires rows padded to COPY_BYTES_PER_ROW_ALIGNMENT.
+                    let row_bytes = lw * 4;
+                    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                    let padded_row = row_bytes.div_ceil(align) * align;
+
+                    let upload: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
+                        std::borrow::Cow::Borrowed(data)
+                    } else {
+                        let mut buf = vec![0u8; padded_row as usize * *lh as usize];
+                        for row in 0..*lh as usize {
+                            let src = row * row_bytes as usize;
+                            let dst = row * padded_row as usize;
+                            buf[dst..dst + row_bytes as usize]
+                                .copy_from_slice(&data[src..src + row_bytes as usize]);
+                        }
+                        std::borrow::Cow::Owned(buf)
+                    };
+
+                    ctx.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &wgpu_tex,
+                            mip_level: level as u32,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &upload,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(padded_row),
+                            rows_per_image: Some(*lh),
+                        },
+                        wgpu::Extent3d {
+                            width: *lw,
+                            height: *lh,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+
+                let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                Some(self.add_texture(ctx, view) as i32)
+            })
+            .collect();
 
         // 2. Materials -------------------------------------------------------
         let resolve_tex = |opt: Option<usize>| -> i32 {
-            opt.and_then(|i| texture_indices.get(i).and_then(|&t| t)).unwrap_or(-1)
+            opt.and_then(|i| texture_indices.get(i).and_then(|&t| t))
+                .unwrap_or(-1)
         };
 
-        let material_ids: Vec<u32> = scene.materials.iter().map(|mat| {
-            let id = self.materials_pool.add_material(&ctx.queue, GpuMaterial {
-                base_color:             mat.base_color,
-                roughness:              mat.roughness,
-                metallic:               mat.metallic,
-                albedo_map:             resolve_tex(mat.albedo_map),
-                normal_map:             resolve_tex(mat.normal_map),
-                metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
-                occlusion_map: resolve_tex(mat.occlusion_map),
-                transmission: mat.transmission,
-                emissive: mat.emissive,
-                emissive_map: resolve_tex(mat.emissive_map),
-                terrain_index: -1,
-                _pad: [0.0; 2],
-                // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
-                // and BLEND goes to the forward pass, so a cutoff on either
-                // would punch holes in geometry that should be solid.
-                alpha_cutoff: crate::material::pool::cutout_threshold(
-                    mat.alpha_mode,
-                    mat.alpha_cutoff,
-                ),
-                flags: if mat.double_sided {
-                    crate::material::pool::MATERIAL_FLAG_DOUBLE_SIDED
-                } else {
-                    0
-                } | if mat.foliage {
-                    crate::material::pool::MATERIAL_FLAG_FOLIAGE
-                } else {
-                    0
-                },
-            });
-            // Phase 17D: remember double-sidedness so the visibility pass can
-            // draw those instances with back-face culling switched off.
-            self.set_material_double_sided(id, mat.double_sided);
-            // Phase 21: remember which materials are blended so `submit` can
-            // route their draws to the forward transparent pass.
-            self.set_material_blend(
-                id,
-                mat.alpha_mode == somnium_asset::AlphaMode::Blend,
-            );
-            id
-        }).collect();
+        let material_ids: Vec<u32> = scene
+            .materials
+            .iter()
+            .map(|mat| {
+                let id = self.materials_pool.add_material(
+                    &ctx.queue,
+                    GpuMaterial {
+                        base_color: mat.base_color,
+                        roughness: mat.roughness,
+                        metallic: mat.metallic,
+                        albedo_map: resolve_tex(mat.albedo_map),
+                        normal_map: resolve_tex(mat.normal_map),
+                        metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
+                        occlusion_map: resolve_tex(mat.occlusion_map),
+                        transmission: mat.transmission,
+                        emissive: mat.emissive,
+                        emissive_map: resolve_tex(mat.emissive_map),
+                        terrain_index: -1,
+                        _pad: [0.0; 2],
+                        // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
+                        // and BLEND goes to the forward pass, so a cutoff on either
+                        // would punch holes in geometry that should be solid.
+                        alpha_cutoff: crate::material::pool::cutout_threshold(
+                            mat.alpha_mode,
+                            mat.alpha_cutoff,
+                        ),
+                        flags: if mat.double_sided {
+                            crate::material::pool::MATERIAL_FLAG_DOUBLE_SIDED
+                        } else {
+                            0
+                        } | if mat.foliage {
+                            crate::material::pool::MATERIAL_FLAG_FOLIAGE
+                        } else {
+                            0
+                        },
+                    },
+                );
+                // Phase 17D: remember double-sidedness so the visibility pass can
+                // draw those instances with back-face culling switched off.
+                self.set_material_double_sided(id, mat.double_sided);
+                // Phase 21: remember which materials are blended so `submit` can
+                // route their draws to the forward transparent pass.
+                self.set_material_blend(id, mat.alpha_mode == somnium_asset::AlphaMode::Blend);
+                id
+            })
+            .collect();
 
         // 3. Meshes ----------------------------------------------------------
-        let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene.meshes.iter()
+        let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
+            .meshes
+            .iter()
             .map(|mesh| {
-                let alloc = self.geometry.upload_mesh(
-                    &ctx.queue, &mesh.vertices, &mesh.indices, 0,
-                );
+                let alloc = self
+                    .geometry
+                    .upload_mesh(&ctx.queue, &mesh.vertices, &mesh.indices, 0);
                 // Phase 24J: a BLAS describes geometry in object space, so it
                 // is built once here and then referenced by however many
                 // instances place it in the world.
@@ -794,20 +844,24 @@ impl SomniumRenderer {
             .collect();
 
         // 4. Build UploadedNode list ----------------------------------------
-        scene.nodes.iter().filter_map(|node| {
-            let mesh_idx = node.mesh_index?;
-            let alloc    = mesh_allocs.get(mesh_idx)?;
-            let mat_idx  = node.material_index.unwrap_or(0);
-            let mat_id   = material_ids.get(mat_idx).copied().unwrap_or(0);
-            Some(UploadedNode {
-                entity_name:   node.name.clone(),
-                vertex_offset: alloc.vertex_offset,
-                index_offset:  alloc.index_offset,
-                index_count:   alloc.index_count,
-                material_id:   mat_id,
-                transform:     node.transform,
+        scene
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let mesh_idx = node.mesh_index?;
+                let alloc = mesh_allocs.get(mesh_idx)?;
+                let mat_idx = node.material_index.unwrap_or(0);
+                let mat_id = material_ids.get(mat_idx).copied().unwrap_or(0);
+                Some(UploadedNode {
+                    entity_name: node.name.clone(),
+                    vertex_offset: alloc.vertex_offset,
+                    index_offset: alloc.index_offset,
+                    index_count: alloc.index_count,
+                    material_id: mat_id,
+                    transform: node.transform,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     /// Set the camera matrices for this frame.
@@ -826,12 +880,14 @@ impl SomniumRenderer {
         // frames sample the scene at slightly different positions. Applied to
         // the clip-space translation, which shifts the whole image without
         // touching the projection's shape.
-        let jitter = self.taa_pass.jitter_ndc(self.render_width, self.render_height);
+        let jitter = self
+            .taa_pass
+            .jitter_ndc(self.render_width, self.render_height);
         let mut jittered = proj;
         jittered.z_axis.x += jitter.x;
         jittered.z_axis.y += jitter.y;
 
-        self.view_proj  = jittered * view;
+        self.view_proj = jittered * view;
         self.camera_pos = camera_pos;
     }
 
@@ -877,7 +933,7 @@ impl SomniumRenderer {
     /// Set the directional light parameters for this frame.
     pub fn set_directional_light(&mut self, direction: glam::Vec3, color: glam::Vec3) {
         self.light_direction = direction.normalize();
-        self.light_color     = color;
+        self.light_color = color;
     }
 
     /// Add a local light (Point or Spot) for this frame (Phase 13C).
@@ -981,9 +1037,9 @@ impl SomniumRenderer {
     pub fn set_outline_entity(
         &mut self,
         vertex_offset: u32,
-        index_offset:  u32,
-        index_count:   u32,
-        model:         glam::Mat4,
+        index_offset: u32,
+        index_count: u32,
+        model: glam::Mat4,
     ) {
         self.outline_entity = Some((vertex_offset, index_offset, index_count, model));
     }
@@ -1034,7 +1090,9 @@ impl SomniumRenderer {
     /// `instance_count` doubles as the cull verdict, so counting the non-zero
     /// entries is exactly the number of draws that phase submitted.
     fn report_cull_stats(&self, ctx: &RenderContext, draw_count: usize) {
-        let Some(buffers) = &self.cull_stats_buffers else { return };
+        let Some(buffers) = &self.cull_stats_buffers else {
+            return;
+        };
         let bytes = (draw_count * 16) as u64;
         let mut alive = [0usize; 2];
         // Draw counts alone cannot be compared between the whole-mesh and
@@ -1053,8 +1111,7 @@ impl SomniumRenderer {
                 for a in data.chunks_exact(16) {
                     if u32::from_le_bytes([a[4], a[5], a[6], a[7]]) != 0 {
                         alive[phase] += 1;
-                        indices[phase] +=
-                            u32::from_le_bytes([a[0], a[1], a[2], a[3]]) as u64;
+                        indices[phase] += u32::from_le_bytes([a[0], a[1], a[2], a[3]]) as u64;
                     }
                 }
             }
@@ -1077,11 +1134,20 @@ impl SomniumRenderer {
     /// than starting over.
     fn record_visibility(&self, encoder: &mut wgpu::CommandEncoder, clear: bool) {
         let color_load = if clear {
-            wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            })
         } else {
             wgpu::LoadOp::Load
         };
-        let depth_load = if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load };
+        let depth_load = if clear {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visibility Pass"),
@@ -1090,11 +1156,17 @@ impl SomniumRenderer {
                 view: &self.vis_pass.view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: color_load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.vis_pass.depth_view,
-                depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations {
+                    load: depth_load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -1134,7 +1206,8 @@ impl SomniumRenderer {
 
     pub fn resize(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.vis_pass.resize(&ctx.device, width, height, &self.global_pool.layout);
+            self.vis_pass
+                .resize(&ctx.device, width, height, &self.global_pool.layout);
             self.postprocess_pass.resize(&ctx.device, width, height);
             self.auto_exposure_pass
                 .resize(&ctx.device, &self.postprocess_pass.hdr_view);
@@ -1162,11 +1235,14 @@ impl SomniumRenderer {
                     .expect("ReSTIR GI always allocates its radiance target"),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
-            self.fxaa_pass.resize(&ctx.device, ctx.config.format, width, height);
-            self.cas_pass.resize(&ctx.device, ctx.config.format, width, height);
+            self.fxaa_pass
+                .resize(&ctx.device, ctx.config.format, width, height);
+            self.cas_pass
+                .resize(&ctx.device, ctx.config.format, width, height);
             self.velocity_pass
                 .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
             self.water_pass.resize(&ctx.device, width, height);
+            self.underwater_pass.invalidate();
             self.taa_pass.rebuild(
                 &ctx.device,
                 &self.postprocess_pass.hdr_view,
@@ -1178,7 +1254,11 @@ impl SomniumRenderer {
             self.outline_pass.resize(&ctx.device, width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
             self.hiz_pass.resize(
-                &ctx.device, &ctx.queue, width, height, &self.vis_pass.depth_view,
+                &ctx.device,
+                &ctx.queue,
+                width,
+                height,
+                &self.vis_pass.depth_view,
             );
             // The new texture is zero-filled, i.e. everything at the near
             // plane, so occlusion has to stand down until it is rebuilt.
@@ -1241,7 +1321,14 @@ impl SomniumRenderer {
         index_offset: u32,
         index_count: u32,
     ) {
-        self.water_queue.push((water_id, transform, water, vertex_offset, index_offset, index_count));
+        self.water_queue.push((
+            water_id,
+            transform,
+            water,
+            vertex_offset,
+            index_offset,
+            index_count,
+        ));
     }
 
     /// Allocate a stable ECS-visible water handle.
@@ -1257,6 +1344,10 @@ impl SomniumRenderer {
     ) -> Result<(), String> {
         if self.water_bodies.descriptor(descriptor.water_id) != Some(descriptor) {
             self.water_bodies.create_or_replace(ctx, descriptor)?;
+            // The underwater bind group retains the body's mask/depth views.
+            // Replacing a descriptor under the same stable ECS id allocates
+            // new textures, so the cached group must not keep the old views.
+            self.underwater_pass.invalidate();
         }
         Ok(())
     }
@@ -1275,7 +1366,9 @@ impl SomniumRenderer {
         if indices.is_empty() {
             return Err(format!("water body {water_id} mask produced no triangles"));
         }
-        Ok(self.geometry.upload_mesh(&ctx.queue, &vertices, &indices, 0))
+        Ok(self
+            .geometry
+            .upload_mesh(&ctx.queue, &vertices, &indices, 0))
     }
 
     /// Query the same deterministic surface used by the GPU water shader.
@@ -1285,7 +1378,13 @@ impl SomniumRenderer {
         terrain_local_xz: glam::Vec2,
         time: f32,
     ) -> Option<crate::water_body::WaterSurfaceSample> {
-        self.water_bodies.sample_surface(water_id, terrain_local_xz, time)
+        self.water_bodies
+            .sample_surface(water_id, terrain_local_xz, time)
+    }
+
+    /// Return the terrain-local deepest wet point for deterministic placement.
+    pub fn deepest_water_point(&self, water_id: u32) -> Option<(glam::Vec2, f32)> {
+        self.water_bodies.deepest_point(water_id)
     }
 
     /// Test whether a terrain-local point lies inside the displaced water volume.
@@ -1295,7 +1394,8 @@ impl SomniumRenderer {
         terrain_local_point: glam::Vec3,
         time: f32,
     ) -> bool {
-        self.water_bodies.contains_point(water_id, terrain_local_point, time)
+        self.water_bodies
+            .contains_point(water_id, terrain_local_point, time)
     }
 
     /// Create a new heightmap terrain (Phase 14) and return its terrain id.
@@ -1333,11 +1433,19 @@ impl SomniumRenderer {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
                 ctx,
-                layer_view(&terrain.layer_textures.albedo, layer, "Terrain Layer Albedo+Height"),
+                layer_view(
+                    &terrain.layer_textures.albedo,
+                    layer,
+                    "Terrain Layer Albedo+Height",
+                ),
             ) as i32;
             ids.surface[i] = self.add_texture(
                 ctx,
-                layer_view(&terrain.layer_textures.surface, layer, "Terrain Layer Surface"),
+                layer_view(
+                    &terrain.layer_textures.surface,
+                    layer,
+                    "Terrain Layer Surface",
+                ),
             ) as i32;
         }
         terrain.texture_ids = ids;
@@ -1416,7 +1524,7 @@ impl SomniumRenderer {
         // ── 0. Upload view buffer (208 bytes) ────────────────────────────────
         // Layout: view_proj(64) | inv_view_proj(64) | view(64) | camera_pos(12) | cascade_debug_flag(4)
         let inv_view_proj = self.view_proj.inverse();
-        let debug_flag    = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
+        let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
 
         let mut view_data = Vec::with_capacity(224);
         view_data.extend_from_slice(bytemuck::bytes_of(&self.view_proj.to_cols_array()));
@@ -1426,7 +1534,8 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
         view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3])); // _pad1
-        ctx.queue.write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
+        ctx.queue
+            .write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
 
         // ── 0.5 Phase 19: refresh the environment cubemap ────────────────────
         // No-ops unless the sun actually moved, so this is free in the common
@@ -1455,10 +1564,7 @@ impl SomniumRenderer {
         // difference — which is why the shimmer vanished when TAA was switched
         // off: `jitter_ndc` returns zero when TAA is disabled, so the cascades
         // stopped moving.
-        let cascades = compute_cascades(
-            self.light_direction,
-            self.view_proj_unjittered.inverse(),
-        );
+        let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
 
         let shadow_debug = std::env::var("SOMNIUM_SHADOW_DEBUG")
             .ok()
@@ -1485,7 +1591,8 @@ impl SomniumRenderer {
             moon_direction: crate::shadow::moon_direction(
                 self.light_direction,
                 (self.time as f64) / 86400.0,
-            ).to_array(),
+            )
+            .to_array(),
             moon_intensity: self.moon_intensity,
         };
         ctx.queue.write_buffer(
@@ -1545,8 +1652,11 @@ impl SomniumRenderer {
                     }
                 }
             }
-            self.terrain_materials
-                .write(&ctx.queue, terrain.terrain_index, &terrain.gpu_material());
+            self.terrain_materials.write(
+                &ctx.queue,
+                terrain.terrain_index,
+                &terrain.gpu_material(),
+            );
 
             let material_id = terrain.material_id;
             for chunk in &terrain.chunks {
@@ -1598,13 +1708,14 @@ impl SomniumRenderer {
             } else {
                 0
             };
-            self.instances.add_instance(crate::instance::GpuInstanceData {
-                model_matrix:       cmd.transform.to_cols_array_2d(),
-                material_id:        cmd.material_id,
-                mesh_vertex_offset: cmd.vertex_offset,
-                mesh_index_offset:  cmd.index_offset,
-                _padding:           terrain_lod,
-            });
+            self.instances
+                .add_instance(crate::instance::GpuInstanceData {
+                    model_matrix: cmd.transform.to_cols_array_2d(),
+                    material_id: cmd.material_id,
+                    mesh_vertex_offset: cmd.vertex_offset,
+                    mesh_index_offset: cmd.index_offset,
+                    _padding: terrain_lod,
+                });
         }
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones. The visibility pass only draws the opaque
@@ -1613,13 +1724,14 @@ impl SomniumRenderer {
         let mut transparent_draws: Vec<crate::pass::transparent::TransparentDraw> =
             Vec::with_capacity(self.transparent_queue.len());
         for (i, cmd) in self.transparent_queue.iter().enumerate() {
-            self.instances.add_instance(crate::instance::GpuInstanceData {
-                model_matrix:       cmd.transform.to_cols_array_2d(),
-                material_id:        cmd.material_id,
-                mesh_vertex_offset: cmd.vertex_offset,
-                mesh_index_offset:  cmd.index_offset,
-                _padding:           0,
-            });
+            self.instances
+                .add_instance(crate::instance::GpuInstanceData {
+                    model_matrix: cmd.transform.to_cols_array_2d(),
+                    material_id: cmd.material_id,
+                    mesh_vertex_offset: cmd.vertex_offset,
+                    mesh_index_offset: cmd.index_offset,
+                    _padding: 0,
+                });
             let origin = cmd.transform.w_axis.truncate();
             transparent_draws.push(crate::pass::transparent::TransparentDraw {
                 instance_index: transparent_base + i as u32,
@@ -1652,7 +1764,10 @@ impl SomniumRenderer {
             // it is clearly being instanced.
             self.instanced_counts.clear();
             for cmd in &self.draw_queue {
-                *self.instanced_counts.entry(cmd.vertex_offset).or_insert(0u32) += 1;
+                *self
+                    .instanced_counts
+                    .entry(cmd.vertex_offset)
+                    .or_insert(0u32) += 1;
             }
 
             self.cluster_args.clear();
@@ -1684,7 +1799,8 @@ impl SomniumRenderer {
                     );
                 }
             }
-            self.indirect.upload(&ctx.device, &ctx.queue, &self.cluster_args);
+            self.indirect
+                .upload(&ctx.device, &ctx.queue, &self.cluster_args);
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
@@ -1709,7 +1825,7 @@ impl SomniumRenderer {
 
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
         let output = match ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex)    => tex,
+            wgpu::CurrentSurfaceTexture::Success(tex) => tex,
             wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             _ => {
                 tracing::warn!("Failed to acquire surface texture");
@@ -1722,11 +1838,15 @@ impl SomniumRenderer {
                 return;
             }
         };
-        let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Main Render Encoder"),
-        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Main Render Encoder"),
+            });
 
         // Phase 29: the profiler brackets each pass from outside, so no pass
         // has to know it is being timed. Scopes nest — `end` closes the
@@ -1762,8 +1882,7 @@ impl SomniumRenderer {
         // Phase 24AE: cull casters too small to be worth a shadow before any of
         // them reach the atlas. See `shadow_casters`.
         let casters = self.shadow_casters();
-        self.profiler.counters.shadow_casters =
-            u32::try_from(casters.len()).unwrap_or(u32::MAX);
+        self.profiler.counters.shadow_casters = u32::try_from(casters.len()).unwrap_or(u32::MAX);
         self.profiler.begin(&mut encoder, "Shadows");
         self.shadow_pass.record(
             &mut encoder,
@@ -1858,7 +1977,11 @@ impl SomniumRenderer {
                 .iter()
                 .enumerate()
                 .map(|(i, cmd)| {
-                    (u32::try_from(i).unwrap_or(0), cmd.vertex_offset, cmd.transform)
+                    (
+                        u32::try_from(i).unwrap_or(0),
+                        cmd.vertex_offset,
+                        cmd.transform,
+                    )
                 })
                 .collect();
             self.raytrace_pass.build(
@@ -2007,8 +2130,7 @@ impl SomniumRenderer {
         let capture_now = self.capture.tick();
         let capture_after_water =
             std::env::var("SOMNIUM_CAPTURE_AFTER_WATER").as_deref() == Ok("1");
-        let capture_after_taa =
-            std::env::var("SOMNIUM_CAPTURE_AFTER_TAA").as_deref() == Ok("1");
+        let capture_after_taa = std::env::var("SOMNIUM_CAPTURE_AFTER_TAA").as_deref() == Ok("1");
         if capture_now && !capture_after_water && !capture_after_taa {
             // The switches an A/B is meant to be varying, recorded with the
             // capture so a null result can be told from a switch that never
@@ -2133,7 +2255,8 @@ impl SomniumRenderer {
 
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.grid_enabled {
-            self.grid_pass.record(&mut encoder, &self.postprocess_pass.hdr_view);
+            self.grid_pass
+                .record(&mut encoder, &self.postprocess_pass.hdr_view);
         }
 
         // ── 7.75 Ray-traced shadow debug (Phase 24J) ─────────────────────────
@@ -2191,15 +2314,17 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
 
         self.profiler.begin(&mut encoder, "TAA");
-        if self.taa_pass.record(
-            &mut encoder,
-            &ctx.queue,
-            self.view_proj,
-            self.view_proj_unjittered,
-            ctx.config.width,
-            ctx.config.height,
-        )
-        .is_some()
+        if self
+            .taa_pass
+            .record(
+                &mut encoder,
+                &ctx.queue,
+                self.view_proj,
+                self.view_proj_unjittered,
+                ctx.config.width,
+                ctx.config.height,
+            )
+            .is_some()
         {
             // Copy back into the HDR target so every later pass keeps reading
             // one target, rather than a view that alternates each frame.
@@ -2211,12 +2336,63 @@ impl SomniumRenderer {
             );
         }
 
+        // Phase IV-G: choose the finite body under the camera from the same
+        // CPU query contract used by gameplay. Mesh-local XZ is centred, while
+        // body query coordinates use the authored bounds origin.
+        let active_water = self.water_queue.iter().find_map(|entry| {
+            let (water_id, model, material, _, _, _) = *entry;
+            let body = self.water_bodies.get(water_id)?;
+            let local = model.inverse().transform_point3(self.camera_pos);
+            let center = glam::Vec2::new(
+                (body.descriptor.bounds[0] + body.descriptor.bounds[2]) * 0.5,
+                (body.descriptor.bounds[1] + body.descriptor.bounds[3]) * 0.5,
+            );
+            let sample =
+                body.sample_surface(glam::Vec2::new(local.x, local.z) + center, self.time)?;
+            let signed_distance = local.y - (sample.height - body.descriptor.surface_level);
+            Some((water_id, model, material, signed_distance))
+        });
+        self.underwater_body = active_water.map(|entry| entry.0);
+        self.camera_submersion = active_water.map_or(0.0, |entry| {
+            let t = ((0.08 - entry.3) / 0.16).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        });
+        if let Some((water_id, model, material, signed_distance)) = active_water {
+            encoder.copy_texture_to_texture(
+                self.postprocess_pass.hdr_texture.as_image_copy(),
+                self.postprocess_pass.scene_copy_texture.as_image_copy(),
+                self.postprocess_pass.hdr_texture.size(),
+            );
+            if let Some(body) = self.water_bodies.get(water_id) {
+                self.profiler.begin(&mut encoder, "Underwater");
+                self.underwater_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.postprocess_pass.hdr_view,
+                    &self.postprocess_pass.scene_copy_view,
+                    &self.vis_pass.depth_view,
+                    &self.global_pool.view_proj_buffer,
+                    &self.global_pool.light_buffer,
+                    water_id,
+                    body,
+                    model,
+                    material,
+                    self.time,
+                    signed_distance,
+                );
+                self.profiler.end(&mut encoder);
+            }
+        }
+
         if capture_now && capture_after_taa {
             tracing::info!(
-                "CAPTURE-TAA water_bodies={} water_draws={} taa={}",
+                "CAPTURE-TAA water_bodies={} water_draws={} taa={} underwater={:?} submersion={:.3}",
                 self.water_bodies.active_count(),
                 self.water_queue.len(),
                 self.taa_pass.enabled(),
+                self.underwater_body,
+                self.camera_submersion,
             );
             self.capture.record(
                 &ctx.device,
@@ -2289,11 +2465,23 @@ impl SomniumRenderer {
         self.postprocess_pass.set_params(
             &ctx.queue,
             if debugging { 1.0 } else { self.exposure },
-            if debugging { 0.0 } else { self.vignette_strength },
-            if debugging { 0.0 } else { self.chromatic_aberration },
+            if debugging {
+                0.0
+            } else {
+                self.vignette_strength
+            },
+            if debugging {
+                0.0
+            } else {
+                self.chromatic_aberration
+            },
             if debugging { 3 } else { self.tonemapper },
             self.auto_exposure && !debugging,
-            if debugging { 0.0 } else { self.bloom_pass.intensity() },
+            if debugging {
+                0.0
+            } else {
+                self.bloom_pass.intensity()
+            },
             // Grading is a look, and a debug view is not one — it must reach
             // the screen as the numbers it holds.
             if debugging {
@@ -2325,15 +2513,18 @@ impl SomniumRenderer {
             &surface_view
         };
         if fxaa_active {
-            self.fxaa_pass.update(&ctx.queue, ctx.config.width, ctx.config.height);
-            self.postprocess_pass.record(&mut encoder, &self.fxaa_pass.ldr_view);
+            self.fxaa_pass
+                .update(&ctx.queue, ctx.config.width, ctx.config.height);
+            self.postprocess_pass
+                .record(&mut encoder, &self.fxaa_pass.ldr_view);
             self.fxaa_pass.record(&mut encoder, ldr_target);
         } else {
             self.postprocess_pass.record(&mut encoder, ldr_target);
         }
         if cas_active {
             self.profiler.begin(&mut encoder, "CAS");
-            self.cas_pass.record(&ctx.queue, &mut encoder, &surface_view);
+            self.cas_pass
+                .record(&ctx.queue, &mut encoder, &surface_view);
             self.profiler.end(&mut encoder);
         }
 
@@ -2344,7 +2535,8 @@ impl SomniumRenderer {
             let model = glam::Mat4::from_translation(gizmo_pos)
                 * glam::Mat4::from_scale(glam::Vec3::splat(scale));
             self.gizmo_pass.update_transform(&ctx.queue, model);
-            self.gizmo_pass.record(&mut encoder, &surface_view, self.gizmo_mode);
+            self.gizmo_pass
+                .record(&mut encoder, &surface_view, self.gizmo_mode);
         }
 
         // ── 8.7 Selection outline → swapchain (Phase 11.5I) ─────────────────
@@ -2358,15 +2550,14 @@ impl SomniumRenderer {
                 v_off,
                 i_off,
                 i_cnt,
-                [0.98, 0.58, 0.07, 1.0],  // orange highlight (#FA9412)
-                0.007,                      // ~2-3 px at typical camera distance
+                [0.98, 0.58, 0.07, 1.0], // orange highlight (#FA9412)
+                0.007,                   // ~2-3 px at typical camera distance
             );
         }
 
         // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
         if self.light_gizmos_enabled && !self.light_gizmo_queue.is_empty() {
-            let lines =
-                crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
+            let lines = crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
             self.light_gizmo_pass.record(
                 &ctx.device,
                 &ctx.queue,
@@ -2391,9 +2582,13 @@ impl SomniumRenderer {
         // ── 9. UI Overlay ────────────────────────────────────────────────────
         ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
 
-        let stats_draws = if self.cull_stats { self.indirect.len() } else { 0 };
-        self.profiler.end(&mut encoder);  // Post + present
-        self.profiler.end(&mut encoder);  // Frame
+        let stats_draws = if self.cull_stats {
+            self.indirect.len()
+        } else {
+            0
+        };
+        self.profiler.end(&mut encoder); // Post + present
+        self.profiler.end(&mut encoder); // Frame
         self.profiler.end_frame(&mut encoder);
         ctx.queue.submit(std::iter::once(encoder.finish()));
         // Must follow the submit: the map would otherwise race the copy that
@@ -2635,7 +2830,7 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
 
 #[cfg(test)]
 mod mip_tests {
-    use super::{build_mip_chain, ALPHA_TEST_CUTOFF};
+    use super::{ALPHA_TEST_CUTOFF, build_mip_chain};
 
     /// A 2x2 cutout block: one opaque green texel, three transparent black.
     /// Unweighted averaging would give a quarter-strength muddy green; weighting
@@ -2730,7 +2925,10 @@ mod mip_tests {
     fn a_flat_colour_survives_downsampling() {
         let data = vec![100u8; 4 * 4 * 4];
         for (_, _, level) in build_mip_chain(&data, 4, 4) {
-            assert!(level.iter().all(|&v| v == 100), "box filter shifted a flat colour");
+            assert!(
+                level.iter().all(|&v| v == 100),
+                "box filter shifted a flat colour"
+            );
         }
     }
 

@@ -13,8 +13,8 @@
 //! standard sphere-fitting + grid-alignment approach documented in
 //! "Common Techniques to Improve Shadow Depth Maps" (Microsoft DirectX docs).
 
-use glam::{Mat4, Vec3, Vec4};
 use super::NUM_CASCADES;
+use glam::{Mat4, Vec3, Vec4};
 
 /// Camera near plane (matches hello_engine's perspective_rh near).
 pub const CAMERA_NEAR: f32 = 0.1;
@@ -58,7 +58,10 @@ pub fn compute_cascades(light_dir: Vec3, inv_view_proj: Mat4) -> [CascadeData; N
     // Full frustum corners in world space (NDC z ∈ [0, 1] for wgpu).
     let full_corners = frustum_corners_world(inv_view_proj);
 
-    let mut cascades = [CascadeData { view_proj: Mat4::IDENTITY, split_depth: 0.0 }; NUM_CASCADES];
+    let mut cascades = [CascadeData {
+        view_proj: Mat4::IDENTITY,
+        split_depth: 0.0,
+    }; NUM_CASCADES];
 
     for i in 0..NUM_CASCADES {
         let near_depth = if i == 0 { CAMERA_NEAR } else { splits[i - 1] };
@@ -66,10 +69,16 @@ pub fn compute_cascades(light_dir: Vec3, inv_view_proj: Mat4) -> [CascadeData; N
 
         // Lerp t values: fraction of the full [NEAR..SHADOW_DISTANCE] range.
         let near_t = (near_depth - CAMERA_NEAR) / (SHADOW_DISTANCE - CAMERA_NEAR);
-        let far_t  = (far_depth  - CAMERA_NEAR) / (SHADOW_DISTANCE - CAMERA_NEAR);
+        let far_t = (far_depth - CAMERA_NEAR) / (SHADOW_DISTANCE - CAMERA_NEAR);
 
-        cascades[i].view_proj = cascade_vp(light_dir, up, &full_corners, near_t, far_t,
-                                           super::CASCADE_SIZE as f32);
+        cascades[i].view_proj = cascade_vp(
+            light_dir,
+            up,
+            &full_corners,
+            near_t,
+            far_t,
+            super::CASCADE_SIZE as f32,
+        );
         cascades[i].split_depth = far_depth;
     }
 
@@ -82,7 +91,7 @@ fn compute_pss_splits(near: f32, far: f32) -> [f32; NUM_CASCADES] {
     for i in 0..NUM_CASCADES {
         let frac = (i + 1) as f32 / NUM_CASCADES as f32;
         let uniform = near + (far - near) * frac;
-        let log     = near * (far / near).powf(frac);
+        let log = near * (far / near).powf(frac);
         splits[i] = uniform + LAMBDA * (log - uniform);
     }
     splits
@@ -94,13 +103,13 @@ fn compute_pss_splits(near: f32, far: f32) -> [f32; NUM_CASCADES] {
 fn frustum_corners_world(inv_view_proj: Mat4) -> [Vec3; 8] {
     let ndc: [[f32; 4]; 8] = [
         [-1.0, -1.0, 0.0, 1.0],
-        [ 1.0, -1.0, 0.0, 1.0],
-        [ 1.0,  1.0, 0.0, 1.0],
-        [-1.0,  1.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
         [-1.0, -1.0, 1.0, 1.0],
-        [ 1.0, -1.0, 1.0, 1.0],
-        [ 1.0,  1.0, 1.0, 1.0],
-        [-1.0,  1.0, 1.0, 1.0],
+        [1.0, -1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0, 1.0],
     ];
     ndc.map(|n| {
         let v = inv_view_proj * Vec4::new(n[0], n[1], n[2], n[3]);
@@ -134,13 +143,20 @@ fn cascade_vp(
         full_corners[3].lerp(full_corners[7], far_t),
     ];
     let all_corners: [Vec3; 8] = [
-        near_corners[0], near_corners[1], near_corners[2], near_corners[3],
-        far_corners[0],  far_corners[1],  far_corners[2],  far_corners[3],
+        near_corners[0],
+        near_corners[1],
+        near_corners[2],
+        near_corners[3],
+        far_corners[0],
+        far_corners[1],
+        far_corners[2],
+        far_corners[3],
     ];
 
     // Bounding sphere center and radius.
     let center = all_corners.iter().copied().fold(Vec3::ZERO, |a, c| a + c) / 8.0;
-    let radius = all_corners.iter()
+    let radius = all_corners
+        .iter()
         .map(|c| (*c - center).length())
         .fold(0.0f32, f32::max);
     let radius = (radius * 16.0).ceil() / 16.0; // round up slightly for safety
@@ -167,12 +183,12 @@ fn cascade_vp(
     let offset_y = snapped_y - center_ls.y;
 
     // Orthographic projection in [0,1] depth range (wgpu z convention).
-    let left   = -radius + offset_x;
-    let right  =  radius + offset_x;
+    let left = -radius + offset_x;
+    let right = radius + offset_x;
     let bottom = -radius + offset_y;
-    let top    =  radius + offset_y;
-    let near   = 0.0_f32;
-    let far    = back + radius * 2.0 + CASTER_DEPTH_EXTENSION;
+    let top = radius + offset_y;
+    let near = 0.0_f32;
+    let far = back + radius * 2.0 + CASTER_DEPTH_EXTENSION;
 
     let light_proj = ortho_rh_zo(left, right, bottom, top, near, far);
     light_proj * light_view
@@ -187,6 +203,11 @@ fn ortho_rh_zo(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32
         Vec4::new(2.0 * rcp_w, 0.0, 0.0, 0.0),
         Vec4::new(0.0, 2.0 * rcp_h, 0.0, 0.0),
         Vec4::new(0.0, 0.0, rcp_d, 0.0),
-        Vec4::new(-(left + right) * rcp_w, -(bottom + top) * rcp_h, near * rcp_d, 1.0),
+        Vec4::new(
+            -(left + right) * rcp_w,
+            -(bottom + top) * rcp_h,
+            near * rcp_d,
+            1.0,
+        ),
     )
 }

@@ -237,7 +237,10 @@ mod tests {
     fn planes_are_normalized() {
         for p in frustum_planes(test_view_proj()) {
             let len = glam::Vec3::new(p[0], p[1], p[2]).length();
-            assert!((len - 1.0).abs() < 1e-4, "plane normal not unit length: {len}");
+            assert!(
+                (len - 1.0).abs() < 1e-4,
+                "plane normal not unit length: {len}"
+            );
         }
     }
 
@@ -275,11 +278,17 @@ mod tests {
 
         let off_screen = glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 400.0));
         let (wmin, wmax) = transform_aabb(off_screen, lmin, lmax);
-        assert!(!aabb_in_frustum(&planes, wmin, wmax), "should be culled behind camera");
+        assert!(
+            !aabb_in_frustum(&planes, wmin, wmax),
+            "should be culled behind camera"
+        );
 
         let in_view = glam::Mat4::from_translation(glam::Vec3::ZERO);
         let (wmin, wmax) = transform_aabb(in_view, lmin, lmax);
-        assert!(aabb_in_frustum(&planes, wmin, wmax), "should be visible at origin");
+        assert!(
+            aabb_in_frustum(&planes, wmin, wmax),
+            "should be visible at origin"
+        );
     }
 }
 
@@ -399,7 +408,11 @@ mod hiz_tests {
         let b = project_aabb_to_screen([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], persp()).unwrap();
         assert!(b.rect[0] < 0.5 && b.rect[2] > 0.5, "rect {:?}", b.rect);
         assert!(b.rect[1] < 0.5 && b.rect[3] > 0.5, "rect {:?}", b.rect);
-        assert!(b.min_depth > 0.0 && b.min_depth < 1.0, "depth {}", b.min_depth);
+        assert!(
+            b.min_depth > 0.0 && b.min_depth < 1.0,
+            "depth {}",
+            b.min_depth
+        );
     }
 
     #[test]
@@ -418,27 +431,31 @@ mod hiz_tests {
     #[test]
     fn a_nearer_box_reports_a_smaller_depth() {
         let near = project_aabb_to_screen([-1.0, -1.0, 4.0], [1.0, 1.0, 5.0], persp()).unwrap();
-        let far  = project_aabb_to_screen([-1.0, -1.0, -50.0], [1.0, 1.0, -49.0], persp()).unwrap();
+        let far = project_aabb_to_screen([-1.0, -1.0, -50.0], [1.0, 1.0, -49.0], persp()).unwrap();
         assert!(near.min_depth < far.min_depth);
     }
 
     #[test]
     fn the_rect_is_clamped_to_the_screen() {
-        let b = project_aabb_to_screen([-500.0, -500.0, -1.0], [500.0, 500.0, 1.0], persp()).unwrap();
+        let b =
+            project_aabb_to_screen([-500.0, -500.0, -1.0], [500.0, 500.0, 1.0], persp()).unwrap();
         assert_eq!(b.rect, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
     fn a_bigger_footprint_selects_a_coarser_level() {
         let small = hiz_mip_level([0.5, 0.5, 0.5039, 0.5039], 1024, 1024, 11); // ~4 px
-        let large = hiz_mip_level([0.0, 0.0, 1.0, 1.0], 1024, 1024, 11);       // 1024 px
+        let large = hiz_mip_level([0.0, 0.0, 1.0, 1.0], 1024, 1024, 11); // 1024 px
         assert!(large > small, "small {small} large {large}");
     }
 
     #[test]
     fn a_footprint_of_two_texels_uses_the_base_level() {
         // 2 px across is already covered by one 2x2 block at level 0.
-        assert_eq!(hiz_mip_level([0.0, 0.0, 2.0 / 1024.0, 2.0 / 1024.0], 1024, 1024, 11), 0);
+        assert_eq!(
+            hiz_mip_level([0.0, 0.0, 2.0 / 1024.0, 2.0 / 1024.0], 1024, 1024, 11),
+            0
+        );
     }
 
     #[test]
@@ -452,13 +469,19 @@ mod hiz_tests {
 
     #[test]
     fn a_candidate_behind_the_recorded_depth_is_occluded() {
-        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.8 };
+        let b = ScreenBounds {
+            rect: [0.0, 0.0, 0.1, 0.1],
+            min_depth: 0.8,
+        };
         assert!(is_occluded(&b, 0.5));
     }
 
     #[test]
     fn a_candidate_in_front_of_the_recorded_depth_is_visible() {
-        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.3 };
+        let b = ScreenBounds {
+            rect: [0.0, 0.0, 0.1, 0.1],
+            min_depth: 0.3,
+        };
         assert!(!is_occluded(&b, 0.5));
     }
 
@@ -466,7 +489,10 @@ mod hiz_tests {
     fn an_empty_region_never_occludes() {
         // Cleared depth is 1.0. Even a candidate at the far plane must survive,
         // or the first frame would cull the entire scene.
-        let b = ScreenBounds { rect: [0.0, 0.0, 1.0, 1.0], min_depth: 1.0 };
+        let b = ScreenBounds {
+            rect: [0.0, 0.0, 1.0, 1.0],
+            min_depth: 1.0,
+        };
         assert!(!is_occluded(&b, 1.0));
     }
 
@@ -474,7 +500,10 @@ mod hiz_tests {
     fn equal_depths_count_as_visible() {
         // A candidate exactly coplanar with the occluder is the object itself on
         // the next frame; rejecting it would make geometry flicker out.
-        let b = ScreenBounds { rect: [0.0, 0.0, 0.1, 0.1], min_depth: 0.5 };
+        let b = ScreenBounds {
+            rect: [0.0, 0.0, 0.1, 0.1],
+            min_depth: 0.5,
+        };
         assert!(!is_occluded(&b, 0.5));
     }
 }

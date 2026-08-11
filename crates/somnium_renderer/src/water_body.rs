@@ -225,6 +225,40 @@ impl WaterBodyData {
             .is_some_and(|uv| self.mask[self.texel_index(uv)] >= 128)
     }
 
+    /// Terrain-local location and depth of the deepest authored wet texel.
+    /// Useful for deterministic underwater validation and gameplay spawn
+    /// placement without exposing the registry's image storage.
+    pub fn deepest_point(&self) -> Option<(glam::Vec2, f32)> {
+        // Large authored basins commonly contain many texels at the same
+        // maximum depth. Break that tie by signed shoreline distance so a
+        // validation/gameplay spawn cannot land on the last raster-edge texel.
+        let (index, &depth) = self
+            .depth_metres
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.mask[*index] >= 128)
+            .max_by(|(index_a, depth_a), (index_b, depth_b)| {
+                depth_a.total_cmp(depth_b).then_with(|| {
+                    self.shore_distance_cells[*index_a]
+                        .total_cmp(&self.shore_distance_cells[*index_b])
+                })
+            })?;
+        let x = index as u32 % self.size[0];
+        let z = index as u32 / self.size[0];
+        let uv = glam::Vec2::new(
+            x as f32 / (self.size[0] - 1).max(1) as f32,
+            z as f32 / (self.size[1] - 1).max(1) as f32,
+        );
+        let [min_x, min_z, max_x, max_z] = self.descriptor.bounds;
+        Some((
+            glam::Vec2::new(
+                min_x + uv.x * (max_x - min_x),
+                min_z + uv.y * (max_z - min_z),
+            ),
+            depth,
+        ))
+    }
+
     fn depth_at_uv(&self, uv: glam::Vec2) -> f32 {
         let fx = uv.x.clamp(0.0, 1.0) * (self.size[0] - 1) as f32;
         let fz = uv.y.clamp(0.0, 1.0) * (self.size[1] - 1) as f32;
@@ -413,6 +447,10 @@ impl WaterBodyRegistry {
 
     pub fn sample_surface(&self, id: u32, xz: glam::Vec2, time: f32) -> Option<WaterSurfaceSample> {
         self.get(id)?.sample_surface(xz, time)
+    }
+
+    pub fn deepest_point(&self, id: u32) -> Option<(glam::Vec2, f32)> {
+        self.get(id)?.deepest_point()
     }
 
     pub fn contains_point(&self, id: u32, point: glam::Vec3, time: f32) -> bool {

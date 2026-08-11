@@ -114,7 +114,10 @@ pub struct MeshletBuild {
 pub fn build_meshlets(vertices: &[Vertex], indices: &[u32]) -> MeshletBuild {
     let triangle_count = indices.len() / 3;
     if triangle_count == 0 || vertices.is_empty() {
-        return MeshletBuild { meshlets: Vec::new(), indices: Vec::new() };
+        return MeshletBuild {
+            meshlets: Vec::new(),
+            indices: Vec::new(),
+        };
     }
 
     // Centroid per triangle, plus the scene bounds needed to normalize before
@@ -153,7 +156,10 @@ pub fn build_meshlets(vertices: &[Vertex], indices: &[u32]) -> MeshletBuild {
     }
 
     if valid.is_empty() {
-        return MeshletBuild { meshlets: Vec::new(), indices: Vec::new() };
+        return MeshletBuild {
+            meshlets: Vec::new(),
+            indices: Vec::new(),
+        };
     }
 
     // Sort along the Morton curve. A degenerate axis (a flat mesh) has zero
@@ -169,9 +175,8 @@ pub fn build_meshlets(vertices: &[Vertex], indices: &[u32]) -> MeshletBuild {
         .enumerate()
         .map(|(slot, &tri)| {
             let c = centroids[slot];
-            let q = |v: f32, lo: f32, ext: f32| {
-                (((v - lo) / ext) * 1023.0).clamp(0.0, 1023.0) as u32
-            };
+            let q =
+                |v: f32, lo: f32, ext: f32| (((v - lo) / ext) * 1023.0).clamp(0.0, 1023.0) as u32;
             let code = morton3(
                 q(c[0], min[0], extent[0]),
                 q(c[1], min[1], extent[1]),
@@ -203,7 +208,10 @@ pub fn build_meshlets(vertices: &[Vertex], indices: &[u32]) -> MeshletBuild {
         start += count;
     }
 
-    MeshletBuild { meshlets, indices: out_indices }
+    MeshletBuild {
+        meshlets,
+        indices: out_indices,
+    }
 }
 
 /// Bounding sphere and normal cone for one contiguous run of triangles.
@@ -341,7 +349,11 @@ mod tests {
     use super::*;
 
     fn v(p: [f32; 3]) -> Vertex {
-        Vertex { position: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] }
+        Vertex {
+            position: p,
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        }
     }
 
     /// A strip of `n` axis-aligned triangles in the XZ plane, all facing +Y.
@@ -404,7 +416,10 @@ mod tests {
         let b = build_meshlets(&verts, &idx);
         assert_eq!(b.meshlets.len(), 3);
         assert_eq!(
-            b.meshlets.iter().map(|m| m.triangle_count).collect::<Vec<_>>(),
+            b.meshlets
+                .iter()
+                .map(|m| m.triangle_count)
+                .collect::<Vec<_>>(),
             vec![128, 128, 44],
         );
         // Offsets must tile the range with no gap and no overlap: 15F draws
@@ -447,11 +462,7 @@ mod tests {
             let hi = lo + m.index_count() as usize;
             for &i in &b.indices[lo..hi] {
                 let p = verts[i as usize].position;
-                let d = [
-                    p[0] - m.center[0],
-                    p[1] - m.center[1],
-                    p[2] - m.center[2],
-                ];
+                let d = [p[0] - m.center[0], p[1] - m.center[1], p[2] - m.center[2]];
                 let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                 assert!(
                     dist <= m.radius + 1e-4,
@@ -468,7 +479,11 @@ mod tests {
         let b = build_meshlets(&verts, &idx);
         let m = b.meshlets[0];
         // All triangles face +Y, so the cone collapses onto that axis.
-        assert!((m.cone_axis[1] - 1.0).abs() < 1e-4, "axis {:?}", m.cone_axis);
+        assert!(
+            (m.cone_axis[1] - 1.0).abs() < 1e-4,
+            "axis {:?}",
+            m.cone_axis
+        );
         assert!(m.cone_cutoff > 0.999, "cutoff {}", m.cone_cutoff);
     }
 
@@ -477,8 +492,12 @@ mod tests {
         // Two triangles facing exactly opposite ways: the average normal
         // cancels, and no cone can describe them.
         let verts = vec![
-            v([0.0, 0.0, 0.0]), v([0.0, 0.0, 1.0]), v([1.0, 0.0, 0.0]),
-            v([0.0, 1.0, 0.0]), v([1.0, 1.0, 0.0]), v([0.0, 1.0, 1.0]),
+            v([0.0, 0.0, 0.0]),
+            v([0.0, 0.0, 1.0]),
+            v([1.0, 0.0, 0.0]),
+            v([0.0, 1.0, 0.0]),
+            v([1.0, 1.0, 0.0]),
+            v([0.0, 1.0, 1.0]),
         ];
         let idx = vec![0, 1, 2, 3, 4, 5];
         let b = build_meshlets(&verts, &idx);
@@ -593,10 +612,14 @@ mod tests {
     #[test]
     fn a_cluster_spanning_a_hemisphere_is_never_rejected() {
         let m = Meshlet {
-            triangle_offset: 0, triangle_count: 1,
-            center: [0.0; 3], radius: 1.0,
-            aabb_min: [-1.0; 3], aabb_max: [1.0; 3],
-            cone_axis: [0.0, 1.0, 0.0], cone_cutoff: -1.0,
+            triangle_offset: 0,
+            triangle_count: 1,
+            center: [0.0; 3],
+            radius: 1.0,
+            aabb_min: [-1.0; 3],
+            aabb_max: [1.0; 3],
+            cone_axis: [0.0, 1.0, 0.0],
+            cone_cutoff: -1.0,
         };
         // 2.0 is unreachable by a dot product, so the test never fires.
         assert_eq!(m.backface_cutoff(), 2.0);
@@ -605,10 +628,14 @@ mod tests {
     #[test]
     fn a_wider_cone_is_harder_to_reject() {
         let mk = |c: f32| Meshlet {
-            triangle_offset: 0, triangle_count: 1,
-            center: [0.0; 3], radius: 1.0,
-            aabb_min: [-1.0; 3], aabb_max: [1.0; 3],
-            cone_axis: [0.0, 1.0, 0.0], cone_cutoff: c,
+            triangle_offset: 0,
+            triangle_count: 1,
+            center: [0.0; 3],
+            radius: 1.0,
+            aabb_min: [-1.0; 3],
+            aabb_max: [1.0; 3],
+            cone_axis: [0.0, 1.0, 0.0],
+            cone_cutoff: c,
         };
         // Tighter cone (cutoff nearer 1) -> smaller threshold -> culls sooner.
         assert!(mk(0.99).backface_cutoff() < mk(0.5).backface_cutoff());

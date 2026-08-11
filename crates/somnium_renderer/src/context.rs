@@ -66,8 +66,8 @@ pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RA
 /// engine to hand it query indices. `TIMESTAMP_QUERY_INSIDE_ENCODERS` allows
 /// them on the encoder between passes, so the profiler brackets a pass from
 /// outside and the passes themselves stay unaware they are being measured.
-pub const PROFILER_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
-    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+pub const PROFILER_FEATURES: wgpu::Features =
+    wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
@@ -120,7 +120,9 @@ impl RenderContext {
 
         let available_features = adapter.features();
         if !available_features.contains(required_features) {
-            warn!("GPU does not support full bindless rendering. Attempting to request anyway, which may fail.");
+            warn!(
+                "GPU does not support full bindless rendering. Attempting to request anyway, which may fail."
+            );
         }
 
         // Phase 15: ask for the GPU-driven draw features only if the adapter has
@@ -202,37 +204,35 @@ impl RenderContext {
 
         // Request the device and queue.
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("somnium_device"),
-                    required_features,
-                    required_limits: limits,
-                    // Ray query is gated behind an explicit acknowledgement
-                    // token, not just a feature bit. wgpu is asking the caller
-                    // to accept that its experimental APIs may contain
-                    // soundness bugs reachable from otherwise-safe code — the
-                    // token is `unsafe` precisely so that acceptance is
-                    // deliberate rather than incidental.
-                    //
-                    // Taken only when ray tracing was actually detected, so a
-                    // machine that cannot ray trace never opts into the risk.
-                    //
-                    // SAFETY: no safety obligation can be discharged here; this
-                    // is an acknowledgement, and it is scoped as narrowly as
-                    // the API allows.
-                    experimental_features: if ray_tracing {
-                        unsafe { wgpu::ExperimentalFeatures::enabled() }
-                    } else {
-                        wgpu::ExperimentalFeatures::disabled()
-                    },
-                    ..Default::default()
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("somnium_device"),
+                required_features,
+                required_limits: limits,
+                // Ray query is gated behind an explicit acknowledgement
+                // token, not just a feature bit. wgpu is asking the caller
+                // to accept that its experimental APIs may contain
+                // soundness bugs reachable from otherwise-safe code — the
+                // token is `unsafe` precisely so that acceptance is
+                // deliberate rather than incidental.
+                //
+                // Taken only when ray tracing was actually detected, so a
+                // machine that cannot ray trace never opts into the risk.
+                //
+                // SAFETY: no safety obligation can be discharged here; this
+                // is an acknowledgement, and it is scoped as narrowly as
+                // the API allows.
+                experimental_features: if ray_tracing {
+                    unsafe { wgpu::ExperimentalFeatures::enabled() }
+                } else {
+                    wgpu::ExperimentalFeatures::disabled()
                 },
-            )
+                ..Default::default()
+            })
             .await
             .expect("Failed to request wgpu device with required features");
 
         let surface_caps = surface.get_capabilities(&adapter);
-        
+
         // Prefer sRGB format for the swapchain.
         let surface_format = surface_caps
             .formats

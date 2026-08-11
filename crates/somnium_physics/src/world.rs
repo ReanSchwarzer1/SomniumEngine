@@ -2,7 +2,10 @@ use glam::{Quat, Vec3};
 use somnium_physics_sys::*;
 use std::ffi::c_void;
 
-use crate::{body::{BodyId, RigidBodyDescriptor}, config::PhysicsConfig};
+use crate::{
+    body::{BodyId, RigidBodyDescriptor},
+    config::PhysicsConfig,
+};
 
 /// The main physics simulation world.
 pub struct PhysicsWorld {
@@ -19,9 +22,14 @@ impl PhysicsWorld {
                 config.max_body_pairs,
                 config.max_contact_constraints,
             );
-            
-            jph_physics_system_set_gravity(system, config.gravity.x, config.gravity.y, config.gravity.z);
-            
+
+            jph_physics_system_set_gravity(
+                system,
+                config.gravity.x,
+                config.gravity.y,
+                config.gravity.z,
+            );
+
             Self { system }
         }
     }
@@ -48,10 +56,10 @@ impl PhysicsWorld {
             }
 
             let id = jph_body_interface_create_and_add_body(self.system, &jolt_settings, 1);
-            
+
             // Release the shape reference since Jolt took ownership internally
             jph_shape_destroy(jolt_settings.shape);
-            
+
             BodyId(id)
         }
     }
@@ -72,9 +80,7 @@ impl PhysicsWorld {
 
     /// Check if a body is active (not sleeping).
     pub fn is_active(&self, id: BodyId) -> bool {
-        unsafe {
-            jph_body_interface_is_active(self.system, id.0) != 0
-        }
+        unsafe { jph_body_interface_is_active(self.system, id.0) != 0 }
     }
 
     /// Get the world-space position of a body.
@@ -91,7 +97,14 @@ impl PhysicsWorld {
     /// Set the world-space position of a body.
     pub fn set_position(&mut self, id: BodyId, pos: Vec3, activate: bool) {
         unsafe {
-            jph_body_interface_set_position(self.system, id.0, pos.x, pos.y, pos.z, if activate { 1 } else { 0 });
+            jph_body_interface_set_position(
+                self.system,
+                id.0,
+                pos.x,
+                pos.y,
+                pos.z,
+                if activate { 1 } else { 0 },
+            );
         }
     }
 
@@ -148,9 +161,7 @@ impl PhysicsWorld {
 
     /// Get the total number of bodies in the simulation.
     pub fn num_bodies(&self) -> u32 {
-        unsafe {
-            jph_physics_system_get_num_bodies(self.system)
-        }
+        unsafe { jph_physics_system_get_num_bodies(self.system) }
     }
 }
 

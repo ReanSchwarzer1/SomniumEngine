@@ -130,6 +130,12 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                     "roughness": water.roughness,
                     "anisotropy": water.anisotropy,
                     "ssr_strength": water.ssr_strength,
+                    "spectrum_blend": water.spectrum_blend,
+                    "wind_speed": water.wind_speed,
+                    "foam_decay": water.foam_decay,
+                    "foam_threshold": water.foam_threshold,
+                    "caustic_strength": water.caustic_strength,
+                    "underwater_enabled": water.underwater_enabled,
                 })
             });
 

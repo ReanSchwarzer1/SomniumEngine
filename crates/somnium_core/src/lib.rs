@@ -51,6 +51,7 @@ pub mod context;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
 pub mod scene_serial;
@@ -68,6 +69,9 @@ pub use editor_commands::{
 };
 pub use error::EngineError;
 pub use event::{EngineEvent, InputState};
+pub use landscape::{
+    BuiltLandscape, DEFAULT_LANDSCAPE_VERSION, DefaultLandscapePreset, create_default_landscape,
+};
 pub use scene_serial::{parse_scene, save_scene};
 pub use time::TimeState;
 
@@ -1184,6 +1188,18 @@ pub struct WaterComponent {
     pub anisotropy: f32,
     /// Screen-space reflection contribution before environment fallback.
     pub ssr_strength: f32,
+    /// Blend from deterministic Gerstner (0) to the two-cascade spectral tier (1).
+    pub spectrum_blend: f32,
+    /// Authored wind speed for cinematic wave presets, metres per second.
+    pub wind_speed: f32,
+    /// Seconds for crest foam history to decay toward zero.
+    pub foam_decay: f32,
+    /// Jacobian compression threshold that begins crest foam.
+    pub foam_threshold: f32,
+    /// Multiplier for underwater projected caustics.
+    pub caustic_strength: f32,
+    /// Whether this body participates in the underwater medium pass.
+    pub underwater_enabled: bool,
 }
 
 impl Default for WaterComponent {
@@ -1217,6 +1233,12 @@ impl Default for WaterComponent {
             roughness: 0.12,
             anisotropy: 0.35,
             ssr_strength: 0.85,
+            spectrum_blend: 0.75,
+            wind_speed: 8.0,
+            foam_decay: 0.9,
+            foam_threshold: 0.08,
+            caustic_strength: 1.0,
+            underwater_enabled: true,
         }
     }
 }
@@ -1245,6 +1267,12 @@ impl WaterComponent {
             roughness: 0.12,
             anisotropy: 0.45,
             ssr_strength: 0.9,
+            spectrum_blend: 0.72,
+            wind_speed: 7.5,
+            foam_decay: 0.9,
+            foam_threshold: 0.08,
+            caustic_strength: 0.85,
+            underwater_enabled: true,
             ..Self::default()
         }
     }

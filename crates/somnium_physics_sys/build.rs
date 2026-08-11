@@ -14,25 +14,25 @@ fn main() {
 
     let mut build = cc::Build::new();
 
-    build.cpp(true)
-         .std("c++17")
-         .include("../../example_repo/JoltPhysics-master/JoltPhysics-master")
-         .include("src")
-         // Jolt configuration macros
-         .define("JPH_OBJECT_LAYER_BITS", "16")
-         .define("JPH_CROSS_PLATFORM_DETERMINISTIC", "1"); // Helpful for stability
+    build
+        .cpp(true)
+        .std("c++17")
+        .include("../../example_repo/JoltPhysics-master/JoltPhysics-master")
+        .include("src")
+        // Jolt configuration macros
+        .define("JPH_OBJECT_LAYER_BITS", "16")
+        .define("JPH_CROSS_PLATFORM_DETERMINISTIC", "1"); // Helpful for stability
 
     // Optional: Use double precision
     // build.define("JPH_DOUBLE_PRECISION", "1");
 
     if target.contains("msvc") {
-        build.flag("/fp:fast")
-             .flag("/EHsc")
-             .flag("/GR-"); // Disable RTTI
+        build.flag("/fp:fast").flag("/EHsc").flag("/GR-"); // Disable RTTI
     } else {
-        build.flag("-ffast-math")
-             .flag("-fno-rtti")
-             .flag("-fno-exceptions");
+        build
+            .flag("-ffast-math")
+            .flag("-fno-rtti")
+            .flag("-fno-exceptions");
     }
 
     // Add our bridge file

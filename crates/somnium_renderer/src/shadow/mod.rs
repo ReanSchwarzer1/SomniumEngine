@@ -22,19 +22,29 @@ pub const NUM_CASCADES: usize = 4;
 
 /// Cascade viewport regions within the atlas (x, y, w, h).
 pub const CASCADE_VIEWPORTS: [(f32, f32, f32, f32); 4] = [
-    (0.0,                  0.0,                  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (CASCADE_SIZE as f32,  0.0,                  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (0.0,                  CASCADE_SIZE as f32,  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
-    (CASCADE_SIZE as f32,  CASCADE_SIZE as f32,  CASCADE_SIZE as f32, CASCADE_SIZE as f32),
+    (0.0, 0.0, CASCADE_SIZE as f32, CASCADE_SIZE as f32),
+    (
+        CASCADE_SIZE as f32,
+        0.0,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
+    (
+        0.0,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
+    (
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+        CASCADE_SIZE as f32,
+    ),
 ];
 
 /// UV offsets for each cascade in atlas space (used in shading.wgsl).
-pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [
-    (0.0, 0.0),
-    (0.5, 0.0),
-    (0.0, 0.5),
-    (0.5, 0.5),
-];
+pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)];
 
 /// GPU-uploadable directional light struct (336 bytes, std140-aligned).
 ///
@@ -145,9 +155,8 @@ pub fn moon_direction(sun_direction: glam::Vec3, time_days: f64) -> glam::Vec3 {
     let cos_phase = (phase_angle as f32).cos();
     let sin_phase = (phase_angle as f32).sin();
 
-    let moon = -sun * cos_phase
-        + right * sin_phase * incl_rad.cos()
-        + up * sin_phase * incl_rad.sin();
+    let moon =
+        -sun * cos_phase + right * sin_phase * incl_rad.cos() + up * sin_phase * incl_rad.sin();
 
     moon.normalize()
 }
@@ -169,7 +178,6 @@ mod moon_tests {
         assert!(moon.dot(sun) > 0.9999);
     }
 }
-
 
 /// Owns the shadow atlas texture, its views, and the comparison sampler.
 pub struct ShadowMapResources {

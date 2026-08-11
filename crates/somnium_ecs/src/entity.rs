@@ -38,7 +38,10 @@ pub struct Entity {
 impl Entity {
     /// A sentinel value used to fill unused slots in fixed-size child arrays.
     /// Never a valid entity (generation u32::MAX is never issued by the allocator).
-    pub const DANGLING: Self = Self { index: u32::MAX, generation: u32::MAX };
+    pub const DANGLING: Self = Self {
+        index: u32::MAX,
+        generation: u32::MAX,
+    };
 
     /// Create an entity with the given index and generation.
     ///

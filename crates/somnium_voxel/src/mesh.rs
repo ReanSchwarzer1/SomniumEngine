@@ -7,8 +7,8 @@
 //! the outermost voxels are never eroded (reduces cracks at LOD boundaries).
 
 use crate::chunk::{CHUNK_SIZE, CHUNK_SIZE_F, PADDED_CHUNK_SIZE};
-use crate::voxel::{Voxel, PALETTE_SIZE};
-use block_mesh::{visible_block_faces, UnitQuadBuffer, RIGHT_HANDED_Y_UP_CONFIG};
+use crate::voxel::{PALETTE_SIZE, Voxel};
+use block_mesh::{RIGHT_HANDED_Y_UP_CONFIG, UnitQuadBuffer, visible_block_faces};
 use ndshape::{RuntimeShape, Shape};
 use somnium_asset::Vertex;
 
@@ -143,7 +143,11 @@ mod tests {
             .map(|lin| {
                 let [_, y, _] = shape.delinearize(lin);
                 // padded y index 1..=32 maps to local voxel y 0..=31
-                if (y as i32 - 1) <= height { Voxel::Grass } else { Voxel::Air }
+                if (y as i32 - 1) <= height {
+                    Voxel::Grass
+                } else {
+                    Voxel::Air
+                }
             })
             .collect()
     }
@@ -155,7 +159,11 @@ mod tests {
         assert!(mesh.vertices.len() >= 32 * 32 * 4);
         assert_eq!(mesh.indices.len() % 6, 0);
         // Top surface must sit at y = 11 (one above the highest solid voxel).
-        let max_y = mesh.vertices.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+        let max_y = mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
         assert_eq!(max_y, 11.0);
     }
 
@@ -163,7 +171,11 @@ mod tests {
     fn lod_chunk_spans_same_extent() {
         for lod in 0..=MAX_LOD {
             let mesh = mesh_chunk(&flat_ground(15), lod).expect("non-empty mesh");
-            let max_x = mesh.vertices.iter().map(|v| v.position[0]).fold(f32::MIN, f32::max);
+            let max_x = mesh
+                .vertices
+                .iter()
+                .map(|v| v.position[0])
+                .fold(f32::MIN, f32::max);
             assert_eq!(max_x, CHUNK_SIZE_F, "lod {lod} should span the full chunk");
         }
     }

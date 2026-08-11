@@ -1,7 +1,7 @@
 # Phase IV — Great Lakes Landscape and Black Flag Water
 
 **Project:** Somnium Engine  
-**Status:** IV-A through IV-E complete; IV-F next
+**Status:** IV-A through IV-H complete; IV-I next
 **Plan date:** 2026-08-11  
 **Codename:** Black Flag  
 **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -17,12 +17,13 @@ Phase IV will replace the current demo terrain/water pairing with one shared, pr
 - application startup and **Create → Terrain** call one landscape factory, so they cannot drift;
 - asset and reference provenance is recorded in `assets/LICENSE.md` and `ATTRIBUTION.md` before the new default ships.
 
-IV-A through IV-E were implemented on 2026-08-11. The remaining sections are
-the active plan beginning with IV-F.
+IV-A through IV-H were implemented on 2026-08-11. The remaining sections are
+the active plan beginning with IV-I.
 
-Live wgpu evidence: [`phase_iv_default_validation.png`](phase_iv_default_validation.png)
-was captured from release frame 12 after the Great Lakes default and portable
-water resource uploads initialized successfully.
+Live wgpu evidence is stored by phase under [`dev records/phase IV`](dev%20records/phase%20IV).
+The IV-F/G/H release captures cover the default spectral surface, deep
+underwater medium, and waterline transition; no PNG evidence is kept in the
+repository root.
 
 ## 2. Research conclusion
 
@@ -355,8 +356,8 @@ The ECS and scene format persist wavelengths, speed, steepness, absorption,
 scattering, roughness, anisotropy, and SSR strength. The Water inspector exposes
 the primary motion and reflection controls. Release-mode live wgpu captures at
 day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
-`phase_iv_de_validation_taa2.png` and
-`phase_iv_de_validation_night.png` record the post-TAA evidence.
+`dev records/phase IV/IV-D-E/IV-D-E_day_post-TAA.png` and
+`dev records/phase IV/IV-D-E/IV-D-E_night_post-TAA.png` record the post-TAA evidence.
 
 **Work**
 
@@ -377,6 +378,8 @@ day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
 
 ### IV-F — Multi-scale waves, shoreline, and foam
 
+**Status: DONE — 2026-08-11**
+
 **Work**
 
 - Retain Gerstner as the deterministic baseline and low-end quality tier.
@@ -392,7 +395,22 @@ day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
 - Foam is limited to shoreline and breaking crests, persists briefly, and decays.
 - No obvious FFT tile seam or short-period repetition is visible from the default camera path.
 
+**Delivered.** An optional deterministic two-cascade GPU inverse FFT uses
+256²/192 m and 512²/53 m grids. The compute chain evolves a wind spectrum,
+performs bit-reversal and radix-2 ping-pong inverse transforms, and composes
+RGBA16F displacement plus gradient/Jacobian history. ECS wind speed, spectral
+blend, foam decay, and foam threshold drive the shared simulation. Crest foam
+comes from horizontal-displacement folding, shore foam from the authored
+SDF/depth, and the same signal darkens the wet-sand band. Incommensurate patch
+lengths and retained distant normal variance avoid a single obvious repeat.
+`SOMNIUM_WATER_SPECTRUM=0` preserves the deterministic Gerstner tier.
+
+Release evidence:
+[`IV-F-G-H_surface_day.png`](dev%20records/phase%20IV/IV-F-G-H/IV-F-G-H_surface_day.png).
+
 ### IV-G — Underwater medium and partial submersion
+
+**Status: DONE — 2026-08-11**
 
 **Work**
 
@@ -412,7 +430,25 @@ day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
 - The surface is visible from below and exhibits an intelligible Snell-window/TIR transition.
 - Caustics disappear with depth/turbidity and do not project above water.
 
+**Delivered.** Renderer-side containment selects the finite active body and
+tests the camera against the displaced CPU surface. A post-TAA HDR pass builds
+a per-pixel near-plane submersion mask, reconstructs the submerged camera-to-
+receiver ray segment, and applies RGB Beer–Lambert extinction, HG in-scattering,
+sun/moon illumination, submerged fog, and bounded light-shaft modulation. The
+two-sided surface orients its interface normal to the viewer and exposes the
+underside/TIR transition. Portable caustics are restricted to submerged opaque
+receivers and fade with receiver depth, path length, and turbidity. The WGSL is
+original; Wicked's Shadertoy-cited Brown–Conrady and god-ray helpers were not
+translated.
+
+Release evidence:
+[`IV-G_underwater_deep.png`](dev%20records/phase%20IV/IV-F-G-H/IV-G_underwater_deep.png)
+and
+[`IV-G_waterline_transition.png`](dev%20records/phase%20IV/IV-F-G-H/IV-G_waterline_transition.png).
+
 ### IV-H — One default landscape everywhere
+
+**Status: DONE — 2026-08-11**
 
 **Work**
 
@@ -426,6 +462,15 @@ day and `SOMNIUM_SUN_ELEVATION=-20` remained finite, mask-clipped, and stable;
 
 - Startup and UI-created landscapes have identical source recipe, terrain descriptor, water preset, masks, materials, and hierarchy.
 - The old `WaterPlane` entity and hard-coded 20 m geometry no longer exist.
+
+**Delivered.** `DefaultLandscapePreset` is a versioned recipe for terrain,
+relief, material threshold, transforms, water datum, camera, and post process.
+Both normal demo startup and **Create → Terrain** call
+`create_default_landscape`; the editor wraps its returned Terrain and Water
+snapshots in one undoable `CreateLandscapeCmd`. The finite water child remains
+a separate Outliner/ECS entity. Structural, undo/redo, deletion, and scene
+round-trip tests cover the graph and the serialized spectral/underwater values.
+The legacy `WaterPlane` startup path and demo-owned water texture setup are gone.
 
 ### IV-I — Interaction tier (after the visual/volume foundation)
 

@@ -12,8 +12,8 @@
 //! mark the touched chunks (or splat rows) dirty; the renderer re-uploads on
 //! the next frame.
 
-use super::textures::TERRAIN_LAYER_COUNT;
 use super::TerrainData;
+use super::textures::TERRAIN_LAYER_COUNT;
 
 /// What the brush does (Phase 14D-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,11 @@ fn brush_falloff(dist: f32, radius: f32, hardness: f32) -> f32 {
     }
     let strength = 1.0 - dist / radius;
     let soft = 1.0 - hardness.clamp(0.0, 0.999);
-    if strength < soft { strength / soft } else { 1.0 }
+    if strength < soft {
+        strength / soft
+    } else {
+        1.0
+    }
 }
 
 /// Inclusive vertex region affected by one brush application.

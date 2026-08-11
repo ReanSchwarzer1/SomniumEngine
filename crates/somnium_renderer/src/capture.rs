@@ -74,7 +74,12 @@ impl CapturedFrame {
         }
         let rgb = bytemuck::cast_slice::<u8, f32>(&bytes[16..16 + rgb_bytes]).to_vec();
         let terrain = bytes[16 + rgb_bytes..16 + rgb_bytes + pixels].to_vec();
-        Ok(Self { width, height, rgb, terrain })
+        Ok(Self {
+            width,
+            height,
+            rgb,
+            terrain,
+        })
     }
 
     /// Rec.709 luminance of pixel `i`.
@@ -334,10 +339,8 @@ impl FrameCapture {
                 mapped_at_creation: false,
             })
         };
-        self.hdr_staging =
-            Some(alloc(hdr_row as u64 * height as u64, "Frame Capture HDR"));
-        self.vis_staging =
-            Some(alloc(vis_row as u64 * height as u64, "Frame Capture Vis"));
+        self.hdr_staging = Some(alloc(hdr_row as u64 * height as u64, "Frame Capture HDR"));
+        self.vis_staging = Some(alloc(vis_row as u64 * height as u64, "Frame Capture Vis"));
 
         let copy = |encoder: &mut wgpu::CommandEncoder,
                     tex: &wgpu::Texture,
@@ -353,7 +356,11 @@ impl FrameCapture {
                         rows_per_image: Some(height),
                     },
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
         };
         copy(encoder, hdr, self.hdr_staging.as_ref().unwrap(), hdr_row);
@@ -366,12 +373,10 @@ impl FrameCapture {
     /// `is_terrain_instance` answers whether a visibility-buffer instance id
     /// belongs to a terrain chunk; the renderer knows because it built the draw
     /// queue this frame.
-    pub fn resolve(
-        &mut self,
-        device: &wgpu::Device,
-        is_terrain_instance: impl Fn(u32) -> bool,
-    ) {
-        let Some((width, height)) = self.pending.take() else { return };
+    pub fn resolve(&mut self, device: &wgpu::Device, is_terrain_instance: impl Fn(u32) -> bool) {
+        let Some((width, height)) = self.pending.take() else {
+            return;
+        };
         let (Some(hdr_buf), Some(vis_buf)) = (&self.hdr_staging, &self.vis_staging) else {
             return;
         };
@@ -416,7 +421,12 @@ impl FrameCapture {
             buf.unmap();
         }
 
-        let captured = CapturedFrame { width, height, rgb, terrain };
+        let captured = CapturedFrame {
+            width,
+            height,
+            rgb,
+            terrain,
+        };
         // Mean luminance per class, logged because a diff of exactly zero means
         // the same thing whether the feature under test does nothing or the
         // readback is empty — and those need telling apart.
@@ -458,9 +468,10 @@ impl FrameCapture {
         }
 
         if let Some(path) = &self.compare_to {
-            match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| {
-                CapturedFrame::decode(&b)
-            }) {
+            match std::fs::read(path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| CapturedFrame::decode(&b))
+            {
                 Ok(before) if before.width == width && before.height == height => {
                     let t = compare(&before, &captured, PIXEL_TERRAIN);
                     let m = compare(&before, &captured, PIXEL_MESH);
@@ -469,14 +480,21 @@ impl FrameCapture {
                         "CAPTURE-DIFF vs {path}: terrain px={} mean_abs={:.4} changed={} \
                          | mesh px={} mean_abs={:.4} changed={} \
                          | sky px={} mean_abs={:.4} changed={}",
-                        t.pixels, t.mean_abs, t.changed,
-                        m.pixels, m.mean_abs, m.changed,
-                        s.pixels, s.mean_abs, s.changed,
+                        t.pixels,
+                        t.mean_abs,
+                        t.changed,
+                        m.pixels,
+                        m.mean_abs,
+                        m.changed,
+                        s.pixels,
+                        s.mean_abs,
+                        s.changed,
                     );
                 }
                 Ok(before) => tracing::error!(
                     "CAPTURE-DIFF: {path} is {}x{}, this frame is {width}x{height}",
-                    before.width, before.height,
+                    before.width,
+                    before.height,
                 ),
                 Err(e) => tracing::error!("CAPTURE-DIFF read {path} failed: {e}"),
             }
@@ -531,8 +549,14 @@ mod tests {
         // Two pixels of terrain, two of something else; only the terrain pair
         // changes. This is exactly the shape of the 25A acceptance test, and
         // the 25A-1 failure was that the terrain column stayed at zero.
-        let before = frame(&[1.0, 1.0, 4.0, 900.0], &[PIXEL_TERRAIN, PIXEL_TERRAIN, PIXEL_MESH, PIXEL_SKY]);
-        let after = frame(&[0.5, 0.75, 4.0, 900.0], &[PIXEL_TERRAIN, PIXEL_TERRAIN, PIXEL_MESH, PIXEL_SKY]);
+        let before = frame(
+            &[1.0, 1.0, 4.0, 900.0],
+            &[PIXEL_TERRAIN, PIXEL_TERRAIN, PIXEL_MESH, PIXEL_SKY],
+        );
+        let after = frame(
+            &[0.5, 0.75, 4.0, 900.0],
+            &[PIXEL_TERRAIN, PIXEL_TERRAIN, PIXEL_MESH, PIXEL_SKY],
+        );
 
         let t = compare(&before, &after, PIXEL_TERRAIN);
         assert_eq!(t.pixels, 2);

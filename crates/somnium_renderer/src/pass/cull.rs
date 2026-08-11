@@ -134,7 +134,11 @@ impl CullPass {
             aabb_buffer: Self::alloc_aabbs(device, INITIAL_CAPACITY),
             params_buffers: std::array::from_fn(|phase| {
                 device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(if phase == 0 { "Cull Params P1" } else { "Cull Params P2" }),
+                    label: Some(if phase == 0 {
+                        "Cull Params P1"
+                    } else {
+                        "Cull Params P2"
+                    }),
                     size: std::mem::size_of::<GpuCullParams>() as u64,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -241,25 +245,43 @@ impl CullPass {
             label: Some("Cull Bind Group"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: instance_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.aabb_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: indirect_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.params_buffers[phase].as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(hiz_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: self.flags_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.aabb_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: indirect_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buffers[phase].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(hiz_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.flags_buffer.as_entire_binding(),
+                },
             ],
         });
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: if phase == 0 { Some("Instance Cull Phase 1") } else { Some("Instance Cull Phase 2") },
+            label: if phase == 0 {
+                Some("Instance Cull Phase 1")
+            } else {
+                Some("Instance Cull Phase 2")
+            },
             timestamp_writes: None,
         });
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(
-            (draw_count as u32).div_ceil(WORKGROUP_SIZE),
-            1,
-            1,
-        );
+        cpass.dispatch_workgroups((draw_count as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
     }
 }

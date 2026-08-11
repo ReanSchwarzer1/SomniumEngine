@@ -49,8 +49,8 @@ pub mod terrain;
 pub mod voxel;
 pub mod world;
 
-pub use chunk::{chunk_origin, ChunkCoord, CHUNK_SIZE, CHUNK_SIZE_F, PADDED_CHUNK_SIZE};
+pub use chunk::{CHUNK_SIZE, CHUNK_SIZE_F, ChunkCoord, PADDED_CHUNK_SIZE, chunk_origin};
 pub use mesh::ChunkMeshData;
 pub use terrain::TerrainConfig;
-pub use voxel::{Voxel, PALETTE_SIZE};
+pub use voxel::{PALETTE_SIZE, Voxel};
 pub use world::{ReadyChunk, VoxelWorld, VoxelWorldConfig, VoxelWorldUpdate};

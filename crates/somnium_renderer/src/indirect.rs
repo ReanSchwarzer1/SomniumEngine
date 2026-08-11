@@ -99,7 +99,12 @@ impl IndirectDrawBuffer {
     }
 
     /// Upload a pre-built argument list (Phase 15F builds one arg per cluster).
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, args: &[DrawIndirectArgs]) {
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        args: &[DrawIndirectArgs],
+    ) {
         self.len = args.len();
         if self.len > self.capacity {
             let mut cap = self.capacity.max(1);
@@ -120,12 +125,13 @@ impl IndirectDrawBuffer {
     /// instance buffer is built in, so `first_instance = i`.
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[DrawCommand]) {
         self.staging.clear();
-        self.staging.extend(draws.iter().enumerate().map(|(i, cmd)| DrawIndirectArgs {
-            vertex_count: cmd.index_count,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: i as u32,
-        }));
+        self.staging
+            .extend(draws.iter().enumerate().map(|(i, cmd)| DrawIndirectArgs {
+                vertex_count: cmd.index_count,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: i as u32,
+            }));
         self.len = self.staging.len();
 
         if self.len > self.capacity {
@@ -178,7 +184,12 @@ pub fn push_cluster_args(
                 bounds.push(GpuCullAabb {
                     min: [m.aabb_min[0], m.aabb_min[1], m.aabb_min[2], 0.0],
                     max: [m.aabb_max[0], m.aabb_max[1], m.aabb_max[2], 0.0],
-                    cone: [m.cone_axis[0], m.cone_axis[1], m.cone_axis[2], m.backface_cutoff()],
+                    cone: [
+                        m.cone_axis[0],
+                        m.cone_axis[1],
+                        m.cone_axis[2],
+                        m.backface_cutoff(),
+                    ],
                 });
             }
         }
@@ -309,7 +320,14 @@ mod tests {
     #[test]
     fn a_mesh_without_clusters_stays_one_draw() {
         let (mut args, mut bounds) = (Vec::new(), Vec::new());
-        push_cluster_args(3, 600, None, Some(([-1.0; 3], [1.0; 3])), &mut args, &mut bounds);
+        push_cluster_args(
+            3,
+            600,
+            None,
+            Some(([-1.0; 3], [1.0; 3])),
+            &mut args,
+            &mut bounds,
+        );
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].vertex_count, 600);
         assert_eq!(args[0].first_vertex, 0);

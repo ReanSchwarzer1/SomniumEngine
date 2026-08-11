@@ -24,9 +24,17 @@ unsafe extern "C" {
     pub fn jph_init();
     pub fn jph_shutdown();
 
-    pub fn jph_physics_system_create(max_bodies: u32, max_body_pairs: u32, max_contact_constraints: u32) -> *mut c_void;
+    pub fn jph_physics_system_create(
+        max_bodies: u32,
+        max_body_pairs: u32,
+        max_contact_constraints: u32,
+    ) -> *mut c_void;
     pub fn jph_physics_system_destroy(system: *mut c_void);
-    pub fn jph_physics_system_update(system: *mut c_void, dt: f32, collision_steps: std::os::raw::c_int) -> std::os::raw::c_int;
+    pub fn jph_physics_system_update(
+        system: *mut c_void,
+        dt: f32,
+        collision_steps: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
     pub fn jph_physics_system_set_gravity(system: *mut c_void, x: f32, y: f32, z: f32);
     pub fn jph_physics_system_optimize_broad_phase(system: *mut c_void);
     pub fn jph_physics_system_get_num_bodies(system: *mut c_void) -> u32;
@@ -48,16 +56,58 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub fn jph_shape_destroy(shape: *mut c_void);
 
-    pub fn jph_body_interface_create_and_add_body(system: *mut c_void, settings: *const JphBodyCreationSettings, activation: std::os::raw::c_int) -> u32;
+    pub fn jph_body_interface_create_and_add_body(
+        system: *mut c_void,
+        settings: *const JphBodyCreationSettings,
+        activation: std::os::raw::c_int,
+    ) -> u32;
     pub fn jph_body_interface_remove_body(system: *mut c_void, body_id: u32);
     pub fn jph_body_interface_destroy_body(system: *mut c_void, body_id: u32);
     pub fn jph_body_interface_is_active(system: *mut c_void, body_id: u32) -> std::os::raw::c_int;
 
-    pub fn jph_body_interface_get_position(system: *mut c_void, body_id: u32, out_x: *mut f32, out_y: *mut f32, out_z: *mut f32);
-    pub fn jph_body_interface_set_position(system: *mut c_void, body_id: u32, x: f32, y: f32, z: f32, activation: std::os::raw::c_int);
-    pub fn jph_body_interface_get_rotation(system: *mut c_void, body_id: u32, out_x: *mut f32, out_y: *mut f32, out_z: *mut f32, out_w: *mut f32);
-    pub fn jph_body_interface_get_linear_velocity(system: *mut c_void, body_id: u32, out_x: *mut f32, out_y: *mut f32, out_z: *mut f32);
-    pub fn jph_body_interface_set_linear_velocity(system: *mut c_void, body_id: u32, x: f32, y: f32, z: f32);
+    pub fn jph_body_interface_get_position(
+        system: *mut c_void,
+        body_id: u32,
+        out_x: *mut f32,
+        out_y: *mut f32,
+        out_z: *mut f32,
+    );
+    pub fn jph_body_interface_set_position(
+        system: *mut c_void,
+        body_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        activation: std::os::raw::c_int,
+    );
+    pub fn jph_body_interface_get_rotation(
+        system: *mut c_void,
+        body_id: u32,
+        out_x: *mut f32,
+        out_y: *mut f32,
+        out_z: *mut f32,
+        out_w: *mut f32,
+    );
+    pub fn jph_body_interface_get_linear_velocity(
+        system: *mut c_void,
+        body_id: u32,
+        out_x: *mut f32,
+        out_y: *mut f32,
+        out_z: *mut f32,
+    );
+    pub fn jph_body_interface_set_linear_velocity(
+        system: *mut c_void,
+        body_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+    );
     pub fn jph_body_interface_add_force(system: *mut c_void, body_id: u32, x: f32, y: f32, z: f32);
-    pub fn jph_body_interface_add_impulse(system: *mut c_void, body_id: u32, x: f32, y: f32, z: f32);
+    pub fn jph_body_interface_add_impulse(
+        system: *mut c_void,
+        body_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+    );
 }

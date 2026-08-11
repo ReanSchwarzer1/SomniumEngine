@@ -81,26 +81,81 @@ struct LayerRecipe {
 
 const RECIPES: [LayerRecipe; TERRAIN_LAYER_COUNT as usize] = [
     // 0: Grass
-    LayerRecipe { tone_a: [0.16, 0.34, 0.10], tone_b: [0.28, 0.46, 0.14], roughness: 0.90, bump: 0.6, seed: 11 },
+    LayerRecipe {
+        tone_a: [0.16, 0.34, 0.10],
+        tone_b: [0.28, 0.46, 0.14],
+        roughness: 0.90,
+        bump: 0.6,
+        seed: 11,
+    },
     // 1: Dirt
-    LayerRecipe { tone_a: [0.30, 0.21, 0.13], tone_b: [0.42, 0.31, 0.20], roughness: 0.95, bump: 0.8, seed: 23 },
+    LayerRecipe {
+        tone_a: [0.30, 0.21, 0.13],
+        tone_b: [0.42, 0.31, 0.20],
+        roughness: 0.95,
+        bump: 0.8,
+        seed: 23,
+    },
     // 2: Rock (also the triplanar cliff layer)
-    LayerRecipe { tone_a: [0.32, 0.32, 0.33], tone_b: [0.52, 0.51, 0.50], roughness: 0.80, bump: 1.0, seed: 37 },
+    LayerRecipe {
+        tone_a: [0.32, 0.32, 0.33],
+        tone_b: [0.52, 0.51, 0.50],
+        roughness: 0.80,
+        bump: 1.0,
+        seed: 37,
+    },
     // 3: Snow
-    LayerRecipe { tone_a: [0.82, 0.85, 0.90], tone_b: [0.95, 0.96, 1.00], roughness: 0.35, bump: 0.3, seed: 53 },
+    LayerRecipe {
+        tone_a: [0.82, 0.85, 0.90],
+        tone_b: [0.95, 0.96, 1.00],
+        roughness: 0.35,
+        bump: 0.3,
+        seed: 53,
+    },
     // 4: Meadow — a lighter, yellower grass than layer 0.
-    LayerRecipe { tone_a: [0.22, 0.36, 0.12], tone_b: [0.38, 0.48, 0.18], roughness: 0.92, bump: 0.5, seed: 67 },
+    LayerRecipe {
+        tone_a: [0.22, 0.36, 0.12],
+        tone_b: [0.38, 0.48, 0.18],
+        roughness: 0.92,
+        bump: 0.5,
+        seed: 67,
+    },
     // 5: Mud
-    LayerRecipe { tone_a: [0.20, 0.14, 0.09], tone_b: [0.32, 0.24, 0.16], roughness: 0.70, bump: 0.9, seed: 79 },
+    LayerRecipe {
+        tone_a: [0.20, 0.14, 0.09],
+        tone_b: [0.32, 0.24, 0.16],
+        roughness: 0.70,
+        bump: 0.9,
+        seed: 79,
+    },
     // 6: Sand
-    LayerRecipe { tone_a: [0.62, 0.54, 0.38], tone_b: [0.76, 0.68, 0.50], roughness: 0.85, bump: 0.4, seed: 89 },
+    LayerRecipe {
+        tone_a: [0.62, 0.54, 0.38],
+        tone_b: [0.76, 0.68, 0.50],
+        roughness: 0.85,
+        bump: 0.4,
+        seed: 89,
+    },
     // 7: Gravel
-    LayerRecipe { tone_a: [0.34, 0.32, 0.30], tone_b: [0.55, 0.52, 0.48], roughness: 0.88, bump: 1.0, seed: 97 },
+    LayerRecipe {
+        tone_a: [0.34, 0.32, 0.30],
+        tone_b: [0.55, 0.52, 0.48],
+        roughness: 0.88,
+        bump: 1.0,
+        seed: 97,
+    },
 ];
 
 /// Names matching the recipe order, used by the layer-management UI.
 pub const LAYER_NAMES: [&str; TERRAIN_LAYER_COUNT as usize] = [
-    "Grass", "Forest Floor", "Rock", "Snow", "Meadow", "Mud", "Sand", "Gravel",
+    "Grass",
+    "Forest Floor",
+    "Rock",
+    "Snow",
+    "Meadow",
+    "Mud",
+    "Sand",
+    "Gravel",
 ];
 
 fn noise_height(u: f32, v: f32, recipe: &LayerRecipe) -> f32 {
@@ -136,8 +191,12 @@ fn generate_layer(recipe: &LayerRecipe) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 
             // Tangent-space normal from noise gradient (finite differences).
             let e = inv;
-            let dx = (noise_height(u + e, v, recipe) - noise_height(u - e, v, recipe)) * recipe.bump * 8.0;
-            let dz = (noise_height(u, v + e, recipe) - noise_height(u, v - e, recipe)) * recipe.bump * 8.0;
+            let dx = (noise_height(u + e, v, recipe) - noise_height(u - e, v, recipe))
+                * recipe.bump
+                * 8.0;
+            let dz = (noise_height(u, v + e, recipe) - noise_height(u, v - e, recipe))
+                * recipe.bump
+                * 8.0;
             let nv = glam::Vec3::new(-dx, -dz, 1.0).normalize();
             normal.extend([
                 ((nv.x * 0.5 + 0.5) * 255.0) as u8,
@@ -172,7 +231,11 @@ fn create_array_texture(
     let mip_level_count = (size as f32).log2().floor() as u32 + 1;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers.len() as u32 },
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: layers.len() as u32,
+        },
         mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -201,7 +264,11 @@ fn create_array_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
                     mip_level: level as u32,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &staged,
@@ -210,7 +277,11 @@ fn create_array_texture(
                     bytes_per_row: Some(padded),
                     rows_per_image: Some(*lh),
                 },
-                wgpu::Extent3d { width: *lw, height: *lh, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: *lw,
+                    height: *lh,
+                    depth_or_array_layers: 1,
+                },
             );
         }
     }
@@ -259,7 +330,11 @@ fn mean_linear_albedo(texels: &[u8]) -> [f32; 4] {
     }
     let srgb_to_linear = |c: u8| {
         let s = f32::from(c) / 255.0;
-        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
     };
     let mut sum = [0.0f64; 3];
     let n = texels.len() / 4;
@@ -396,15 +471,25 @@ impl TerrainLayerTextures {
         // Albedo is sRGB; the surface pack is linear data — a normal, a
         // roughness and an occlusion, none of which are colours.
         let (albedo, albedo_view) = create_array_texture(
-            device, queue, "Terrain Albedo+Height Array",
-            wgpu::TextureFormat::Rgba8UnormSrgb, size, &albedos,
+            device,
+            queue,
+            "Terrain Albedo+Height Array",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            size,
+            &albedos,
         );
         let (surface, surface_view) = create_array_texture(
-            device, queue, "Terrain Surface Array",
-            wgpu::TextureFormat::Rgba8Unorm, size, &surfaces,
+            device,
+            queue,
+            "Terrain Surface Array",
+            wgpu::TextureFormat::Rgba8Unorm,
+            size,
+            &surfaces,
         );
         let mean_albedo = std::array::from_fn(|i| {
-            albedos.get(i).map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+            albedos
+                .get(i)
+                .map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
         });
         Ok(Self {
             albedo,
@@ -433,15 +518,25 @@ impl TerrainLayerTextures {
             surfaces.push(surface);
         }
         let (albedo, albedo_view) = create_array_texture(
-            device, queue, "Terrain Albedo+Height Array",
-            wgpu::TextureFormat::Rgba8UnormSrgb, LAYER_TEXTURE_SIZE, &albedos,
+            device,
+            queue,
+            "Terrain Albedo+Height Array",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            LAYER_TEXTURE_SIZE,
+            &albedos,
         );
         let (surface, surface_view) = create_array_texture(
-            device, queue, "Terrain Surface Array",
-            wgpu::TextureFormat::Rgba8Unorm, LAYER_TEXTURE_SIZE, &surfaces,
+            device,
+            queue,
+            "Terrain Surface Array",
+            wgpu::TextureFormat::Rgba8Unorm,
+            LAYER_TEXTURE_SIZE,
+            &surfaces,
         );
         let mean_albedo = std::array::from_fn(|i| {
-            albedos.get(i).map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+            albedos
+                .get(i)
+                .map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
         });
         Self {
             albedo,
@@ -487,7 +582,11 @@ impl Splatmap {
         let make = |label: &str| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -500,8 +599,16 @@ impl Splatmap {
         };
         let (texture, view) = make("Terrain Splatmap 0-3");
         let (texture_hi, view_hi) = make("Terrain Splatmap 4-7");
-        let mut splat =
-            Self { texture, view, texture_hi, view_hi, data, width, height, dirty: None };
+        let mut splat = Self {
+            texture,
+            view,
+            texture_hi,
+            view_hi,
+            data,
+            width,
+            height,
+            dirty: None,
+        };
         splat.mark_dirty(0, 0, width - 1, height - 1);
         splat.upload_dirty(queue);
         splat
@@ -523,7 +630,9 @@ impl Splatmap {
     /// here. That costs a copy of the dirty rows, which is cheaper than holding
     /// two CPU arrays and keeping their normalisation in step.
     pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
-        let Some((_, z0, _, z1)) = self.dirty.take() else { return };
+        let Some((_, z0, _, z1)) = self.dirty.take() else {
+            return;
+        };
         let rows = z1 - z0 + 1;
         let offset = (z0 * self.width) as usize;
         let texels = (rows * self.width) as usize;
@@ -550,7 +659,11 @@ impl Splatmap {
                     bytes_per_row: Some(self.width * 4),
                     rows_per_image: Some(rows),
                 },
-                wgpu::Extent3d { width: self.width, height: rows, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
             );
         }
     }

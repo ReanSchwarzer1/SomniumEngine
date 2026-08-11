@@ -12,8 +12,8 @@
 //!
 //! **Depth bias:** `constant=2, slope_scale=2.0, clamp=0.0` as starting values; tune per scene.
 
-use wgpu;
 use crate::shadow::{CASCADE_VIEWPORTS, NUM_CASCADES};
+use wgpu;
 
 /// Shadow render pass: pipeline, cascade-uniform bind group layout, and per-cascade bind groups.
 pub struct ShadowPass {
@@ -82,38 +82,34 @@ impl ShadowPass {
 
         // Create 4 small uniform buffers pre-initialized to cascade indices 0..3.
         // These are constant for the lifetime of the pass.
-        let cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES] =
-            std::array::from_fn(|i| {
-                // 16-byte buffer: u32 index + 12 bytes padding (satisfies min uniform size).
-                let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Cascade Index Buffer"),
-                    size: 16,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let mut data = [0u8; 16];
-                data[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-                queue.write_buffer(&buf, 0, &data);
-                buf
+        let cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES] = std::array::from_fn(|i| {
+            // 16-byte buffer: u32 index + 12 bytes padding (satisfies min uniform size).
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Cascade Index Buffer"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+            let mut data = [0u8; 16];
+            data[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            queue.write_buffer(&buf, 0, &data);
+            buf
+        });
 
-        let cascade_bind_groups: [wgpu::BindGroup; NUM_CASCADES] =
-            std::array::from_fn(|i| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Shadow Cascade BG"),
-                    layout: &cascade_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: cascade_index_buffers[i].as_entire_binding(),
-                    }],
-                })
-            });
+        let cascade_bind_groups: [wgpu::BindGroup; NUM_CASCADES] = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow Cascade BG"),
+                layout: &cascade_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cascade_index_buffers[i].as_entire_binding(),
+                }],
+            })
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shadow.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
         });
 
         // Phase 17E: sampler for the alpha-cutout test, so foliage casts a
@@ -257,7 +253,6 @@ impl ShadowPass {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::casts_shadow;
@@ -281,7 +276,10 @@ mod tests {
         // one rule and no per-asset tuning.
         let far = 120.0 * 120.0;
         assert!(casts_shadow(6.0, far, T), "a 6 m tree at 120 m should cast");
-        assert!(!casts_shadow(0.15, far, T), "a 15 cm tuft at 120 m should not");
+        assert!(
+            !casts_shadow(0.15, far, T),
+            "a 15 cm tuft at 120 m should not"
+        );
     }
 
     #[test]

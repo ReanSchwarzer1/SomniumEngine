@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-11
-> **Current phase:** Phase IV-E complete; IV-F multi-scale waves, shoreline, and foam next
+> **Current phase:** Phase IV-H complete; IV-I interaction tier next
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -3378,8 +3378,8 @@ patterns are in `ATTRIBUTION.md` §13.31.
 
 Validation: `cargo check --workspace --all-targets`; 202 renderer tests, 31 core
 tests, and 3 UI tests pass in release mode. The importer was executed twice and
-all output hashes matched. `phase_iv_default_validation.png` is the release-mode
-frame-12 live wgpu capture.
+all output hashes matched. Current release-mode live wgpu evidence is organized
+under `dev records/phase IV` rather than in the repository root.
 
 **IV-D/E completed 2026-08-11.** The broad terrain-sized water plane is gone.
 Each body builds a compact 2 m terrain-local mesh only over wet coarse cells,
@@ -3399,8 +3399,35 @@ serialization and their primary controls are available in the Water inspector.
 
 Validation: `cargo check --workspace --all-targets`; 204 renderer tests, 31 core
 tests, and 3 UI tests pass in release mode. Live wgpu post-TAA day and -20° sun
-captures are `phase_iv_de_validation_taa2.png` and
-`phase_iv_de_validation_night.png`.
+captures are `dev records/phase IV/IV-D-E/IV-D-E_day_post-TAA.png` and
+`dev records/phase IV/IV-D-E/IV-D-E_night_post-TAA.png`.
+
+**IV-F/G/H completed 2026-08-11.** The cinematic water tier now owns two
+deterministic GPU inverse-FFT cascades (256² over 192 m and 512² over 53 m).
+The compute chain evolves a wind spectrum, executes radix-2 ping-pong inverse
+transforms, and writes displacement, gradients, horizontal-displacement
+Jacobian, and temporally decayed foam history. Gerstner remains the deterministic
+baseline and CPU-query contract. Serialized water authoring now includes
+spectral blend, wind speed, foam decay/threshold, caustic strength, and an
+underwater enable. Crest folding, shoreline SDF/depth, and wet-sand darkening
+share one foam signal.
+
+The post-TAA underwater HDR pass selects the finite body beneath the camera,
+uses a smooth per-pixel near-plane submersion mask, reconstructs the submerged
+ray segment, and applies RGB extinction, HG in-scattering, fog, sun/moon shafts,
+and depth/turbidity-faded bed caustics. The surface renders two-sided with an
+underside/TIR transition. Its transition and shaft WGSL is original and does
+not translate the Shadertoy-cited helpers found in Wicked's underwater shader.
+
+`DefaultLandscapePreset` v1 now owns the default terrain descriptor, Great
+Lakes relief/material threshold, transforms, water datum, camera, and post
+process. Normal startup and **Create → Terrain** both call
+`create_default_landscape`; editor creation remains one undoable transaction
+containing separate Terrain and Water entities. The old `WaterPlane` path is
+removed. Release validation passed 33 core tests, 208 renderer tests, 9 shader
+module tests, 3 UI tests, and every remaining workspace target. Live evidence
+is `dev records/phase IV/IV-F-G-H/IV-F-G-H_surface_day.png`,
+`IV-G_underwater_deep.png`, and `IV-G_waterline_transition.png` in that folder.
 
 ## 18. Known Issues & Active Bugs
 

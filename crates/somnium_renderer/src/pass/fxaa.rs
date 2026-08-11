@@ -113,7 +113,11 @@ impl FxaaPass {
 
         let (ldr_texture, ldr_view) = Self::alloc_target(device, surface_format, width, height);
         let bind_group = Self::make_bind_group(
-            device, &bind_group_layout, &ldr_view, &sampler, &params_buffer,
+            device,
+            &bind_group_layout,
+            &ldr_view,
+            &sampler,
+            &params_buffer,
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -201,9 +205,18 @@ impl FxaaPass {
             label: Some("FXAA Bind Group"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         })
     }

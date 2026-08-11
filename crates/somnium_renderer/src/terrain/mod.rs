@@ -30,7 +30,7 @@ pub mod textures;
 use std::collections::HashMap;
 
 use mesh::{EDGE_EAST, EDGE_NORTH, EDGE_SOUTH, EDGE_WEST, MAX_TERRAIN_LOD};
-use textures::{Splatmap, TerrainLayerTextures, LAYER_NAMES, TERRAIN_LAYER_COUNT};
+use textures::{LAYER_NAMES, Splatmap, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
 
 /// Static terrain configuration (Phase 14A-1). The matching ECS component
 /// `somnium_core::TerrainComponent` stores a copy of these plus the terrain id.
@@ -432,8 +432,7 @@ impl TerrainData {
             // `SOMNIUM_TERRAIN_DETAIL_FADE=0` pushes the fade past any real
             // view distance, which is the A/B for the budget: the shader keeps
             // its distance term and simply never reaches it.
-            detail_fade_start: if std::env::var("SOMNIUM_TERRAIN_DETAIL_FADE").as_deref()
-                == Ok("0")
+            detail_fade_start: if std::env::var("SOMNIUM_TERRAIN_DETAIL_FADE").as_deref() == Ok("0")
             {
                 1.0e9
             } else {
@@ -441,8 +440,7 @@ impl TerrainData {
             },
             detail_fade_end: 400.0,
             macro_dirty: true,
-            height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref()
-                != Ok("0"),
+            height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref() != Ok("0"),
             parallax_scale: if std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("0") {
                 0.0
             } else {
@@ -478,9 +476,7 @@ impl TerrainData {
         let [wx, wz] = self.desc.world_size();
         let origin = self.model.w_axis;
         GpuTerrainMaterial {
-            layer_tiling: std::array::from_fn(|i| {
-                self.layers.get(i).map_or(0.25, |l| l.tiling)
-            }),
+            layer_tiling: std::array::from_fn(|i| self.layers.get(i).map_or(0.25, |l| l.tiling)),
             brush: self.brush_cursor,
             albedo_maps: self.texture_ids.albedo,
             surface_maps: self.texture_ids.surface,
@@ -512,7 +508,11 @@ impl TerrainData {
             layer_parallax: std::array::from_fn(|i| {
                 self.layers.get(i).map_or(0.0, |l| l.blend.parallax_depth) * self.parallax_scale
             }),
-            parallax_steps: if self.parallax_scale > 0.0 { self.parallax_steps } else { 0 },
+            parallax_steps: if self.parallax_scale > 0.0 {
+                self.parallax_steps
+            } else {
+                0
+            },
             parallax_shadow_steps: self.parallax_shadow_steps,
             _pad4: [0; 2],
         }
@@ -581,8 +581,8 @@ impl TerrainData {
     /// that will disagree. When the UI phase lets a heightmap be chosen at
     /// creation, this becomes the default that dialog starts from.
     pub fn apply_default_relief(&mut self, amplitude: f32) -> String {
-        let path = std::env::var("SOMNIUM_HEIGHTMAP")
-            .unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
+        let path =
+            std::env::var("SOMNIUM_HEIGHTMAP").unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
         match self.load_heightmap_file(&path, amplitude) {
             Ok(()) => {
                 if path == DEFAULT_HEIGHTMAP {
@@ -604,19 +604,20 @@ impl TerrainData {
     /// landform tint. Alpha is a per-texel strength mask, so the Great Lakes
     /// bake can exclude water pixels from ground colour.
     pub fn load_authored_macro_file(&mut self, path: &str) -> Result<(), String> {
-        let image = image::open(path).map_err(|e| format!("{path}: {e}"))?.to_rgba8();
-        let resized = if image.width() == macro_map::MACRO_SIZE
-            && image.height() == macro_map::MACRO_SIZE
-        {
-            image
-        } else {
-            image::imageops::resize(
-                &image,
-                macro_map::MACRO_SIZE,
-                macro_map::MACRO_SIZE,
-                image::imageops::FilterType::Triangle,
-            )
-        };
+        let image = image::open(path)
+            .map_err(|e| format!("{path}: {e}"))?
+            .to_rgba8();
+        let resized =
+            if image.width() == macro_map::MACRO_SIZE && image.height() == macro_map::MACRO_SIZE {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    macro_map::MACRO_SIZE,
+                    macro_map::MACRO_SIZE,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
         self.authored_macro = Some(macro_map::MacroMap {
             texels: resized.into_raw(),
             size: macro_map::MACRO_SIZE,
@@ -647,10 +648,10 @@ impl TerrainData {
     /// Scaled (world-space) height at an arbitrary terrain-local XZ position,
     /// bilinearly interpolated (Phase 14A-3 `world_height_at`).
     pub fn world_height_at(&self, local_x: f32, local_z: f32) -> f32 {
-        let fx = (local_x / self.desc.cell_size)
-            .clamp(0.0, (self.desc.total_vertices_x() - 1) as f32);
-        let fz = (local_z / self.desc.cell_size)
-            .clamp(0.0, (self.desc.total_vertices_z() - 1) as f32);
+        let fx =
+            (local_x / self.desc.cell_size).clamp(0.0, (self.desc.total_vertices_x() - 1) as f32);
+        let fz =
+            (local_z / self.desc.cell_size).clamp(0.0, (self.desc.total_vertices_z() - 1) as f32);
         let (x0, z0) = (fx.floor() as u32, fz.floor() as u32);
         let (tx, tz) = (fx - fx.floor(), fz - fz.floor());
 
@@ -668,7 +669,10 @@ impl TerrainData {
     /// Ground query for the foliage brush (Phase 17F).
     pub fn ground_sample(&self, local_x: f32, local_z: f32) -> foliage_paint::GroundSample {
         let s = self.surface_sample(local_x, local_z, 0);
-        foliage_paint::GroundSample { height: s.height, slope_cos: s.slope_cos }
+        foliage_paint::GroundSample {
+            height: s.height,
+            slope_cos: s.slope_cos,
+        }
     }
 
     /// Sample height, slope and paint-layer weight at a terrain-local point
@@ -680,14 +684,24 @@ impl TerrainData {
         // both axes because `world_height_at` already applies `height_scale`,
         // so the normal comes straight out of it.
         let d = self.desc.cell_size;
-        let hx = self.world_height_at(local_x + d, local_z) - self.world_height_at(local_x - d, local_z);
-        let hz = self.world_height_at(local_x, local_z + d) - self.world_height_at(local_x, local_z - d);
+        let hx =
+            self.world_height_at(local_x + d, local_z) - self.world_height_at(local_x - d, local_z);
+        let hz =
+            self.world_height_at(local_x, local_z + d) - self.world_height_at(local_x, local_z - d);
         let normal = glam::Vec3::new(-hx, 2.0 * d, -hz).normalize_or_zero();
         // Y of the unit normal IS the cosine of the slope from vertical.
-        let slope_cos = if normal == glam::Vec3::ZERO { 1.0 } else { normal.y.abs() };
+        let slope_cos = if normal == glam::Vec3::ZERO {
+            1.0
+        } else {
+            normal.y.abs()
+        };
 
         let layer_weight = self.layer_weight_at(local_x, local_z, layer);
-        foliage::SurfaceSample { height, slope_cos, layer_weight }
+        foliage::SurfaceSample {
+            height,
+            slope_cos,
+            layer_weight,
+        }
     }
 
     /// Splatmap weight of `layer` at a terrain-local point, `0..=1`.
@@ -716,14 +730,21 @@ impl TerrainData {
     ///
     /// Returns the samples and the world spacing between them.
     pub fn heightfield(&self) -> (Vec<f32>, u32, glam::Vec3) {
-        let n = collider::sample_count_for(self.desc.total_vertices_x().min(self.desc.total_vertices_z()));
+        let n = collider::sample_count_for(
+            self.desc
+                .total_vertices_x()
+                .min(self.desc.total_vertices_z()),
+        );
         let world = self.desc.world_size();
         let samples = collider::resample(n, world, |x, z| self.world_height_at(x, z));
         (samples, n, collider::heightfield_scale(world, n))
     }
 
     /// Scatter foliage over this terrain (Phase 17A).
-    pub fn scatter_foliage(&self, params: &foliage::FoliageParams) -> Vec<foliage::FoliageInstance> {
+    pub fn scatter_foliage(
+        &self,
+        params: &foliage::FoliageParams,
+    ) -> Vec<foliage::FoliageInstance> {
         foliage::scatter(params, self.desc.world_size(), |x, z| {
             self.surface_sample(x, z, params.layer)
         })
@@ -759,7 +780,10 @@ impl TerrainData {
         loop {
             let mut changed = false;
             for i in 0..self.chunks.len() {
-                let (cx, cz) = (self.chunks[i].grid_pos[0] as i64, self.chunks[i].grid_pos[1] as i64);
+                let (cx, cz) = (
+                    self.chunks[i].grid_pos[0] as i64,
+                    self.chunks[i].grid_pos[1] as i64,
+                );
                 let mut min_neighbor = u8::MAX;
                 for (dx, dz) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
                     if let Some(l) = at(&self.chunks, cx + dx, cz + dz) {
@@ -778,7 +802,10 @@ impl TerrainData {
 
         // 3. Edge mask: stitch toward any strictly coarser neighbor.
         for i in 0..self.chunks.len() {
-            let (cx, cz) = (self.chunks[i].grid_pos[0] as i64, self.chunks[i].grid_pos[1] as i64);
+            let (cx, cz) = (
+                self.chunks[i].grid_pos[0] as i64,
+                self.chunks[i].grid_pos[1] as i64,
+            );
             let lod = self.chunks[i].lod;
             let mut mask = 0u8;
             for (dx, dz, bit) in [
@@ -903,7 +930,8 @@ impl TerrainData {
                 continue; // pool full: this LOD/mask draws nothing this frame
             };
             pool.write_indices(queue, offset, &indices);
-            self.index_blocks.insert(key, (offset, indices.len() as u32));
+            self.index_blocks
+                .insert(key, (offset, indices.len() as u32));
         }
     }
 
@@ -1009,9 +1037,9 @@ impl TerrainData {
         out.extend(self.splatmap.width.to_le_bytes());
         out.extend(self.splatmap.height.to_le_bytes());
         out.extend(bytemuck::cast_slice::<f32, u8>(&self.heightmap));
-        out.extend(bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(
-            &self.splatmap.data,
-        ));
+        out.extend(
+            bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(&self.splatmap.data),
+        );
         std::fs::write(path, out)
     }
 
@@ -1085,7 +1113,9 @@ mod tests {
         for cz in 0..gz {
             for cx in 0..gx {
                 let center = glam::Vec3::new(
-                    (cx as f32 + 0.5) * chunk_world, 0.0, (cz as f32 + 0.5) * chunk_world,
+                    (cx as f32 + 0.5) * chunk_world,
+                    0.0,
+                    (cz as f32 + 0.5) * chunk_world,
                 );
                 let dist = camera.distance(center).max(0.01);
                 let lod_f = (dist / desc.lod_base_range).log2().floor();

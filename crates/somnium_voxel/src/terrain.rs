@@ -75,7 +75,11 @@ impl TerrainConfig {
                 Voxel::Grass
             }
         } else if depth <= 3 {
-            if h <= self.sand_height { Voxel::Sand } else { Voxel::Dirt }
+            if h <= self.sand_height {
+                Voxel::Sand
+            } else {
+                Voxel::Dirt
+            }
         } else {
             Voxel::Stone
         }
@@ -151,7 +155,10 @@ mod tests {
     fn deterministic() {
         let cfg = TerrainConfig::default();
         assert_eq!(cfg.height(10.0, -42.0), cfg.height(10.0, -42.0));
-        assert_eq!(cfg.voxel(IVec3::new(3, -5, 7)), cfg.voxel(IVec3::new(3, -5, 7)));
+        assert_eq!(
+            cfg.voxel(IVec3::new(3, -5, 7)),
+            cfg.voxel(IVec3::new(3, -5, 7))
+        );
     }
 
     #[test]

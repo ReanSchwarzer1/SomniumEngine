@@ -12,7 +12,7 @@ use somnium_audio::engine::AudioEngine;
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
-use somnium_renderer::{gizmo_hit_test, GizmoAxis, GizmoMode, RenderContext, SomniumRenderer};
+use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
 use somnium_ui::{EditorEvent, UiManager};
 
 use crate::config::EngineConfig;
@@ -22,15 +22,15 @@ use crate::editor_commands::{
     SetTransformCmd, TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
-use crate::event::{translate_window_event, EngineEvent};
+use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
-    simulate_particles, Children, FoliageComponent, LightComponent, LightType, MaterialComponent,
-    MeshComponent, MeshKind, Name, Parent, PostProcessComponent, TerrainComponent, Transform,
-    WaterComponent, WorldTransform,
+    FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent, MeshKind, Name,
+    Parent, PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
+    simulate_particles,
 };
 use somnium_ecs::World;
-use somnium_renderer::terrain::brush::{apply_paint, apply_sculpt, BrushMode, TerrainBrush};
+use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
 
 /// State captured when the user begins dragging a gizmo axis handle.
 #[derive(Clone)]
@@ -2118,100 +2118,20 @@ impl<G: GameApp> Engine<G> {
                 else {
                     return;
                 };
-                let desc = somnium_renderer::terrain::TerrainDescriptor::default();
-                let terrain_id = renderer.create_terrain(render_ctx, desc);
-                let [wx, wz] = desc.world_size();
-
-                // Phase 25L: a new terrain arrives with relief and materials
-                // already on it, rather than as a flat plain the user has to
-                // sculpt before it looks like anything. The heightmap is fixed
-                // for now; choosing one at creation is a UI-phase job, which is
-                // why the source lives behind `apply_default_relief` rather
-                // than being spelled out here.
-                if let Some(terrain) = renderer.terrain_mut(terrain_id) {
-                    let amplitude = somnium_renderer::terrain::DEFAULT_RELIEF_METRES;
-                    let source = terrain.apply_default_relief(amplitude);
-                    // Assigns all eight materials by altitude and slope.
-                    somnium_renderer::terrain::brush::auto_splat(terrain, amplitude * 0.62);
-                    info!("Created terrain ({wx}x{wz} m, heightmap: {source})");
-                }
-
-                let snapshot = EntitySnapshot {
-                    // Center the terrain footprint on the world origin.
-                    transform: Some(Transform::from_translation(glam::Vec3::new(
-                        -wx * 0.5,
-                        0.0,
-                        -wz * 0.5,
-                    ))),
-                    name: Some(Name::new("Terrain")),
-                    light: None,
-                    mesh: None,
-                    mat: None,
-                    wt: Some(WorldTransform::identity()),
-                    mesh_kind: None,
-                    is_particle_emitter: false,
-                    voxel_terrain: None,
-                    terrain: Some(TerrainComponent {
-                        terrain_id,
-                        chunk_cells: desc.chunk_cells,
-                        grid_x: desc.grid_size[0],
-                        grid_z: desc.grid_size[1],
-                        cell_size: desc.cell_size,
-                        height_scale: desc.height_scale,
-                    }),
-                    // Phase 17A: present but disabled, so a new terrain is bare
-                    // until foliage is deliberately switched on.
-                    foliage: Some(crate::FoliageComponent::default()),
-                    water: None,
-                    parent: None,
-                    children: Some(Children::empty()),
-                };
-                let water_id = renderer.allocate_water_body_id();
-                let water_component =
-                    WaterComponent::great_lakes(water_id, terrain_id, [0.0, 0.0, wx, wz]);
-                if let Err(error) =
-                    renderer.ensure_water_body(render_ctx, water_component.descriptor())
-                {
-                    warn!("Failed to create Great Lakes water data: {error}");
-                }
-                let water_allocation = match renderer.upload_water_body_mesh(render_ctx, water_id) {
-                    Ok(allocation) => allocation,
-                    Err(error) => {
-                        warn!("Failed to build finite Great Lakes water mesh: {error}");
-                        return;
+                match crate::create_default_landscape(renderer, render_ctx) {
+                    Ok(built) => {
+                        let desc = built.preset.terrain;
+                        let [wx, wz] = desc.world_size();
+                        let cmd = Box::new(CreateLandscapeCmd::new(built.terrain, built.water));
+                        self.undo_stack
+                            .push(cmd, &mut self.world, &mut self.selected_entity);
+                        info!(
+                            "Created landscape preset v{} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
+                            built.preset.version, desc.grid_size[0], desc.grid_size[1], wx, wz,
+                        );
                     }
-                };
-                let water_snapshot = EntitySnapshot {
-                    transform: Some(Transform::from_translation(glam::Vec3::new(
-                        wx * 0.5,
-                        water_component.surface_level,
-                        wz * 0.5,
-                    ))),
-                    name: Some(Name::new("Water")),
-                    light: None,
-                    mesh: Some(MeshComponent {
-                        vertex_offset: water_allocation.vertex_offset,
-                        index_offset: water_allocation.index_offset,
-                        index_count: water_allocation.index_count,
-                    }),
-                    mat: None,
-                    wt: Some(WorldTransform::identity()),
-                    mesh_kind: Some(MeshKind::Plane),
-                    is_particle_emitter: false,
-                    terrain: None,
-                    voxel_terrain: None,
-                    foliage: None,
-                    water: Some(water_component),
-                    parent: None,
-                    children: None,
-                };
-                let cmd = Box::new(CreateLandscapeCmd::new(snapshot, water_snapshot));
-                self.undo_stack
-                    .push(cmd, &mut self.world, &mut self.selected_entity);
-                info!(
-                    "Created terrain {} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
-                    terrain_id, desc.grid_size[0], desc.grid_size[1], wx, wz,
-                );
+                    Err(error) => warn!("Failed to create default landscape: {error}"),
+                }
             }
 
             EditorEvent::CreateEntity(kind) => {

@@ -49,6 +49,8 @@ struct WaterMaterial {
     wave_dir_a: vec2<f32>,
     wave_dir_b: vec2<f32>,
     wave_params: vec4<f32>,
+    simulation_params: vec4<f32>,
+    volume_params: vec4<f32>,
 }
 
 struct Instance {
@@ -77,6 +79,10 @@ struct Instance {
 @group(3) @binding(1) var tex_normal: texture_2d<f32>;
 @group(3) @binding(2) var tex_orm: texture_2d<f32>;
 @group(3) @binding(3) var sampler_linear: sampler;
+@group(3) @binding(4) var spectrum_displacement_large: texture_2d<f32>;
+@group(3) @binding(5) var spectrum_gradient_large: texture_2d<f32>;
+@group(3) @binding(6) var spectrum_displacement_small: texture_2d<f32>;
+@group(3) @binding(7) var spectrum_gradient_small: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
@@ -102,6 +108,32 @@ fn sdf_at(uv: vec2<f32>) -> f32 {
 
 fn local_coord(uv: vec2<f32>) -> vec2<f32> {
     return mix(material.bounds.xy, material.bounds.zw, uv);
+}
+
+fn repeating_texel(p: vec2<f32>, patch_length: f32, dimensions: vec2<u32>) -> vec2<i32> {
+    let uv = fract(p / patch_length + vec2<f32>(16.0));
+    return vec2<i32>(floor(uv * vec2<f32>(dimensions))) % vec2<i32>(dimensions);
+}
+
+fn spectral_displacement(p: vec2<f32>, shore: f32) -> vec3<f32> {
+    let large = textureLoad(spectrum_displacement_large,
+        repeating_texel(p, 192.0, textureDimensions(spectrum_displacement_large)), 0);
+    let small = textureLoad(spectrum_displacement_small,
+        repeating_texel(p, 53.0, textureDimensions(spectrum_displacement_small)), 0);
+    let combined = (large.xyz * 0.68 + small.xyz * 0.32)
+        * clamp(material.simulation_params.x, 0.0, 1.0);
+    let scale = material.surface_params.z * 0.42 * shore;
+    return vec3<f32>(combined.x, combined.z, combined.y) * scale;
+}
+
+fn spectral_gradient(p: vec2<f32>) -> vec4<f32> {
+    let large = textureLoad(spectrum_gradient_large,
+        repeating_texel(p, 192.0, textureDimensions(spectrum_gradient_large)), 0);
+    let small = textureLoad(spectrum_gradient_small,
+        repeating_texel(p, 53.0, textureDimensions(spectrum_gradient_small)), 0);
+    let blend = clamp(material.simulation_params.x, 0.0, 1.0);
+    return vec4<f32>((large.xy * 0.68 + small.xy * 0.32) * blend,
+        max(large.z, small.z) * blend, max(large.a, small.a) * blend);
 }
 
 struct WaveSample {
@@ -310,9 +342,14 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let p = local_coord(input.uv);
     let current_wave = evaluate_waves(p, frame.current_time, shore);
     let previous_wave = evaluate_waves(p, frame.previous_time, shore);
+    let spectrum_wave = spectral_displacement(p, shore);
     let base_world = (instance.model * vec4<f32>(input.position, 1.0)).xyz;
-    let current_world = base_world + (instance.model * vec4<f32>(current_wave.displacement, 0.0)).xyz;
-    let previous_world = base_world + (instance.model * vec4<f32>(previous_wave.displacement, 0.0)).xyz;
+    let current_world = base_world + (instance.model
+        * vec4<f32>(current_wave.displacement + spectrum_wave, 0.0)).xyz;
+    // Spectral displacement history remains visual-only in this tier; reusing
+    // the current sample avoids inventing a false whole-wave motion vector.
+    let previous_world = base_world + (instance.model
+        * vec4<f32>(previous_wave.displacement + spectrum_wave, 0.0)).xyz;
     let current_clip = frame.current_view_proj * vec4<f32>(current_world, 1.0);
     let previous_clip = frame.previous_view_proj * vec4<f32>(previous_world, 1.0);
     let current_ndc = current_clip.xy / current_clip.w;
@@ -337,7 +374,7 @@ struct FragmentOutput {
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> FragmentOutput {
+fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> FragmentOutput {
     if mask_at(input.uv) < 0.5 {
         discard;
     }
@@ -348,6 +385,7 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     let shore = smoothstep(0.25, 2.0, authored_depth);
     let water_coord = local_coord(input.uv);
     let wave = evaluate_waves(water_coord, frame.current_time, shore);
+    let spectrum = spectral_gradient(water_coord);
     let water_view_depth = view_depth(input.world_position);
 
     // A displaced vertex surface can keep its large silhouette waves, while
@@ -358,7 +396,10 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     let slope_resolve = 1.0 - smoothstep(shortest_wave * 0.035, shortest_wave * 0.18,
         metres_per_pixel);
     let distance_resolve = 1.0 - smoothstep(120.0, 420.0, water_view_depth);
-    let resolved_wave_normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), wave.normal,
+    let spectrum_normal = normalize(vec3<f32>(-spectrum.x * material.surface_params.z * 0.42,
+        1.0, -spectrum.y * material.surface_params.z * 0.42));
+    let combined_wave_normal = normalize(mix(wave.normal, spectrum_normal, 0.38));
+    let resolved_wave_normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), combined_wave_normal,
         min(slope_resolve, distance_resolve)));
 
     let texture_time = frame.current_time;
@@ -373,8 +414,9 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     // Move sub-pixel wave energy into roughness with distance instead of
     // letting unresolved normals become a white moiré pattern at the horizon.
     let detail_strength = 0.35 * (1.0 - smoothstep(100.0, 450.0, water_view_depth));
-    let n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
+    var n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
     let v = normalize(view.camera_pos - input.world_position);
+    if dot(n, v) < 0.0 { n = -n; }
     let ndotv = max(dot(n, v), 1e-4);
     let screen_size = vec2<f32>(textureDimensions(depth_texture));
     let screen_uv = input.clip_pos.xy / screen_size;
@@ -422,8 +464,13 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     var transmitted = refracted * tint * transmittance + single_scatter;
 
     let shore_distance = abs(sdf_at(input.uv));
-    let foam_amount = (1.0 - smoothstep(0.0, max(material.surface_params.y, 0.5), shore_distance))
+    let shore_foam = (1.0 - smoothstep(0.0, max(material.surface_params.y, 0.5), shore_distance))
         * (0.55 + 0.45 * sin(frame.current_time * 1.8 + shore_distance * 2.0));
+    let crest_foam = spectrum.a * smoothstep(0.8, 2.5, authored_depth);
+    let foam_amount = clamp(max(shore_foam, crest_foam), 0.0, 1.0);
+    let wet_band = (1.0 - smoothstep(0.0, max(material.surface_params.y * 2.5, 1.5),
+        shore_distance)) * (0.35 + foam_amount * 0.65);
+    transmitted *= 1.0 - wet_band * 0.16;
     transmitted = mix(transmitted, material.edge_color.rgb * (env_up + vec3<f32>(0.08)), foam_amount);
 
     let roughness_map = 0.5 * (
@@ -442,7 +489,15 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
     let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
     let reflected = mix(environment, ssr.rgb, ssr_weight);
-    let fresnel = fresnel_schlick(ndotv);
+    var fresnel = fresnel_schlick(ndotv);
+    if !front_facing {
+        // Water-to-air transmission reaches a critical angle. Past it the
+        // underside becomes a full reflection (the Snell-window/TIR boundary).
+        let eta = 1.333;
+        let sin_transmitted_sq = eta * eta * (1.0 - ndotv * ndotv);
+        fresnel = mix(fresnel, vec3<f32>(1.0), smoothstep(0.96, 1.02,
+            sin_transmitted_sq));
+    }
     let direct = direct_specular(n, v, sun_l, light.color * shadow, roughness)
         + direct_specular(n, v, moon_l, moon_color, max(roughness, 0.06));
     let final_color = transmitted * (vec3<f32>(1.0) - fresnel) + reflected * fresnel + direct;

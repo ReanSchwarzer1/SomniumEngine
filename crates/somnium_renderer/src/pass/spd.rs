@@ -91,7 +91,11 @@ impl SpdPass {
             cache: None,
         });
 
-        Self { pipeline, layout, stages: Vec::new() }
+        Self {
+            pipeline,
+            layout,
+            stages: Vec::new(),
+        }
     }
 
     /// Plan the dispatches for a pyramid of `levels` levels over `mip_views`.
@@ -136,7 +140,10 @@ impl SpdPass {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&mip_views[src_level as usize]),
                 },
-                wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
             ];
             for i in 0..MIPS_PER_DISPATCH {
                 // Slots past `count` are never written — the shader's loop stops
@@ -195,7 +202,7 @@ pub fn dispatches_for(levels: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatches_for, MIPS_PER_DISPATCH};
+    use super::{MIPS_PER_DISPATCH, dispatches_for};
 
     #[test]
     fn a_720p_pyramid_takes_two_dispatches_instead_of_ten() {

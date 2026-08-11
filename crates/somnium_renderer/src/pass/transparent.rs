@@ -79,9 +79,18 @@ impl TransparentPass {
             label: Some("Transparent BG"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(env_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(env_sampler),
+                },
             ],
         });
 
@@ -136,7 +145,10 @@ impl TransparentPass {
             cache: None,
         });
 
-        Self { pipeline, bind_group }
+        Self {
+            pipeline,
+            bind_group,
+        }
     }
 
     /// Draw the blended queue. `draws` must already be sorted back-to-front.
@@ -197,7 +209,11 @@ mod tests {
     use super::*;
 
     fn d(depth_sq: f32) -> TransparentDraw {
-        TransparentDraw { instance_index: 0, index_count: 3, depth_sq }
+        TransparentDraw {
+            instance_index: 0,
+            index_count: 3,
+            depth_sq,
+        }
     }
 
     #[test]

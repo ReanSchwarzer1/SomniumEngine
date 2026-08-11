@@ -118,8 +118,7 @@ pub fn paint(
         };
         let sp_sq = spacing * spacing;
         if out.iter().any(|p| {
-            p.kind == brush.kind
-                && (p.position.x - x).powi(2) + (p.position.z - z).powi(2) < sp_sq
+            p.kind == brush.kind && (p.position.x - x).powi(2) + (p.position.z - z).powi(2) < sp_sq
         }) {
             return;
         }
@@ -175,7 +174,8 @@ pub fn erase(
     let r_sq = radius * radius;
     let before = out.len();
     out.retain(|p| {
-        let inside = (p.position.x - center[0]).powi(2) + (p.position.z - center[1]).powi(2) <= r_sq;
+        let inside =
+            (p.position.x - center[0]).powi(2) + (p.position.z - center[1]).powi(2) <= r_sq;
         let matches = kind.is_none_or(|k| k == p.kind);
         !(inside && matches)
     });
@@ -201,11 +201,18 @@ mod tests {
     use super::*;
 
     fn flat(_x: f32, _z: f32) -> GroundSample {
-        GroundSample { height: 0.0, slope_cos: 1.0 }
+        GroundSample {
+            height: 0.0,
+            slope_cos: 1.0,
+        }
     }
 
     fn brush() -> FoliageBrush {
-        FoliageBrush { radius: 5.0, density: 2.0, ..Default::default() }
+        FoliageBrush {
+            radius: 5.0,
+            density: 2.0,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -231,7 +238,11 @@ mod tests {
         let area = std::f32::consts::PI * 25.0;
         let spacing = spacing_for_density(2.0);
         let ceiling = (area / (spacing * spacing)) as usize + 20;
-        assert!(v.len() < ceiling, "{} instances, expected under {ceiling}", v.len());
+        assert!(
+            v.len() < ceiling,
+            "{} instances, expected under {ceiling}",
+            v.len()
+        );
         assert!(v.len() > 20, "40 dabs only placed {}", v.len());
     }
 
@@ -257,17 +268,43 @@ mod tests {
         let mut sparse = Vec::new();
         let mut dense = Vec::new();
         for seed in 0..25 {
-            paint(&mut sparse, &FoliageBrush { density: 0.5, ..brush() }, [0.0, 0.0], seed, flat);
-            paint(&mut dense, &FoliageBrush { density: 8.0, ..brush() }, [0.0, 0.0], seed, flat);
+            paint(
+                &mut sparse,
+                &FoliageBrush {
+                    density: 0.5,
+                    ..brush()
+                },
+                [0.0, 0.0],
+                seed,
+                flat,
+            );
+            paint(
+                &mut dense,
+                &FoliageBrush {
+                    density: 8.0,
+                    ..brush()
+                },
+                [0.0, 0.0],
+                seed,
+                flat,
+            );
         }
-        assert!(dense.len() > sparse.len() * 3, "{} vs {}", dense.len(), sparse.len());
+        assert!(
+            dense.len() > sparse.len() * 3,
+            "{} vs {}",
+            dense.len(),
+            sparse.len()
+        );
     }
 
     #[test]
     fn single_mode_places_exactly_one_at_the_cursor() {
         // How trees get placed: one per click, where you point, not a scatter.
         let mut v = Vec::new();
-        let b = FoliageBrush { single: true, ..brush() };
+        let b = FoliageBrush {
+            single: true,
+            ..brush()
+        };
         let n = paint(&mut v, &b, [3.0, -4.0], 1, flat);
         assert_eq!(n, 1);
         assert_eq!(v[0].position.x, 3.0);
@@ -277,7 +314,10 @@ mod tests {
     #[test]
     fn single_mode_does_not_stack_trees_on_one_spot() {
         let mut v = Vec::new();
-        let b = FoliageBrush { single: true, ..brush() };
+        let b = FoliageBrush {
+            single: true,
+            ..brush()
+        };
         for seed in 0..10 {
             paint(&mut v, &b, [3.0, -4.0], seed, flat);
         }
@@ -288,22 +328,48 @@ mod tests {
     fn different_kinds_do_not_block_each_other() {
         // Grass must be paintable under a tree, so spacing is per palette entry.
         let mut v = Vec::new();
-        paint(&mut v, &FoliageBrush { kind: 0, single: true, ..brush() }, [0.0, 0.0], 1, flat);
-        let n = paint(&mut v, &FoliageBrush { kind: 1, single: true, ..brush() }, [0.0, 0.0], 2, flat);
+        paint(
+            &mut v,
+            &FoliageBrush {
+                kind: 0,
+                single: true,
+                ..brush()
+            },
+            [0.0, 0.0],
+            1,
+            flat,
+        );
+        let n = paint(
+            &mut v,
+            &FoliageBrush {
+                kind: 1,
+                single: true,
+                ..brush()
+            },
+            [0.0, 0.0],
+            2,
+            flat,
+        );
         assert_eq!(n, 1, "a different kind was blocked by an existing instance");
         assert_eq!(v.len(), 2);
     }
 
     #[test]
     fn steep_ground_rejects_the_brush() {
-        let cliff = |_x: f32, _z: f32| GroundSample { height: 0.0, slope_cos: 0.1 };
+        let cliff = |_x: f32, _z: f32| GroundSample {
+            height: 0.0,
+            slope_cos: 0.1,
+        };
         let mut v = Vec::new();
         assert_eq!(paint(&mut v, &brush(), [0.0, 0.0], 1, cliff), 0);
     }
 
     #[test]
     fn instances_sit_on_the_ground() {
-        let hill = |x: f32, z: f32| GroundSample { height: x * 0.5 + z, slope_cos: 1.0 };
+        let hill = |x: f32, z: f32| GroundSample {
+            height: x * 0.5 + z,
+            slope_cos: 1.0,
+        };
         let mut v = Vec::new();
         paint(&mut v, &brush(), [10.0, 10.0], 1, hill);
         for p in &v {
@@ -317,13 +383,25 @@ mod tests {
         // points at the centre and the brush paints a hot spot.
         let mut v = Vec::new();
         for seed in 0..30 {
-            paint(&mut v, &FoliageBrush { density: 4.0, ..brush() }, [0.0, 0.0], seed, flat);
+            paint(
+                &mut v,
+                &FoliageBrush {
+                    density: 4.0,
+                    ..brush()
+                },
+                [0.0, 0.0],
+                seed,
+                flat,
+            );
         }
         let inner = v.iter().filter(|p| p.position.length() < 2.5).count();
         // The inner half-radius disc is a quarter of the area, so it should hold
         // roughly a quarter of the instances.
         let frac = inner as f32 / v.len() as f32;
-        assert!((0.15..0.35).contains(&frac), "inner disc holds {frac:.2} of instances");
+        assert!(
+            (0.15..0.35).contains(&frac),
+            "inner disc holds {frac:.2} of instances"
+        );
     }
 
     #[test]
@@ -343,11 +421,30 @@ mod tests {
     #[test]
     fn erase_can_target_one_palette_entry() {
         let mut v = Vec::new();
-        paint(&mut v, &FoliageBrush { kind: 0, ..brush() }, [0.0, 0.0], 1, flat);
-        paint(&mut v, &FoliageBrush { kind: 1, single: true, ..brush() }, [0.0, 0.0], 2, flat);
+        paint(
+            &mut v,
+            &FoliageBrush { kind: 0, ..brush() },
+            [0.0, 0.0],
+            1,
+            flat,
+        );
+        paint(
+            &mut v,
+            &FoliageBrush {
+                kind: 1,
+                single: true,
+                ..brush()
+            },
+            [0.0, 0.0],
+            2,
+            flat,
+        );
         let removed = erase(&mut v, [0.0, 0.0], 5.0, Some(1));
         assert_eq!(removed, 1);
-        assert!(v.iter().all(|p| p.kind == 0), "erasing kind 1 took kind 0 with it");
+        assert!(
+            v.iter().all(|p| p.kind == 0),
+            "erasing kind 1 took kind 0 with it"
+        );
     }
 
     #[test]
@@ -365,8 +462,32 @@ mod tests {
     #[test]
     fn degenerate_brushes_do_nothing_instead_of_panicking() {
         let mut v = Vec::new();
-        assert_eq!(paint(&mut v, &FoliageBrush { radius: 0.0, ..brush() }, [0.0, 0.0], 1, flat), 0);
-        assert_eq!(paint(&mut v, &FoliageBrush { density: 0.0, ..brush() }, [0.0, 0.0], 1, flat), 0);
+        assert_eq!(
+            paint(
+                &mut v,
+                &FoliageBrush {
+                    radius: 0.0,
+                    ..brush()
+                },
+                [0.0, 0.0],
+                1,
+                flat
+            ),
+            0
+        );
+        assert_eq!(
+            paint(
+                &mut v,
+                &FoliageBrush {
+                    density: 0.0,
+                    ..brush()
+                },
+                [0.0, 0.0],
+                1,
+                flat
+            ),
+            0
+        );
         assert_eq!(erase(&mut v, [0.0, 0.0], 0.0, None), 0);
         assert_eq!(spacing_for_density(0.0), f32::MAX);
     }
