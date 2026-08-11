@@ -9,7 +9,7 @@
 > **Project:** Somnium Engine  
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
 
-The codename is thematic only. No Bethesda code, artwork, textures, names, or other game assets will be used.
+The codename is thematic, while publicly documented Bethesda Game Studios rendering and landscape-production principles are research references for this phase. Those ideas will be independently adapted to Somnium and attributed; no Bethesda source code, artwork, textures, or game assets will be copied.
 
 ## 1. Executive decision
 
@@ -118,6 +118,8 @@ Research prioritized source code in the supplied reference repositories, officia
 | Wicked Engine | Terrain uses material arrays and sparse/virtual atlas techniques for larger scopes. | Continue material arrays; avoid introducing an atlas/VT subsystem without a world-size requirement. |
 | Fyrox | Terrain layers are individually masked and authored as a stack. | Preserve intuitive layer-based authoring while keeping Somnium's packed one-pass control textures. |
 | Bevy biplanar reference | Demonstrates biplanar sampling with explicit gradients and the reduction from three projections to two, with known axis-switch discontinuities. | Use full-PBR biplanar projection as the default steep-slope path, retain triplanar as a debug/quality fallback, and test seam hysteresis. |
+| Godot 4.7.1 `BaseMaterial3D` | Its generated world/object-space triplanar path uses normalized powered-normal axis weights and exposes blend sharpness. It applies the same projected coordinates to albedo, metallic, roughness/ORM, normal, bent-normal, AO, emission, and detail inputs. Godot explicitly disables height mapping when triplanar mapping is active. | Use Godot as additional evidence that projection must cover the complete PBR channel set and expose bounded projection sharpness. Project height for material transitions, but disable parallax ray marching on the projected cliff path. Retain Somnium's explicit-gradient, orientation-correct normal implementation rather than translating Godot's generic sampling code. |
+| Godot 4.7.1 texture importer | `Image::generate_mipmap_roughness` reconstructs normal Z, builds a summed-area table, measures average-normal length over each mip footprint, estimates unresolved variance, and raises roughness accordingly before compression. The import pipeline associates a roughness texture with its source normal texture automatically. | Make normal-to-roughness association explicit in the terrain manifest and add Godot's limiter as a named validation reference for Somnium's independently implemented Toksvig-style semantic mip generator. |
 | Bethesda Game Studios / Fallout 4 | Bethesda's first-party graphics overview describes a physically based deferred renderer designed to make materials visually distinct, plus a material system that changes world surfaces when rain arrives. | Judge all sixteen materials by their light response—not albedo alone—and verify wet/dry weather states without erasing the identity of sand, soil, grass, and rock. |
 | Bethesda Game Studios / GDC 2016 | Joel Burgess and Nathan Purkeypile describe reusable modular art kits and an iterative level-design workflow as the production foundation that allowed a comparatively small content team to build Fallout 4's enormous world. | Treat the sixteen-material palette and biome preset as a reusable **landscape kit**: versioned, previewable, composable, and repeatedly reviewed across the whole terrain rather than tuned as isolated textures. |
 
@@ -128,8 +130,8 @@ Research prioritized source code in the supplied reference repositories, officia
 | Anti-tiling | Mikkelsen's practical hex tiling preserves derivatives and limits randomised repetitions; Somnium already has this implementation. | Keep and extend the existing path. Do not layer texture bombing on top. |
 | Histogram preservation | Burley's histogram-preserving blending addresses contrast/colour loss under randomized tiling. | Add only after an A/B evaluation shows measurable contrast loss; it requires preprocessing and is not automatically justified. |
 | Normal composition | Reoriented Normal Mapping (RNM) preserves detail better than linear normal averaging. | Blend transition normals through weighted surface gradients, then apply shared microdetail to the result with RNM. |
-| Specular shimmer | Toksvig filtering and LEAN mapping account for unresolved normal variance. | Generate per-mip roughness compensation offline using normal variance. Reject LEAN's additional storage for this phase. |
-| Cliff mapping | Full triplanar displacement research maps colour, detail normals, and displacement consistently. | Project every PBR channel at cliffs. Use biplanar by default for cost; keep triplanar for verification/fallback. |
+| Specular shimmer | Toksvig filtering and LEAN mapping account for unresolved normal variance. Godot 4.7.1 provides a production importer example that derives additional mip roughness from the shortened average normal vector over each footprint. | Generate per-mip roughness compensation offline using normal variance. Compare the output against an independently implemented Godot-reference limiter and reject LEAN's additional storage for this phase. |
+| Cliff mapping | Full triplanar displacement research maps colour, detail normals, and displacement consistently. Godot applies world-space triplanar coordinates across its PBR inputs, but deliberately makes height-map parallax and triplanar mutually exclusive. | Project every stored PBR channel at cliffs. Use projected height for layer-transition coherence, not projected POM; use biplanar by default for cost and keep triplanar for verification/fallback. |
 | Photogrammetry | DICE's photogrammetry workflow and MatSynth both highlight scale, material completeness, cleanup, and metadata. | Treat “photoscanned” as a quality/provenance requirement, not a marketing label. Validate seams, scale, lighting neutrality, and all PBR channels. |
 | Compression | wgpu exposes BC texture compression only when the adapter supports `TEXTURE_COMPRESSION_BC`. | Produce BC7 runtime packs and request the feature conditionally. Keep a deterministic RGBA8 fallback and never keep both resident. |
 | Virtual texturing | Unreal, Far Cry 5, Ghost Recon, O3DE, and Wicked demonstrate its value at large scale. | Defer until a profiler-backed gate is crossed. Somnium currently has a bounded 1 km terrain and a working direct-array path. |
@@ -144,6 +146,16 @@ The Appalachia codename now has a practical design link as well as the “sixtee
 - BGS senior environment artist Megan Sawyer describes a landscape team that reviews its work weekly and uses regionally meaningful flora—such as West Virginia's rhododendron—to ground Fallout 76. Foliage remains outside Phase XV, but the material manifest should retain biome and moisture tags so a later scatter system can extend the same environmental identity instead of inventing a disconnected one.
 
 This does **not** mean copying Creation Engine technology or Fallout's art direction. It contributes production principles: distinct physical materials, weather-aware validation, reusable landscape building blocks, strong regional identity, and regular landscape-scale review.
+
+### 5.4 Godot 4.7.1 source audit
+
+Godot does not provide a native 3D terrain/splat-material subsystem in the inspected source, so it does not supersede the O3DE, Unreal, Wicked, or Fyrox layer-management references. Its general material and import pipelines nevertheless add two concrete safeguards to Phase XV.
+
+First, Godot's `BaseMaterial3D` generator treats triplanar mapping as a material-wide coordinate policy rather than an albedo special case. Axis weights are derived from the powered absolute surface normal and normalized; world-space projection and blend sharpness are explicit options. The projected coordinates are reused for the available PBR and detail channels. This reinforces Somnium's full-channel cliff requirement, while Godot's documented cost warning supports keeping biplanar as the shipping default and triplanar as a reference/quality mode. Godot's prohibition on combining triplanar mapping with height-map parallax also clarifies Somnium's boundary: cliff height still participates in material/height blending, but projected POM ray marching is disabled.
+
+Second, Godot's importer supplies a useful specular anti-aliasing reference. For each roughness mip texel, it averages reconstructed normals across the corresponding full-resolution footprint using a summed-area table. The shortened mean-normal length estimates unresolved directional variance; that variance is combined with squared source roughness and bounded before writing the mip. Somnium should implement the principle independently in Rust, cite Godot and the original normal-filtering research, and compare generated mip chains against this reference behaviour. The terrain manifest's explicit pairing of surface/normal and roughness channels makes the association deterministic instead of relying on editor-time detection.
+
+Godot is MIT-licensed. No source should be copied into Somnium; any translated pattern must be independently expressed for Somnium's packed arrays, cited in `ATTRIBUTION.md`, and retain the applicable notice if a substantial portion were ever incorporated.
 
 ## 6. Proposed sixteen-material palette
 
@@ -259,6 +271,7 @@ Offline mips must be channel-aware:
 - average tangent-space normals, renormalize, and repack XY;
 - preserve linear height and AO semantics;
 - increase per-mip roughness using the lost normal-vector length/variance (Toksvig-style specular anti-aliasing);
+- compare the roughness result against the Godot 4.7.1 normal-footprint limiter and record formula/threshold differences in the pack report;
 - perform deterministic edge wrapping for tileable sources;
 - validate alpha and scalar ranges after compression.
 
@@ -275,6 +288,8 @@ Replace the current albedo-only cliff projection with a shared projected-materia
 - height.
 
 Default to biplanar projection with explicit gradients to control cost and avoid derivative errors inside divergent branches. Blend projection axes continuously and add hysteresis/smoothing around the axis switch. A triplanar mode should remain available as a debug/reference quality path. Height blending and projected normal orientation must use the same coordinates, or cliff material boundaries will swim.
+
+Projected height is used for coherent layer selection and transition blending only. POM/parallax ray marching must be disabled on the projected cliff branch, matching the practical incompatibility exposed by Godot's general material path and avoiding another divergent multi-sample loop.
 
 Slope transitions should be broad enough to avoid a visible contour around the whole landscape. Layer 14 is the preferred dedicated cliff face, while layer 2 retains legacy compatibility. Artists can override cliff assignment through painted weights.
 
@@ -340,6 +355,7 @@ All subphases are **PLANNED**. Completing a subphase requires its acceptance evi
 - Make the fetcher manifest-driven with hashes, identifying User-Agent, retries, and fail-closed validation.
 - Extend the packer to sixteen layers and physical-scale metadata.
 - Implement semantic mip generation, normal renormalization, and Toksvig-style roughness compensation.
+- Add a Godot-reference roughness-mip comparison fixture using the same source normal/roughness pairs, without copying Godot implementation code.
 - Emit 2K/4K RGBA8 and BC7 variants plus a validation report.
 
 **Exit criteria**
@@ -392,6 +408,7 @@ All subphases are **PLANNED**. Completing a subphase requires its acceptance evi
 - Default compressed material residency is at most 200 MiB at 2K.
 - Uncompressed fallback is at most 700 MiB at 2K.
 - No visible mip seams, hue shifts, dark normal mips, or new distant specular shimmer.
+- Somnium's normal-variance roughness mips have a documented comparison against the Godot-reference limiter and remain within the approved visual/error bounds.
 
 ### XV-F — Full-PBR mountain and cliff materials
 
@@ -399,6 +416,7 @@ All subphases are **PLANNED**. Completing a subphase requires its acceptance evi
 
 - Implement explicit-gradient biplanar projection for all packed channels.
 - Correct projected normal orientation and blend it through surface gradients.
+- Expose a bounded projection-sharpness control and explicitly suppress POM on the projected path while retaining projected height blending.
 - Add triplanar reference/debug mode and axis-switch diagnostics.
 - Tune cliff slope masks and dedicated rock-face selection.
 
@@ -677,6 +695,11 @@ All web sources were accessed on 2026-08-12 unless otherwise noted.
 - `C:\Users\adhir\Downloads\GE\example_repo\o3de-development\o3de-development\Code\Framework\AzFramework\AzFramework\SurfaceData\SurfaceData.h`
 - `C:\Users\adhir\Downloads\GE\example_repo\bevy-plugins\bevy_triplanar_splatting-main\src\shaders\biplanar.wgsl`
 - `C:\Users\adhir\Downloads\GE\example_repo\New_Engines\WickedEngine-master\WickedEngine\wiTerrain.cpp`
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\scene\resources\material.cpp` (`BaseMaterial3D` world/object triplanar generation and PBR-channel coverage)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\doc\classes\BaseMaterial3D.xml` (triplanar cost/quality constraints and height-mapping incompatibility)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\core\io\image.cpp` (`Image::generate_mipmap_roughness` normal-footprint roughness limiter)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\editor\import\resource_importer_texture.cpp` (normal/roughness import association and preprocessing order)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\LICENSE.txt` (Godot Engine MIT license)
 - Unreal Landscape weightmap and Runtime Virtual Texture source under `C:\Users\adhir\Downloads\GE\example_repo\UnrealEngine-release\UnrealEngine-release`
 - Relevant Fyrox terrain material/mask source under `C:\Users\adhir\Downloads\GE\example_repo`
 
