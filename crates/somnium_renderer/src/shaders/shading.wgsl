@@ -1004,30 +1004,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var moonlight = vec3<f32>(0.0);
         let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
+        let is_foliage = (material.flags & 2u) != 0u;
+
         if moon_strength > 0.0 && light.moon_intensity > 0.0 {
             let moon_dir = normalize(light.moon_direction);
             let moon_color = vec3<f32>(0.55, 0.72, 1.0) * light.moon_intensity * moon_strength;
-            let moon_geo_ndotl = saturate(dot(geo_normal, moon_dir));
-            let moon_self_shadow = smoothstep(0.0, 0.05, moon_geo_ndotl);
-            let moon_ndotl = max(dot(surface.normal, moon_dir), 0.0) * moon_self_shadow;
+
+            var moon_self_shadow = 1.0;
+            var moon_ndotl = max(dot(surface.normal, moon_dir), 0.0);
+
+            if is_foliage {
+                // Foliage uses double-sided wrapped lighting so leaves receive moonlight
+                // from both top and bottom faces, preventing pitch-black foliage at night.
+                moon_ndotl = max(dot(surface.normal, moon_dir), 0.0) + 0.35 * max(dot(-surface.normal, moon_dir), 0.0);
+            } else {
+                let moon_geo_ndotl = saturate(dot(geo_normal, moon_dir));
+                moon_self_shadow = smoothstep(0.0, 0.05, moon_geo_ndotl);
+            }
+
+            moon_ndotl = moon_ndotl * moon_self_shadow;
             moonlight = evaluate_brdf(surface, moon_dir) * moon_color * moon_ndotl;
+
+            // Transmitted moonlight for foliage leaves
+            if is_foliage && material.transmission > 0.0 {
+                moonlight += transmitted_light(surface, moon_dir, moon_color, material.transmission);
+            }
         }
 
         // Direct sunlight + directional moonlight
         let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor + moonlight;
 
-        // Phase 24S. Deliberately *not* multiplied by the shadow factor: the
-        // whole point is light arriving through the surface from the side the
-        // shadow map says is dark. Attenuating it by the shadow would remove
-        // exactly the case the term exists for.
-        let transmitted = transmitted_light(
-            surface, light_dir, light_color, material.transmission);
-        // Phase 19: real environment lighting instead of a flat 3% fudge —
-        // this is what lets metals reflect the sky.
-        // Phase 24L: one texel of traced indirect, or alpha 0 when the pass is
-        // off or unsupported — in which case `evaluate_ibl` keeps the
-        // environment-map diffuse it always used.
+        // Transmitted sunlight (only when sun is above horizon)
+        var transmitted = vec3<f32>(0.0);
+        if light_dir.y > -0.02 {
+            transmitted = transmitted_light(
+                surface, light_dir, light_color, material.transmission);
+        }
+
         let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
         let ambient = evaluate_ibl(surface, gi_texel);
 
