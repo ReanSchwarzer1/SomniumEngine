@@ -1,5 +1,8 @@
 # Phase XV — Appalachia
 
+> *“Sixteen times the detail.”* — Todd Howard  
+> Sixteen terrain materials. It had to be Appalachia.
+
 > **Codename:** Appalachia, after the setting of Bethesda Game Studios' *Fallout 76*  
 > **Status:** RESEARCH COMPLETE — IMPLEMENTATION NOT STARTED  
 > **Plan date:** 2026-08-12  
