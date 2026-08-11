@@ -42,6 +42,36 @@ struct PhysicsBody {
 }
 impl Component for PhysicsBody {}
 
+#[derive(Debug, Clone, Copy)]
+struct BuoyantVessel {
+    water_id: u32,
+    water_origin: Vec3,
+    buoyancy_per_sample: f32,
+    linear_drag: f32,
+    propulsion_force: f32,
+}
+impl Component for BuoyantVessel {}
+
+#[derive(Debug, Clone, Copy)]
+struct BoatPart {
+    vertex_offset: u32,
+    index_offset: u32,
+    index_count: u32,
+    material_id: u32,
+    local_transform: glam::Mat4,
+}
+
+#[derive(Debug, Clone)]
+struct BoatRuntime {
+    entity: Entity,
+    body: BodyId,
+    water_id: u32,
+    water_origin: Vec3,
+    initial_position: Vec3,
+    initial_rotation: glam::Quat,
+    parts: Vec<BoatPart>,
+}
+
 #[derive(Serialize)]
 struct OutlinerEntity {
     name: String,
@@ -144,14 +174,6 @@ impl EditorCamera {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Editor mode
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Paused is a planned play-mode state, not yet wired up.
-enum EditorMode {
-    Editing,
-    Playing,
-    Paused,
-}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Voxel terrain driver (Phase 14)
@@ -345,7 +367,8 @@ struct HelloGame {
     log_timer: f32,
     camera: EditorCamera,
     cascade_debug: bool,
-    editor_mode: EditorMode,
+    last_simulation_time: f32,
+    boat: Option<BoatRuntime>,
     /// Default material ID for newly created entities.
     default_material_id: Option<u32>,
     /// Geometry allocation for the procedural cube (shared by create_entity).
@@ -360,11 +383,129 @@ impl HelloGame {
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
             cascade_debug: false,
-            editor_mode: EditorMode::Editing,
+            last_simulation_time: 0.0,
+            boat: None,
             default_material_id: None,
             default_cube_alloc: None,
             voxel_terrain: None,
         }
+    }
+
+    fn spawn_default_vessel(
+        &mut self,
+        renderer: &mut somnium_renderer::SomniumRenderer,
+        render_ctx: &somnium_renderer::RenderContext,
+        world: &mut somnium_ecs::World,
+        physics: &mut somnium_physics::world::PhysicsWorld,
+        preset: somnium_core::DefaultLandscapePreset,
+        water: somnium_core::WaterComponent,
+    ) {
+        let scene = match somnium_asset::load_gltf(
+            "assets/models/gislinge_viking_boat/gislinge_viking_boat.glb",
+        ) {
+            Ok(scene) => scene,
+            Err(error) => {
+                tracing::warn!("Gislinge Viking Boat load failed: {error}");
+                return;
+            }
+        };
+        let uploaded = renderer.upload_scene(render_ctx, &scene);
+        if uploaded.is_empty() {
+            tracing::warn!("Gislinge Viking Boat contains no renderable mesh");
+            return;
+        }
+        let preferred_xz = glam::Vec2::new(
+            water.bounds[0] + (water.bounds[2] - water.bounds[0]) * 0.397,
+            water.bounds[1] + (water.bounds[3] - water.bounds[1]) * 0.716,
+        );
+        let local_xz = if renderer
+            .query_water_surface(water.water_id, preferred_xz, 0.0)
+            .is_some()
+        {
+            preferred_xz
+        } else {
+            renderer.deepest_water_point(water.water_id).map_or_else(
+                || {
+                    glam::Vec2::new(
+                        (water.bounds[0] + water.bounds[2]) * 0.5,
+                        (water.bounds[1] + water.bounds[3]) * 0.5,
+                    )
+                },
+                |point| point.0,
+            )
+        };
+        let surface = renderer
+            .query_water_surface(water.water_id, local_xz, 0.0)
+            .map_or(water.surface_level, |sample| sample.height);
+        let initial_position = Vec3::new(
+            preset.terrain_translation.x + local_xz.x,
+            preset.terrain_translation.y + surface,
+            preset.terrain_translation.z + local_xz.y,
+        );
+        // The downloaded GLB is authored in centimetres with its 7.7 m length
+        // on local Z. Scale to metres and turn that axis onto Somnium's +X
+        // vessel-forward convention.
+        let initial_rotation = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 - 0.28);
+        let body = physics.create_body(RigidBodyDescriptor {
+            // Stable low-frequency proxy for the documented 7.7 x 1.5 m hull.
+            shape: ColliderShape::Box {
+                half_extents: Vec3::new(3.55, 0.34, 0.72),
+            },
+            position: initial_position,
+            rotation: initial_rotation,
+            motion_type: MotionType::Dynamic,
+            object_layer: LAYER_MOVING,
+            friction: 0.25,
+            restitution: 0.02,
+            linear_damping: 0.08,
+            angular_damping: 0.65,
+            allow_sleeping: false,
+            ..Default::default()
+        });
+        if !body.is_valid() {
+            tracing::warn!("Gislinge Viking Boat physics hull could not be created");
+            return;
+        }
+        let parts = uploaded
+            .into_iter()
+            .map(|node| BoatPart {
+                vertex_offset: node.vertex_offset,
+                index_offset: node.index_offset,
+                index_count: node.index_count,
+                material_id: node.material_id,
+                local_transform: node.transform,
+            })
+            .collect::<Vec<_>>();
+        let entity = world.spawn((
+            Transform {
+                translation: initial_position,
+                rotation: initial_rotation,
+                scale: Vec3::splat(0.01),
+            },
+            WorldTransform::identity(),
+            PhysicsBody { id: body },
+            BuoyantVessel {
+                water_id: water.water_id,
+                water_origin: preset.terrain_translation,
+                buoyancy_per_sample: 16_000.0,
+                linear_drag: 1_200.0,
+                propulsion_force: 7_500.0,
+            },
+            Name::new("Gislinge Viking Boat (CC BY 4.0)"),
+        ));
+        self.boat = Some(BoatRuntime {
+            entity,
+            body,
+            water_id: water.water_id,
+            water_origin: preset.terrain_translation,
+            initial_position,
+            initial_rotation,
+            parts,
+        });
+        info!(
+            "Default vessel spawned: Gislinge Viking Boat (29,035 triangles, CC BY 4.0) at {:?}",
+            initial_position
+        );
     }
 
     /// Keep the voxel streaming driver in sync with the ECS.
@@ -600,6 +741,16 @@ impl GameApp for HelloGame {
                                         if viewpoint == "underwater" { 5.0 } else { 0.0 };
                                     info!(%viewpoint, depth, "Deterministic water validation viewpoint active");
                                 }
+                            }
+                            if let Some(water_component) = water_component {
+                                self.spawn_default_vessel(
+                                    renderer,
+                                    render_ctx,
+                                    ctx.world,
+                                    ctx.physics,
+                                    preset,
+                                    water_component,
+                                );
                             }
                             info!("Default landscape preset v{} active", preset.version);
                         }
@@ -998,36 +1149,122 @@ impl GameApp for HelloGame {
         }
     }
 
+    fn on_fixed_update(&mut self, ctx: &mut EngineContext) {
+        let Some(boat) = self.boat.as_ref() else {
+            return;
+        };
+        let Some(vessel) = ctx.world.get::<BuoyantVessel>(boat.entity).copied() else {
+            return;
+        };
+        let position = ctx.physics.get_position(boat.body);
+        let rotation = ctx.physics.get_rotation(boat.body);
+        let linear_velocity = ctx.physics.get_linear_velocity(boat.body);
+        let angular_velocity = ctx.physics.get_angular_velocity(boat.body);
+        let samples = [
+            Vec3::new(-3.0, -0.22, -0.42),
+            Vec3::new(-3.0, -0.22, 0.42),
+            Vec3::new(-1.0, -0.24, -0.58),
+            Vec3::new(-1.0, -0.24, 0.58),
+            Vec3::new(1.0, -0.24, -0.58),
+            Vec3::new(1.0, -0.24, 0.58),
+            Vec3::new(3.0, -0.22, -0.42),
+            Vec3::new(3.0, -0.22, 0.42),
+        ];
+        let mut wet_samples = 0.0;
+        for local_offset in samples {
+            let offset = rotation * local_offset;
+            let point = position + offset;
+            let terrain_local = glam::Vec2::new(
+                point.x - vessel.water_origin.x,
+                point.z - vessel.water_origin.z,
+            );
+            let surface = ctx.renderer.as_deref().and_then(|renderer| {
+                renderer.query_water_surface(
+                    vessel.water_id,
+                    terrain_local,
+                    ctx.simulation.elapsed_seconds,
+                )
+            });
+            let Some(surface) = surface else { continue };
+            let surface_y = vessel.water_origin.y + surface.height;
+            let submerged = ((surface_y - point.y) / 0.65).clamp(0.0, 1.0);
+            if submerged <= 0.0 {
+                continue;
+            }
+            wet_samples += submerged;
+            let point_velocity = linear_velocity + angular_velocity.cross(offset);
+            let water_velocity =
+                Vec3::new(surface.velocity.x, surface.velocity.y, surface.velocity.z);
+            let relative_velocity = water_velocity - point_velocity;
+            let buoyancy = surface.normal * vessel.buoyancy_per_sample * submerged;
+            let drag = relative_velocity * vessel.linear_drag * submerged;
+            ctx.physics
+                .add_force_at_position(boat.body, buoyancy + drag, point);
+        }
+
+        if wet_samples > 0.5 {
+            // The imported hull's bow points along +X after its root transform.
+            // A modest constant
+            // thrust makes the default scene immediately demonstrate wakes;
+            // later input/vehicle work can replace this with throttle control.
+            let forward_3d = rotation * Vec3::X;
+            let forward = Vec3::new(forward_3d.x, 0.0, forward_3d.z).normalize_or_zero();
+            let thrust = forward * vessel.propulsion_force * (wet_samples / 8.0).clamp(0.0, 1.0);
+            ctx.physics.add_force_at_position(
+                boat.body,
+                thrust,
+                position + rotation * Vec3::new(-2.8, -0.18, 0.0),
+            );
+        }
+    }
+
     fn on_update(&mut self, ctx: &mut EngineContext) {
         let dt = ctx.dt();
 
-        // Phase 11.5A-2: Propagate parent→child transforms, writing WorldTransform.
-        propagate_transforms(ctx.world);
-
-        // Sync physics → ECS transforms (only in playing/paused mode to keep editor stable)
-        if self.editor_mode == EditorMode::Playing {
-            let required = ComponentSet::from_ids(vec![
-                ComponentId::of::<Transform>(),
-                ComponentId::of::<PhysicsBody>(),
-            ]);
-            for archetype in ctx
-                .world
-                .query_archetypes_mut(&required, &ComponentSet::empty())
-            {
-                let t_col = archetype
-                    .column_index(ComponentId::of::<Transform>())
-                    .unwrap();
-                let b_col = archetype
-                    .column_index(ComponentId::of::<PhysicsBody>())
-                    .unwrap();
-                for row in 0..archetype.len() {
-                    let body = unsafe { *archetype.column(b_col).get::<PhysicsBody>(row) };
-                    let transform =
-                        unsafe { archetype.column_mut(t_col).get_mut::<Transform>(row) };
-                    transform.translation = ctx.physics.get_position(body.id);
+        // Stop rolls the shared simulation clock back to zero. Restore the
+        // demonstrator vessel at that point, while ordinary editor preview
+        // continues to advance water and rigid-body simulation.
+        if ctx.simulation.elapsed_seconds + f32::EPSILON < self.last_simulation_time {
+            if let Some(boat) = self.boat.as_ref() {
+                ctx.physics
+                    .set_position(boat.body, boat.initial_position, true);
+                ctx.physics
+                    .set_rotation(boat.body, boat.initial_rotation, true);
+                ctx.physics.set_linear_velocity(boat.body, Vec3::ZERO);
+                ctx.physics.set_angular_velocity(boat.body, Vec3::ZERO);
+                if let Some(transform) = ctx.world.get_mut::<Transform>(boat.entity) {
+                    transform.translation = boat.initial_position;
+                    transform.rotation = boat.initial_rotation;
                 }
             }
         }
+
+        let required = ComponentSet::from_ids(vec![
+            ComponentId::of::<Transform>(),
+            ComponentId::of::<PhysicsBody>(),
+        ]);
+        for archetype in ctx
+            .world
+            .query_archetypes_mut(&required, &ComponentSet::empty())
+        {
+            let t_col = archetype
+                .column_index(ComponentId::of::<Transform>())
+                .unwrap();
+            let b_col = archetype
+                .column_index(ComponentId::of::<PhysicsBody>())
+                .unwrap();
+            for row in 0..archetype.len() {
+                let body = unsafe { *archetype.column(b_col).get::<PhysicsBody>(row) };
+                let transform = unsafe { archetype.column_mut(t_col).get_mut::<Transform>(row) };
+                transform.translation = ctx.physics.get_position(body.id);
+                transform.rotation = ctx.physics.get_rotation(body.id);
+            }
+        }
+        self.last_simulation_time = ctx.simulation.elapsed_seconds;
+
+        // Propagate after physics/editor synchronization so render transforms
+        // reflect Play, Pause, and Stop in the same frame.
+        propagate_transforms(ctx.world);
 
         self.camera.update(dt, ctx.camera_speed);
         self.log_timer += dt;
@@ -1050,6 +1287,24 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        let (wake_origin_direction, wake_params) =
+            self.boat.as_ref().map_or(([0.0; 4], [0.0; 4]), |boat| {
+                let position = ctx.physics.get_position(boat.body);
+                let forward_3d = ctx.physics.get_rotation(boat.body) * Vec3::X;
+                let forward = Vec3::new(forward_3d.x, 0.0, forward_3d.z).normalize_or_zero();
+                let velocity = ctx.physics.get_linear_velocity(boat.body);
+                let speed = velocity.dot(forward).max(0.0);
+                let wake_strength = ((speed - 0.25) / 2.4).clamp(0.0, 1.0);
+                (
+                    [
+                        position.x - boat.water_origin.x,
+                        position.z - boat.water_origin.z,
+                        forward.x,
+                        forward.z,
+                    ],
+                    [speed, wake_strength, 110.0, 3.0],
+                )
+            });
         if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
             let aspect = render_ctx.config.width as f32 / render_ctx.config.height as f32;
             let view_mat = self.camera.view_matrix();
@@ -1275,6 +1530,32 @@ impl GameApp for HelloGame {
                 }
             }
 
+            // The Viking boat is a single ECS/physics entity backed by the
+            // original GLB's multi-node render hierarchy. Submit every part
+            // against the shared rigid-body root without flooding the outliner.
+            if let Some(boat) = self.boat.as_ref() {
+                let root = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::splat(0.01),
+                    ctx.physics.get_rotation(boat.body),
+                    ctx.physics.get_position(boat.body),
+                );
+                for (part_index, part) in boat.parts.iter().enumerate() {
+                    renderer.submit(somnium_renderer::command::DrawCommand {
+                        casts_shadow: true,
+                        sort_key: somnium_renderer::command::SortKey::new(
+                            0,
+                            part.material_id as u16,
+                            boat.entity.index().saturating_add(part_index as u32),
+                        ),
+                        vertex_offset: part.vertex_offset,
+                        index_offset: part.index_offset,
+                        index_count: part.index_count,
+                        material_id: part.material_id,
+                        transform: root * part.local_transform,
+                    });
+                }
+            }
+
             // Phase 14: Submit voxel chunk draws (visibility buffer pipeline).
             if let Some(vt) = &self.voxel_terrain {
                 vt.submit_draws(renderer);
@@ -1356,6 +1637,14 @@ impl GameApp for HelloGame {
                                 0.0,
                                 0.0,
                             ],
+                            wake_origin_direction,
+                            wake_params: if water.water_id
+                                == self.boat.as_ref().map_or(u32::MAX, |b| b.water_id)
+                            {
+                                wake_params
+                            } else {
+                                [0.0; 4]
+                            },
                         },
                         mesh.vertex_offset,
                         mesh.index_offset,

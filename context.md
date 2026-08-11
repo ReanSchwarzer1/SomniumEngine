@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-11
-> **Current phase:** Phase IV-H complete; IV-I interaction tier next
+> **Current phase:** Phase IV complete (IV-A through IV-J)
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
 ---
@@ -3356,7 +3356,7 @@ complete until those checks are recorded.
 1025×1025 16-bit derivative of Motion Forge Pictures' FLOAT32 Great Lakes EXR.
 The importer preserves floating-point EXR channels, verifies the audited source
 range, area-resamples height, masks water out of the sRGB macro-colour map, and
-bakes a 1024×1024 water mask, shoreline SDF, and 0–12 m synthetic bathymetry.
+bakes a 2048×2048 water mask, shoreline SDF, and 0–12 m synthetic bathymetry.
 The dry terrain floor is 0.35 m above the 15 m water datum, preventing coplanar
 ground and water.
 
@@ -3428,6 +3428,27 @@ removed. Release validation passed 33 core tests, 208 renderer tests, 9 shader
 module tests, 3 UI tests, and every remaining workspace target. Live evidence
 is `dev records/phase IV/IV-F-G-H/IV-F-G-H_surface_day.png`,
 `IV-G_underwater_deep.png`, and `IV-G_waterline_transition.png` in that folder.
+
+**IV-I/J completed 2026-08-11.** The default scene adds Opus Poly's CC BY 4.0
+Gislinge Viking Boat as an unchanged 29,035-triangle multi-node GLB with its
+embedded materials and a separate stable Jolt proxy hull. Fixed-step
+environment simulation runs at 60 Hz in both Editing and Playing. Eight hull samples use the existing deterministic CPU
+water query for distributed buoyancy, drag, and propulsion; the resulting
+heading and speed drive analytic Kelvin-angle wake arms and prop-wash foam in
+the water pass. The viewport toolbar now exposes Play, Pause/Resume, and Stop;
+pausing freezes gameplay, physics, particles, and water time, while stopping
+restores the vessel pose and clears velocities before live editor preview resumes.
+
+Water's near-shore presentation now retains the 2048² source contour and uses a
+bilinearly reconstructed, derivative-antialiased SDF boundary, a one-cell
+raster guard ring around the wet footprint, a foam width in world metres,
+noise-broken breakers, and a three-band
+rotated normal detail stack with distance fade. This visually softens the
+terrain/water intersection without changing the licensed source elevation data
+or allowing water onto dry depth-tested terrain. Complete vessel provenance,
+license, hash, scale, and render/physics separation notes live in
+`assets/models/gislinge_viking_boat/README.md`; future screenshots belong in
+`dev records/phase IV/IV-I-J/`, never the repository root.
 
 ## 18. Known Issues & Active Bugs
 

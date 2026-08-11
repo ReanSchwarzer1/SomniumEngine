@@ -13,6 +13,10 @@ pub struct WaterMaterialData {
     pub wave_params: [f32; 4],       // wavelengths A/B, speed, steepness
     pub simulation_params: [f32; 4], // spectral blend, wind speed, foam decay/threshold
     pub volume_params: [f32; 4],     // caustics, underwater enabled, reserved
+    /// Vessel local-XZ origin followed by its forward direction.
+    pub wake_origin_direction: [f32; 4],
+    /// Speed, strength, wake length, and half-width in metres.
+    pub wake_params: [f32; 4],
 }
 
 const WATER_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -334,7 +338,7 @@ impl WaterPass {
                         binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -794,7 +798,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_their_sixteen_byte_wgsl_layouts() {
-        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 176);
+        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 208);
         assert_eq!(std::mem::size_of::<WaterFrameData>(), 144);
         assert_eq!(std::mem::size_of::<WaterMaterialData>() % 16, 0);
     }

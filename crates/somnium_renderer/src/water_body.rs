@@ -322,7 +322,7 @@ impl WaterBodyData {
             }
         }
         let row = cells_x + 1;
-        let mut indices = Vec::new();
+        let mut wet_cells = vec![false; (cells_x * cells_z) as usize];
         for z in 0..cells_z {
             for x in 0..cells_x {
                 let sx0 = (x * self.size[0] / cells_x).min(self.size[0] - 1);
@@ -332,12 +332,29 @@ impl WaterBodyData {
                 // Keep a coarse cell if any covered source texel is wet. The
                 // fragment mask then owns the exact shore, so decimation can
                 // add harmless overdraw but can never cut a narrow inlet out.
-                let wet = (sz0..sz1).any(|source_z| {
+                wet_cells[(z * cells_x + x) as usize] = (sz0..sz1).any(|source_z| {
                     (sx0..sx1).any(|source_x| {
                         self.mask[(source_z * self.size[0] + source_x) as usize] >= 128
                     })
                 });
-                if !wet {
+            }
+        }
+
+        let mut indices = Vec::new();
+        for z in 0..cells_z {
+            for x in 0..cells_x {
+                // Rasterize one dry coarse-cell guard ring around the wet set.
+                // The SDF fragment contour still owns exact coverage. Without
+                // this ring the sparse mesh itself became the visible shore,
+                // producing the large 2 m square/triangle bites seen in IV-I.
+                let min_x = x.saturating_sub(1);
+                let max_x = (x + 1).min(cells_x - 1);
+                let min_z = z.saturating_sub(1);
+                let max_z = (z + 1).min(cells_z - 1);
+                let touches_water = (min_z..=max_z).any(|near_z| {
+                    (min_x..=max_x).any(|near_x| wet_cells[(near_z * cells_x + near_x) as usize])
+                });
+                if !touches_water {
                     continue;
                 }
                 let base = z * row + x;
@@ -513,7 +530,7 @@ mod tests {
             wave_steepness: 0.45,
         };
         let (size, mask, depth, sdf) = load_assets(descriptor).expect("baked assets");
-        assert_eq!(size, [1024, 1024]);
+        assert_eq!(size, [2048, 2048]);
         assert_eq!(mask.len(), depth.len());
         assert_eq!(mask.len(), sdf.len());
         assert!(mask.iter().any(|&v| v == 0) && mask.iter().any(|&v| v != 0));

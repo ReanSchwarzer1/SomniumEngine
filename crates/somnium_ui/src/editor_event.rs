@@ -196,6 +196,12 @@ pub enum EditorEvent {
     Undo,
     Redo,
     ToggleShadingMode,
+    /// Start or resume deterministic game/physics time.
+    PlaySimulation,
+    /// Freeze game/physics time while keeping the editor interactive.
+    PauseSimulation,
+    /// Return to edit mode and reset the simulation clock.
+    StopSimulation,
     SaveScene,
     NewScene,
     LoadScene(String),

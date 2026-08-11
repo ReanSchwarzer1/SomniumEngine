@@ -103,7 +103,40 @@ unsafe extern "C" {
         z: f32,
     );
     pub fn jph_body_interface_add_force(system: *mut c_void, body_id: u32, x: f32, y: f32, z: f32);
+    pub fn jph_body_interface_add_force_at_position(
+        system: *mut c_void,
+        body_id: u32,
+        fx: f32,
+        fy: f32,
+        fz: f32,
+        px: f32,
+        py: f32,
+        pz: f32,
+    );
     pub fn jph_body_interface_add_impulse(
+        system: *mut c_void,
+        body_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+    );
+    pub fn jph_body_interface_set_rotation(
+        system: *mut c_void,
+        body_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        w: f32,
+        activation: std::os::raw::c_int,
+    );
+    pub fn jph_body_interface_get_angular_velocity(
+        system: *mut c_void,
+        body_id: u32,
+        out_x: *mut f32,
+        out_y: *mut f32,
+        out_z: *mut f32,
+    );
+    pub fn jph_body_interface_set_angular_velocity(
         system: *mut c_void,
         body_id: u32,
         x: f32,

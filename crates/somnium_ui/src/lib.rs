@@ -254,6 +254,12 @@ struct EditorLayout {
     file_import_item: NodeHandle,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    play_button: NodeHandle,
+    play_label: NodeHandle,
+    pause_button: NodeHandle,
+    pause_label: NodeHandle,
+    stop_button: NodeHandle,
+    stop_label: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, u8)>,
     inspector_handles: InspectorHandles,
     viewport_handle: NodeHandle,
@@ -302,6 +308,12 @@ pub struct UiManager {
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    play_button: NodeHandle,
+    play_label: NodeHandle,
+    pause_button: NodeHandle,
+    pause_label: NodeHandle,
+    stop_button: NodeHandle,
+    stop_label: NodeHandle,
     // Terrain tool buttons (Phase 14F): (button_handle, BrushMode index)
     terrain_tool_items: Vec<(NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -390,6 +402,12 @@ impl UiManager {
             file_import_item: layout.file_import_item,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
+            play_button: layout.play_button,
+            play_label: layout.play_label,
+            pause_button: layout.pause_button,
+            pause_label: layout.pause_label,
+            stop_button: layout.stop_button,
+            stop_label: layout.stop_label,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             inspector_handles: layout.inspector_handles,
@@ -506,6 +524,22 @@ impl UiManager {
             self.camera_speed_label,
             format!("{speed:.1} m/s"),
         ));
+    }
+
+    /// Keep the UE-style transport controls visually synchronized with the
+    /// engine-owned simulation state.
+    pub fn update_simulation_controls(&mut self, state: u8) {
+        let (play, pause, stop) = match state {
+            1 => ("[>] Playing", "[||] Pause", "[ ] Stop"),
+            2 => ("[>] Resume", "[||] Paused", "[ ] Stop"),
+            _ => ("[>] Play", "[||] Pause", "[ ] Reset"),
+        };
+        self.native_ui
+            .send(TextMessage::set_text(self.play_label, play.to_string()));
+        self.native_ui
+            .send(TextMessage::set_text(self.pause_label, pause.to_string()));
+        self.native_ui
+            .send(TextMessage::set_text(self.stop_label, stop.to_string()));
     }
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
@@ -1078,6 +1112,18 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleProfiler);
                     continue;
                 }
+                if msg.destination == self.play_button {
+                    self.editor_events.push_back(EditorEvent::PlaySimulation);
+                    continue;
+                }
+                if msg.destination == self.pause_button {
+                    self.editor_events.push_back(EditorEvent::PauseSimulation);
+                    continue;
+                }
+                if msg.destination == self.stop_button {
+                    self.editor_events.push_back(EditorEvent::StopSimulation);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.post_cel_toggle {
                     self.editor_events
                         .push_back(EditorEvent::TogglePostFx(PostFxToggle::CelShading));
@@ -1421,6 +1467,34 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .with_color(theme::TEXT_PRIMARY)
     .build();
     let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
+
+    // Phase IV-I: editor transport controls. These live in the viewport bar,
+    // where their state remains visible while inspecting the moving vessel.
+    let transport_button =
+        |ui: &mut UserInterface, parent: NodeHandle, text: &str, font_id: u8, left: f32| {
+            let button = ButtonBuilder::new(WidgetBuilder::new().with_height(20.0).with_margin(
+                Thickness {
+                    left,
+                    top: 3.0,
+                    right: 3.0,
+                    bottom: 0.0,
+                },
+            ))
+            .build();
+            let button_handle = ui.add_node(button, parent);
+            let label =
+                TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(7.0, 3.0)))
+                    .with_text(text)
+                    .with_font_size(11.0)
+                    .with_font_id(font_id)
+                    .with_color(theme::TEXT_PRIMARY)
+                    .build();
+            let label_handle = ui.add_node(label, button_handle);
+            (button_handle, label_handle)
+        };
+    let (play_button, play_label) = transport_button(ui, vp_stack_h, "[>] Play", font_id, 14.0);
+    let (pause_button, pause_label) = transport_button(ui, vp_stack_h, "[||] Pause", font_id, 0.0);
+    let (stop_button, stop_label) = transport_button(ui, vp_stack_h, "[ ] Stopped", font_id, 0.0);
 
     // Phase 29: the profiler switch lives on the viewport toolbar rather than
     // in a menu, because it is a thing you flick on and off while looking at
@@ -1861,6 +1935,12 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         file_import_item,
         camera_speed_slider,
         camera_speed_label,
+        play_button,
+        play_label,
+        pause_button,
+        pause_label,
+        stop_button,
+        stop_label,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,

@@ -11,7 +11,7 @@ use std::{
 
 const SOURCE_SIZE: u32 = 2048;
 const HEIGHT_SIZE: u32 = 1025;
-const WATER_SIZE: u32 = 1024;
+const WATER_SIZE: u32 = 2048;
 const MACRO_SIZE: u32 = 512;
 const PLATEAU: f32 = 0.040_073_775;
 const PLATEAU_EPSILON: f32 = 0.000_1;
@@ -21,7 +21,8 @@ const WATER_LEVEL_M: f32 = 15.0;
 const MAX_DEPTH_M: f32 = 12.0;
 const LAND_RELIEF_M: f32 = 90.0;
 const TOTAL_HEIGHT_M: f32 = WATER_LEVEL_M + LAND_RELIEF_M;
-const SHORE_WIDTH_PX: f32 = 72.0;
+// 72 world metres at the 0.5 m source-texel scale.
+const SHORE_WIDTH_PX: f32 = 144.0;
 
 fn scalar_exr(path: &Path) -> Result<(u32, u32, Vec<f32>), String> {
     use exr::prelude::*;
@@ -93,14 +94,20 @@ fn cell_mask(src: &[f32], sw: u32) -> Vec<u8> {
     let mut mask = vec![0; (WATER_SIZE * WATER_SIZE) as usize];
     for y in 0..WATER_SIZE {
         for x in 0..WATER_SIZE {
+            let sx0 = x * sw / WATER_SIZE;
+            let sx1 = ((x + 1) * sw / WATER_SIZE).max(sx0 + 1).min(sw);
+            let sy0 = y * sw / WATER_SIZE;
+            let sy1 = ((y + 1) * sw / WATER_SIZE).max(sy0 + 1).min(sw);
             let mut hits = 0;
-            for oy in 0..2 {
-                for ox in 0..2 {
-                    let h = src[((y * 2 + oy) * sw + x * 2 + ox) as usize];
+            let mut samples = 0;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let h = src[(sy * sw + sx) as usize];
                     hits += u32::from((h - PLATEAU).abs() <= PLATEAU_EPSILON);
+                    samples += 1;
                 }
             }
-            mask[(y * WATER_SIZE + x) as usize] = if hits >= 3 { 255 } else { 0 };
+            mask[(y * WATER_SIZE + x) as usize] = if hits * 4 >= samples * 3 { 255 } else { 0 };
         }
     }
     mask
@@ -217,8 +224,8 @@ fn main() -> Result<(), String> {
     let mut metres = vec![0.0; resampled.len()];
     for y in 0..HEIGHT_SIZE {
         for x in 0..HEIGHT_SIZE {
-            let cx = x.min(WATER_SIZE - 1);
-            let cy = y.min(WATER_SIZE - 1);
+            let cx = x * (WATER_SIZE - 1) / (HEIGHT_SIZE - 1);
+            let cy = y * (WATER_SIZE - 1) / (HEIGHT_SIZE - 1);
             let ci = (cy * WATER_SIZE + cx) as usize;
             let i = (y * HEIGHT_SIZE + x) as usize;
             metres[i] = if mask[ci] != 0 {
@@ -272,7 +279,9 @@ fn main() -> Result<(), String> {
                     }
                 }
             }
-            let water = mask[((y * 2 * WATER_SIZE + x * 2) as usize).min(mask.len() - 1)] != 0;
+            let mx = x * WATER_SIZE / MACRO_SIZE;
+            let my = y * WATER_SIZE / MACRO_SIZE;
+            let water = mask[(my * WATER_SIZE + mx) as usize] != 0;
             macro_pixels.extend_from_slice(&if water {
                 [128, 128, 128, 0]
             } else {

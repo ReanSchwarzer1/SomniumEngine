@@ -1,7 +1,7 @@
 # Phase IV — Great Lakes Landscape and Black Flag Water
 
 **Project:** Somnium Engine  
-**Status:** IV-A through IV-H complete; IV-I next
+**Status:** IV-A through IV-J complete
 **Plan date:** 2026-08-11  
 **Codename:** Black Flag  
 **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -17,8 +17,7 @@ Phase IV will replace the current demo terrain/water pairing with one shared, pr
 - application startup and **Create → Terrain** call one landscape factory, so they cannot drift;
 - asset and reference provenance is recorded in `assets/LICENSE.md` and `ATTRIBUTION.md` before the new default ships.
 
-IV-A through IV-H were implemented on 2026-08-11. The remaining sections are
-the active plan beginning with IV-I.
+IV-A through IV-J were implemented on 2026-08-11.
 
 Live wgpu evidence is stored by phase under [`dev records/phase IV`](dev%20records/phase%20IV).
 The IV-F/G/H release captures cover the default spectral surface, deep
@@ -257,7 +256,7 @@ normal while retaining face normals for ordinary meshes.
 **Status: DONE — 2026-08-11**
 
 Added the deterministic `bake_great_lakes` importer and committed its 1025²
-16-bit height, masked macro colour, 1024² lake mask, bathymetric depth, shoreline
+16-bit height, masked macro colour, 2048² lake mask, bathymetric depth, shoreline
 SDF, and recipe products. Repeated runs produce identical hashes. The default
 terrain now loads these derivatives, uses 105 m total relief, a 15 m water datum,
 up to 12 m of synthetic bathymetry, and a 0.35 m minimum dry-ground clearance.
@@ -474,6 +473,34 @@ The legacy `WaterPlane` startup path and demo-owned water texture setup are gone
 
 ### IV-I — Interaction tier (after the visual/volume foundation)
 
+**Status: DONE — 2026-08-11**
+
+The default landscape now spawns Opus Poly's 29,035-triangle Gislinge Viking
+Boat as a first-class ECS entity with its original embedded materials and a
+separate, low-frequency Jolt proxy hull. Eight distributed hull samples query the same
+deterministic CPU water surface used by rendering and apply buoyancy, point
+drag, righting torque, and submerged propulsion at a fixed 60 Hz. Vessel speed
+and heading feed an original analytic Kelvin-angle wake and prop-wash foam path
+in the water shader. Environment simulation runs in editor preview as well as
+Play mode and requires no GPU readback.
+
+The editor viewport toolbar now owns Play, Pause/Resume, and Stop controls.
+One simulation clock gates Jolt steps, particle time, and water time. Editing
+and Playing both advance it, Pause holds the exact state while rendering
+continues, and Stop resets time, velocities, and the vessel pose before live
+editor preview resumes. Rendering and physics therefore always sample the same
+water time.
+
+The shoreline readability fix is part of this milestone: the full 2048² source
+contour replaces the old 1024² majority mask, its SDF zero contour is bilinearly
+reconstructed and antialiased, SDF distance is evaluated in metres,
+and a broken-up depth-aware breaker band blends into crest/wake foam. Three
+rotated normal-map frequency bands with distance fade replace the former two
+obvious high-frequency tiles. A one-cell raster guard ring now surrounds the
+wet-cell mesh so the fragment SDF—not missing coarse triangles—owns the entire
+visible coastline. This removes the large square/triangular bites without
+moving or smoothing the source height field.
+
 **Work**
 
 - Ripple-normal injection for rain, footsteps, projectiles, and small impacts.
@@ -488,6 +515,21 @@ The legacy `WaterPlane` startup path and demo-owned water texture setup are gone
 - Server/CPU users can query deterministic water without requiring full GPU readback every frame.
 
 ### IV-J — Documentation, attribution, and completion evidence
+
+**Status: DONE — 2026-08-11**
+
+The vessel is Opus Poly's CC BY 4.0 Gislinge Viking Boat.
+`assets/models/gislinge_viking_boat/README.md` records the author, original
+page, license, source hash, real-world dimensions, runtime scaling, and the
+render-hierarchy/physics-hull boundary. `assets/LICENSE.md`,
+`ATTRIBUTION.md`, and `context.md` carry the same provenance and implementation
+record. No screenshots were added to the repository root; any later visual
+acceptance captures belong under `dev records/phase IV/IV-I-J/`.
+
+Validation covers formatting, workspace compilation/tests, shader-module
+validation, and targeted Clippy on the touched crates. Runtime visual inspection
+remains the final check for foam strength and vessel framing on the user's
+adapter.
 
 - Update `context.md` after every completed sub-phase.
 - Add pattern-level citations to `ATTRIBUTION.md` before translating each reference.
@@ -581,6 +623,7 @@ Reference implementations are architectural/pattern sources only. No third-party
 - AMD GPUOpen, [FidelityFX Stochastic Screen Space Reflections](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/stochastic-screen-space-reflections/).
 - Monzon et al. (2024), [*Real-Time Underwater Spectral Rendering*](https://diglib.eg.org/items/1316f247-e9a8-48fe-8754-f3276191e6b5), DOI `10.1111/cgf.15009`.
 - Jeschke et al., [*Water Surface Wavelets*](https://research.nvidia.com/labs/prl/shallow-water-simulation/) — long-term interaction reference.
+- Opus Poly, [Gislinge Viking Boat](https://sketchfab.com/3d-models/gislinge-viking-boat-01098ad7973647a9b558f41d2ebc5193), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ### Local reference file index
 

@@ -27,17 +27,20 @@ is supplied voluntarily even though CC0 does not require it.
 
 | File | Encoding | SHA-256 |
 |---|---|---|
-| `height.png` | 1025×1025, 16-bit height samples | `737062867d6af1a153df69f41cdb258296f9a2c759e49bf59a7d6852489f768f` |
-| `macro_color.png` | 512×512 sRGB RGBA; water alpha is zero | `b60371ec104c13bdcff143ea2d3312e3b42d13324b05192c02fef2d780d3485c` |
-| `water_mask.png` | 1024×1024, 8-bit wet/dry mask | `3e237185204389989d107430fb5a00d22818ed9d8fee72e0210e638e4fab66f0` |
-| `water_depth.png` | 1024×1024, 16-bit normalized 0–12 m depth | `585bcfecbdbdd5e6aa02ea4a8e2f3478b3393596028f2f08717cabf1dab82a9c` |
-| `shore_sdf.png` | 1024×1024, signed shore distance encoded over ±128 cells | `5ec68ca47a1de0067b4f10f119d10935b51b4026f1dc54c698f1506ec6398085` |
+| `height.png` | 1025×1025, 16-bit height samples | `90325eb716efc1f5c7e98da291eab8a33a694e63b8f20c45bd8735336c5d5842` |
+| `macro_color.png` | 512×512 sRGB RGBA; water alpha is zero | `ea07cbabff6b87b320af416cf2fee8237c5191e9addce621b96e4d6444f5d089` |
+| `water_mask.png` | 2048×2048, 8-bit wet/dry mask | `d832a6a8b21a0846a0b843423e6789a10363a422fd2aa9473eeafc241764fec8` |
+| `water_depth.png` | 2048×2048, 16-bit normalized 0–12 m depth | `3bdb89cb735c0aeee1fa38ce386ec82221bf211d74a9b25dc51dfa059efccedd` |
+| `shore_sdf.png` | 2048×2048, signed shore distance encoded over ±128 cells | `9b46d9cf87408cdc003bf7afba3f08e9e0e0f478595e0811957d8c44d3a17312` |
 
 `recipe.json` records the audited float range, plateau tolerance, water datum,
 bathymetry settings, output dimensions, and source hashes. The bake makes dry
 terrain at least 0.35 m higher than the 15 m water datum, so no terrain/water
 surface remains coplanar. Selected lake plateaus receive a smooth synthetic bed
-up to 12 m deep.
+up to 12 m deep. Phase IV-I retains the source's full 2048² wet/dry contour
+instead of majority-downsampling it to 1024²; the water shader reconstructs a
+bilinear zero contour from the SDF, giving the shoreline 0.5 m authored samples
+plus screen-space antialiasing.
 
 Rebuild deterministically from the downloaded source directory:
 

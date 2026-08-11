@@ -26,6 +26,54 @@ use somnium_ui::UiManager;
 use crate::config::EngineConfig;
 use crate::time::TimeState;
 
+/// Editor-controlled simulation clock shared by gameplay, physics and render
+/// systems. Editing is a live environment preview; rendering may continue
+/// while explicitly paused, but no simulation time or fixed physics step then
+/// advances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimulationClock {
+    /// Whether the editor is live-previewing, playing, or explicitly paused.
+    pub state: SimulationState,
+    /// Deterministic environment/game time advanced only by fixed steps.
+    pub elapsed_seconds: f32,
+    /// Duration of one gameplay/physics step, in seconds.
+    pub fixed_delta_seconds: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SimulationClock, SimulationState};
+
+    #[test]
+    fn simulation_clock_starts_in_live_editor_at_sixty_hertz() {
+        let clock = SimulationClock::default();
+        assert_eq!(clock.state, SimulationState::Editing);
+        assert!(clock.elapsed_seconds.abs() < f32::EPSILON);
+        assert!((clock.fixed_delta_seconds - 1.0 / 60.0).abs() < f32::EPSILON);
+    }
+}
+
+impl Default for SimulationClock {
+    fn default() -> Self {
+        Self {
+            state: SimulationState::Editing,
+            elapsed_seconds: 0.0,
+            fixed_delta_seconds: 1.0 / 60.0,
+        }
+    }
+}
+
+/// Editor transport state for gameplay and fixed-step physics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationState {
+    /// Authoring mode; gameplay time is reset and physics does not advance.
+    Editing,
+    /// Fixed-step gameplay and physics are advancing.
+    Playing,
+    /// The current simulated state is held while rendering continues.
+    Paused,
+}
+
 /// Contextual data available to game code each frame.
 ///
 /// See the [module-level documentation](self) for lifetime rationale.
@@ -59,6 +107,9 @@ pub struct EngineContext<'a> {
     /// RMB + scroll wheel (Phase 20B). Game code reads this each frame rather
     /// than owning its own speed.
     pub camera_speed: f32,
+
+    /// Play/Pause/Stop state and deterministic fixed-step time.
+    pub simulation: SimulationClock,
 
     /// Set by [`Self::set_camera_speed`]; the engine applies it after the
     /// callback returns. Same read-back pattern as `should_exit`, since the
@@ -99,6 +150,7 @@ impl<'a> EngineContext<'a> {
         selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
         ui: &'a mut UiManager,
         camera_speed: f32,
+        simulation: SimulationClock,
     ) -> Self {
         Self {
             time,
@@ -110,6 +162,7 @@ impl<'a> EngineContext<'a> {
             renderer,
             selected_entity,
             camera_speed,
+            simulation,
             camera_speed_request: None,
             ui,
             should_exit: false,

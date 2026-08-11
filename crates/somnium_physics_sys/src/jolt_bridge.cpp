@@ -305,10 +305,44 @@ void jph_body_interface_add_force(void* system_ptr, uint32_t body_id, float x, f
     ctx->system->GetBodyInterface().AddForce(id, Vec3(x, y, z));
 }
 
+void jph_body_interface_add_force_at_position(void* system_ptr, uint32_t body_id,
+                                               float fx, float fy, float fz,
+                                               float px, float py, float pz) {
+    auto* ctx = static_cast<PhysicsContext*>(system_ptr);
+    BodyID id(body_id);
+    ctx->system->GetBodyInterface().AddForce(id, Vec3(fx, fy, fz), RVec3(px, py, pz));
+}
+
 void jph_body_interface_add_impulse(void* system_ptr, uint32_t body_id, float x, float y, float z) {
     PhysicsContext* ctx = (PhysicsContext*)system_ptr;
     BodyID id(body_id);
     ctx->system->GetBodyInterface().AddImpulse(id, Vec3(x, y, z));
+}
+
+
+void jph_body_interface_set_rotation(void* system_ptr, uint32_t body_id,
+                                     float x, float y, float z, float w, int activation) {
+    auto* ctx = static_cast<PhysicsContext*>(system_ptr);
+    BodyID id(body_id);
+    ctx->system->GetBodyInterface().SetRotation(
+        id, Quat(x, y, z, w), activation ? EActivation::Activate : EActivation::DontActivate);
+}
+
+void jph_body_interface_get_angular_velocity(void* system_ptr, uint32_t body_id,
+                                             float* out_x, float* out_y, float* out_z) {
+    auto* ctx = static_cast<PhysicsContext*>(system_ptr);
+    BodyID id(body_id);
+    Vec3 velocity = ctx->system->GetBodyInterface().GetAngularVelocity(id);
+    *out_x = velocity.GetX();
+    *out_y = velocity.GetY();
+    *out_z = velocity.GetZ();
+}
+
+void jph_body_interface_set_angular_velocity(void* system_ptr, uint32_t body_id,
+                                             float x, float y, float z) {
+    auto* ctx = static_cast<PhysicsContext*>(system_ptr);
+    BodyID id(body_id);
+    ctx->system->GetBodyInterface().SetAngularVelocity(id, Vec3(x, y, z));
 }
 
 } // extern "C"

@@ -8,10 +8,10 @@
   "plateau_epsilon": 0.0001,
   "resample": "centred area box",
   "terrain_size": 1025,
-  "water_size": 1024,
+  "water_size": 2048,
   "water_level_metres": 15,
   "max_depth_metres": 12,
-  "wet_cells": 299034,
-  "wet_fraction": 0.28518105,
+  "wet_cells": 1199232,
+  "wet_fraction": 0.28591919,
   "max_baked_depth_metres": 12.000000
 }

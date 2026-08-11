@@ -62,7 +62,7 @@ pub mod time;
 
 pub use app::{Engine, GameApp};
 pub use config::EngineConfig;
-pub use context::EngineContext;
+pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
     CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
     ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
@@ -1262,12 +1262,14 @@ impl WaterComponent {
             wave_length_b: 11.0,
             wave_speed: 0.85,
             wave_steepness: 0.42,
+            edge_color: [0.88, 0.96, 1.0, 1.0],
+            edge_scale: 1.35,
             absorption: [0.22, 0.070, 0.032],
             scattering: [0.016, 0.045, 0.065],
-            roughness: 0.12,
+            roughness: 0.16,
             anisotropy: 0.45,
             ssr_strength: 0.9,
-            spectrum_blend: 0.72,
+            spectrum_blend: 0.64,
             wind_speed: 7.5,
             foam_decay: 0.9,
             foam_threshold: 0.08,

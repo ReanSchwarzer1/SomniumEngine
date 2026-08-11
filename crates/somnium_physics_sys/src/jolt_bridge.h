@@ -57,7 +57,15 @@ void jph_body_interface_get_rotation(void* system, uint32_t body_id, float* out_
 void jph_body_interface_get_linear_velocity(void* system, uint32_t body_id, float* out_x, float* out_y, float* out_z);
 void jph_body_interface_set_linear_velocity(void* system, uint32_t body_id, float x, float y, float z);
 void jph_body_interface_add_force(void* system, uint32_t body_id, float x, float y, float z);
+void jph_body_interface_add_force_at_position(void* system, uint32_t body_id,
+    float fx, float fy, float fz, float px, float py, float pz);
 void jph_body_interface_add_impulse(void* system, uint32_t body_id, float x, float y, float z);
+void jph_body_interface_set_rotation(void* system, uint32_t body_id,
+    float x, float y, float z, float w, int activation);
+void jph_body_interface_get_angular_velocity(void* system, uint32_t body_id,
+    float* out_x, float* out_y, float* out_z);
+void jph_body_interface_set_angular_velocity(void* system, uint32_t body_id,
+    float x, float y, float z);
 
 #ifdef __cplusplus
 }

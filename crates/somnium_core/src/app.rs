@@ -16,7 +16,7 @@ use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, giz
 use somnium_ui::{EditorEvent, UiManager};
 
 use crate::config::EngineConfig;
-use crate::context::EngineContext;
+use crate::context::{EngineContext, SimulationClock, SimulationState};
 use crate::editor_commands::{
     CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd,
     SetTransformCmd, TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
@@ -75,6 +75,11 @@ pub trait GameApp {
 
     /// Called every frame for game logic.
     fn on_update(&mut self, _ctx: &mut EngineContext) {}
+
+    /// Called once per deterministic fixed simulation step, immediately before
+    /// Jolt advances. Buoyancy and other forces belong here rather than in the
+    /// variable-rate editor update.
+    fn on_fixed_update(&mut self, _ctx: &mut EngineContext) {}
 
     /// Called every frame for UI and debug rendering.
     fn on_render(&mut self, _ctx: &mut EngineContext) {}
@@ -200,6 +205,10 @@ pub struct Engine<G: GameApp> {
     /// Phase 20B: editor camera speed as a normalized 0..1 slider position.
     /// Game code reads the mapped speed via `EngineContext::camera_speed`.
     camera_speed_norm: f32,
+    /// UE-style editor transport state and deterministic gameplay time.
+    simulation_clock: SimulationClock,
+    /// Carries fractional wall-clock time between 60 Hz physics steps.
+    simulation_accumulator: f32,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -267,6 +276,8 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
+            simulation_clock: SimulationClock::default(),
+            simulation_accumulator: 0.0,
         };
 
         event_loop
@@ -304,6 +315,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Resumed);
             return;
@@ -351,6 +363,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.selected_entity,
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
+                    self.simulation_clock,
                 );
                 self.game.on_init(&mut ctx);
 
@@ -381,6 +394,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Suspended);
         }
@@ -704,6 +718,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &engine_event);
             let speed_request = ctx.camera_speed_request;
@@ -759,6 +774,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_event(&mut ctx, &ev);
         }
@@ -772,8 +788,35 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
 
-        if let Some(physics) = self.physics.as_mut() {
-            physics.step(dt);
+        // Editor-world simulations (water, buoyancy, particles, previews) run
+        // in ordinary Edit mode. Pause is the only state that freezes time;
+        // Play remains a game-state distinction, not an animation power switch.
+        if self.simulation_clock.state != SimulationState::Paused {
+            self.simulation_accumulator += dt.min(0.1);
+            let fixed_dt = self.simulation_clock.fixed_delta_seconds;
+            while self.simulation_accumulator >= fixed_dt {
+                {
+                    let mut ctx = EngineContext::new(
+                        &self.time,
+                        &self.config,
+                        &mut self.world,
+                        self.physics.as_mut().unwrap(),
+                        self.audio.as_mut().unwrap(),
+                        self.render_ctx.as_ref(),
+                        self.renderer.as_mut(),
+                        &mut self.selected_entity,
+                        self.ui_manager.as_mut().unwrap(),
+                        crate::camera_speed_from_normalized(self.camera_speed_norm),
+                        self.simulation_clock,
+                    );
+                    self.game.on_fixed_update(&mut ctx);
+                }
+                if let Some(physics) = self.physics.as_mut() {
+                    physics.step(fixed_dt);
+                }
+                self.simulation_clock.elapsed_seconds += fixed_dt;
+                self.simulation_accumulator -= fixed_dt;
+            }
         }
 
         // ── Gizmo drag: update entity transform each frame while dragging ────
@@ -809,6 +852,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_update(&mut ctx);
         }
@@ -1092,6 +1136,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.selected_entity,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
             );
             self.game.on_render(&mut ctx);
 
@@ -1104,7 +1149,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
-            let gpu_particles = simulate_particles(&mut self.world, dt, frame);
+            let particle_dt = if self.simulation_clock.state != SimulationState::Paused {
+                dt
+            } else {
+                0.0
+            };
+            let gpu_particles = simulate_particles(&mut self.world, particle_dt, frame);
             if let Some(r) = &mut self.renderer {
                 r.set_particles(gpu_particles);
             }
@@ -1129,7 +1179,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             &mut self.ui_manager,
             &self.window,
         ) {
-            r.time = self.time.elapsed().as_secs_f32();
+            r.time = self.simulation_clock.elapsed_seconds;
             r.render(c, ui, window);
         }
 
@@ -2794,6 +2844,32 @@ impl<G: GameApp> Engine<G> {
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_camera_speed(self.camera_speed_norm, speed);
                 }
+            }
+
+            EditorEvent::PlaySimulation => {
+                self.simulation_clock.state = SimulationState::Playing;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(1);
+                }
+                info!("Simulation playing");
+            }
+
+            EditorEvent::PauseSimulation => {
+                self.simulation_clock.state = SimulationState::Paused;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(2);
+                }
+                info!("Simulation paused");
+            }
+
+            EditorEvent::StopSimulation => {
+                self.simulation_clock.state = SimulationState::Editing;
+                self.simulation_clock.elapsed_seconds = 0.0;
+                self.simulation_accumulator = 0.0;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_simulation_controls(0);
+                }
+                info!("Simulation stopped");
             }
 
             EditorEvent::ImportModel => {

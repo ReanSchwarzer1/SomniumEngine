@@ -95,3 +95,18 @@ Phase 14 and the `.tbmp` decoder in Phase 25L — see ATTRIBUTION.md.
 Override with `SOMNIUM_HEIGHTMAP=<path>` (16-bit PNG, any decodable image, or
 another `.tbmp`). With the file absent the engine generates procedural FBM
 relief instead, so the scene still has landscape.
+
+## assets/models/gislinge_viking_boat/ - default water-interaction vessel (Phase IV-I)
+
+- **Model:** Gislinge Viking Boat
+- **Author:** Opus Poly
+- **License:** Creative Commons Attribution 4.0 International (CC BY 4.0)
+- **Original:** <https://sketchfab.com/3d-models/gislinge-viking-boat-01098ad7973647a9b558f41d2ebc5193>
+- **License text:** <https://creativecommons.org/licenses/by/4.0/>
+
+Attribution: “Gislinge Viking Boat” by Opus Poly, licensed under CC BY 4.0.
+The original GLB and its embedded materials/textures are distributed unchanged.
+Somnium applies a runtime centimetre-to-metre scale and keeps the 29,035
+triangle render hierarchy separate from its low-frequency buoyancy proxy.
+The exact source hash and integration notes are in
+[`models/gislinge_viking_boat/README.md`](models/gislinge_viking_boat/README.md).

@@ -51,6 +51,8 @@ struct WaterMaterial {
     wave_params: vec4<f32>,
     simulation_params: vec4<f32>,
     volume_params: vec4<f32>,
+    wake_origin_direction: vec4<f32>,
+    wake_params: vec4<f32>,
 }
 
 struct Instance {
@@ -95,15 +97,53 @@ fn body_texel(uv: vec2<f32>, dimensions: vec2<u32>) -> vec2<i32> {
 }
 
 fn mask_at(uv: vec2<f32>) -> f32 {
-    return textureLoad(body_mask, body_texel(uv, textureDimensions(body_mask)), 0).r;
+    return textureSample(body_mask, sampler_linear, uv).r;
 }
 
 fn depth_at(uv: vec2<f32>) -> f32 {
-    return textureLoad(body_depth, body_texel(uv, textureDimensions(body_depth)), 0).r;
+    let dimensions = textureDimensions(body_depth);
+    let coordinate = clamp(
+        uv * vec2<f32>(dimensions) - vec2<f32>(0.5),
+        vec2<f32>(0.0),
+        vec2<f32>(dimensions - vec2<u32>(1u)),
+    );
+    let lo = vec2<i32>(floor(coordinate));
+    let hi = min(lo + vec2<i32>(1), vec2<i32>(dimensions) - vec2<i32>(1));
+    let blend = fract(coordinate);
+    let row_a = mix(
+        textureLoad(body_depth, lo, 0).r,
+        textureLoad(body_depth, vec2<i32>(hi.x, lo.y), 0).r,
+        blend.x,
+    );
+    let row_b = mix(
+        textureLoad(body_depth, vec2<i32>(lo.x, hi.y), 0).r,
+        textureLoad(body_depth, hi, 0).r,
+        blend.x,
+    );
+    return mix(row_a, row_b, blend.y);
 }
 
 fn sdf_at(uv: vec2<f32>) -> f32 {
-    return textureLoad(shore_sdf, body_texel(uv, textureDimensions(shore_sdf)), 0).r;
+    let dimensions = textureDimensions(shore_sdf);
+    let coordinate = clamp(
+        uv * vec2<f32>(dimensions) - vec2<f32>(0.5),
+        vec2<f32>(0.0),
+        vec2<f32>(dimensions - vec2<u32>(1u)),
+    );
+    let lo = vec2<i32>(floor(coordinate));
+    let hi = min(lo + vec2<i32>(1), vec2<i32>(dimensions) - vec2<i32>(1));
+    let blend = fract(coordinate);
+    let row_a = mix(
+        textureLoad(shore_sdf, lo, 0).r,
+        textureLoad(shore_sdf, vec2<i32>(hi.x, lo.y), 0).r,
+        blend.x,
+    );
+    let row_b = mix(
+        textureLoad(shore_sdf, vec2<i32>(lo.x, hi.y), 0).r,
+        textureLoad(shore_sdf, hi, 0).r,
+        blend.x,
+    );
+    return mix(row_a, row_b, blend.y);
 }
 
 fn local_coord(uv: vec2<f32>) -> vec2<f32> {
@@ -145,6 +185,46 @@ struct WaveSample {
 fn safe_dir(v: vec2<f32>) -> vec2<f32> {
     let length_squared = dot(v, v);
     return select(vec2<f32>(1.0, 0.0), v * inverseSqrt(length_squared), length_squared > 1e-8);
+}
+
+fn rotate2(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+struct WakeSample {
+    slope: vec2<f32>,
+    foam: f32,
+}
+
+// Compact Kelvin-wake approximation: the 19.47 degree divergent arms carry
+// most of the white water, with a narrower turbulent prop wash on the centre
+// line. It is driven by the same CPU vessel position/direction as buoyancy.
+fn evaluate_wake(p: vec2<f32>) -> WakeSample {
+    let strength = material.wake_params.y;
+    if strength <= 0.0001 {
+        return WakeSample(vec2<f32>(0.0), 0.0);
+    }
+    let direction = safe_dir(material.wake_origin_direction.zw);
+    let side = vec2<f32>(-direction.y, direction.x);
+    let delta = p - material.wake_origin_direction.xy;
+    let behind = max(-dot(delta, direction), 0.0);
+    let lateral = dot(delta, side);
+    let length_limit = max(material.wake_params.z, 8.0);
+    let half_width = max(material.wake_params.w, 2.0) + behind * 0.354;
+    let longitudinal = smoothstep(0.0, 3.0, behind)
+        * (1.0 - smoothstep(length_limit * 0.72, length_limit, behind));
+    let cone = 1.0 - smoothstep(half_width * 0.72, half_width, abs(lateral));
+    let arm_distance = abs(abs(lateral) - behind * 0.354);
+    let arms = 1.0 - smoothstep(0.35, 1.85, arm_distance);
+    let wash = exp(-abs(lateral) * 0.42) * exp(-behind * 0.028);
+    let phase = sin(behind * 1.05 + abs(lateral) * 1.75 - frame.current_time * 5.2);
+    let energy = longitudinal * cone * strength * clamp(material.wake_params.x / 3.0, 0.2, 1.6);
+    let slope = (direction * phase * (arms * 0.18 + wash * 0.08)
+        + side * sign(lateral) * arms * 0.12) * energy;
+    let foam = clamp(energy * (arms * 1.15 + wash * 0.72), 0.0, 1.0);
+    return WakeSample(slope, foam);
 }
 
 fn evaluate_waves(p: vec2<f32>, time: f32, shore: f32) -> WaveSample {
@@ -375,17 +455,25 @@ struct FragmentOutput {
 
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> FragmentOutput {
-    if mask_at(input.uv) < 0.5 {
+    // Reconstruct a continuous zero contour from the signed shoreline field.
+    // A binary filtered mask still exposes its square texel grid at oblique
+    // shorelines; the bilinear SDF contour is stable in world space and gets
+    // one derivative-scaled antialiasing band on top.
+    let sdf_cells = sdf_at(input.uv);
+    let cell_metres = (material.bounds.z - material.bounds.x)
+        / f32(max(textureDimensions(shore_sdf).x, 1u));
+    let signed_shore_distance = sdf_cells * cell_metres;
+    let coverage_width = max(fwidth(signed_shore_distance), cell_metres * 0.35);
+    let coverage = smoothstep(-coverage_width, coverage_width, signed_shore_distance);
+    if coverage <= 0.001 {
         discard;
     }
-    let authored_depth = depth_at(input.uv);
-    if authored_depth <= 0.001 {
-        discard;
-    }
+    let authored_depth = max(depth_at(input.uv), 0.025);
     let shore = smoothstep(0.25, 2.0, authored_depth);
     let water_coord = local_coord(input.uv);
     let wave = evaluate_waves(water_coord, frame.current_time, shore);
     let spectrum = spectral_gradient(water_coord);
+    let wake = evaluate_wake(water_coord);
     let water_view_depth = view_depth(input.world_position);
 
     // A displaced vertex surface can keep its large silhouette waves, while
@@ -398,22 +486,34 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let distance_resolve = 1.0 - smoothstep(120.0, 420.0, water_view_depth);
     let spectrum_normal = normalize(vec3<f32>(-spectrum.x * material.surface_params.z * 0.42,
         1.0, -spectrum.y * material.surface_params.z * 0.42));
-    let combined_wave_normal = normalize(mix(wave.normal, spectrum_normal, 0.38));
+    let wake_normal = normalize(vec3<f32>(-wake.slope.x, 1.0, -wake.slope.y));
+    let combined_wave_normal = normalize(mix(
+        normalize(mix(wave.normal, spectrum_normal, 0.38)),
+        wake_normal,
+        clamp(material.wake_params.y * 0.55, 0.0, 0.75),
+    ));
     let resolved_wave_normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), combined_wave_normal,
         min(slope_resolve, distance_resolve)));
 
     let texture_time = frame.current_time;
-    let detail_uv_a = local_coord(input.uv) * 0.035 + vec2<f32>(0.012, 0.008) * texture_time;
-    let detail_uv_b = local_coord(input.uv) * 0.061 + vec2<f32>(-0.009, 0.015) * texture_time;
+    // Scale-separated, rotated samples prevent the obvious 16-28 m repeating
+    // grid visible in the old material. Fine detail fades first with distance.
+    let detail_uv_a = rotate2(water_coord, 0.31) * 0.008
+        + vec2<f32>(0.004, 0.003) * texture_time;
+    let detail_uv_b = rotate2(water_coord, -0.67) * 0.021
+        + vec2<f32>(-0.008, 0.010) * texture_time;
+    let detail_uv_c = rotate2(water_coord, 1.13) * 0.057
+        + vec2<f32>(0.015, -0.011) * texture_time;
     let normal_a = textureSample(tex_normal, sampler_linear, detail_uv_a).xyz * 2.0 - 1.0;
     let normal_b = textureSample(tex_normal, sampler_linear, detail_uv_b).xyz * 2.0 - 1.0;
-    let detail_normal = normalize(normal_a + normal_b);
+    let normal_c = textureSample(tex_normal, sampler_linear, detail_uv_c).xyz * 2.0 - 1.0;
+    let detail_normal = normalize(normal_a * 0.52 + normal_b * 0.31 + normal_c * 0.17);
     let tangent = normalize(vec3<f32>(resolved_wave_normal.y, -resolved_wave_normal.x, 0.0));
     let bitangent = normalize(cross(resolved_wave_normal, tangent));
     let mapped = normalize(mat3x3<f32>(tangent, bitangent, resolved_wave_normal) * detail_normal);
     // Move sub-pixel wave energy into roughness with distance instead of
     // letting unresolved normals become a white moiré pattern at the horizon.
-    let detail_strength = 0.35 * (1.0 - smoothstep(100.0, 450.0, water_view_depth));
+    let detail_strength = 0.24 * (1.0 - smoothstep(75.0, 360.0, water_view_depth));
     var n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
     let v = normalize(view.camera_pos - input.world_position);
     if dot(n, v) < 0.0 { n = -n; }
@@ -463,19 +563,32 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         smoothstep(0.5, max(material.surface_params.y * 6.0, 2.0), authored_depth));
     var transmitted = refracted * tint * transmittance + single_scatter;
 
-    let shore_distance = abs(sdf_at(input.uv));
-    let shore_foam = (1.0 - smoothstep(0.0, max(material.surface_params.y, 0.5), shore_distance))
-        * (0.55 + 0.45 * sin(frame.current_time * 1.8 + shore_distance * 2.0));
+    let shore_distance = max(sdf_cells, 0.0) * cell_metres;
+    let foam_width = max(material.surface_params.y * 8.0, 6.0);
+    let foam_noise = clamp(
+        textureSample(tex_orm, sampler_linear, detail_uv_b * 0.63).r * 0.65
+        + textureSample(tex_normal, sampler_linear, detail_uv_a * 0.47).x * 0.35,
+        0.0,
+        1.0,
+    );
+    let breaker_distance = 1.1 + 0.75 * sin(frame.current_time * 0.72
+        + dot(water_coord, vec2<f32>(0.071, 0.043)));
+    let breaker = 1.0 - smoothstep(0.45, 2.0, abs(shore_distance - breaker_distance));
+    let shore_band = 1.0 - smoothstep(0.0, foam_width, shore_distance);
+    let shore_foam = shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0);
     let crest_foam = spectrum.a * smoothstep(0.8, 2.5, authored_depth);
-    let foam_amount = clamp(max(shore_foam, crest_foam), 0.0, 1.0);
+    let foam_amount = clamp(max(max(shore_foam, crest_foam), wake.foam), 0.0, 1.0);
     let wet_band = (1.0 - smoothstep(0.0, max(material.surface_params.y * 2.5, 1.5),
         shore_distance)) * (0.35 + foam_amount * 0.65);
     transmitted *= 1.0 - wet_band * 0.16;
-    transmitted = mix(transmitted, material.edge_color.rgb * (env_up + vec3<f32>(0.08)), foam_amount);
+    let foam_light = max(env_up, vec3<f32>(0.28))
+        + light.color * shadow * max(dot(n, sun_l), 0.0) * 0.000006;
+    transmitted = mix(transmitted, material.edge_color.rgb * foam_light, foam_amount);
 
     let roughness_map = 0.5 * (
         textureSample(tex_orm, sampler_linear, detail_uv_a).g
-        + textureSample(tex_orm, sampler_linear, detail_uv_b).g);
+        + textureSample(tex_orm, sampler_linear, detail_uv_b).g * 0.65
+        + textureSample(tex_orm, sampler_linear, detail_uv_c).g * 0.35) / 1.5;
     let unresolved_energy = 1.0 - min(slope_resolve, distance_resolve);
     let distance_roughness = unresolved_energy * 0.28;
     let roughness = clamp(
@@ -503,8 +616,8 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let final_color = transmitted * (vec3<f32>(1.0) - fresnel) + reflected * fresnel + direct;
 
     return FragmentOutput(
-        vec4<f32>(min(final_color, vec3<f32>(60000.0)), 1.0),
-        vec4<f32>(n.xz * 0.5 + 0.5, min(water_view_depth, 60000.0), 1.0),
+        vec4<f32>(min(final_color, vec3<f32>(60000.0)), coverage),
+        vec4<f32>(n.xz * 0.5 + 0.5, min(water_view_depth, 60000.0), coverage),
         clamp(input.screen_velocity, vec2<f32>(-1.0), vec2<f32>(1.0)),
     );
 }

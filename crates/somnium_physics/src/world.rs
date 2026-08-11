@@ -120,6 +120,21 @@ impl PhysicsWorld {
         Quat::from_xyzw(x, y, z, w)
     }
 
+    /// Set the world-space rotation of a body.
+    pub fn set_rotation(&mut self, id: BodyId, rotation: Quat, activate: bool) {
+        unsafe {
+            jph_body_interface_set_rotation(
+                self.system,
+                id.0,
+                rotation.x,
+                rotation.y,
+                rotation.z,
+                rotation.w,
+                if activate { 1 } else { 0 },
+            );
+        }
+    }
+
     /// Get the linear velocity of a body.
     pub fn get_linear_velocity(&self, id: BodyId) -> Vec3 {
         let mut x = 0.0;
@@ -142,6 +157,45 @@ impl PhysicsWorld {
     pub fn add_force(&mut self, id: BodyId, force: Vec3) {
         unsafe {
             jph_body_interface_add_force(self.system, id.0, force.x, force.y, force.z);
+        }
+    }
+
+    /// Apply a force at a world-space point, producing both translation and
+    /// torque. This is the primitive used by distributed buoyancy samples.
+    pub fn add_force_at_position(&mut self, id: BodyId, force: Vec3, position: Vec3) {
+        unsafe {
+            jph_body_interface_add_force_at_position(
+                self.system,
+                id.0,
+                force.x,
+                force.y,
+                force.z,
+                position.x,
+                position.y,
+                position.z,
+            );
+        }
+    }
+
+    pub fn get_angular_velocity(&self, id: BodyId) -> Vec3 {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut z = 0.0;
+        unsafe {
+            jph_body_interface_get_angular_velocity(self.system, id.0, &mut x, &mut y, &mut z);
+        }
+        Vec3::new(x, y, z)
+    }
+
+    pub fn set_angular_velocity(&mut self, id: BodyId, velocity: Vec3) {
+        unsafe {
+            jph_body_interface_set_angular_velocity(
+                self.system,
+                id.0,
+                velocity.x,
+                velocity.y,
+                velocity.z,
+            );
         }
     }
 
