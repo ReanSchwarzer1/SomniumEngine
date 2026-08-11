@@ -3357,7 +3357,10 @@ complete until those checks are recorded.
 The importer preserves floating-point EXR channels, verifies the audited source
 range, area-resamples height, masks water out of the sRGB macro-colour map, and
 bakes a 2048×2048 water mask, shoreline SDF, and 0–12 m synthetic bathymetry.
-The dry terrain floor is 0.35 m above the 15 m water datum, preventing coplanar
+The baked dry terrain floor is 0.35 m above its original 15 m extraction datum.
+The accepted default runtime water level is 16.1 m, which keeps the visible
+surface above the residual terrain-grid intersection while the authored wet mask
+still prevents water from spreading across dry land. This avoids coplanar
 ground and water.
 
 The daytime triangle-shaped terrain shadows were not present in the source
@@ -3438,17 +3441,26 @@ heading and speed drive analytic Kelvin-angle wake arms and prop-wash foam in
 the water pass. The viewport toolbar now exposes Play, Pause/Resume, and Stop;
 pausing freezes gameplay, physics, particles, and water time, while stopping
 restores the vessel pose and clears velocities before live editor preview resumes.
+From Play until Stop, including a paused play session, the renderer suppresses
+the grid, transform and light gizmos, selection outline, and terrain/foliage
+authoring cursors so the viewport contains only player-visible scene content.
 
 Water's near-shore presentation now retains the 2048² source contour and uses a
-bilinearly reconstructed, derivative-antialiased SDF boundary, a one-cell
-raster guard ring around the wet footprint, a foam width in world metres,
-noise-broken breakers, and a three-band
-rotated normal detail stack with distance fade. This visually softens the
-terrain/water intersection without changing the licensed source elevation data
-or allowing water onto dry depth-tested terrain. Complete vessel provenance,
+bilinearly reconstructed, derivative-antialiased SDF boundary, a two-cell
+raster guard ring, 1.5 m under-terrain dilation, a foam width in world metres,
+scene-depth contact foam, noise-broken breakers, and a three-band rotated normal
+detail stack with distance fade. Terrain chunks whose vertical range crosses
+the water datum are held at LOD 0; neighbor relaxation preserves crack-free
+transitions outside the shore band. The full-resolution terrain depth now hides
+the dilated surface, so coarse distance-LOD facets cannot define the visible
+shore. This visually softens the terrain/water intersection without changing
+the licensed source elevation data or allowing visible water onto dry terrain.
+Complete vessel provenance,
 license, hash, scale, and render/physics separation notes live in
 `assets/models/gislinge_viking_boat/README.md`; future screenshots belong in
-`dev records/phase IV/IV-I-J/`, never the repository root.
+`dev records/phase IV/IV-I-J/`, never the repository root. The current
+post-TAA shoreline validation is
+`dev records/phase IV/IV-I-J/IV-I-J_shoreline_lod_validation.png`.
 
 ## 18. Known Issues & Active Bugs
 

@@ -258,7 +258,7 @@ normal while retaining face normals for ordinary meshes.
 Added the deterministic `bake_great_lakes` importer and committed its 1025²
 16-bit height, masked macro colour, 2048² lake mask, bathymetric depth, shoreline
 SDF, and recipe products. Repeated runs produce identical hashes. The default
-terrain now loads these derivatives, uses 105 m total relief, a 15 m water datum,
+terrain now loads these derivatives, uses 105 m total relief, a 16.1 m water datum,
 up to 12 m of synthetic bathymetry, and a 0.35 m minimum dry-ground clearance.
 
 **Work**
@@ -489,17 +489,22 @@ One simulation clock gates Jolt steps, particle time, and water time. Editing
 and Playing both advance it, Pause holds the exact state while rendering
 continues, and Stop resets time, velocities, and the vessel pose before live
 editor preview resumes. Rendering and physics therefore always sample the same
-water time.
+water time. A Play session, including its paused state, suppresses the grid,
+transform and light gizmos, selection outline, and terrain/foliage authoring
+cursors; Stop restores those editor-only overlays.
 
 The shoreline readability fix is part of this milestone: the full 2048² source
 contour replaces the old 1024² majority mask, its SDF zero contour is bilinearly
 reconstructed and antialiased, SDF distance is evaluated in metres,
 and a broken-up depth-aware breaker band blends into crest/wake foam. Three
 rotated normal-map frequency bands with distance fade replace the former two
-obvious high-frequency tiles. A one-cell raster guard ring now surrounds the
-wet-cell mesh so the fragment SDF—not missing coarse triangles—owns the entire
-visible coastline. This removes the large square/triangular bites without
-moving or smoothing the source height field.
+obvious high-frequency tiles. A two-cell raster guard ring plus a 1.5 m
+under-bank coverage dilation keeps the water surface behind opaque terrain,
+while terrain chunks whose height range crosses the water datum are pinned to
+LOD 0. The full-resolution terrain, depth buffer, and fragment SDF therefore own
+the visible coastline instead of coarse distance-LOD triangles. Scene-depth
+contact foam bridges the final sub-pixel edge. This removes the remaining
+square/triangular bites without altering the licensed source height field.
 
 **Work**
 
@@ -526,10 +531,11 @@ render-hierarchy/physics-hull boundary. `assets/LICENSE.md`,
 record. No screenshots were added to the repository root; any later visual
 acceptance captures belong under `dev records/phase IV/IV-I-J/`.
 
-Validation covers formatting, workspace compilation/tests, shader-module
-validation, and targeted Clippy on the touched crates. Runtime visual inspection
-remains the final check for foam strength and vessel framing on the user's
-adapter.
+Validation covers formatting, workspace compilation/tests (including 209
+renderer tests and all 9 shader-module tests), and targeted Clippy on the
+touched crates. The post-TAA runtime capture
+`dev records/phase IV/IV-I-J/IV-I-J_shoreline_lod_validation.png` records the
+water-aware terrain LOD and contact-band result on the user's adapter.
 
 - Update `context.md` after every completed sub-phase.
 - Add pattern-level citations to `ATTRIBUTION.md` before translating each reference.

@@ -103,6 +103,28 @@ pub struct TerrainChunk {
 /// Offset value meaning "this chunk has no pool space".
 pub const UNALLOCATED: u32 = u32::MAX;
 
+fn chunk_crosses_water_surface(
+    chunk: &TerrainChunk,
+    chunk_world: f32,
+    shoreline_regions: &[crate::water_body::WaterBodyDescriptor],
+) -> bool {
+    let chunk_min_x = chunk.grid_pos[0] as f32 * chunk_world;
+    let chunk_min_z = chunk.grid_pos[1] as f32 * chunk_world;
+    let chunk_max_x = chunk_min_x + chunk_world;
+    let chunk_max_z = chunk_min_z + chunk_world;
+    shoreline_regions.iter().any(|water| {
+        let [water_min_x, water_min_z, water_max_x, water_max_z] = water.bounds;
+        let overlaps_xz = chunk_max_x >= water_min_x
+            && chunk_min_x <= water_max_x
+            && chunk_max_z >= water_min_z
+            && chunk_min_z <= water_max_z;
+        let wave_margin = water.amplitude.max(0.05);
+        overlaps_xz
+            && chunk.aabb_min.y <= water.surface_level + wave_margin
+            && chunk.aabb_max.y >= water.surface_level - wave_margin
+    })
+}
+
 /// Heightmap a new terrain loads unless told otherwise (Phase 25L).
 pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/great_lakes/height.png";
 
@@ -110,7 +132,7 @@ pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/great_lakes/height.png";
 pub const DEFAULT_MACRO_MAP: &str = "assets/terrain/great_lakes/macro_color.png";
 
 /// Great Lakes preset surface datum in terrain-local metres.
-pub const DEFAULT_WATER_LEVEL_METRES: f32 = 15.0;
+pub const DEFAULT_WATER_LEVEL_METRES: f32 = 16.1;
 
 /// Maximum synthetic lake-bed depth in the baked preset.
 pub const DEFAULT_WATER_DEPTH_METRES: f32 = 12.0;
@@ -752,9 +774,14 @@ impl TerrainData {
 
     // ── Per-frame update ─────────────────────────────────────────────────────
 
-    /// Select per-chunk LODs from the camera position (terrain-local), clamp
-    /// neighbor differences to ≤ 1 level, and derive edge stitch masks.
-    pub fn select_lods(&mut self, local_camera_pos: glam::Vec3) {
+    /// Select per-chunk LODs from the camera position (terrain-local), retain
+    /// full detail where a water surface crosses the terrain, clamp neighbor
+    /// differences to ≤ 1 level, and derive edge stitch masks.
+    pub fn select_lods(
+        &mut self,
+        local_camera_pos: glam::Vec3,
+        shoreline_regions: &[crate::water_body::WaterBodyDescriptor],
+    ) {
         let [gx, gz] = self.desc.grid_size;
         let chunk_world = self.desc.chunk_cells as f32 * self.desc.cell_size;
 
@@ -768,6 +795,17 @@ impl TerrainData {
             let dist = local_camera_pos.distance(center).max(0.01);
             let lod_f = (dist / self.desc.lod_base_range).log2().floor();
             chunk.lod = lod_f.clamp(0.0, MAX_TERRAIN_LOD as f32) as u8;
+
+            // A coarser index buffer skips height vertices. Where a horizontal
+            // water plane cuts the terrain this turns the coastline into the
+            // large LOD-sized triangles seen in IV-I. Unreal's water/landscape
+            // integration similarly treats the intersection as authored
+            // high-detail data rather than letting generic distance LOD own it.
+            // Only chunks whose vertical range actually crosses an overlapping
+            // body's surface are pinned; open water and dry mountains keep LOD.
+            if chunk_crosses_water_surface(chunk, chunk_world, shoreline_regions) {
+                chunk.lod = 0;
+            }
         }
 
         // 2. Relax until adjacent chunks differ by at most one level.
@@ -1167,5 +1205,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_overlapping_chunks_that_cross_the_water_surface_are_shoreline_chunks() {
+        let water = crate::water_body::WaterBodyDescriptor {
+            water_id: 0,
+            terrain_id: 0,
+            preset: 1,
+            surface_level: 15.0,
+            max_depth: 12.0,
+            bounds: [0.0, 0.0, 64.0, 64.0],
+            amplitude: 0.35,
+            wave_dir_a: [1.0, 0.0],
+            wave_dir_b: [0.0, 1.0],
+            wave_length_a: 18.0,
+            wave_length_b: 11.0,
+            wave_speed: 1.0,
+            wave_steepness: 0.95,
+        };
+        let chunk = |grid_pos, min_y, max_y| TerrainChunk {
+            grid_pos,
+            aabb_min: glam::Vec3::new(0.0, min_y, 0.0),
+            aabb_max: glam::Vec3::new(16.0, max_y, 16.0),
+            vertex_offset: UNALLOCATED,
+            dirty: false,
+            lod: 3,
+            edge_mask: 0,
+        };
+
+        assert!(chunk_crosses_water_surface(
+            &chunk([1, 2], 10.0, 20.0),
+            16.0,
+            &[water]
+        ));
+        assert!(!chunk_crosses_water_surface(
+            &chunk([1, 2], 20.0, 30.0),
+            16.0,
+            &[water]
+        ));
+        assert!(!chunk_crosses_water_surface(
+            &chunk([8, 8], 10.0, 20.0),
+            16.0,
+            &[water]
+        ));
     }
 }

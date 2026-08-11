@@ -183,6 +183,10 @@ pub struct SomniumRenderer {
     light_gizmo_queue: Vec<crate::pass::light_gizmo::LightGizmoDesc>,
     /// When true, submitted light gizmos are drawn (toggle with `L`).
     light_gizmos_enabled: bool,
+    /// Master switch for editor-only viewport overlays. Play-in-editor keeps
+    /// their state but suppresses transform/light gizmos, selection outlines,
+    /// and the optional editor grid from the player's view.
+    editor_overlays_enabled: bool,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -609,6 +613,7 @@ impl SomniumRenderer {
             light_gizmo_pass,
             light_gizmo_queue: Vec::new(),
             light_gizmos_enabled: true,
+            editor_overlays_enabled: true,
             outline_pass,
             outline_entity: None,
             particle_pass,
@@ -964,6 +969,17 @@ impl SomniumRenderer {
     /// Set the active gizmo mode (Translate / Rotate / Scale).
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
         self.gizmo_mode = mode;
+    }
+
+    /// Show or suppress editor-only viewport overlays without losing their
+    /// selection/toggle state. Used by Play-in-editor.
+    pub fn set_editor_overlays_enabled(&mut self, enabled: bool) {
+        self.editor_overlays_enabled = enabled;
+    }
+
+    /// Whether editor-only viewport overlays may be drawn or picked.
+    pub fn editor_overlays_enabled(&self) -> bool {
+        self.editor_overlays_enabled
     }
 
     /// Toggle the Phase 15 GPU-driven indirect draw path, returning the new
@@ -1611,10 +1627,11 @@ impl SomniumRenderer {
         // it up. There is no terrain pass left to run at the end of the frame.
         let mut rebuilt_chunks: Vec<u32> = Vec::new();
         for &(id, model) in &self.terrain_queue {
+            let shoreline_regions = self.water_bodies.shoreline_lod_regions(id);
             let terrain = &mut self.terrains[id as usize];
             terrain.model = model;
             let local_cam = model.inverse().transform_point3(self.camera_pos);
-            terrain.select_lods(local_cam);
+            terrain.select_lods(local_cam, &shoreline_regions);
             rebuilt_chunks.clear();
             terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut rebuilt_chunks);
             terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
@@ -2254,7 +2271,7 @@ impl SomniumRenderer {
         );
 
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
-        if self.grid_enabled {
+        if self.editor_overlays_enabled && self.grid_enabled {
             self.grid_pass
                 .record(&mut encoder, &self.postprocess_pass.hdr_view);
         }
@@ -2529,7 +2546,9 @@ impl SomniumRenderer {
         }
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
-        if let Some(gizmo_pos) = self.gizmo_world_pos {
+        if self.editor_overlays_enabled
+            && let Some(gizmo_pos) = self.gizmo_world_pos
+        {
             let dist = (self.camera_pos - gizmo_pos).length().max(0.5);
             let scale = dist * 0.15;
             let model = glam::Mat4::from_translation(gizmo_pos)
@@ -2540,7 +2559,9 @@ impl SomniumRenderer {
         }
 
         // ── 8.7 Selection outline → swapchain (Phase 11.5I) ─────────────────
-        if let Some((v_off, i_off, i_cnt, model)) = self.outline_entity {
+        if self.editor_overlays_enabled
+            && let Some((v_off, i_off, i_cnt, model)) = self.outline_entity
+        {
             self.outline_pass.record(
                 &ctx.queue,
                 &mut encoder,
@@ -2556,7 +2577,10 @@ impl SomniumRenderer {
         }
 
         // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
-        if self.light_gizmos_enabled && !self.light_gizmo_queue.is_empty() {
+        if self.editor_overlays_enabled
+            && self.light_gizmos_enabled
+            && !self.light_gizmo_queue.is_empty()
+        {
             let lines = crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
             self.light_gizmo_pass.record(
                 &ctx.device,

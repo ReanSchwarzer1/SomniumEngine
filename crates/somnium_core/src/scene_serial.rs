@@ -199,7 +199,8 @@ mod tests {
         let water = entities.iter().find(|e| e["name"] == "Water").unwrap();
         assert_eq!(water["parent_local_idx"], 0);
         assert_eq!(water["water"]["preset"], 1);
-        assert_eq!(water["water"]["surface_level"], 15.0);
+        let surface_level = water["water"]["surface_level"].as_f64().unwrap();
+        assert!((surface_level - 16.1).abs() < 1.0e-5);
         assert_eq!(water["water"]["max_depth"], 12.0);
         assert_eq!(
             water["water"]["mask_asset"],

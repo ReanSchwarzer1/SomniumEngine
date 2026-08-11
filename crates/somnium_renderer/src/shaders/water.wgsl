@@ -464,7 +464,16 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         / f32(max(textureDimensions(shore_sdf).x, 1u));
     let signed_shore_distance = sdf_cells * cell_metres;
     let coverage_width = max(fwidth(signed_shore_distance), cell_metres * 0.35);
-    let coverage = smoothstep(-coverage_width, coverage_width, signed_shore_distance);
+    // Extend the surface slightly beneath opaque terrain. Terrain depth owns
+    // the visible intersection, as in Unreal's dilated WaterInfo mesh and
+    // Wicked Engine's broad ocean surface. This closes sub-cell mask/terrain
+    // mismatches without allowing water to draw over dry ground.
+    let under_terrain_guard = 1.5;
+    let coverage = smoothstep(
+        -under_terrain_guard - coverage_width,
+        -under_terrain_guard + coverage_width,
+        signed_shore_distance,
+    );
     if coverage <= 0.001 {
         discard;
     }
@@ -575,7 +584,19 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         + dot(water_coord, vec2<f32>(0.071, 0.043)));
     let breaker = 1.0 - smoothstep(0.45, 2.0, abs(shore_distance - breaker_distance));
     let shore_band = 1.0 - smoothstep(0.0, foam_width, shore_distance);
-    let shore_foam = shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0);
+    // Wicked Engine derives shore foam from the difference between water and
+    // opaque scene depth. Combine that actual contact signal with the authored
+    // SDF band, so residual one-metre terrain facets blend into foam instead of
+    // reading as a geometric cut-out.
+    let depth_contact = select(
+        0.0,
+        1.0 - smoothstep(0.04, 1.35, backdrop_distance),
+        base_has_backdrop,
+    );
+    let shore_foam = max(
+        shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0),
+        depth_contact * (0.62 + foam_noise * 0.28),
+    );
     let crest_foam = spectrum.a * smoothstep(0.8, 2.5, authored_depth);
     let foam_amount = clamp(max(max(shore_foam, crest_foam), wake.foam), 0.0, 1.0);
     let wet_band = (1.0 - smoothstep(0.0, max(material.surface_params.y * 2.5, 1.5),

@@ -343,14 +343,16 @@ impl WaterBodyData {
         let mut indices = Vec::new();
         for z in 0..cells_z {
             for x in 0..cells_x {
-                // Rasterize one dry coarse-cell guard ring around the wet set.
+                // Rasterize two dry coarse-cell guard rings around the wet set.
                 // The SDF fragment contour still owns exact coverage. Without
                 // this ring the sparse mesh itself became the visible shore,
                 // producing the large 2 m square/triangle bites seen in IV-I.
-                let min_x = x.saturating_sub(1);
-                let max_x = (x + 1).min(cells_x - 1);
-                let min_z = z.saturating_sub(1);
-                let max_z = (z + 1).min(cells_z - 1);
+                // The second ring supports a small shader-side dilation under
+                // opaque terrain, mirroring Unreal's dilated WaterInfo mesh.
+                let min_x = x.saturating_sub(2);
+                let max_x = (x + 2).min(cells_x - 1);
+                let min_z = z.saturating_sub(2);
+                let max_z = (z + 2).min(cells_z - 1);
                 let touches_water = (min_z..=max_z).any(|near_z| {
                     (min_x..=max_x).any(|near_x| wet_cells[(near_z * cells_x + near_x) as usize])
                 });
@@ -477,6 +479,18 @@ impl WaterBodyRegistry {
 
     pub fn active_count(&self) -> usize {
         self.bodies.iter().filter(|body| body.is_some()).count()
+    }
+
+    /// Active water descriptors associated with one terrain. Terrain LOD uses
+    /// these small records to keep the actual land/water intersection at full
+    /// geometry resolution, while open land and deep water retain distance LOD.
+    pub fn shoreline_lod_regions(&self, terrain_id: u32) -> Vec<WaterBodyDescriptor> {
+        self.bodies
+            .iter()
+            .flatten()
+            .filter(|body| body.descriptor.terrain_id == terrain_id)
+            .map(|body| body.descriptor)
+            .collect()
     }
 
     pub fn create_or_replace(

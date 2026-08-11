@@ -207,6 +207,9 @@ pub struct Engine<G: GameApp> {
     camera_speed_norm: f32,
     /// UE-style editor transport state and deterministic gameplay time.
     simulation_clock: SimulationClock,
+    /// True from Play until Stop, including while a play session is paused.
+    /// Editor-only overlays and authoring tools stay disabled for the session.
+    play_session_active: bool,
     /// Carries fractional wall-clock time between 60 Hz physics steps.
     simulation_accumulator: f32,
 }
@@ -277,6 +280,7 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
             simulation_clock: SimulationClock::default(),
+            play_session_active: false,
             simulation_accumulator: 0.0,
         };
 
@@ -598,7 +602,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
-        if self.foliage_paint_active {
+        if !self.play_session_active && self.foliage_paint_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
                 button: winit::event::MouseButton::Left,
@@ -632,7 +636,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── 3.5 Terrain brush stroke (Phase 14D) — takes priority over gizmo ──
-        if self.terrain_edit_active {
+        if !self.play_session_active && self.terrain_edit_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
                 button: winit::event::MouseButton::Left,
@@ -658,46 +662,48 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── 4. Gizmo LMB pick / drag-end ────────────────────────────────────
         let mut gizmo_consumed = false;
 
-        if let WindowEvent::MouseInput {
-            state: winit::event::ElementState::Pressed,
-            button: winit::event::MouseButton::Left,
-            ..
-        } = &event
-        {
-            let drag = try_start_gizmo_drag(
-                self.renderer.as_ref(),
-                &self.world,
-                &self.selected_entity,
-                self.cursor_pos,
-                self.viewport_size,
-            );
-            if drag.is_some() {
-                self.gizmo_drag = drag;
-                gizmo_consumed = true;
-            }
-        }
-
-        if let WindowEvent::MouseInput {
-            state: winit::event::ElementState::Released,
-            button: winit::event::MouseButton::Left,
-            ..
-        } = &event
-        {
-            if let Some(drag) = self.gizmo_drag.take() {
-                if let Some(entity) = self.world.find_entity_by_index(drag.entity_index) {
-                    let final_t = self
-                        .world
-                        .get::<Transform>(entity)
-                        .copied()
-                        .unwrap_or(drag.start_transform);
-                    let cmd = Box::new(SetTransformCmd::new(
-                        drag.entity_index,
-                        drag.start_transform,
-                        final_t,
-                    ));
-                    self.undo_stack.push_silent(cmd);
+        if !self.play_session_active {
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                let drag = try_start_gizmo_drag(
+                    self.renderer.as_ref(),
+                    &self.world,
+                    &self.selected_entity,
+                    self.cursor_pos,
+                    self.viewport_size,
+                );
+                if drag.is_some() {
+                    self.gizmo_drag = drag;
+                    gizmo_consumed = true;
                 }
-                gizmo_consumed = true;
+            }
+
+            if let WindowEvent::MouseInput {
+                state: winit::event::ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                if let Some(drag) = self.gizmo_drag.take() {
+                    if let Some(entity) = self.world.find_entity_by_index(drag.entity_index) {
+                        let final_t = self
+                            .world
+                            .get::<Transform>(entity)
+                            .copied()
+                            .unwrap_or(drag.start_transform);
+                        let cmd = Box::new(SetTransformCmd::new(
+                            drag.entity_index,
+                            drag.start_transform,
+                            final_t,
+                        ));
+                        self.undo_stack.push_silent(cmd);
+                    }
+                    gizmo_consumed = true;
+                }
             }
         }
 
@@ -1162,13 +1168,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Terrain editing + submission (Phase 14) ──────────────────────────
         self.apply_terrain_restores();
-        self.update_terrain_editing(dt);
+        if self.play_session_active {
+            self.gizmo_drag = None;
+            self.terrain_stroke = None;
+            self.foliage_painting = false;
+            if let Some(r) = &mut self.renderer {
+                for terrain in &mut r.terrains {
+                    terrain.brush_cursor = [0.0; 4];
+                }
+            }
+        } else {
+            self.update_terrain_editing(dt);
+        }
         self.submit_terrains();
         self.submit_foliage();
         self.sync_terrain_colliders();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
-        self.submit_light_gizmos();
+        if !self.play_session_active {
+            self.submit_light_gizmos();
+        }
 
         // ── Post-processing settings (Phase 15A1) ────────────────────────────
         self.apply_post_process();
@@ -1179,6 +1198,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             &mut self.ui_manager,
             &self.window,
         ) {
+            r.set_editor_overlays_enabled(!self.play_session_active);
             r.time = self.simulation_clock.elapsed_seconds;
             r.render(c, ui, window);
         }
@@ -2848,6 +2868,12 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::PlaySimulation => {
                 self.simulation_clock.state = SimulationState::Playing;
+                self.play_session_active = true;
+                self.gizmo_drag = None;
+                self.terrain_stroke = None;
+                if let Some(r) = &mut self.renderer {
+                    r.set_editor_overlays_enabled(false);
+                }
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_simulation_controls(1);
                 }
@@ -2856,6 +2882,11 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::PauseSimulation => {
                 self.simulation_clock.state = SimulationState::Paused;
+                if self.play_session_active {
+                    if let Some(r) = &mut self.renderer {
+                        r.set_editor_overlays_enabled(false);
+                    }
+                }
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_simulation_controls(2);
                 }
@@ -2866,6 +2897,10 @@ impl<G: GameApp> Engine<G> {
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
                 self.simulation_accumulator = 0.0;
+                self.play_session_active = false;
+                if let Some(r) = &mut self.renderer {
+                    r.set_editor_overlays_enabled(true);
+                }
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_simulation_controls(0);
                 }
@@ -3089,6 +3124,9 @@ fn try_start_gizmo_drag(
     viewport_size: (f32, f32),
 ) -> Option<GizmoDragState> {
     let renderer = renderer?;
+    if !renderer.editor_overlays_enabled() {
+        return None;
+    }
     let entity = (*selected_entity)?;
     let gizmo_pos = renderer.gizmo_world_pos?;
 
