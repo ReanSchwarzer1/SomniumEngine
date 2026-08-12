@@ -5,7 +5,7 @@
 > **Branch at audit:** `dev`  
 > **25M-2 boundary commit:** `4e56482`  
 > **Audited HEAD:** `846dea7` (`Phase XV BGS and Godot ref update`)  
-> **Implementation status:** Phase IV-A through IV-J complete; Phase XV researched and planned but not implemented
+> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13); Phase XV researched and planned but not implemented; Phase VV (ray-traced water reflections) planned in [`phase_VV.md`](phase_VV.md)
 
 ## 1. Read this first
 

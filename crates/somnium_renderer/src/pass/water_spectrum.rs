@@ -1,65 +1,182 @@
-//! Phase IV-K multi-cascade deterministic spectral water simulation.
-
-use wgpu::util::DeviceExt;
+//! Phase IV-K multi-cascade deterministic spectral ocean simulation.
+//!
+//! Three independently parameterised JONSWAP/TMA cascades are evolved on the
+//! GPU and unpacked into a displacement map, a normal/foam map, and a foam
+//! accumulator per cascade. The cascade roster and its numeric parameters match
+//! the MIT-licensed GodotOceanWaves reference so the two renderers can be
+//! compared frame to frame; see `dev records/phase_IV.md` section 14.
 
 const PARAM_STRIDE: u64 = 256;
-const PARAM_SIZE: usize = 64;
-const RECORDS_PER_CASCADE: usize = 24;
+const PARAM_SIZE: usize = 80;
+
+/// Every cascade uses the same transform size, which lets one butterfly table
+/// and one scratch buffer serve all of them. 1024 is the largest row the
+/// shared-memory transform can hold inside WebGPU's 16 KiB workgroup budget.
+pub const MAP_SIZE: u32 = 1024;
+
+/// The simulation advances on a fixed tick so foam growth and decay do not
+/// change character with frame rate.
+const UPDATES_PER_SECOND: f32 = 50.0;
+const TICK_SECONDS: f32 = 1.0 / UPDATES_PER_SECOND;
+/// A long stall should not be replayed as dozens of catch-up ticks.
+const MAX_TICKS_PER_FRAME: u32 = 3;
+
 const WATER_DEPTH_METRES: f32 = 20.0;
-const FETCH_METRES: f32 = 150_000.0;
-const SPECTRUM_SWELL: f32 = 0.65;
-const SPECTRUM_SPREAD: f32 = 0.22;
-const SPECTRUM_DETAIL: f32 = 0.92;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SpectrumParams {
-    dimension: u32,
-    stage_size: u32,
-    axis: u32,
-    input_is_a: u32,
+    map_size: u32,
+    stages: u32,
+    _pad0: u32,
+    _pad1: u32,
+    tile_length: [f32; 2],
+    depth: f32,
     time: f32,
-    delta_time: f32,
-    patch_length: f32,
-    speed: f32,
-    wind_dir: [f32; 2],
-    choppy: f32,
-    foam_decay_rate: f32,
-    foam_threshold: f32,
-    water_depth: f32,
+    alpha: f32,
+    peak_frequency: f32,
+    wind_speed: f32,
+    wind_angle: f32,
+    swell: f32,
+    detail: f32,
+    spread: f32,
+    whitecap: f32,
     foam_grow_rate: f32,
-    _pad1: f32,
+    foam_decay_rate: f32,
+    seed: [i32; 2],
 }
 
+/// Authored parameters for one cascade. These are the values a scene or preset
+/// controls; everything else in the pass is derived from them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveCascadeParams {
+    /// Side length of the repeating tile, in metres.
+    pub tile_length: f32,
+    /// How much of this cascade's horizontal/vertical offset reaches geometry.
+    pub displacement_scale: f32,
+    /// How much of this cascade's slope reaches the shading normal.
+    pub normal_scale: f32,
+    pub wind_speed: f32,
+    pub wind_direction_degrees: f32,
+    /// Distance over which the wind has been blowing, in kilometres.
+    pub fetch_kilometres: f32,
+    /// Biases energy towards long, ordered swell rather than local wind chop.
+    pub swell: f32,
+    /// Fades the directional distribution towards isotropic.
+    pub spread: f32,
+    /// Rolls off waves too short for the transform to resolve.
+    pub detail: f32,
+    /// Jacobian below which the surface counts as folded over.
+    pub whitecap: f32,
+    /// Rate at which folded surface turns into persistent foam.
+    pub foam_amount: f32,
+    pub seed: [i32; 2],
+}
+
+impl WaveCascadeParams {
+    /// JONSWAP equilibrium range parameter.
+    ///
+    /// Source: <https://wikiwaves.org/Ocean-Wave_Spectra#JONSWAP_Spectrum>.
+    fn alpha(&self) -> f32 {
+        let fetch = self.fetch_metres();
+        0.076 * (self.wind_speed * self.wind_speed / (fetch * 9.81)).powf(0.22)
+    }
+
+    /// Angular frequency carrying the most energy, in radians per second.
+    fn peak_angular_frequency(&self) -> f32 {
+        let fetch = self.fetch_metres();
+        22.0 * (9.81 * 9.81 / (self.wind_speed * fetch)).powf(1.0 / 3.0)
+    }
+
+    fn fetch_metres(&self) -> f32 {
+        (self.fetch_kilometres * 1000.0).max(1.0)
+    }
+}
+
+/// The shipped ocean roster. Cascade 0 carries the swell that geometry
+/// actually follows, cascade 1 adds a second displaced scale, and cascade 2
+/// contributes no displacement at all — only the fine slope and foam detail
+/// that would alias badly if it moved vertices.
+pub const OCEAN_CASCADES: [WaveCascadeParams; 3] = [
+    WaveCascadeParams {
+        tile_length: 88.0,
+        displacement_scale: 1.0,
+        normal_scale: 1.0,
+        wind_speed: 10.0,
+        wind_direction_degrees: 20.0,
+        fetch_kilometres: 150.0,
+        swell: 0.8,
+        spread: 0.2,
+        detail: 1.0,
+        whitecap: 0.5,
+        foam_amount: 8.0,
+        seed: [-4703, 8129],
+    },
+    WaveCascadeParams {
+        tile_length: 57.0,
+        displacement_scale: 0.75,
+        normal_scale: 1.0,
+        wind_speed: 5.0,
+        wind_direction_degrees: 15.0,
+        fetch_kilometres: 150.0,
+        swell: 0.8,
+        spread: 0.4,
+        detail: 1.0,
+        whitecap: 0.5,
+        foam_amount: 0.0,
+        seed: [6211, -1877],
+    },
+    WaveCascadeParams {
+        tile_length: 16.0,
+        displacement_scale: 0.0,
+        normal_scale: 0.25,
+        wind_speed: 20.0,
+        wind_direction_degrees: 20.0,
+        fetch_kilometres: 550.0,
+        swell: 0.8,
+        spread: 0.4,
+        detail: 1.0,
+        whitecap: 0.25,
+        foam_amount: 3.0,
+        seed: [-9043, -2551],
+    },
+];
+
 struct Cascade {
-    dimension: u32,
-    patch_length: f32,
-    seed: u64,
-    initial_buffer: wgpu::Buffer,
+    params: WaveCascadeParams,
+    /// Offset so the cascades do not momentarily agree and produce one huge
+    /// coherent wave.
+    time: f32,
+    needs_spectrum: bool,
+    _spectrum: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     _displacement: wgpu::Texture,
     displacement_view: wgpu::TextureView,
-    gradient: wgpu::Texture,
+    _gradient: wgpu::Texture,
     gradient_view: wgpu::TextureView,
-    gradient_history: wgpu::Texture,
+    _foam: wgpu::Texture,
 }
 
-/// Two periodic, incommensurate inverse-FFT cascades. Gerstner remains the
-/// deterministic CPU/query tier; these textures add the optional cinematic
-/// surface detail without forcing GPU readback on gameplay systems.
+/// Three periodic, incommensurate inverse-FFT cascades. Gerstner remains the
+/// deterministic CPU/query tier; these textures supply the surface detail
+/// without forcing a GPU readback on gameplay systems.
 pub struct WaterSpectrumPass {
-    update_pipeline: wgpu::ComputePipeline,
-    reverse_pipeline: wgpu::ComputePipeline,
-    stage_pipeline: wgpu::ComputePipeline,
-    compose_pipeline: wgpu::ComputePipeline,
+    generate_pipeline: wgpu::ComputePipeline,
+    butterfly_pipeline: wgpu::ComputePipeline,
+    modulate_pipeline: wgpu::ComputePipeline,
+    fft_pipeline: wgpu::ComputePipeline,
+    transpose_pipeline: wgpu::ComputePipeline,
+    unpack_pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
+    _butterfly: wgpu::Buffer,
+    _fft_data: wgpu::Buffer,
     cascades: [Cascade; 3],
     enabled: bool,
+    butterfly_ready: bool,
     previous_time: f32,
-    phase_time: f32,
+    tick_accumulator: f32,
     smoothed_simulation: [f32; 4],
     simulation_initialized: bool,
-    spectrum_wind_speed: f32,
 }
 
 impl WaterSpectrumPass {
@@ -71,9 +188,9 @@ impl WaterSpectrumPass {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water spectrum layout"),
             entries: &[
-                storage_buffer(0, true),
-                storage_buffer(1, false),
-                storage_buffer(2, false),
+                storage_buffer(0),
+                storage_buffer(1),
+                storage_buffer(2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -84,18 +201,9 @@ impl WaterSpectrumPass {
                     },
                     count: None,
                 },
-                storage_texture(4),
-                storage_texture(5),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                storage_texture(4, wgpu::TextureFormat::Rgba16Float, false),
+                storage_texture(5, wgpu::TextureFormat::Rgba16Float, false),
+                storage_texture(6, wgpu::TextureFormat::R32Float, true),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -113,32 +221,61 @@ impl WaterSpectrumPass {
                 cache: None,
             })
         };
-        let update_pipeline = pipeline("update_spectrum");
-        let reverse_pipeline = pipeline("bit_reverse");
-        let stage_pipeline = pipeline("fft_stage");
-        let compose_pipeline = pipeline("compose");
+
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water spectrum dispatch params"),
-            size: PARAM_STRIDE * (RECORDS_PER_CASCADE * 3) as u64,
+            size: PARAM_STRIDE * OCEAN_CASCADES.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let first = make_cascade(device, &layout, &params, 256, 88.0, 0x5A17_0C3Du64);
-        let second = make_cascade(device, &layout, &params, 512, 57.0, 0xC041_DA7Au64);
-        let third = make_cascade(device, &layout, &params, 256, 16.0, 0xB3AC_F1E5u64);
+
+        let stages = MAP_SIZE.ilog2();
+        let butterfly = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water FFT butterfly factors"),
+            size: u64::from(stages) * u64::from(MAP_SIZE) * 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        // Cascades are dispatched one after another inside a single compute
+        // pass, so the transform scratch can be shared instead of tripled.
+        let fft_data = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water FFT scratch"),
+            size: u64::from(MAP_SIZE) * u64::from(MAP_SIZE) * 4 * 2 * 8,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let cascades = std::array::from_fn(|index| {
+            make_cascade(
+                device,
+                &layout,
+                &params,
+                &butterfly,
+                &fft_data,
+                OCEAN_CASCADES[index],
+                // The reference starts each cascade at a different phase so
+                // they never line up into one implausible crest.
+                120.0 + std::f32::consts::PI * index as f32,
+            )
+        });
+
         Self {
-            update_pipeline,
-            reverse_pipeline,
-            stage_pipeline,
-            compose_pipeline,
+            generate_pipeline: pipeline("generate_spectrum"),
+            butterfly_pipeline: pipeline("butterfly_precompute"),
+            modulate_pipeline: pipeline("modulate"),
+            fft_pipeline: pipeline("fft_row"),
+            transpose_pipeline: pipeline("transpose"),
+            unpack_pipeline: pipeline("unpack"),
             params,
-            cascades: [first, second, third],
+            _butterfly: butterfly,
+            _fft_data: fft_data,
+            cascades,
             enabled: std::env::var("SOMNIUM_WATER_SPECTRUM").as_deref() != Ok("0"),
+            butterfly_ready: false,
             previous_time: 0.0,
-            phase_time: 0.0,
+            tick_accumulator: 0.0,
             smoothed_simulation: [0.0; 4],
             simulation_initialized: false,
-            spectrum_wind_speed: 7.5,
         }
     }
 
@@ -146,21 +283,28 @@ impl WaterSpectrumPass {
         self.enabled
     }
 
+    /// Per-cascade `(1 / tile_length, displacement_scale, normal_scale)` for
+    /// the surface shader.
+    pub fn map_scales(&self) -> [[f32; 4]; 3] {
+        std::array::from_fn(|index| {
+            let params = self.cascades[index].params;
+            let inverse = 1.0 / params.tile_length.max(0.001);
+            [
+                inverse,
+                inverse,
+                params.displacement_scale,
+                params.normal_scale,
+            ]
+        })
+    }
+
     pub fn views(&self) -> [(&wgpu::TextureView, &wgpu::TextureView); 3] {
-        [
+        std::array::from_fn(|index| {
             (
-                &self.cascades[0].displacement_view,
-                &self.cascades[0].gradient_view,
-            ),
-            (
-                &self.cascades[1].displacement_view,
-                &self.cascades[1].gradient_view,
-            ),
-            (
-                &self.cascades[2].displacement_view,
-                &self.cascades[2].gradient_view,
-            ),
-        ]
+                &self.cascades[index].displacement_view,
+                &self.cascades[index].gradient_view,
+            )
+        })
     }
 
     pub fn record(
@@ -184,114 +328,100 @@ impl WaterSpectrumPass {
             self.smoothed_simulation =
                 smooth_controls(self.smoothed_simulation, simulation, delta_time);
         }
-        let wind_speed = self.smoothed_simulation[1].clamp(0.1, 40.0);
-        let requested_wind = simulation[1].clamp(0.1, 40.0);
-        if (requested_wind - self.spectrum_wind_speed).abs() > 0.05 {
-            for cascade in &self.cascades {
-                let spectrum = initial_spectrum(
-                    cascade.dimension,
-                    cascade.patch_length,
-                    cascade.seed,
-                    requested_wind,
-                );
-                queue.write_buffer(&cascade.initial_buffer, 0, bytemuck::cast_slice(&spectrum));
-            }
-            self.spectrum_wind_speed = requested_wind;
+
+        self.tick_accumulator += delta_time;
+        let mut ticks = 0u32;
+        while self.tick_accumulator >= TICK_SECONDS && ticks < MAX_TICKS_PER_FRAME {
+            self.tick_accumulator -= TICK_SECONDS;
+            ticks += 1;
         }
-        let phase_speed = (wind_speed / 11.0).sqrt().clamp(0.2, 2.0);
-        self.phase_time += delta_time * phase_speed;
-        let choppy = (0.45 + wind_speed * 0.045).clamp(0.45, 1.35);
-        let foam_decay = self.smoothed_simulation[2].clamp(0.05, 8.0);
-        let foam_threshold = self.smoothed_simulation[3].clamp(0.0, 0.95);
-        // IV-K2/K7: Delta-scaled foam growth/decay matching GodotOceanWaves.
-        // Previously foam_grow_rate was ~300x too weak because foam_amount was
-        // unscaled (1.1 instead of 5.0-15.0). Now properly scaled so open sea
-        // wave crests generate visible whitecaps.
-        let foam_amount = (1.0 / foam_decay.max(0.02)).clamp(1.5, 15.0);
-        let foam_grow_rate = (delta_time * foam_amount * 35.0).clamp(0.05, 2.5);
-        let foam_decay_rate = delta_time * (0.5_f32.max(12.0 - foam_amount)) * 1.15;
-        let mut bytes = vec![0u8; (PARAM_STRIDE as usize) * RECORDS_PER_CASCADE * 3];
-        let mut record_count = 0usize;
-        for cascade in &self.cascades {
-            let mut push = |stage_size: u32, axis: u32, input_is_a: u32| {
-                let value = SpectrumParams {
-                    dimension: cascade.dimension,
-                    stage_size,
-                    axis,
-                    input_is_a,
-                    // Integrated phase time preserves continuity when wind
-                    // speed changes; absolute_time * new_speed would jump.
-                    time: self.phase_time,
-                    delta_time,
-                    patch_length: cascade.patch_length,
-                    speed: 1.0,
-                    wind_dir: [0.944, 0.330],
-                    choppy,
-                    foam_decay_rate,
-                    foam_threshold,
-                    water_depth: WATER_DEPTH_METRES,
-                    foam_grow_rate,
-                    _pad1: 0.0,
-                };
-                let start = record_count * PARAM_STRIDE as usize;
-                bytes[start..start + PARAM_SIZE].copy_from_slice(bytemuck::bytes_of(&value));
-                record_count += 1;
+        if ticks == 0 {
+            return self.smoothed_simulation;
+        }
+        // Catching up several ticks at once advances phase by the whole
+        // interval but only runs one transform, which is what the fixed rate
+        // is for.
+        let step = TICK_SECONDS * ticks as f32;
+        for cascade in &mut self.cascades {
+            cascade.time += step;
+        }
+
+        let mut bytes = vec![0u8; (PARAM_STRIDE as usize) * self.cascades.len()];
+        for (index, cascade) in self.cascades.iter().enumerate() {
+            let params = cascade.params;
+            // The constants normalize `foam_amount` into a usable range; they
+            // come from the reference and are not derived from first
+            // principles.
+            let foam_grow_rate = step * params.foam_amount * 7.5;
+            let foam_decay_rate = step * (10.0_f32 - params.foam_amount).max(0.5) * 1.15;
+            let value = SpectrumParams {
+                map_size: MAP_SIZE,
+                stages: MAP_SIZE.ilog2(),
+                _pad0: 0,
+                _pad1: 0,
+                tile_length: [params.tile_length, params.tile_length],
+                depth: WATER_DEPTH_METRES,
+                time: cascade.time,
+                alpha: params.alpha(),
+                peak_frequency: params.peak_angular_frequency(),
+                wind_speed: params.wind_speed,
+                wind_angle: params.wind_direction_degrees.to_radians(),
+                swell: params.swell,
+                detail: params.detail,
+                spread: params.spread,
+                whitecap: params.whitecap,
+                foam_grow_rate,
+                foam_decay_rate,
+                seed: params.seed,
             };
-            push(0, 0, 1); // spectrum update
-            push(0, 0, 1); // two-dimensional bit reverse
-            let stages = cascade.dimension.ilog2();
-            let mut input_is_a = 0u32; // reverse writes B
-            for axis in 0..2 {
-                for stage in 1..=stages {
-                    push(1 << stage, axis, input_is_a);
-                    input_is_a ^= 1;
-                }
-            }
-            debug_assert_eq!(input_is_a, 0, "power-of-two cascades finish in B");
-            push(0, 0, 0); // compose from B
+            let start = index * PARAM_STRIDE as usize;
+            bytes[start..start + PARAM_SIZE].copy_from_slice(bytemuck::bytes_of(&value));
         }
-        queue.write_buffer(
-            &self.params,
-            0,
-            &bytes[..record_count * PARAM_STRIDE as usize],
-        );
+        queue.write_buffer(&self.params, 0, &bytes);
+
+        let groups = MAP_SIZE.div_ceil(16);
+        let tiles = MAP_SIZE.div_ceil(32);
+        let stages = MAP_SIZE.ilog2();
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Water spectral cascades"),
             timestamp_writes: None,
         });
-        let mut record = 0u32;
-        for cascade in &self.cascades {
-            let groups = cascade.dimension.div_ceil(8);
-            pass.set_pipeline(&self.update_pipeline);
-            pass.set_bind_group(0, &cascade.bind_group, &[record * PARAM_STRIDE as u32]);
-            pass.dispatch_workgroups(groups, groups, 1);
-            record += 1;
-            pass.set_pipeline(&self.reverse_pipeline);
-            pass.set_bind_group(0, &cascade.bind_group, &[record * PARAM_STRIDE as u32]);
-            pass.dispatch_workgroups(groups, groups, 3);
-            record += 1;
-            pass.set_pipeline(&self.stage_pipeline);
-            for _axis in 0..2 {
-                for _stage in 1..=cascade.dimension.ilog2() {
-                    pass.set_bind_group(0, &cascade.bind_group, &[record * PARAM_STRIDE as u32]);
-                    pass.dispatch_workgroups(groups, groups, 3);
-                    record += 1;
-                }
+        if !self.butterfly_ready {
+            pass.set_pipeline(&self.butterfly_pipeline);
+            pass.set_bind_group(0, &self.cascades[0].bind_group, &[0]);
+            pass.dispatch_workgroups(MAP_SIZE / 2 / 64, stages, 1);
+            self.butterfly_ready = true;
+        }
+        for (index, cascade) in self.cascades.iter_mut().enumerate() {
+            let offset = (index as u64 * PARAM_STRIDE) as u32;
+            if cascade.needs_spectrum {
+                pass.set_pipeline(&self.generate_pipeline);
+                pass.set_bind_group(0, &cascade.bind_group, &[offset]);
+                pass.dispatch_workgroups(groups, groups, 1);
+                cascade.needs_spectrum = false;
             }
-            pass.set_pipeline(&self.compose_pipeline);
-            pass.set_bind_group(0, &cascade.bind_group, &[record * PARAM_STRIDE as u32]);
+            pass.set_pipeline(&self.modulate_pipeline);
+            pass.set_bind_group(0, &cascade.bind_group, &[offset]);
             pass.dispatch_workgroups(groups, groups, 1);
-            record += 1;
+
+            pass.set_pipeline(&self.fft_pipeline);
+            pass.set_bind_group(0, &cascade.bind_group, &[offset]);
+            pass.dispatch_workgroups(1, MAP_SIZE, 4);
+
+            pass.set_pipeline(&self.transpose_pipeline);
+            pass.set_bind_group(0, &cascade.bind_group, &[offset]);
+            pass.dispatch_workgroups(tiles, tiles, 4);
+
+            pass.set_pipeline(&self.fft_pipeline);
+            pass.set_bind_group(0, &cascade.bind_group, &[offset]);
+            pass.dispatch_workgroups(1, MAP_SIZE, 4);
+
+            pass.set_pipeline(&self.unpack_pipeline);
+            pass.set_bind_group(0, &cascade.bind_group, &[offset]);
+            pass.dispatch_workgroups(groups, groups, 1);
         }
         drop(pass);
-        for cascade in &self.cascades {
-            encoder.copy_texture_to_texture(
-                cascade.gradient.as_image_copy(),
-                cascade.gradient_history.as_image_copy(),
-                cascade.gradient.size(),
-            );
-        }
         self.smoothed_simulation
     }
 }
@@ -305,12 +435,12 @@ fn smooth_controls(current: [f32; 4], target: [f32; 4], delta_time: f32) -> [f32
     result
 }
 
-fn storage_buffer(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+fn storage_buffer(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
             has_dynamic_offset: false,
             min_binding_size: None,
         },
@@ -318,13 +448,21 @@ fn storage_buffer(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn storage_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn storage_texture(
+    binding: u32,
+    format: wgpu::TextureFormat,
+    read_write: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::StorageTexture {
-            access: wgpu::StorageTextureAccess::WriteOnly,
-            format: wgpu::TextureFormat::Rgba16Float,
+            access: if read_write {
+                wgpu::StorageTextureAccess::ReadWrite
+            } else {
+                wgpu::StorageTextureAccess::WriteOnly
+            },
+            format,
             view_dimension: wgpu::TextureViewDimension::D2,
         },
         count: None,
@@ -334,76 +472,66 @@ fn storage_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
 fn make_cascade(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    params: &wgpu::Buffer,
-    dimension: u32,
-    patch_length: f32,
-    seed: u64,
+    params_buffer: &wgpu::Buffer,
+    butterfly: &wgpu::Buffer,
+    fft_data: &wgpu::Buffer,
+    params: WaveCascadeParams,
+    time: f32,
 ) -> Cascade {
-    let initial = initial_spectrum(dimension, patch_length, seed, 7.5);
-    let initial_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let spectrum = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Water initial wind spectrum"),
-        contents: bytemuck::cast_slice(&initial),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        size: u64::from(MAP_SIZE) * u64::from(MAP_SIZE) * 16,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
     });
-    let field_bytes = dimension as u64 * dimension as u64 * 3 * 8;
-    let make_buffer = |label| {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: field_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        })
-    };
-    let spectrum_a = make_buffer("Water FFT ping");
-    let spectrum_b = make_buffer("Water FFT pong");
-    let make_texture = |label, history: bool| {
+    let make_texture = |label, format| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
-                width: dimension,
-                height: dimension,
+                width: MAP_SIZE,
+                height: MAP_SIZE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: if history {
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
-            } else {
-                wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-            },
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
         })
     };
-    let displacement = make_texture("Water spectral displacement", false);
-    let gradient = make_texture("Water spectral gradient and foam", false);
-    let gradient_history = make_texture("Water spectral gradient history", true);
+    let displacement = make_texture(
+        "Water spectral displacement",
+        wgpu::TextureFormat::Rgba16Float,
+    );
+    let gradient = make_texture(
+        "Water spectral gradient and foam",
+        wgpu::TextureFormat::Rgba16Float,
+    );
+    let foam = make_texture("Water foam accumulator", wgpu::TextureFormat::R32Float);
     let displacement_view = displacement.create_view(&Default::default());
     let gradient_view = gradient.create_view(&Default::default());
-    let history_view = gradient_history.create_view(&Default::default());
+    let foam_view = foam.create_view(&Default::default());
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Water spectrum cascade"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: initial_buffer.as_entire_binding(),
+                resource: spectrum.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: spectrum_a.as_entire_binding(),
+                resource: fft_data.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: spectrum_b.as_entire_binding(),
+                resource: butterfly.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: params,
+                    buffer: params_buffer,
                     offset: 0,
                     size: std::num::NonZeroU64::new(PARAM_SIZE as u64),
                 }),
@@ -418,127 +546,22 @@ fn make_cascade(
             },
             wgpu::BindGroupEntry {
                 binding: 6,
-                resource: wgpu::BindingResource::TextureView(&history_view),
+                resource: wgpu::BindingResource::TextureView(&foam_view),
             },
         ],
     });
     Cascade {
-        dimension,
-        patch_length,
-        seed,
-        initial_buffer,
+        params,
+        time,
+        needs_spectrum: true,
+        _spectrum: spectrum,
         bind_group,
         _displacement: displacement,
         displacement_view,
-        gradient,
+        _gradient: gradient,
         gradient_view,
-        gradient_history,
+        _foam: foam,
     }
-}
-
-fn initial_spectrum(
-    dimension: u32,
-    patch_length: f32,
-    mut state: u64,
-    wind_speed: f32,
-) -> Vec<[f32; 2]> {
-    let count = (dimension * dimension) as usize;
-    let mut values = Vec::with_capacity(count);
-    let wind = glam::Vec2::new(0.944, 0.330).normalize();
-    let wind_speed = wind_speed.max(0.1);
-    let alpha = 0.076 * (wind_speed * wind_speed / (FETCH_METRES * 9.81)).powf(0.22);
-    let peak_frequency = 22.0 * (9.81 * 9.81 / (wind_speed * FETCH_METRES)).powf(1.0 / 3.0);
-    let delta_k = std::f32::consts::TAU / patch_length;
-    for y in 0..dimension {
-        for x in 0..dimension {
-            let sx = if x <= dimension / 2 {
-                x as f32
-            } else {
-                x as f32 - dimension as f32
-            };
-            let sy = if y <= dimension / 2 {
-                y as f32
-            } else {
-                y as f32 - dimension as f32
-            };
-            let k = glam::Vec2::new(sx, sy) * std::f32::consts::TAU / patch_length;
-            let length = k.length();
-            let spectrum = if length < 1.0e-4 {
-                0.0
-            } else {
-                let direction = k / length;
-                let omega = (9.81 * length * (length * WATER_DEPTH_METRES).tanh()).sqrt();
-                let depth_term = length * WATER_DEPTH_METRES;
-                let tanh_depth = depth_term.tanh();
-                let derivative =
-                    0.5 * 9.81 * (tanh_depth + depth_term * (1.0 - tanh_depth * tanh_depth))
-                        / omega.max(1.0e-5);
-                let sigma = if omega <= peak_frequency { 0.07 } else { 0.09 };
-                let peak_shape = (-(omega - peak_frequency).powi(2)
-                    / (2.0 * sigma * sigma * peak_frequency * peak_frequency))
-                    .exp();
-                let jonswap = alpha * 9.81 * 9.81 / omega.powi(5)
-                    * (-1.25 * (peak_frequency / omega).powi(4)).exp()
-                    * 3.3_f32.powf(peak_shape);
-                let shallow_frequency = (omega * (WATER_DEPTH_METRES / 9.81).sqrt()).min(2.0);
-                let depth_attenuation = if shallow_frequency <= 1.0 {
-                    0.5 * shallow_frequency * shallow_frequency
-                } else {
-                    1.0 - 0.5 * (2.0 - shallow_frequency).powi(2)
-                };
-                let ratio = omega / peak_frequency;
-                let directional_power = if omega <= peak_frequency {
-                    6.97 * ratio.powf(4.06)
-                } else {
-                    9.77 * ratio.powf(-2.33 - 1.45 * (wind_speed * peak_frequency / 9.81 - 1.17))
-                };
-                let directional_power = directional_power
-                    + 16.0 * (peak_frequency / omega).tanh() * SPECTRUM_SWELL.powi(2);
-                let normalization = longuet_higgins_normalization(directional_power);
-                let cos_half_angle = ((direction.y.atan2(direction.x) - wind.y.atan2(wind.x))
-                    * 0.5)
-                    .cos()
-                    .abs();
-                let directional = normalization * cos_half_angle.powf(2.0 * directional_power);
-                let spread = (0.5 / std::f32::consts::PI) * SPECTRUM_SPREAD
-                    + directional * (1.0 - SPECTRUM_SPREAD);
-                let detail = (-(1.0 - SPECTRUM_DETAIL).powi(2) * length * length).exp();
-                jonswap * depth_attenuation * spread * detail * derivative / length
-                    * delta_k
-                    * delta_k
-            };
-            let g0 = gaussian(&mut state);
-            let g1 = gaussian(&mut state);
-            let scale = (spectrum * 0.5).sqrt();
-            let value = [g0 * scale, g1 * scale];
-            values.push(value);
-        }
-    }
-    // Physical spectrum energy scaling matching GodotOceanWaves / Tessendorf.
-    values
-}
-
-fn longuet_higgins_normalization(power: f32) -> f32 {
-    if power < 0.4 {
-        0.5 / std::f32::consts::PI + power * (0.220_636 + power * (-0.109 + power * 0.090))
-    } else {
-        let root = power.sqrt();
-        (root * 0.5 + 0.0625 / root) / std::f32::consts::PI.sqrt()
-    }
-}
-
-fn gaussian(state: &mut u64) -> f32 {
-    let u1 = uniform(state).max(1.0e-7);
-    let u2 = uniform(state);
-    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
-}
-
-fn uniform(state: &mut u64) -> f32 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    let bits = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
-    ((bits >> 40) as u32) as f32 / (1u32 << 24) as f32
 }
 
 #[cfg(test)]
@@ -546,29 +569,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deterministic_spectrum_is_finite_and_repeatable() {
-        let a = initial_spectrum(32, 53.0, 7, 7.5);
-        let b = initial_spectrum(32, 53.0, 7, 7.5);
-        assert_eq!(a, b);
-        assert!(a.iter().flatten().all(|value| value.is_finite()));
-        assert!(
-            a.iter()
-                .skip(1)
-                .any(|value| value[0] != 0.0 || value[1] != 0.0)
-        );
-    }
-
-    #[test]
-    fn tma_spectrum_responds_to_wind_without_losing_determinism() {
-        let calm = initial_spectrum(32, 53.0, 7, 3.0);
-        let storm = initial_spectrum(32, 53.0, 7, 18.0);
-        assert_ne!(calm, storm);
-        assert!(storm.iter().flatten().all(|value| value.is_finite()));
-    }
-
-    #[test]
     fn dispatch_parameter_layout_matches_wgsl() {
         assert_eq!(std::mem::size_of::<SpectrumParams>(), PARAM_SIZE);
+        // Uniform structs round up to a sixteen-byte multiple.
+        assert_eq!(PARAM_SIZE % 16, 0);
+    }
+
+    #[test]
+    fn jonswap_energy_falls_as_fetch_and_wind_grow() {
+        let calm = WaveCascadeParams {
+            wind_speed: 5.0,
+            ..OCEAN_CASCADES[0]
+        };
+        let storm = WaveCascadeParams {
+            wind_speed: 20.0,
+            ..OCEAN_CASCADES[0]
+        };
+        // A longer, stronger wind field peaks at a lower frequency: bigger,
+        // slower waves rather than more of the same chop.
+        assert!(storm.peak_angular_frequency() < calm.peak_angular_frequency());
+        assert!(storm.alpha() > calm.alpha());
+        assert!(calm.alpha().is_finite() && storm.alpha().is_finite());
+    }
+
+    #[test]
+    fn shipped_cascades_are_incommensurate_and_ordered() {
+        let lengths: Vec<f32> = OCEAN_CASCADES.iter().map(|c| c.tile_length).collect();
+        assert_eq!(lengths, vec![88.0, 57.0, 16.0]);
+        // Repeating tiles that share a factor would visibly line up.
+        for window in lengths.windows(2) {
+            let ratio = window[0] / window[1];
+            assert!((ratio - ratio.round()).abs() > 0.1, "tiles {window:?} align");
+        }
+        // The finest cascade must not move geometry; a 16 m tile displaced on
+        // a metre-scale mesh aliases badly.
+        assert_eq!(OCEAN_CASCADES[2].displacement_scale, 0.0);
+    }
+
+    #[test]
+    fn map_size_row_fits_the_workgroup_storage_budget() {
+        let bytes = 2 * MAP_SIZE as usize * std::mem::size_of::<[f32; 2]>();
+        assert!(bytes <= 16384, "{bytes} exceeds the guaranteed 16 KiB");
+        assert_eq!(MAP_SIZE % 256, 0, "row must divide across 256 invocations");
     }
 
     #[test]

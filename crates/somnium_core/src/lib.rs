@@ -1238,7 +1238,7 @@ impl Default for WaterComponent {
             wave_steepness: 0.35,
             absorption: [0.18, 0.055, 0.025],
             scattering: [0.012, 0.035, 0.055],
-            roughness: 0.40,
+            roughness: 0.65,
             anisotropy: 0.35,
             ssr_strength: 0.85,
             spectrum_blend: 0.75,
@@ -1260,27 +1260,50 @@ impl WaterComponent {
             preset: 1,
             body_kind: 0,
             surface_level: somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES,
-            max_depth: somnium_renderer::terrain::DEFAULT_WATER_DEPTH_METRES,
+            // Deliberately deeper than the baked bed
+            // ([`somnium_renderer::terrain::DEFAULT_WATER_DEPTH_METRES`]). This
+            // is the optical path the extinction integral walks where nothing
+            // opaque lies behind the surface, so the extra six metres is what
+            // carries open water into full absorption instead of leaving it
+            // thin and grey out towards the horizon.
+            max_depth: 18.6,
             bounds,
-            amplitude: 0.35,
+            // Under a metre of swell for an inland body. This scales rendered
+            // displacement but not the cascade Jacobian, so foam still forms
+            // for the full-strength sea; the mismatch is deliberate and reads
+            // as crests that break slightly early. Pushing it much past one
+            // buries the surface in white.
+            amplitude: 0.57,
+            clarity: 1.0,
             coord_scale: [1.0, 1.0],
             wave_dir_a: [0.944, 0.330],
             wave_dir_b: [-0.243, 0.970],
             wave_length_a: 18.0,
             wave_length_b: 11.0,
-            wave_speed: 0.85,
+            wave_speed: 0.2,
             wave_steepness: 0.42,
             edge_color: [0.88, 0.96, 1.0, 1.0],
             edge_scale: 1.35,
             absorption: [0.22, 0.070, 0.032],
             scattering: [0.016, 0.045, 0.065],
-            roughness: 0.40,
+            // Phase IV-K, authored against the shipped scene rather than taken
+            // from the reference. A near-mirror microfacet distribution is what
+            // gives the sun a tight, glittering track across the swell instead
+            // of a broad sheen; the sky reflection stays soft regardless,
+            // because the shader blurs that with its own separate roughness.
+            roughness: 0.02,
             anisotropy: 0.45,
-            ssr_strength: 0.9,
+            ssr_strength: 1.0,
             spectrum_blend: 0.64,
-            wind_speed: 7.5,
-            foam_decay: 0.9,
-            foam_threshold: 0.08,
+            // Authored, but inert since IV-K: the spectral cascades carry their
+            // own wind field and run foam growth and decay against the
+            // Jacobian, so nothing downstream reads these three. They are kept
+            // because the Gerstner-only tier and the scene format still carry
+            // them, and because a body that says it is a 6.5 m/s sea should say
+            // so whether or not the current surface tier asks.
+            wind_speed: 6.5,
+            foam_decay: 4.5,
+            foam_threshold: 0.54,
             caustic_strength: 0.85,
             underwater_enabled: true,
             ..Self::default()

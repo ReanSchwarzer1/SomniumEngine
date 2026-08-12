@@ -736,9 +736,21 @@ impl GameApp for HelloGame {
                                         preset.terrain_translation.y + eye_y,
                                         preset.terrain_translation.z + local_xz.y,
                                     );
-                                    self.camera.yaw = -35.0;
-                                    self.camera.pitch =
-                                        if viewpoint == "underwater" { 5.0 } else { 0.0 };
+                                    // The deepest point of a lake is not
+                                    // necessarily surrounded by open water, so
+                                    // the validation heading is overridable.
+                                    self.camera.yaw = std::env::var("SOMNIUM_WATER_YAW")
+                                        .ok()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(-35.0);
+                                    self.camera.pitch = std::env::var("SOMNIUM_WATER_PITCH")
+                                        .ok()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(if viewpoint == "underwater" {
+                                            5.0
+                                        } else {
+                                            0.0
+                                        });
                                     info!(%viewpoint, depth, "Deterministic water validation viewpoint active");
                                 }
                             }
@@ -1645,6 +1657,7 @@ impl GameApp for HelloGame {
                             } else {
                                 [0.0; 4]
                             },
+                            cascade_scales: [[0.0; 4]; 3],
                         },
                         mesh.vertex_offset,
                         mesh.index_offset,

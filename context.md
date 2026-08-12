@@ -1,18 +1,23 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-12  
-> **Current phase:** Phase IV in-progress (IV-A through IV-J complete, IV-K ocean fidelity pass UNFIXED / IN-PROGRESS / UNFINISHED)  
+> **Last updated:** 2026-08-13  
+> **Current phase:** Phase IV complete (IV-A through IV-K)  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
-> **CRITICAL INSTRUCTIONS FOR THE NEXT AI MODEL / SESSION:**
-> Phase IV-K (Ocean Fidelity Pass) is **UNFIXED / UNFINISHED and REQUIRES AN EXTENSIVE AUDIT AND SIGNIFICANT WORK**. The ocean in Somnium Engine does NOT yet match the visual appearance of the Godot implementation.
-> The next model MUST:
-> 1. Conduct a deep, line-by-line audit of all water rendering code (`crates/somnium_renderer/src/shaders/water.wgsl`, `water_spectrum.wgsl`, `crates/somnium_renderer/src/pass/water_spectrum.rs`, `particle.rs`, `water_body.rs`, `shading.wgsl`).
-> 2. Read all documentation: `READ THIS FIRST.md`, `dev records/phase_IV.md` (Section 14), `context.md`, `ATTRIBUTION.md`, `implementation_plan.md`, and `walkthrough.md`.
-> 3. Study the reference repository: `C:\Users\adhir\Downloads\GE\example_repo\GodotOceanWaves-main` (specifically `water.gdshader`, `spectrum_compute.glsl`, `fft_unpack.glsl`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`).
-> 4. Inspect the target visual screenshot: `C:\Users\adhir\Downloads\Screenshot 2026-08-12 211804.png`. The goal is to make Somnium's water look **EXACTLY or VERY CLOSE to this Godot reference screenshot**.
-> 5. Review cited papers and video talks (GDC 2019 *Interactive Water Simulation in Atlas*, Tessendorf *Simulating Ocean Water*, Horvath directional spectra, Turánszki Wicked Engine updates, Sea of Thieves SIGGRAPH '18 talk).
-> 6. Iterate on FFT parameters, 3-cascade scales, foam noise blending, specular highlights, subsurface scattering, screen-space reflections, atmosphere/fog blending, and sea spray particles until exact visual parity is achieved.
+> Phase IV-K, the ocean fidelity pass against
+> [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), closed on
+> 2026-08-13. The three-cascade 1024² FFT, the Jacobian whitecap model, and the
+> GDC 2019 *Atlas* surface lighting all ship; the record of what was
+> implemented, what was deliberately deferred, and where Somnium departs from
+> the reference is in `dev records/phase_IV.md` section 14. Two IV-K items were
+> **not** delivered and are stated there rather than buried: the ocean clipmap
+> body kind (K-1) and the HDRI/Filmic environment (K-7) were deferred, and GPU
+> sea spray (K-6) was abandoned after two failed emitters.
+>
+> The next substantial water work is **Phase VV — Halcyon**, ray-traced water
+> reflections, planned in `dev records/phase_VV.md`. Reflections are currently
+> a 28-step screen-space march with an environment-cube fallback, which is the
+> largest remaining fidelity gap for a low camera over open water.
 
 ---
 
@@ -1236,6 +1241,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
+| VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
 ---
 
@@ -3489,6 +3495,41 @@ GodotOceanWaves equations and Sea of Thieves rendering description; no
 third-party textures were required. Naga validates all Phase IV water modules,
 and the deterministic spectrum, wind response, parameter layout, and control
 smoothing tests pass.
+
+**Phase IV-K — ocean fidelity pass, completed 2026-08-13.** IV-K supersedes the
+two-cascade simulation described immediately above. The full record, including
+the mathematics and every deviation from the reference, is in
+`dev records/phase_IV.md` section 14; the short version:
+
+- **Three cascades at 1024²** (tile lengths 88 m, 57 m, 16 m) replace the two
+  previous ones, with four complex spectra packed per Stockham inverse-FFT pass
+  and butterfly factors precomputed once. Every spectrum parameter — wind,
+  fetch, swell, spread, detail, whitecap, foam amount, seed — is now authored
+  per cascade in `WaveCascadeParams` rather than shared globally.
+- **Whitecaps come from the Jacobian.** Displacement, slope, horizontal
+  stretch, and fold are unpacked in one pass; foam accumulates additively into
+  an `r32float` history at a fixed 50 Hz step and decays exponentially. Foam is
+  deliberately excluded from the Gerstner/spectral crossfade, so dialling
+  `spectrum_blend` back cannot erase whitecaps that already formed.
+- **Surface lighting follows the GDC 2019 *Atlas* model**, with four departures
+  that a physically scaled deferred renderer forces. Diffuse is albedo-weighted
+  and normalised by π rather than the reference's unitless `0.5 * ndotl`, which
+  otherwise renders the entire lake white. *Two* Fresnel curves are evaluated:
+  the reference's suppressed curve for the direct sun highlight, and a plain
+  Schlick curve capped by reflection blur for the environment split, because
+  one curve for both jobs makes water read as wet stone. Total internal
+  reflection is gated on the camera being below the fragment, so a
+  choppiness-folded wave is not mistaken for the Snell window and turned into a
+  white shard. Both subsurface-scattering terms are gated on the viewer facing
+  the sun, not just the height term.
+- **Three items did not ship** and are recorded as such rather than left
+  implied: the ocean clipmap body kind (K-1) and the HDRI/Filmic environment
+  (K-7) are deferred, and GPU sea spray (K-6) was abandoned after two emitters
+  placed particles incorrectly. The reference's spray texture and its
+  attribution stay in the tree for a later attempt.
+
+Evidence is in `dev records/phase IV/IV-K/`. The authored body that ships is
+`WaterComponent::great_lakes`, captured in `ivk_authored_water_body.png`.
 
 ## 18. Known Issues & Active Bugs
 

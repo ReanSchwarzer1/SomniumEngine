@@ -1269,14 +1269,14 @@ and its LUT sizes were adopted; both are covered by §13.27's terms.
 | Finite-depth directional spectrum | **GodotOceanWaves** by 2Retr0 (`example_repo/GodotOceanWaves-main`, MIT), especially `spectrum_compute.glsl`, `spectrum_modulate.glsl`, `fft_unpack.glsl`, and `water.gdshader`, documents the TMA/JONSWAP spectrum, finite-depth dispersion, Hasselmann/Longuet-Higgins directional spreading, swell and detail terms, and wind/fetch parameterization derived from Christopher J. Horvath and Jerry Tessendorf. Somnium adapts those published equations into Rust and WGSL, maintaining 3 spectral cascades ($88\text{m}$, $57\text{m}$, $16\text{m}$). |
 | Pixel-density wave filtering & Bicubic sampling | GodotOceanWaves `water.gdshader` adapts the four-sample cubic B-spline optimization from NVIDIA GPU Gems 2 Chapter 20 and blends cubic/bilinear sampling using world-space texel density. Somnium implements the bicubic filter in WGSL for its gradient/foam textures. |
 | Crest colour, foam feedback & GDC 2019 lighting | **GodotOceanWaves** (`water.gdshader`, `fft_unpack.glsl`, MIT) and Nigel Ang et al. (*The Technical Art of Sea of Thieves*, SIGGRAPH '18 Talks) describe horizontal-displacement Jacobian whitecap fold calculations $f = \max(w_{cap} - J, 0)$, temporal additive foam accumulation $F_t = \text{clamp}(F_{t-1} e^{-\gamma_{decay} \Delta t} + f \gamma_{grow} \Delta t, 0, 1)$, and GDC 2019 ocean surface SSS height/near equations combined with GGX microfacet specular. |
-| Asset & GPU Spray Emitter (`sea_spray.png`) | **GodotOceanWaves** (`main.tscn`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`, MIT) uses `sea_spray.png` as `albedo_texture` on a 32,768-particle `GPUParticles3D` emitter (`WaterSprayEmitter`). `sea_spray_particle.gdshader` samples wave crest foam ($F_{accum} > 0.9$) from the FFT normal map to spawn dynamic billboarded spray quads tinted by $\mathbf{C}_{foam} \cdot (1.65, 1.75, 1.65)$. `sea_spray.png` is copied to [`assets/ocean_pbr/sea_spray.png`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/sea_spray.png) for Somnium's particle pass (IV-K5). |
+| Asset & GPU Spray Emitter (`sea_spray.png`) | **GodotOceanWaves** (`main.tscn`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`, MIT) uses `sea_spray.png` as `albedo_texture` on a 32,768-particle `GPUParticles3D` emitter (`WaterSprayEmitter`). `sea_spray_particle.gdshader` samples wave crest foam ($F_{accum} > 0.9$) from the FFT normal map to spawn dynamic billboarded spray quads tinted by $\mathbf{C}_{foam} \cdot (1.65, 1.75, 1.65)$. `sea_spray.png` is copied to `assets/ocean_pbr/sea_spray.png`. **Somnium ships no spray emitter** — two attempts placed particles incorrectly and were removed — so this row records the asset's provenance and the design that was studied, not shipped code. |
 
-> **IMPORTANT NOTE FOR NEXT SESSION / MODEL REGARDING PHASE IV-K:**  
-> **Phase IV-K (Ocean Fidelity Pass) is currently UNFIXED / IN-PROGRESS / UNFINISHED.**  
-> The next session/model MUST thoroughly read and review:
-> 1. The entire codebase in `crates/` (`somnium_renderer`, `somnium_core`, `somnium_ui`, `somnium_asset`, etc.).
-> 2. All project documentation and context files, including `READ THIS FIRST.md`, `dev records/phase_IV.md`, `context.md`, `ATTRIBUTION.md`, `implementation_plan.md`, and `walkthrough.md`.
-> 3. All reference repositories in `example_repo/` (specifically `GodotOceanWaves-main`, `WickedEngine`, `JoltPhysics`).
-> 4. All cited academic papers, technical talks, and videos (Tessendorf *Simulating Ocean Water*, Horvath *Empirical Directional Wave Spectra*, GDC 2019 *Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas*, Turánszki *Underwater effect updates*, SIGGRAPH '18 *Sea of Thieves Water*).
-> 5. Perform a comprehensive code audit of the current engine shaders and renderer passes, verify that all proposed changes and current code are correct, and iterate on the water surface, foam, and lighting shaders until visual quality matches the `GodotOceanWaves` target even more closely.
+**Status: IV-K closed 2026-08-13.** Somnium's implementation of the above is
+original Rust and WGSL adapted from the published equations; no reference
+source was copied. Where Somnium departs from the reference — two Fresnel
+curves instead of one, π-normalised albedo-weighted diffuse, camera-gated total
+internal reflection, directionally gated subsurface scattering, and a fixed
+50 Hz cascade step — the departure and its cause are recorded in
+`dev records/phase_IV.md` section 14.4. The GPU spray emitter in the last row
+was studied but never shipped.
 

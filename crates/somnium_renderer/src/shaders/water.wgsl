@@ -53,6 +53,9 @@ struct WaterMaterial {
     volume_params: vec4<f32>,
     wake_origin_direction: vec4<f32>,
     wake_params: vec4<f32>,
+    // Per cascade: inverse tile length in x and y, then the displacement and
+    // normal weights that cascade contributes.
+    cascade_scales: array<vec4<f32>, 3>,
 }
 
 struct Instance {
@@ -200,45 +203,53 @@ fn sample_spectrum_bicubic(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
     return mix(row0, row1, blend.y);
 }
 
-fn sample_spectrum_filtered(
-    tex: texture_2d<f32>,
-    p: vec2<f32>,
-    patch_length: f32,
-    metres_per_pixel: f32,
-) -> vec4<f32> {
-    let dimensions = textureDimensions(tex);
-    let uv = fract(p / patch_length + vec2<f32>(16.0));
-    let world_texel = patch_length / f32(dimensions.x);
+/// Cubic filtering stabilizes a cascade whose texels are larger than a pixel;
+/// hardware bilinear is both cheaper and sharper once the map out-resolves the
+/// screen. The crossover is the cascade's own texel density, so a coarse map
+/// and a fine map each pick the right filter at the same distance.
+fn sample_spectrum_filtered(tex: texture_2d<f32>, uv: vec2<f32>, inverse_tile: f32) -> vec4<f32> {
+    let texels_per_metre = f32(textureDimensions(tex).x) * inverse_tile;
     let linear = textureSampleLevel(tex, sampler_linear, uv, 0.0);
     let cubic = sample_spectrum_bicubic(tex, uv);
-    let resolved = 1.0 - smoothstep(world_texel * 0.65, world_texel * 2.0,
-        metres_per_pixel);
-    return mix(cubic, linear, resolved);
+    return mix(cubic, linear, min(1.0, texels_per_metre * 0.1));
 }
 
+/// World displacement summed over the cascades that are allowed to move
+/// geometry. Channels are `(x, up, z)` straight out of the transform.
 fn spectral_displacement(p: vec2<f32>, shore: f32) -> vec3<f32> {
-    let large = textureLoad(spectrum_displacement_large,
-        repeating_texel(p, 88.0, textureDimensions(spectrum_displacement_large)), 0);
-    let medium = textureLoad(spectrum_displacement_small,
-        repeating_texel(p, 57.0, textureDimensions(spectrum_displacement_small)), 0);
-    let combined = (large.xyz * 1.0 + medium.xyz * 0.75)
+    var displacement = vec3<f32>(0.0);
+    let scales_0 = material.cascade_scales[0];
+    let scales_1 = material.cascade_scales[1];
+    let scales_2 = material.cascade_scales[2];
+    displacement += textureSampleLevel(spectrum_displacement_large, sampler_linear,
+        p * scales_0.xy, 0.0).xyz * scales_0.z;
+    displacement += textureSampleLevel(spectrum_displacement_small, sampler_linear,
+        p * scales_1.xy, 0.0).xyz * scales_1.z;
+    displacement += textureSampleLevel(spectrum_displacement_fine, sampler_linear,
+        p * scales_2.xy, 0.0).xyz * scales_2.z;
+    let scale = material.surface_params.z * shore
         * clamp(material.simulation_params.x, 0.0, 1.0);
-    let scale = material.surface_params.z * shore;
-    return vec3<f32>(combined.x, combined.z, combined.y) * scale;
+    return displacement * scale;
 }
 
-fn spectral_gradient(p: vec2<f32>, metres_per_pixel: f32) -> vec4<f32> {
-    let large = sample_spectrum_filtered(spectrum_gradient_large, p, 88.0,
-        metres_per_pixel);
-    let medium = sample_spectrum_filtered(spectrum_gradient_small, p, 57.0,
-        metres_per_pixel);
-    let fine = sample_spectrum_filtered(spectrum_gradient_fine, p, 16.0,
-        metres_per_pixel);
+/// Returns `(slope x, slope z, horizontal stretch, accumulated foam)`. Slope is
+/// weighted per cascade; foam is summed, because a texel that is folding in two
+/// cascades at once is whiter than one folding in either alone.
+fn spectral_gradient(p: vec2<f32>) -> vec4<f32> {
+    let scales_0 = material.cascade_scales[0];
+    let scales_1 = material.cascade_scales[1];
+    let scales_2 = material.cascade_scales[2];
+    let large = sample_spectrum_filtered(spectrum_gradient_large, p * scales_0.xy, scales_0.x);
+    let medium = sample_spectrum_filtered(spectrum_gradient_small, p * scales_1.xy, scales_1.x);
+    let fine = sample_spectrum_filtered(spectrum_gradient_fine, p * scales_2.xy, scales_2.x);
     let blend = clamp(material.simulation_params.x, 0.0, 1.0);
-    let grad = (large.xy * 1.0 + medium.xy * 1.0 + fine.xy * 0.25) * blend;
-    let jacobian = max(max(large.z, medium.z), fine.z) * blend;
-    let foam = (large.a + medium.a + fine.a) * blend;
-    return vec4<f32>(grad, jacobian, foam);
+    let grad = (large.xy * scales_0.w + medium.xy * scales_1.w + fine.xy * scales_2.w) * blend;
+    let stretch = large.z + medium.z + fine.z;
+    // Foam takes no part in the Gerstner/spectral crossfade. The analytic waves
+    // produce none at all, so scaling it by the blend would only mean that
+    // dialling back the spectrum quietly erases whitecaps that did form.
+    let foam = large.a + medium.a + fine.a;
+    return vec4<f32>(grad, stretch, foam);
 }
 
 struct WaveSample {
@@ -439,6 +450,76 @@ fn fresnel_schlick(cosine: f32) -> vec3<f32> {
     return F0_WATER + (vec3<f32>(1.0) - F0_WATER) * pow(1.0 - cosine, 5.0);
 }
 
+// ── Reference ocean BRDF ──────────────────────────────────────────────────
+//
+// A rough sea does not behave like the smooth dielectric a plain Schlick term
+// describes: at grazing angles the microfacets shadow each other long before
+// the surface can act as a mirror. The GodotOceanWaves reference folds that
+// into a roughness-dependent Fresnel whose grazing value stays below a tenth
+// rather than reaching one, which is what keeps the horizon reading as water
+// instead of chrome. The exponent and denominator are an empirical fit.
+
+fn ocean_fresnel(cosine: f32, roughness: f32) -> f32 {
+    let exponent = 5.0 * exp(-2.69 * roughness);
+    let falloff = pow(1.0 - cosine, exponent) / (1.0 + 22.7 * pow(roughness, 1.5));
+    return mix(falloff, 1.0, F0_WATER.x);
+}
+
+/// Fresnel for the environment reflection, which is a different quantity from
+/// the one above despite sharing a name.
+///
+/// `ocean_fresnel` deliberately stays below a tenth so a rough sea does not
+/// mirror the sun at grazing angles. Applying that same curve to the sky
+/// reflection is what makes water read as wet stone: almost all of the colour a
+/// viewer calls "sea" is reflected sky, and it has to climb towards a mirror
+/// near the horizon. Roughness caps how far it gets, so foam still scatters
+/// instead of reflecting.
+fn environment_fresnel(cosine: f32, roughness: f32) -> f32 {
+    let grazing = max(1.0 - roughness, F0_WATER.x);
+    return F0_WATER.x + (grazing - F0_WATER.x) * pow(1.0 - cosine, 5.0);
+}
+
+/// Smith height-correlated masking, in the approximate form the reference uses.
+/// `alpha` is taken as the roughness directly rather than its square.
+fn smith_masking_shadowing(cos_theta: f32, alpha: f32) -> f32 {
+    let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 1e-6));
+    let a = cos_theta / max(alpha * sin_theta, 1e-6);
+    let a_squared = a * a;
+    if a >= 1.6 {
+        return 0.0;
+    }
+    return (1.0 - 1.259 * a + 0.396 * a_squared) / (3.535 * a + 2.181 * a_squared);
+}
+
+fn ggx_distribution(cos_theta: f32, alpha: f32) -> f32 {
+    let alpha_squared = alpha * alpha;
+    let d = 1.0 + (alpha_squared - 1.0) * cos_theta * cos_theta;
+    return alpha_squared / max(PI * d * d, 1e-8);
+}
+
+/// Direct sun or moon highlight under the reference model. The `+ 0.1` in the
+/// denominator is the reference's own guard against the grazing singularity.
+fn ocean_specular(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l: vec3<f32>,
+    radiance: vec3<f32>,
+    roughness: f32,
+    fresnel: f32,
+) -> vec3<f32> {
+    let ndotl = max(dot(n, l), 2e-5);
+    let ndotv = max(dot(n, v), 2e-5);
+    if dot(n, l) <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let halfway = normalize(l + v);
+    let light_mask = smith_masking_shadowing(ndotv, roughness);
+    let view_mask = smith_masking_shadowing(ndotl, roughness);
+    let distribution = ggx_distribution(dot(n, halfway), roughness);
+    let geometry = 1.0 / (1.0 + light_mask + view_mask);
+    return radiance * fresnel * distribution * geometry / (4.0 * ndotv + 0.1);
+}
+
 fn hg_phase(g: f32, cos_theta: f32) -> f32 {
     let g2 = g * g;
     return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cos_theta, 1e-4), 1.5));
@@ -550,7 +631,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let water_coord = local_coord(input.uv);
     let wave = evaluate_waves(water_coord, frame.current_time, shore);
     let metres_per_pixel = max(length(dpdx(water_coord)), length(dpdy(water_coord)));
-    let spectrum = spectral_gradient(water_coord, metres_per_pixel);
+    let spectrum = spectral_gradient(water_coord);
     let wake = evaluate_wake(water_coord);
     let water_view_depth = view_depth(input.world_position);
 
@@ -561,11 +642,17 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let slope_resolve = 1.0 - smoothstep(shortest_wave * 0.035, shortest_wave * 0.18,
         metres_per_pixel);
     let distance_resolve = 1.0 - smoothstep(120.0, 420.0, water_view_depth);
-    let spectrum_normal = normalize(vec3<f32>(-spectrum.x * material.surface_params.z * 0.42,
-        1.0, -spectrum.y * material.surface_params.z * 0.42));
+    // Slope decays exponentially towards the horizon instead of being clipped
+    // at a fixed range. Far water is not calm — its waves are simply smaller
+    // than a pixel, and flattening the normal is what stops them aliasing into
+    // a shimmering band.
+    let slope_strength = mix(0.05, 1.0, exp(-water_view_depth * 0.011));
+    let spectral_slope = spectrum.xy * slope_strength;
+    let spectrum_normal = normalize(vec3<f32>(-spectral_slope.x, 1.0, -spectral_slope.y));
     let wake_normal = normalize(vec3<f32>(-wake.slope.x, 1.0, -wake.slope.y));
+    let spectral_weight = clamp(material.simulation_params.x, 0.0, 1.0);
     let combined_wave_normal = normalize(mix(
-        normalize(mix(wave.normal, spectrum_normal, 0.38)),
+        normalize(mix(wave.normal, spectrum_normal, spectral_weight)),
         wake_normal,
         clamp(material.wake_params.y * 0.55, 0.0, 0.75),
     ));
@@ -633,25 +720,35 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         * hg_phase(phase_g, dot(-v, moon_l));
     let env_up = textureSampleLevel(env_cube, env_sampler, vec3<f32>(0.0, 1.0, 0.0), ENV_MAX_MIP).rgb
         * light.ibl_intensity;
+    // Light that entered the water, scattered off what is suspended in it, and
+    // came back out. The single-scattering albedo is far more saturated than
+    // the absorption tint, which is exactly why a deep sea reads as blue-green
+    // rather than black: absorption says what is *removed*, and this says what
+    // comes back. It needs no visible bed, so unlike refraction below it
+    // survives into open water — without it the surface goes bland the moment
+    // it is too deep to see through.
     let single_scatter = (vec3<f32>(1.0) - transmittance)
         * sigma_s / max(sigma_t, vec3<f32>(1e-5))
-        * (sun_scatter + moon_scatter + env_up);
+        * ((sun_scatter + moon_scatter) / PI + env_up);
     let tint = mix(material.shallow_color.rgb, material.deep_color.rgb,
         smoothstep(0.5, max(material.surface_params.y * 6.0, 2.0), authored_depth));
-    var transmitted = refracted * tint * transmittance + single_scatter;
+    var transmitted = refracted * tint * transmittance;
 
-    // IV-K3: GodotOceanWaves SSS model. Forward-scattered light through wave
-    // peaks produces a green-tinted glow visible when looking toward the sun.
-    // The old code multiplied by 0.000004, effectively zeroing the effect.
-    let sss_modifier = vec3<f32>(0.9, 1.15, 0.85); // green-shift for underwater
-    let sss_height = 1.0 * max(0.0, input.wave_height + 2.5)
-        * pow(max(dot(sun_l, -v), 0.0), 4.0)
+    // Light entering the back of a crest and leaving towards the viewer. The
+    // term peaks when looking into the sun through a raised wave, which is what
+    // gives a backlit swell its green translucency. It is consumed by the
+    // diffuse response below rather than added to the refracted path, so it is
+    // not counted twice.
+    let sss_modifier = vec3<f32>(0.9, 1.15, 0.85);
+    // Both terms describe light that has travelled through the water towards
+    // the eye, so both are gated on the viewer facing the sun. The reference
+    // leaves the second one ungated, which in a physically scaled pipeline lays
+    // a constant blue-green wash over the whole sea and goes badly discoloured
+    // under a low sun, where the wash is lit by orange light.
+    let into_sun = pow(max(dot(sun_l, -v), 0.0), 4.0);
+    let sss_height = max(0.0, input.wave_height + 2.5) * into_sun
         * pow(max(0.5 - 0.5 * dot(sun_l, n), 0.0), 3.0);
-    let sss_near = 0.5 * pow(ndotv, 2.0);
-    let crest_scatter = sss_modifier
-        * (sss_height + sss_near)
-        * light.color * shadow * (1.0 - fresnel_schlick(ndotv).x);
-    transmitted += crest_scatter * (vec3<f32>(1.0) - transmittance);
+    let sss_near = 0.5 * pow(ndotv, 2.0) * into_sun;
 
     let shore_distance = max(sdf_cells, 0.0) * cell_metres;
     let foam_width = max(material.surface_params.y * 8.0, 6.0);
@@ -678,18 +775,21 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0),
         depth_contact * (0.62 + foam_noise * 0.28),
     );
-    let crest_foam = smoothstep(0.0, 1.0, spectrum.a * 1.35) * smoothstep(0.5, 2.0, authored_depth);
+    // Whitecap coverage. The 0.75 scale and the distance fade are the
+    // reference's: foam is a thin film that stops resolving long before the
+    // waves carrying it do, so it has to disappear faster than the geometry.
+    let crest_foam = smoothstep(0.0, 1.0, spectrum.a * 0.75)
+        * exp(-water_view_depth * 0.0075)
+        * smoothstep(0.5, 2.0, authored_depth);
     let foam_amount = clamp(max(max(shore_foam, crest_foam), wake.foam), 0.0, 1.0);
     let wet_band = (1.0 - smoothstep(0.0, max(material.surface_params.y * 2.5, 1.5),
         shore_distance)) * (0.35 + foam_amount * 0.65);
     transmitted *= 1.0 - wet_band * 0.16;
-    // IV-K3: Bright, rough foam — not a faint tint. Reference uses white foam
-    // albedo with full Lambertian lighting and distance fade.
-    let foam_albedo = vec3<f32>(0.85, 0.88, 0.82);
-    let foam_light = foam_albedo
-        * (env_up + light.color * shadow * max(dot(n, sun_l), 0.0) + moon_color * max(dot(n, moon_l), 0.0))
-        * exp(-water_view_depth * 0.0075);
-    transmitted = mix(transmitted, foam_light, foam_amount);
+
+    // Foam is a diffuse dielectric scatterer, not a bright emitter. Its colour
+    // is a warm off-white well below unity so lit whitecaps land in range
+    // rather than clipping the moment the sun hits them.
+    let foam_color = vec3<f32>(0.502, 0.412, 0.355);
 
     let roughness_map = 0.5 * (
         textureSample(tex_orm, sampler_linear, detail_uv_a).g
@@ -697,31 +797,83 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         + textureSample(tex_orm, sampler_linear, detail_uv_c).g * 0.35) / 1.5;
     let unresolved_energy = 1.0 - min(slope_resolve, distance_resolve);
     let distance_roughness = unresolved_energy * 0.28;
-    // IV-K3: Raise base roughness from ~0.06 → ~0.40, matching GodotOceanWaves.
-    // Foam pushes roughness further up to ~0.85 for rough whitecap appearance.
-    let roughness = clamp(
-        0.40 + roughness_map * 0.08 + distance_roughness + foam_amount * 0.45,
+
+    // Fresnel is evaluated against the authored base roughness, then roughness
+    // itself responds to foam. Doing it in this order matches the reference and
+    // keeps the two from chasing each other.
+    let base_roughness = clamp(material.absorption_roughness.w, 0.04, 1.0);
+    var fresnel_scalar = ocean_fresnel(ndotv, base_roughness);
+    // A back-facing water fragment means one of two very different things. Seen
+    // from below the surface it is the underside, and past the critical angle
+    // it becomes a perfect mirror — the Snell window. Seen from above it is
+    // just a wave that choppiness has folded over, and treating that as a
+    // mirror turns the fold into a white shard of reflected sky. Only the
+    // camera's own position tells the two apart.
+    let viewed_from_below = view.camera_pos.y < input.world_position.y;
+    if !front_facing && viewed_from_below {
+        let eta = 1.333;
+        let sin_transmitted_sq = eta * eta * (1.0 - ndotv * ndotv);
+        fresnel_scalar = mix(fresnel_scalar, 1.0,
+            smoothstep(0.96, 1.02, sin_transmitted_sq));
+    }
+    // Two different quantities share the name "roughness" here. The authored
+    // one above characterises the microfacet distribution and stays fixed. This
+    // one only decides how blurred the reflection is, and foam pushes it up
+    // because a whitecap scatters the sky rather than mirroring it.
+    let reflection_roughness = clamp(
+        (1.0 - fresnel_scalar) * foam_amount + 0.4
+            + roughness_map * 0.08 + distance_roughness,
         0.04,
-        0.95,
+        1.0,
     );
+
     let reflection_dir = reflect(-v, n);
-    let environment = textureSampleLevel(env_cube, env_sampler, reflection_dir, roughness * ENV_MAX_MIP).rgb
-        * light.ibl_intensity;
+    let environment = textureSampleLevel(env_cube, env_sampler, reflection_dir,
+        reflection_roughness * ENV_MAX_MIP).rgb * light.ibl_intensity;
     let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
     let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
     let reflected = mix(environment, ssr.rgb, ssr_weight);
-    var fresnel = fresnel_schlick(ndotv);
-    if !front_facing {
-        // Water-to-air transmission reaches a critical angle. Past it the
-        // underside becomes a full reflection (the Snell-window/TIR boundary).
-        let eta = 1.333;
-        let sin_transmitted_sq = eta * eta * (1.0 - ndotv * ndotv);
-        fresnel = mix(fresnel, vec3<f32>(1.0), smoothstep(0.96, 1.02,
-            sin_transmitted_sq));
-    }
-    let direct = direct_specular(n, v, sun_l, light.color * shadow, roughness)
-        + direct_specular(n, v, moon_l, moon_color, max(roughness, 0.06));
-    let final_color = transmitted * (vec3<f32>(1.0) - fresnel) + reflected * fresnel + direct;
+
+    // How much of the surface response is reflection rather than everything
+    // underneath it. This is the split that decides whether the sea looks like
+    // water, so it uses the grazing-mirror curve rather than the suppressed one
+    // the direct sun highlight needs.
+    let reflectance = environment_fresnel(ndotv, reflection_roughness);
+    let submerged = 1.0 - reflectance;
+
+    // Forward scatter through a crest, which only exists when looking towards
+    // the sun. Its tint is the water's own, so it belongs with the volume.
+    //
+    // The reference writes the surrounding diffuse as a bare `0.5 * ndotl`
+    // because its light colour is around one. Somnium's sun carries physical
+    // intensity, so the same expression would make the sea a mid-grey diffuse
+    // reflector and wash it out. Everything here is weighted by an actual
+    // albedo and normalised by pi, the convention the rest of the engine's
+    // direct lighting already uses.
+    let sun_mask = smith_masking_shadowing(max(dot(n, v), 2e-5), base_roughness);
+    let scatter_albedo = material.shallow_color.rgb * sss_modifier;
+    let crest_glow = scatter_albedo * (sss_height + sss_near) / (1.0 + sun_mask)
+        * light.color * shadow / PI;
+
+    // Refraction is the only part that needs the bed to be visible, so it is
+    // the only part that fades out with depth. The volume scatter and the crest
+    // glow carry open water on their own.
+    let shallow_transmission = 1.0 - smoothstep(0.5, 6.0, authored_depth);
+    let below_surface = transmitted * shallow_transmission + single_scatter + crest_glow;
+
+    // Where foam covers the surface it replaces the water body entirely: a
+    // whitecap is air and droplets, and nothing below it reaches the eye.
+    let sun_ndotl = max(dot(n, sun_l), 0.0);
+    let moon_ndotl = max(dot(n, moon_l), 0.0);
+    let foam_response = foam_color
+        * (env_up + (light.color * shadow * sun_ndotl + moon_color * moon_ndotl) / PI);
+
+    let direct = ocean_specular(n, v, sun_l, light.color * shadow, base_roughness, fresnel_scalar)
+        + ocean_specular(n, v, moon_l, moon_color, base_roughness, fresnel_scalar);
+
+    let final_color = mix(below_surface, foam_response, foam_amount) * submerged
+        + reflected * reflectance
+        + direct;
 
     return FragmentOutput(
         vec4<f32>(min(final_color, vec3<f32>(60000.0)), coverage),

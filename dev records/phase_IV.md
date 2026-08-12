@@ -1,7 +1,7 @@
 # Phase IV — Great Lakes Landscape and Black Flag Water
 
 **Project:** Somnium Engine  
-**Status:** IV-A through IV-J complete
+**Status:** Complete — IV-A through IV-K
 **Plan date:** 2026-08-11  
 **Codename:** Black Flag  
 **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -17,11 +17,14 @@ Phase IV will replace the current demo terrain/water pairing with one shared, pr
 - application startup and **Create → Terrain** call one landscape factory, so they cannot drift;
 - asset and reference provenance is recorded in `assets/LICENSE.md` and `ATTRIBUTION.md` before the new default ships.
 
-IV-A through IV-J were implemented on 2026-08-11.
+IV-A through IV-J were implemented on 2026-08-11. IV-K, the ocean fidelity pass
+against [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), followed
+on 2026-08-12/13 and is recorded in section 14.
 
-Live wgpu evidence is stored by phase under [`dev records/phase IV`](dev%20records/phase%20IV).
+Live wgpu evidence is stored by phase under [`dev records/phase IV`](phase%20IV).
 The IV-F/G/H release captures cover the default spectral surface, deep
-underwater medium, and waterline transition; no PNG evidence is kept in the
+underwater medium, and waterline transition; IV-K carries the before/after
+shading pair and the authored water body. No PNG evidence is kept in the
 repository root.
 
 ## 2. Research conclusion
@@ -543,6 +546,11 @@ water-aware terrain LOD and contact-band result on the user's adapter.
 - Record fixed-seed screenshots and GPU timings for day/night, above/below surface, shore/open water, and all quality tiers.
 - Run shader validation, renderer tests, scene round-trip tests, `cargo test --workspace`, and `cargo clippy` on touched crates.
 
+### IV-K — Ocean fidelity pass
+
+**Status: DONE — 2026-08-13.** Added after IV-J, once the surface was shipping
+and visibly short of the reference. Recorded in full in section 14.
+
 ## 9. Validation matrix
 
 | Area | Required evidence |
@@ -668,44 +676,49 @@ No controlling top-level license was found in the supplied tree. Do not translat
 
 ## 14. Phase IV-K — Ocean Fidelity Pass (GodotOceanWaves Parity)
 
-> [!WARNING]
-> **STATUS: UNFIXED / IN-PROGRESS / UNFINISHED — EXTENSIVE AUDIT REQUIRED**
-> 
-> Phase IV-K (Ocean Fidelity Pass) is **UNFINISHED, UNFIXED, and REQUIRES AN EXTENSIVE AUDIT AND SIGNIFICANT WORK** across Phase IV (and specifically Phase IV-K). The ocean rendering in Somnium Engine does **NOT yet match** the visual appearance of the `GodotOceanWaves` reference implementation.
-> 
-> **MANDATORY DIRECTIVES FOR THE NEXT AI MODEL / SESSION:**
-> 1. **Conduct a Comprehensive Audit**: Perform a deep, line-by-line code audit of the entire ocean rendering system:
->    - Shader modules: `crates/somnium_renderer/src/shaders/water.wgsl`, `water_spectrum.wgsl`, `shading.wgsl`, `particle.wgsl`.
->    - Rust passes & state: `crates/somnium_renderer/src/pass/water_spectrum.rs`, `particle.rs`, `crates/somnium_renderer/src/water_body.rs`, `crates/somnium_core/src/lib.rs`.
-> 2. **Study Reference Codebase**: Thoroughly inspect the reference repository at `C:\Users\adhir\Downloads\GE\example_repo\GodotOceanWaves-main`. Key files to examine:
->    - Spatial shaders: `assets/shaders/spatial/water.gdshader`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`.
->    - Compute shaders: `assets/shaders/compute/spectrum_compute.glsl`, `fft_unpack.glsl`.
->    - Scene & Dispatch setup: `assets/water/render_context.gd`, `main.tscn`.
-> 3. **Target Visual Screenshot**: Emulate the exact visual look shown in **`C:\Users\adhir\Downloads\Screenshot 2026-08-12 211804.png`**. The goal is to make Somnium's ocean look **EXACTLY or VERY CLOSE to this Godot reference screenshot**.
-> 4. **Review Primary Literature & Video Talks**:
->    - Tessendorf, *Simulating Ocean Water* (2002).
->    - Horvath, *Empirical Directional Wave Spectra* (2015).
->    - Nicolas Longchamps (Eidos Montréal / GDC 2019), *Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas*.
->    - Turánszki (Wicked Engine), *Underwater effect updates*.
->    - Sea of Thieves team (SIGGRAPH 2018), *Water Rendering in Sea of Thieves*.
-> 5. **Audit Areas Requiring Heavy Tuning**:
->    - Wave shape, steepness, and height scaling across cascades.
->    - Micro-normal map sampling, frequency blending, and roughness response.
->    - Subsurface scattering (SSS) light transmission and height-based crest illumination.
->    - Foam noise texture blending, thresholding, and temporal accumulation decay.
->    - Specular highlight sharpness, GGX NDF response, and Fresnel curve calibration.
->    - Atmosphere / sky IBL reflections and screen-space reflection (SSR) blending.
->    - Sea spray GPU particle process shader (activating particles only on sharp wave crests where $F_{accum} > 0.90$).
+**Status: DONE — 2026-08-13**
 
-### 14.1 Thought Process & Attempted Work Summary
-During Phase IV-K, several foundational systems and math models were integrated into Somnium Engine:
-- **TMA Spectrum & 3-Cascade Setup**: Configured 3 FFT cascades ($L_0 = 88\text{m}$, $L_1 = 57\text{m}$, $L_2 = 16\text{m}$) using JONSWAP/TMA energy spectra and Longuet-Higgins directional spreading.
-- **Jacobian Whitecap Folding**: Computed the horizontal Jacobian matrix $J = (1 + \partial D_x/\partial x)(1 + \partial D_z/\partial z) - (\partial D_x/\partial z)(\partial D_z/\partial x)$ to detect wave compression on steep crests.
-- **Temporal Foam Accumulation**: Implemented additive foam accumulation with exponential decay ($F_t = \text{clamp}(F_{t-1} e^{-\gamma_{decay}\Delta t} + f \gamma_{grow}\Delta t, 0, 1)$).
-- **GDC 2019 / Godot Water Material Shader**: Ported the GDC 2019 / Godot lighting model into `water.wgsl` (blended albedo, Fresnel-modulated roughness, SSS height + near scattering, specular boost).
-- **Sea Spray Particle Pipeline**: Copied `sea_spray.png` from `GodotOceanWaves-main` to [`assets/ocean_pbr/sea_spray.png`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/sea_spray.png) and recorded attribution in [`ATTRIBUTION.md`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/ATTRIBUTION.md) and [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt). (Note: Early CPU particle placement experiments were discarded by user request; the next model must construct a proper GPU wave-crest particle process shader following `sea_spray_particle.gdshader`).
+IV-K replaced the two-cascade spectral tier and its ad-hoc surface lighting with
+the simulation and shading model from
+[GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves) (2Retr0, MIT),
+which is itself a Godot implementation of Tessendorf's FFT ocean with the GDC
+2019 *Atlas* lighting model. Evidence lives in
+[`dev records/phase IV/IV-K`](phase%20IV/IV-K): `ivk_before_shading.png` is the
+surface at the start of the shading work, `ivk_after_shading.png` is the
+shipped result, and `ivk_authored_water_body.png` records the authored
+parameters that produce it.
 
-### 14.2 Mathematical Formulas & Physics Architecture
+### 14.1 What shipped, and what did not
+
+| Sub-task | Result |
+|---|---|
+| K-1 — ocean body kind and camera-snapped clipmap | **Deferred.** The finite wet-cell grid from IV-D still carries the surface. The default landscape is an inland lake, so an unbounded ocean clipmap has no scene to prove itself against; the geometry contract is unchanged. |
+| K-2 — per-cascade spectrum parameters | Done. `WaveCascadeParams` replaced the global spectrum constants: tile length, displacement and normal weights, wind speed and direction, fetch, swell, spread, detail, whitecap, foam amount, and seed are authored per cascade. |
+| K-3 — 1024² FFT with four packed spectra | Done. Stockham inverse FFT at 1024², four complex spectra packed per pass, butterfly factors precomputed once. |
+| K-4 — reference unpack, Jacobian, temporal foam | Done. Displacement, slope, horizontal stretch, and Jacobian folding are unpacked in one pass; foam accumulates additively into an `r32float` history and decays exponentially. |
+| K-5 — reference lighting model | Done, with the deviations in 14.4. |
+| K-6 — GPU sea spray particles | **Abandoned.** Two implementations were attempted; both put particles in the wrong places and were removed rather than left half-working. The reference's `sea_spray.png` and its attribution stay in the tree for a later attempt. |
+| K-7 — HDRI panorama and Filmic tonemap | **Not attempted.** Somnium's procedural Rayleigh/Mie/ozone sky and AgX tonemap were kept; matching the reference's HDRI and Filmic curve would have meant regressing the atmosphere the rest of the engine renders against. |
+| K-8 — evidence and documentation | Done — this section. |
+
+### 14.2 Authored surface parameters
+
+The shipped body (`WaterComponent::great_lakes`) is authored against Somnium's
+own scene rather than copied from the reference, because the reference is an
+open ocean under an HDRI and this is an inland lake under a procedural sky:
+
+| Field | Value | Why |
+|---|---|---|
+| `max_depth` | 18.6 m | Deeper than the baked bed. This is the optical path the extinction integral walks where nothing opaque lies behind the surface, so it decides how far out the water reaches full absorption. |
+| `clarity` | 1.0 | Scales the absorption and scattering coefficients between 1.8× (murky) and 0.45× (clear). |
+| `amplitude` | 0.57 | Scales rendered displacement but not the cascade Jacobian, so crests break slightly early. |
+| `roughness` | 0.02 | The microfacet distribution, and the floor the inspector allows. A near-mirror surface is what turns the sun into a tight glittering track rather than a broad sheen; the sky reflection is blurred separately by `reflection_roughness`, so it stays soft. |
+| `ssr_strength` | 1.0 | Screen-space reflection fully replaces the environment cube wherever the march finds a hit. |
+| `spectrum_blend` | 0.64 | Crossfade from Gerstner to spectral. This also scales displacement, so pushing it towards one folds the surface faster than the wet-cell grid resolves. |
+| `wave_speed`, `wave_steepness` | 0.2, 0.42 | The Gerstner tier underneath the crossfade. |
+| `wind_speed`, `foam_decay`, `foam_threshold` | 6.5, 4.5, 0.54 | Authored but inert: the cascades carry their own wind field and run foam growth and decay against the Jacobian. Kept because the scene format and the Gerstner-only tier still carry them. |
+
+### 14.3 Mathematical formulas and physics architecture
 
 #### 1. TMA Spectral Synthesis & Dispersion Relation
 For each cascade $c \in \{0, 1, 2\}$, wave frequencies $\omega(k)$ and TMA spectrum energy $S(\omega)$ are evaluated:
@@ -726,7 +739,12 @@ Fold amount $f$ is evaluated from the whitecap threshold $w_{cap} = 1.0 - \text{
 $$f = \max(w_{cap} - J, 0.0)$$
 Foam is accumulated additively with exponential decay per frame $\Delta t$:
 $$F_t = \text{clamp}\left(F_{t-1} \cdot e^{-\gamma_{decay} \Delta t} + f \cdot \gamma_{grow} \Delta t, 0.0, 1.0\right)$$
-where $\gamma_{grow} = \text{clamp}(\Delta t \cdot \text{foam\_amount} \cdot 35.0, 0.05, 2.5)$ and $\gamma_{decay} = \Delta t \cdot \max(0.5, 12.0 - \text{foam\_amount}) \cdot 1.15$.
+where, with a fixed 50 Hz cascade step $\Delta t$,
+$\gamma_{grow} = \Delta t \cdot \text{foam\_amount} \cdot 7.5$ and
+$\gamma_{decay} = \Delta t \cdot \max(0.5,\ 10.0 - \text{foam\_amount}) \cdot 1.15$.
+The reference advances each cascade on its own accumulated interval; Somnium
+steps all three at one fixed rate, so these constants are the reference's
+rescaled for a single step size rather than its literal values.
 
 #### 4. 3-Cascade Spectral Mapping
 The 3 cascades use tile lengths matching GodotOceanWaves default configuration:
@@ -736,21 +754,93 @@ The 3 cascades use tile lengths matching GodotOceanWaves default configuration:
 
 Summed world displacement $\mathbf{D}_{world}$ and normal gradient $\mathbf{G}$:
 $$\mathbf{D}_{world} = \mathbf{D}_0 \cdot 1.0 + \mathbf{D}_1 \cdot 0.75 + \mathbf{D}_2 \cdot 0.0$$
-$$\mathbf{G}_{slope} = \frac{\mathbf{G}_0 \cdot 1.0 + \mathbf{G}_1 \cdot 1.0 + \mathbf{G}_2 \cdot 0.25}{1 + |\mathbf{G}_{x,z}|}$$
+$$\mathbf{G}_{slope} = \left(\mathbf{G}_0 \cdot 1.0 + \mathbf{G}_1 \cdot 1.0 + \mathbf{G}_2 \cdot 0.25\right) \cdot b$$
+where $b$ is `spectrum_blend`. Foam is summed across cascades and deliberately
+left out of that crossfade, because the Gerstner tier produces none and scaling
+by $b$ would silently erase whitecaps that did form:
 $$F_{accum} = F_0 + F_1 + F_2$$
-$$F_{factor} = \text{smoothstep}(0.0, 1.0, F_{accum} \cdot 0.75) \cdot e^{-\text{dist} \cdot 0.0075}$$
+$$F_{factor} = \text{smoothstep}(0, 1, 0.75 F_{accum}) \cdot e^{-0.0075\,\text{dist}} \cdot \text{smoothstep}(0.5, 2.0, d_{authored})$$
+The distance fade is the reference's: foam is a thin film that stops resolving
+long before the waves carrying it do. The depth gate is Somnium's, and keeps
+whitecaps off the shallows where shore foam already owns the surface.
 
-#### 5. GDC 2019 / Godot Ocean Surface Lighting
-- **Albedo Blend**: $\mathbf{A} = \text{mix}(\mathbf{C}_{water}, \mathbf{C}_{foam}, F_{factor})$
-- **Roughness**: $R = (1.0 - \text{Fresnel}) \cdot F_{factor} + 0.4$
-- **Fresnel**: 
-$$\text{Fresnel} = \text{mix}\left(\frac{(1 - \mathbf{V} \cdot \mathbf{N})^{5 e^{-2.69 R}}}{1 + 22.7 R^{1.5}}, 1.0, 0.02\right)$$
-- **Subsurface Scattering (SSS)**:
-$$SSS_{height} = \max(0.0, h_{wave} + 2.5) \cdot \max(\mathbf{L} \cdot -\mathbf{V}, 0)^4 \cdot \left(0.5 - 0.5 (\mathbf{L} \cdot \mathbf{N})\right)^3$$
-$$SSS_{near} = 0.5 (\mathbf{N} \cdot \mathbf{V})^2$$
-$$\mathbf{C}_{diffuse} = \text{mix}\left(\frac{(SSS_{height} + SSS_{near}) \cdot \mathbf{C}_{sss}}{1 + \text{mask}} + 0.5(\mathbf{N} \cdot \mathbf{L}), \mathbf{C}_{foam}, F_{factor}\right) (1 - \text{Fresnel}) \mathbf{C}_{light}$$
+#### 5. GDC 2019 / Godot ocean surface lighting
 
-### 14.3 Third-Party Provenance, Assets & GPU Sea Spray Emitter
+Two Fresnel curves are evaluated against two different roughnesses, because
+they answer different questions.
+
+The reference's curve drives the **direct sun and moon highlight**. It is
+deliberately suppressed — a rough sea must not mirror the sun at grazing
+angles — and is evaluated against the authored microfacet roughness $R_0$:
+$$F_{direct} = \text{mix}\left(\frac{(1 - \mathbf{V} \cdot \mathbf{N})^{5 e^{-2.69 R_0}}}{1 + 22.7 R_0^{1.5}},\ 1.0,\ 0.02\right)$$
+
+Reflection blur is a separate quantity that shares the name. Foam pushes it up,
+because a whitecap scatters the sky rather than mirroring it:
+$$R_{refl} = \text{clamp}\left((1 - F_{direct}) F_{factor} + 0.4 + 0.08 R_{map} + R_{dist},\ 0.04,\ 1\right)$$
+
+The **environment split** — how much of the surface is reflected sky rather
+than everything underneath it — uses a plain Schlick curve capped by that blur.
+Almost all of the colour a viewer calls "sea" is reflected sky, and it has to
+climb towards a mirror near the horizon; reusing the suppressed curve here is
+what made the surface read as wet stone:
+$$F_{env} = F_0 + (\max(1 - R_{refl}, F_0) - F_0)(1 - \mathbf{V} \cdot \mathbf{N})^5, \qquad F_0 = 0.02$$
+
+**Subsurface scattering.** Both terms describe light that travelled through
+water towards the eye, so both are gated on the viewer facing the sun. The
+reference leaves the second ungated, which in a physically scaled pipeline lays
+a constant blue-green wash over the whole sea and goes badly discoloured under
+a low sun:
+$$\sigma = \max(\mathbf{L} \cdot -\mathbf{V}, 0)^4$$
+$$SSS_{height} = \max(0, h_{wave} + 2.5) \cdot \sigma \cdot \left(0.5 - 0.5 (\mathbf{L} \cdot \mathbf{N})\right)^3, \qquad SSS_{near} = 0.5 (\mathbf{N} \cdot \mathbf{V})^2 \sigma$$
+
+**Composition.** The reference writes its surrounding diffuse as a bare
+$0.5(\mathbf{N} \cdot \mathbf{L})$ because its light colour is around one.
+Somnium's sun carries physical intensity, so the same expression makes the sea
+a mid-grey diffuse reflector. Every term below is weighted by an actual albedo
+and normalised by $\pi$, the convention the rest of the engine's direct
+lighting already uses:
+$$\mathbf{C}_{glow} = \frac{\mathbf{C}_{sss}\,(SSS_{height} + SSS_{near})}{1 + \text{mask}} \cdot \frac{\mathbf{C}_{sun} s}{\pi}$$
+$$\mathbf{C}_{below} = \mathbf{C}_{refr}\,T\,(1 - \text{smoothstep}(0.5, 6, d)) + \mathbf{C}_{scatter} + \mathbf{C}_{glow}$$
+$$\mathbf{C}_{foam} = \mathbf{A}_{foam}\left(\mathbf{E}_{up} + \frac{\mathbf{C}_{sun} s (\mathbf{N} \cdot \mathbf{L}) + \mathbf{C}_{moon}(\mathbf{N} \cdot \mathbf{L}_m)}{\pi}\right)$$
+$$\mathbf{C}_{final} = \text{mix}(\mathbf{C}_{below}, \mathbf{C}_{foam}, F_{factor})(1 - F_{env}) + \mathbf{C}_{refl} F_{env} + \mathbf{C}_{direct}$$
+
+Refraction is the only part that needs the bed to be visible, so it is the only
+part that fades with depth. The single-scattering term $\mathbf{C}_{scatter}$
+carries the water's own colour and survives into open water — without it the
+surface goes bland the moment it is too deep to see through. Where foam covers
+the surface it replaces the water body entirely: a whitecap is air and
+droplets, and nothing below it reaches the eye.
+
+### 14.4 Deviations from the reference
+
+Each of these was a visible defect before it was changed, and each is a
+consequence of the reference being a self-contained Godot scene while Somnium
+is a physically scaled deferred renderer.
+
+- **Diffuse normalisation.** The reference's unitless diffuse against Somnium's
+  physically scaled sun rendered the entire lake white. Every diffuse path is
+  now albedo-weighted and divided by $\pi$.
+- **Two Fresnel curves.** See above. One curve for both jobs makes the surface
+  either flat and stone-like or mirror-bright under direct sun.
+- **Total internal reflection is gated on camera position.** A back-facing
+  water fragment means the Snell window when seen from below, and a
+  choppiness-folded wave when seen from above. Applying the TIR branch to the
+  second turned every fold into a white shard of reflected sky. The branch now
+  requires the camera to be below the fragment.
+- **Directional SSS gating.** Both scattering terms are gated on the viewer
+  facing the sun, not just the height term.
+- **Fixed 50 Hz cascade step.** The reference advances each cascade on its own
+  accumulated interval and derives foam rates from it; Somnium steps all three
+  at one rate, with the foam constants rescaled to match.
+- **Foam is excluded from the spectral crossfade.** Scaling it by
+  `spectrum_blend` would let the blend slider erase whitecaps that had already
+  accumulated.
+- **Slope decays exponentially with distance**, rather than being clipped at a
+  fixed range, and unresolved slope energy is moved into roughness. Far water
+  is not calm; its waves are simply smaller than a pixel, and left alone they
+  alias into a shimmering band at the horizon.
+
+### 14.5 Third-party provenance, assets, and the abandoned spray emitter
 - **Source Repository**: `GodotOceanWaves` by 2Retr0 (https://github.com/2Retr0/GodotOceanWaves)
 - **License**: MIT License / Creative Commons
 - **GPU Sea Spray Particle System Pipeline in Godot**:
@@ -758,10 +848,26 @@ $$\mathbf{C}_{diffuse} = \text{mix}\left(\frac{(SSS_{height} + SSS_{near}) \cdot
   - Attached to `WaterSprayEmitter` (`GPUParticles3D` with 32,768 particles) driven by `assets/shaders/spatial/sea_spray_particle.gdshader` (GPU particle process shader).
   - In `sea_spray_particle.gdshader`, particles sample FFT normals/foam (`normals.z`); when foam accumulation exceeds threshold ($F_{accum} > 0.9$), particles activate on wave crests and billboard towards the camera.
   - In `sea_spray.gdshader`, particle albedo evaluates $\mathbf{C}_{albedo} = \text{albedo\_tex.rgb} \cdot \mathbf{C}_{foam} \cdot (1.65, 1.75, 1.65)$ with noise dissolve and distance opacity fade.
-- **Somnium Engine Asset**: `sea_spray.png` is copied to [`assets/ocean_pbr/sea_spray.png`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/sea_spray.png).
-- **Attribution Files**: [`ATTRIBUTION.md`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/ATTRIBUTION.md) Section 13.35 and [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt).
+- **Somnium Engine Asset**: `sea_spray.png` is copied to `assets/ocean_pbr/sea_spray.png`.
+- **Attribution Files**: `ATTRIBUTION.md` Section 13.35 and `assets/ocean_pbr/README.txt`.
+
+**Why Somnium ships no spray.** Two emitters were built and both were removed.
+A CPU-placed pass produced untextured circles that did not follow the crests;
+a GPU compute emitter that seeded from the foam and displacement textures put
+particles into the air on the wrong side of the wave. The reference's emitter
+samples the same FFT textures Somnium already has, so nothing structural blocks
+a third attempt — the two failures were placement bugs, not missing data. The
+asset and its attribution stay in the tree for whoever takes it on. An
+untextured, incorrectly placed particle is worse than no particle, so the
+surface ships without spray.
 
 ## 13. Definition of done
+
+**Met on 2026-08-13.** IV-A through IV-K are recorded above, with IV-K's two
+deferrals (the ocean clipmap and HDRI/Filmic environment) and one abandonment
+(sea spray) stated in 14.1 rather than left as implied work. Ray-traced water
+reflections, the largest remaining gap in water fidelity, are planned
+separately as [Phase VV — Halcyon](phase_VV.md).
 
 Phase IV is complete only when:
 

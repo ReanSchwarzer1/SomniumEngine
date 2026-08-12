@@ -17,6 +17,10 @@ pub struct WaterMaterialData {
     pub wake_origin_direction: [f32; 4],
     /// Speed, strength, wake length, and half-width in metres.
     pub wake_params: [f32; 4],
+    /// Per-cascade `(1/tile, 1/tile, displacement_scale, normal_scale)`.
+    /// Owned by the spectrum pass and overwritten on upload, so callers can
+    /// leave it zeroed.
+    pub cascade_scales: [[f32; 4]; 3],
 }
 
 const WATER_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -427,7 +431,9 @@ impl WaterPass {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // The vertex stage samples the displacement cascades
+                        // through this sampler, so it cannot be fragment-only.
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
@@ -697,6 +703,7 @@ impl WaterPass {
             });
             let mut gpu_water = *water;
             gpu_water.simulation_params = effective_simulation;
+            gpu_water.cascade_scales = self.spectrum.map_scales();
             queue.write_buffer(&mat_buffer, 0, bytemuck::bytes_of(&gpu_water));
 
             let mat_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -809,7 +816,8 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_their_sixteen_byte_wgsl_layouts() {
-        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 208);
+        // 208 bytes of surface/optics state plus three cascade scale vectors.
+        assert_eq!(std::mem::size_of::<WaterMaterialData>(), 256);
         assert_eq!(std::mem::size_of::<WaterFrameData>(), 144);
         assert_eq!(std::mem::size_of::<WaterMaterialData>() % 16, 0);
     }
