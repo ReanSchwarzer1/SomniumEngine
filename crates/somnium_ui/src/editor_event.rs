@@ -141,6 +141,18 @@ pub enum InspectorField {
     WaterWindSpeed,
     WaterFoamDecay,
     WaterFoamThreshold,
+    WaterSpectrumBlend,
+    WaterEdgeScale,
+    WaterAnisotropy,
+    WaterCausticStrength,
+    // Vessel buoyancy (Phase IV). Visible when the selected entity has a
+    // `BuoyantVessel`.
+    VesselBuoyancy,
+    VesselDrag,
+    VesselAngularDrag,
+    VesselThrust,
+    VesselDraft,
+    VesselRighting,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,

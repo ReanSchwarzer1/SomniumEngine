@@ -274,6 +274,13 @@ impl WaterBodyData {
     }
 
     /// Surface height, normal, bed depth, and velocity in terrain-local space.
+    ///
+    /// This is the Gerstner tier only. The spectral cascades that dominate the
+    /// drawn surface are GPU textures the CPU never reads, so gameplay — the
+    /// viking boat's buoyancy samples included — rides the same analytic waves
+    /// the shader still evaluates and adds on top of the FFT. Keep
+    /// `wave_speed` in the vessel-tuned range; dialling it toward zero freezes
+    /// the boat while the water keeps moving.
     pub fn sample_surface(&self, xz: glam::Vec2, time: f32) -> Option<WaterSurfaceSample> {
         let uv = self.uv_for_local(xz)?;
         if self.mask[self.texel_index(uv)] < 128 {
