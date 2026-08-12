@@ -669,23 +669,45 @@ No controlling top-level license was found in the supplied tree. Do not translat
 ## 14. Phase IV-K — Ocean Fidelity Pass (GodotOceanWaves Parity)
 
 > [!WARNING]
-> **STATUS: UNFIXED / IN-PROGRESS / UNFINISHED**
+> **STATUS: UNFIXED / IN-PROGRESS / UNFINISHED — EXTENSIVE AUDIT REQUIRED**
 > 
-> Phase IV-K (Ocean Fidelity Pass) is **NOT YET COMPLETE** and is marked as **UNFIXED**. While the mathematical foundation, 3-cascade patch sizing ($88\text{m}$, $57\text{m}$, $16\text{m}$), Jacobian whitecap folding, temporal foam accumulation, SSS/GGX lighting, and `sea_spray.png` asset attribution have been implemented, the visual output still requires further tuning and auditing to fully match the `GodotOceanWaves` reference.
+> Phase IV-K (Ocean Fidelity Pass) is **UNFINISHED, UNFIXED, and REQUIRES AN EXTENSIVE AUDIT AND SIGNIFICANT WORK** across Phase IV (and specifically Phase IV-K). The ocean rendering in Somnium Engine does **NOT yet match** the visual appearance of the `GodotOceanWaves` reference implementation.
 > 
-> **MANDATORY INSTRUCTIONS FOR THE NEXT AI MODEL / SESSION:**
-> 1. Read and digest the **entire codebase** in `crates/` (`somnium_renderer`, `somnium_core`, `somnium_ui`, `somnium_asset`, etc.).
-> 2. Read all documentation files completely, especially `READ THIS FIRST.md`, `dev records/phase_IV.md`, `context.md`, `ATTRIBUTION.md`, `implementation_plan.md`, and `walkthrough.md`.
-> 3. Inspect reference repositories in `example_repo/` (specifically `GodotOceanWaves-main`, `WickedEngine`, `JoltPhysics`).
-> 4. Review cited papers and video talks (Tessendorf *Simulating Ocean Water*, Horvath *Empirical Directional Wave Spectra*, GDC 2019 *Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas*, Turánszki *Underwater effect updates*, SIGGRAPH '18 *Sea of Thieves Water*).
-> 5. Perform a full code audit of all written code and proposed changes to check for any subtle errors or discrepancies, and iterate on the water material/spectrum WGSL shaders until visual parity with `GodotOceanWaves` is completely achieved before declaring IV-K finished.
+> **MANDATORY DIRECTIVES FOR THE NEXT AI MODEL / SESSION:**
+> 1. **Conduct a Comprehensive Audit**: Perform a deep, line-by-line code audit of the entire ocean rendering system:
+>    - Shader modules: `crates/somnium_renderer/src/shaders/water.wgsl`, `water_spectrum.wgsl`, `shading.wgsl`, `particle.wgsl`.
+>    - Rust passes & state: `crates/somnium_renderer/src/pass/water_spectrum.rs`, `particle.rs`, `crates/somnium_renderer/src/water_body.rs`, `crates/somnium_core/src/lib.rs`.
+> 2. **Study Reference Codebase**: Thoroughly inspect the reference repository at `C:\Users\adhir\Downloads\GE\example_repo\GodotOceanWaves-main`. Key files to examine:
+>    - Spatial shaders: `assets/shaders/spatial/water.gdshader`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`.
+>    - Compute shaders: `assets/shaders/compute/spectrum_compute.glsl`, `fft_unpack.glsl`.
+>    - Scene & Dispatch setup: `assets/water/render_context.gd`, `main.tscn`.
+> 3. **Target Visual Screenshot**: Emulate the exact visual look shown in **`C:\Users\adhir\Downloads\Screenshot 2026-08-12 211804.png`**. The goal is to make Somnium's ocean look **EXACTLY or VERY CLOSE to this Godot reference screenshot**.
+> 4. **Review Primary Literature & Video Talks**:
+>    - Tessendorf, *Simulating Ocean Water* (2002).
+>    - Horvath, *Empirical Directional Wave Spectra* (2015).
+>    - Nicolas Longchamps (Eidos Montréal / GDC 2019), *Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas*.
+>    - Turánszki (Wicked Engine), *Underwater effect updates*.
+>    - Sea of Thieves team (SIGGRAPH 2018), *Water Rendering in Sea of Thieves*.
+> 5. **Audit Areas Requiring Heavy Tuning**:
+>    - Wave shape, steepness, and height scaling across cascades.
+>    - Micro-normal map sampling, frequency blending, and roughness response.
+>    - Subsurface scattering (SSS) light transmission and height-based crest illumination.
+>    - Foam noise texture blending, thresholding, and temporal accumulation decay.
+>    - Specular highlight sharpness, GGX NDF response, and Fresnel curve calibration.
+>    - Atmosphere / sky IBL reflections and screen-space reflection (SSR) blending.
+>    - Sea spray GPU particle process shader (activating particles only on sharp wave crests where $F_{accum} > 0.90$).
 
-### 14.1 Overview & Motivation
-The ocean rendering pipeline in Somnium Engine underwent a major fidelity pass (Phase IV-K) aimed at closing the visual gap with Retr0's `GodotOceanWaves` repository and the GDC 2019 reference talk *"Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas"*.
+### 14.1 Thought Process & Attempted Work Summary
+During Phase IV-K, several foundational systems and math models were integrated into Somnium Engine:
+- **TMA Spectrum & 3-Cascade Setup**: Configured 3 FFT cascades ($L_0 = 88\text{m}$, $L_1 = 57\text{m}$, $L_2 = 16\text{m}$) using JONSWAP/TMA energy spectra and Longuet-Higgins directional spreading.
+- **Jacobian Whitecap Folding**: Computed the horizontal Jacobian matrix $J = (1 + \partial D_x/\partial x)(1 + \partial D_z/\partial z) - (\partial D_x/\partial z)(\partial D_z/\partial x)$ to detect wave compression on steep crests.
+- **Temporal Foam Accumulation**: Implemented additive foam accumulation with exponential decay ($F_t = \text{clamp}(F_{t-1} e^{-\gamma_{decay}\Delta t} + f \gamma_{grow}\Delta t, 0, 1)$).
+- **GDC 2019 / Godot Water Material Shader**: Ported the GDC 2019 / Godot lighting model into `water.wgsl` (blended albedo, Fresnel-modulated roughness, SSS height + near scattering, specular boost).
+- **Sea Spray Particle Pipeline**: Copied `sea_spray.png` from `GodotOceanWaves-main` to [`assets/ocean_pbr/sea_spray.png`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/sea_spray.png) and recorded attribution in [`ATTRIBUTION.md`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/ATTRIBUTION.md) and [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt). (Note: Early CPU particle placement experiments were discarded by user request; the next model must construct a proper GPU wave-crest particle process shader following `sea_spray_particle.gdshader`).
 
-### 14.2 Mathematical Formulas & Spectral Physics
+### 14.2 Mathematical Formulas & Physics Architecture
 
-#### 1. TMA Spectral Synthesis & Dispersion
+#### 1. TMA Spectral Synthesis & Dispersion Relation
 For each cascade $c \in \{0, 1, 2\}$, wave frequencies $\omega(k)$ and TMA spectrum energy $S(\omega)$ are evaluated:
 $$\omega(k) = \sqrt{g \cdot k \cdot \tanh(k \cdot d)}$$
 $$S(\omega) = \frac{\alpha g^2}{\omega^5} \exp\left(-1.25 \left(\frac{\omega_p}{\omega}\right)^4\right) \cdot 3.3^r \cdot \Phi_{Kitaigorodskii}(\omega, d)$$
@@ -728,15 +750,16 @@ $$SSS_{height} = \max(0.0, h_{wave} + 2.5) \cdot \max(\mathbf{L} \cdot -\mathbf{
 $$SSS_{near} = 0.5 (\mathbf{N} \cdot \mathbf{V})^2$$
 $$\mathbf{C}_{diffuse} = \text{mix}\left(\frac{(SSS_{height} + SSS_{near}) \cdot \mathbf{C}_{sss}}{1 + \text{mask}} + 0.5(\mathbf{N} \cdot \mathbf{L}), \mathbf{C}_{foam}, F_{factor}\right) (1 - \text{Fresnel}) \mathbf{C}_{light}$$
 
-### 14.3 Third-Party Provenance & Attribution
+### 14.3 Third-Party Provenance, Assets & GPU Sea Spray Emitter
 - **Source Repository**: `GodotOceanWaves` by 2Retr0 (https://github.com/2Retr0/GodotOceanWaves)
 - **License**: MIT License / Creative Commons
-- **Attributed Components**:
-  1. `sea_spray.png` asset copied to `assets/ocean_pbr/sea_spray.png`
-  2. TMA wave spectrum parameterization and 3-cascade patch scales (88m, 57m, 16m)
-  3. Exponential additive foam feedback and Jacobian folding math
-  4. GDC 2019 GGX/Smith ocean surface and SSS lighting formulation
-- **Attribution File**: [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt)
+- **GPU Sea Spray Particle System Pipeline in Godot**:
+  - `assets/water/sea_spray.png` is used as `albedo_texture` in `assets/shaders/spatial/sea_spray.gdshader` (billboard quad shader).
+  - Attached to `WaterSprayEmitter` (`GPUParticles3D` with 32,768 particles) driven by `assets/shaders/spatial/sea_spray_particle.gdshader` (GPU particle process shader).
+  - In `sea_spray_particle.gdshader`, particles sample FFT normals/foam (`normals.z`); when foam accumulation exceeds threshold ($F_{accum} > 0.9$), particles activate on wave crests and billboard towards the camera.
+  - In `sea_spray.gdshader`, particle albedo evaluates $\mathbf{C}_{albedo} = \text{albedo\_tex.rgb} \cdot \mathbf{C}_{foam} \cdot (1.65, 1.75, 1.65)$ with noise dissolve and distance opacity fade.
+- **Somnium Engine Asset**: `sea_spray.png` is copied to [`assets/ocean_pbr/sea_spray.png`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/sea_spray.png).
+- **Attribution Files**: [`ATTRIBUTION.md`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/ATTRIBUTION.md) Section 13.35 and [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt).
 
 ## 13. Definition of done
 

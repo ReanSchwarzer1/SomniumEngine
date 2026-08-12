@@ -1,10 +1,18 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-12  
-> **Current phase:** Phase IV in-progress (IV-A through IV-J complete, IV-K ocean fidelity pass UNFIXED / IN-PROGRESS)  
+> **Current phase:** Phase IV in-progress (IV-A through IV-J complete, IV-K ocean fidelity pass UNFIXED / IN-PROGRESS / UNFINISHED)  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
-> **IMPORTANT NOTE FOR NEXT SESSION/MODEL:** Phase IV-K (Ocean Fidelity Pass) is **UNFIXED / IN-PROGRESS / UNFINISHED**. The next model MUST read the entire codebase and all `.md` files (such as `READ THIS FIRST.md`, `dev records/phase_IV.md`, `context.md`, `ATTRIBUTION.md`), inspect reference repositories (`GodotOceanWaves-main`, `WickedEngine`, `JoltPhysics`), review papers and video talks (GDC 2019 Atlas water, Tessendorf, Horvath, Wicked Engine updates, etc.), perform a full code audit of the engine implementation, and iterate to make the ocean visual quality match the Godot implementation even more closely before moving on.
+> **CRITICAL INSTRUCTIONS FOR THE NEXT AI MODEL / SESSION:**
+> Phase IV-K (Ocean Fidelity Pass) is **UNFIXED / UNFINISHED and REQUIRES AN EXTENSIVE AUDIT AND SIGNIFICANT WORK**. The ocean in Somnium Engine does NOT yet match the visual appearance of the Godot implementation.
+> The next model MUST:
+> 1. Conduct a deep, line-by-line audit of all water rendering code (`crates/somnium_renderer/src/shaders/water.wgsl`, `water_spectrum.wgsl`, `crates/somnium_renderer/src/pass/water_spectrum.rs`, `particle.rs`, `water_body.rs`, `shading.wgsl`).
+> 2. Read all documentation: `READ THIS FIRST.md`, `dev records/phase_IV.md` (Section 14), `context.md`, `ATTRIBUTION.md`, `implementation_plan.md`, and `walkthrough.md`.
+> 3. Study the reference repository: `C:\Users\adhir\Downloads\GE\example_repo\GodotOceanWaves-main` (specifically `water.gdshader`, `spectrum_compute.glsl`, `fft_unpack.glsl`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`).
+> 4. Inspect the target visual screenshot: `C:\Users\adhir\Downloads\Screenshot 2026-08-12 211804.png`. The goal is to make Somnium's water look **EXACTLY or VERY CLOSE to this Godot reference screenshot**.
+> 5. Review cited papers and video talks (GDC 2019 *Interactive Water Simulation in Atlas*, Tessendorf *Simulating Ocean Water*, Horvath directional spectra, Turánszki Wicked Engine updates, Sea of Thieves SIGGRAPH '18 talk).
+> 6. Iterate on FFT parameters, 3-cascade scales, foam noise blending, specular highlights, subsurface scattering, screen-space reflections, atmosphere/fog blending, and sea spray particles until exact visual parity is achieved.
 
 ---
 
