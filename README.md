@@ -117,6 +117,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **File > Import Model…** — import any glTF/GLB into the scene at the origin
 - **Create menu** — spawn primitives, lights, particle emitter, heightmap terrain, or voxel terrain
 - Select a light to edit its intensity / range / cone angles in the inspector
+  (full colour swatches: planned Phase 26 — Iris, see `dev records/phase_26.md`)
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
   pick a brush, `[` / `]` size, `-` / `=` strength, `F7` auto-splat by slope/height
 

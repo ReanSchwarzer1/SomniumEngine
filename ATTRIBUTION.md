@@ -101,6 +101,23 @@
 | Toolbar (Play/Pause/Stop) | `#toolbar` | Buttons wired in HTML; engine integration pending |
 | FPS counter (top-right toolbar) | `#fps-counter` | Updated via `update_fps` IPC message each frame |
 
+### 1.5 Colour picker — Details property editor (Phase 26 — Iris, planned)
+
+**Status:** plan only as of 2026-08-13. No Somnium widget code yet. Controlling
+reference for `dev records/phase_26.md`.
+
+| UE5 piece | Pattern to adopt | Somnium target |
+|---|---|---|
+| `SColorBlock` (`AppFramework/Public/Widgets/Colors/`) | Compact swatch in the Details row; click opens the picker | `ColorSwatch` button-sized fill in the inspector property row |
+| `SColorPicker` | Popup: HSV spectrum, value/hue strips, RGB/HSV/Hex fields, optional alpha, OK/Cancel | `ColorPickerPopup` hosted on the root canvas (same escape-from-clip pattern as the File menu) |
+| `FColorPickerArgs` | `InitialColor`, `OnColorCommitted`, `OnColorPickerCancelled`, `bUseAlpha`, interactive begin/end, `bOnlyRefreshOnOk` | `ColorChanging` / `ColorChanged` / `ColorCancelled` messages mirroring `NumericFieldMessage`'s live vs commit split |
+| `FLinearColor` vs display gamma | Linear is storage; the swatch applies display encode so it matches the tonemapped frame | Linear RGB(A) in components; approximate sRGB encode for swatch/spectrum only |
+| Light Details colour + temperature | Swatch edits tint; Intensity and Kelvin stay separate; temperature can override the swatch | Keep `LightColorTemperature`; Kelvin > 0 locks the swatch to the derived tint |
+
+**Boundary:** UE EULA — pattern and information architecture only. No Slate
+source is copied. Widget implementation will be original Rust on the existing
+Fyrox-inspired UI stack (already attributed in §13.13–13.18).
+
 ---
 
 ## 2. The Forge Framework

@@ -10,6 +10,7 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase IV/IV-I-J/` — vessel, shoreline LOD, and contact-band evidence.
 - `phase IV/IV-K/` — ocean fidelity pass: the surface before and after the
   shading rewrite, and the authored water body that ships.
+- `phase 26/` — inspector colour-picker evidence (planned; see `phase_26.md`).
 - `phase VV/` — ray-traced water reflection evidence (planned; see
   `phase_VV.md`).
 
