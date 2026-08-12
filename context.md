@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase 26 (Iris) and Phase VV (Halcyon) planned  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) research-complete / not implementing; Phase 26 (Iris) and Phase VV (Halcyon) planned  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
@@ -15,6 +15,12 @@
 > sea spray (K-6) was abandoned after two failed emitters.
 >
 > Planned next (independent tracks):
+> - **Phase XV — Appalachia** — 8→16 photogrammetry-quality terrain materials so
+>   the ground can match the finished water. Research expanded 2026-08-13
+>   (CoD/AVT talks, clipmaps/CDLOD, Terrain3D wetness, surface-gradient normals,
+>   porous wetting). Plan: `dev records/phase_XV.md`. **Start-here handoff:**
+>   `dev records/post_IV_context_handoff.md`. **Do not implement until
+>   explicitly authorized.**
 > - **Phase 26 — Iris** — inspector colour pickers (swatch + popup), modelled on
 >   Unreal's `SColorBlock` / `SColorPicker`, covering lights, water
 >   deep/shallow/edge, absorption/scattering, particles, and materials. Plan:
@@ -1246,6 +1252,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
+| XV | 📄 Research only | **Phase XV — Appalachia: sixteen terrain materials.** Expand from eight to sixteen photogrammetry-quality PBR layers (four direct splatmaps, strongest-four sparse eval, semantic mips, full-PBR biplanar cliffs, surface-gradient normals, moisture-affinity wetness, Great Lakes shore as water-parity fixture). Research expanded 2026-08-13 with CoD/AVT talks, Geometry Clipmaps/CDLOD, Terrain3D wetness, PlumeSplat, porous-wetting papers. Plan: `dev records/phase_XV.md`. **Do not implement until explicitly authorized.** |
 | 26 | ⬜ Planned | **Phase 26 — Iris: inspector colour pickers.** Lights still expose tint as three anonymous `Col R/G/B` floats; water deep/shallow/edge, absorption, scattering, particle colours, and material base colour are not in the inspector at all. Iris adds a reusable swatch + popup picker modelled on Unreal's `SColorBlock` / `SColorPicker` / `FColorPickerArgs` (interactive preview, Cancel restores, linear storage with sRGB display), then adopts it across lights, water, particles, and materials. Plan: `dev records/phase_26.md`. |
 | VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
@@ -3536,6 +3543,15 @@ the mathematics and every deviation from the reference, is in
 
 Evidence is in `dev records/phase IV/IV-K/`. The authored body that ships is
 `WaterComponent::great_lakes`, captured in `ivk_authored_water_body.png`.
+
+**Phase XV — Appalachia (research expanded 2026-08-13; not implementing).**
+Sixteen-material terrain so the ground can match IV-K water quality. Second
+research pass added CoD/AVT talks, Geometry Clipmaps/CDLOD (deferred to 25C),
+Terrain3D wetness UX, PlumeSplat pattern confirmation, Mikkelsen surface-gradient
+normals as mandatory, and porous-wetting validation at the Great Lakes shore.
+Plan: `dev records/phase_XV.md`. **Start-here:**
+`dev records/post_IV_context_handoff.md`. **Docs only until explicitly
+authorized.**
 
 **Phase 26 — Iris (planned 2026-08-13).** Inspector colour pickers. Lights still
 edit tint as three floats; water deep/shallow/edge and absorption/scattering are

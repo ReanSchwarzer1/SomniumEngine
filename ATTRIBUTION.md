@@ -118,6 +118,25 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
+### 1.6 Terrain materials — Phase XV Appalachia (planned research only)
+
+**Status:** research-complete plan as of 2026-08-13. No sixteen-layer
+runtime, textures, or shaders yet. Controlling reference:
+`dev records/phase_XV.md`.
+
+| Reference | Pattern to study | Somnium target when implementing |
+|---|---|---|
+| O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local; VT at world scale | Sixteen global / strongest-four local; VT deferred |
+| Mikkelsen JCGT 2020 surface gradients + hex tiling | Correct layered/projected normal composition | Surface-gradient blend + existing hex path |
+| Godot 4.7.1 mip roughness / full-channel triplanar | Specular AA + complete projection | Independent Rust mip fixture; full-PBR biplanar cliffs |
+| Terrain3D wetness paint (MIT) | Wetness → roughness authoring | Moisture affinity + global wetness v1; paint later |
+| Hnat et al. porous wetting 2006 | Darken + gloss when wet | Landscape-kit dry/damp/wet validation |
+| Poly Haven / ambientCG CC0 | Photogrammetry materials with clear redistribution | Manifest-driven fetch; hashes; voluntary credit |
+
+**Boundary:** pattern and citation only until XV is authorized. No third-party
+terrain plugin code is copied. Asset downloads require the Phase XV manifest
+gate.
+
 ---
 
 ## 2. The Forge Framework

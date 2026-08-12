@@ -1,15 +1,18 @@
 # Somnium Engine — Post-25M2 Context Handoff
 
-> **Purpose:** authoritative next-session context for all work performed after Phase 25M-2  
-> **Snapshot date:** 2026-08-12  
+> **Purpose:** historical next-session context for work performed after Phase 25M-2 (Phase IV A–J narrative)  
+> **XV start-here:** for a new session that begins **Phase XV**, use [`post_IV_context_handoff.md`](post_IV_context_handoff.md) instead. This file remains the deep Phase IV A–J / asset-license record.  
+> **Snapshot date:** 2026-08-13  
 > **Branch at audit:** `dev`  
 > **25M-2 boundary commit:** `4e56482`  
-> **Audited HEAD:** `846dea7` (`Phase XV BGS and Godot ref update`)  
-> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13); Phase XV researched and planned but not implemented; Phase 26 (Iris — inspector colour pickers) planned in [`phase_26.md`](phase_26.md); Phase VV (Halcyon — ray-traced water reflections) planned in [`phase_VV.md`](phase_VV.md)
+> **Audited HEAD:** `846dea7` (`Phase XV BGS and Godot ref update`) — docs after this snapshot include the 2026-08-13 Phase XV research expansion in `phase_XV.md` and the post-IV handoff  
+> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13); Phase XV researched and planned but **not implemented** (research expanded 2026-08-13); Phase 26 (Iris — inspector colour pickers) planned in [`phase_26.md`](phase_26.md); Phase VV (Halcyon — ray-traced water reflections) planned in [`phase_VV.md`](phase_VV.md)
 
 ## 1. Read this first
 
-The next session should read these files in order:
+> For **Phase XV**, start with [`post_IV_context_handoff.md`](post_IV_context_handoff.md) instead.
+
+The next session that still needs the Phase IV A–J / post-25M-2 narrative should read:
 
 1. [`context.md`](../context.md) — current engine architecture and living phase history.
 2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — exact reference/adaptation boundaries.
@@ -386,11 +389,28 @@ All remain **PLANNED**:
 | XV-E | Conditional BC compression, residency, mip/specular stability. |
 | XV-F | Full-PBR biplanar cliffs, triplanar reference, bounded sharpness, no projected POM. |
 | XV-G | Deterministic biome preset, paint overrides, shared startup/Create terrain creation. |
-| XV-H | Physical scale, macro/meso/micro treatment, RNM, optional histogram-preserving A/B. |
-| XV-I | Sixteen-material native editor palette and diagnostics. |
+| XV-H | Physical scale, surface-gradient normals, macro/meso/micro, moisture wetness, optional histogram-preserving A/B. |
+| XV-I | Sixteen-material native editor palette and diagnostics (incl. wetness / projection-axis views). |
 | XV-J | Verification, performance, migration, evidence, documentation, attribution. |
 
-The next implementation session begins with XV-A. It must not jump directly to downloading textures or changing array sizes without first capturing the baseline/provenance evidence.
+The next implementation session begins with XV-A **only when the user authorizes implementation**. It must not jump directly to downloading textures or changing array sizes without first capturing the baseline/provenance evidence.
+
+### 9.10 Second research pass (2026-08-13)
+
+After Phase IV water closed as the photographic reference surface, Phase XV research was expanded so terrain can meet the same bar. New attributable material (full URLs in `phase_XV.md` §5.5 / §15):
+
+| Addition | Consequence for XV |
+|---|---|
+| Losasso/Hoppe Geometry Clipmaps; Strugar CDLOD | Stay in Phase 25C — XV must not rewrite mesh LOD to sell materials. |
+| Ka Chen Far Cry 4 AVT; Hooker CoD GDC 2021; Étienne SIGGRAPH 2023 | Strengthen VT deferral; define AAA “done” checklist without adopting VT. |
+| Terrain3D (MIT) wetness paint + autoshader/override | Wetness validation first-class; paint wetness deferred past v1; moisture affinity in manifest. |
+| PlumeSplat / PVTUT / Hollow-TerrainSystem | Confirm array+height-blend default; VT prototypes as bibliography only. |
+| Mikkelsen surface-gradient bump (JCGT 2020) + demo | Mandatory inter-layer / cliff normal composition; RNM for microdetail only. |
+| Hnat et al. porous wetting (2006) | Dry/damp/wet = albedo darken + roughness drop + slight F0; Great Lakes shore fixture. |
+| ambientCG CC0 API | Explicit fallback beside Poly Haven. |
+| Water-parity bar | XV fails if materials only look good as flat albedo swatches next to shipping water. |
+
+**Still no Phase XV code or textures.**
 
 ## 10. Phase XV reasoning and deferred alternatives
 
@@ -427,6 +447,11 @@ The next implementation session begins with XV-A. It must not jump directly to d
 ### Terrain rendering and authoring
 
 - Andersson, *Terrain Rendering in Frostbite Using Procedural Shader Splatting*, SIGGRAPH 2007: <https://advances.realtimerendering.com/s2007/Andersson-TerrainRendering%28Siggraph07%29-CourseNotes.pdf>.
+- Losasso & Hoppe, *Geometry Clipmaps*, SIGGRAPH 2004 (added 2026-08-13): <https://hhoppe.com/geomclipmap.pdf>.
+- Strugar, *CDLOD*, JGT 2009 (added 2026-08-13): <https://aggrobird.com/files/cdlod_latest.pdf>.
+- Ka Chen, *Adaptive Virtual Texture Rendering in Far Cry 4*, GDC 2015 (added 2026-08-13): <https://www.gdcvault.com/play/1021761/>.
+- JT Hooker, *Boots on the Ground: The Terrain of Call of Duty*, GDC 2021 (added 2026-08-13): <https://research.activision.com/publications/2021/09/boots-on-the-ground--the-terrain-of-call-of-duty>.
+- Étienne, *Large Scale Terrain Rendering in Call of Duty*, SIGGRAPH 2023 Advances (added 2026-08-13): <https://advances.realtimerendering.com/s2023/Etienne%28ATVI%29-Large%20Scale%20Terrain%20Rendering%20with%20notes%20%28Advances%202023%29.pdf>.
 - Mikkelsen, *Practical Real-Time Hex-Tiling*, JCGT 2022: <https://jcgt.org/published/0011/03/05/>.
 - Burley, *On Histogram-Preserving Blending for Randomized Texture Tiling*, JCGT 2019: <https://jcgt.org/published/0008/04/02/>.
 - O3DE Terrain Surface Materials List: <https://www.docs.o3de.org/docs/user-guide/components/reference/terrain/surface-material-list/>.
@@ -440,14 +465,21 @@ The next implementation session begins with XV-A. It must not jump directly to d
 - Epic Games Runtime Virtual Texturing: <https://dev.epicgames.com/documentation/unreal-engine/runtimevirtual-texturing-quick-start-in-unreal-engine>.
 - NVIDIA, GPU geometry clipmaps: <https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry>.
 - NVIDIA, texture bombing: <https://developer.nvidia.com/gpugems/gpugems/part-iii-materials/chapter-20-texture-bombing>.
+- TokisanGames, Terrain3D (MIT; wetness paint; added 2026-08-13): <https://github.com/TokisanGames/Terrain3D>.
+- DrewRidley, PlumeSplat (added 2026-08-13): <https://github.com/drewridley/plumesplat>.
+- ACskyline, PVTUT (added 2026-08-13): <https://github.com/ACskyline/PVTUT>.
 
-### Material filtering and projection
+### Material filtering, projection, and wetness
 
+- Mikkelsen, *Surface Gradient–Based Bump Mapping Framework*, JCGT 2020 (added 2026-08-13): <https://jcgt.org/published/0009/03/04/>.
+- Mikkelsen, surfgrad demo (added 2026-08-13): <https://github.com/mmikk/surfgrad-bump-standalone-demo>.
 - Hill, *Blending in Detail — Reoriented Normal Mapping*: <https://blog.selfshadow.com/publications/blending-in-detail/>.
 - Toksvig, *Mipmapping Normal Maps*: <https://www.tandfonline.com/doi/abs/10.1080/2151237X.2005.10129203>.
 - Olano and Baker, *LEAN Mapping*: <https://userpages.cs.umbc.edu/olano/papers/lean/>.
 - *Triplanar Displacement Mapping for Terrain*, Eurographics 2020: <https://diglib.eg.org/server/api/core/bitstreams/b3af0317-e2d6-4e3a-8076-b415516eee87/content>.
 - *Mix-Max: Content-Aware Real-Time Texture Transitions*, Eurographics 2024: <https://diglib.eg.org/items/50375852-f98b-4f60-ae25-4ae06ad038d1>.
+- Hnat et al., *Real-time Wetting of Porous Media*, ICCVG 2006 (added 2026-08-13): <http://damien.porquet.free.fr/msi/iccvg06/iccvg06.pdf>.
+- ambientCG docs (fallback; added 2026-08-13): <https://docs.ambientcg.com/>.
 
 ### Bethesda Game Studios sources
 
@@ -506,20 +538,23 @@ These are context, not authorization to expand a Phase XV implementation into un
 
 ## 14. Next-session start checklist
 
-1. Confirm the branch/HEAD and inspect changes made after `846dea7`.
-2. Read the six authoritative files from section 1.
+> Prefer [`post_IV_context_handoff.md`](post_IV_context_handoff.md) §10 for XV starts. Checklist below is retained for continuity.
+
+1. Confirm the branch/HEAD and inspect changes made after `846dea7` / `2dec6bd`.
+2. Read the authoritative files from the post-IV handoff section 1 (or this file’s section 1 for IV A–J depth).
 3. Confirm Phase IV still builds before changing terrain-material layouts.
-4. Begin **XV-A only**:
+4. Begin **XV-A only** when authorized:
    - capture the existing eight-layer visual/performance/memory baseline;
    - freeze camera/adapter/reference scene details;
    - create the provenance/manifest schema;
    - re-verify each Poly Haven candidate, physical scale, channels, CC0 page, and hashes before committing assets;
-   - define the dry/wet/day/night biome review matrix.
+   - define the dry/damp/wet/day/night biome review matrix including the Great Lakes shore fixture.
 5. Preserve indices 0–7 and sidecar v2 behavior.
 6. Do not download or commit Quixel/Megascans content.
-7. Do not implement RVT, indexed splat IDs, LEAN mapping, full multilayer POM, tessellation, or foliage scatter unless the Phase XV evidence gates explicitly justify reopening them.
+7. Do not implement RVT, indexed splat IDs, LEAN mapping, full multilayer POM, tessellation, foliage scatter, geometry clipmaps, or CoD/AVT virtual texturing unless the Phase XV evidence gates explicitly justify reopening them — and only after the user authorizes XV implementation.
 8. Update `context.md` and `ATTRIBUTION.md` after each completed XV subphase, not in advance.
 9. Keep all future evidence under `dev records/phase XV/evidence/`.
+10. Until the user says to implement XV, treat `phase_XV.md` as research/docs only: expand bibliography and decisions freely; do not touch terrain shaders, splat layout, or texture packs.
 
 ## 15. Accuracy rule for future sessions
 
