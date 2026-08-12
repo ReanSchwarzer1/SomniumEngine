@@ -204,15 +204,6 @@ impl ShadingPass {
             ..Default::default()
         });
 
-        // 16 bytes: `vec4` is the smallest uniform WGSL will align, and only
-        // x is used (the volume's range in metres, 0 when it is switched off).
-        let volumetric_range = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Volumetric Range"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // 16 bytes: `vec4` is the smallest uniform WGSL will align, and only x
         // is used — the volume's range in metres, 0 when it is switched off.
         let volumetric_range = device.create_buffer(&wgpu::BufferDescriptor {

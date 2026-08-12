@@ -1,7 +1,8 @@
 // Somnium Engine Phase IV-F: deterministic two-cascade inverse FFT water.
-// The implementation is original WGSL. It uses the published Phillips-style
-// wind spectrum / deep-water dispersion model and a radix-2 Stockham-like
-// ping-pong butterfly organization; no reference-engine source is copied.
+// The implementation is original WGSL. Initial amplitudes use a finite-depth
+// JONSWAP/TMA spectrum with Hasselmann directional spreading, following the
+// equations documented by Horvath and the MIT GodotOceanWaves reference. The
+// inverse transform remains Somnium's radix-2 ping-pong implementation.
 
 struct SpectrumParams {
     dimension: u32,
@@ -16,7 +17,7 @@ struct SpectrumParams {
     choppy: f32,
     foam_decay: f32,
     foam_threshold: f32,
-    _pad0: f32,
+    water_depth: f32,
     _pad1: vec2<f32>,
 }
 
@@ -62,7 +63,8 @@ fn update_spectrum(@builtin(global_invocation_id) id: vec3<u32>) {
     let signed_y = select(f32(id.y), f32(id.y) - f32(n), id.y > n / 2u);
     let k = vec2<f32>(signed_x, signed_y) * TAU / params.patch_length;
     let k_length = length(k);
-    let omega = sqrt(9.81 * k_length) * params.speed;
+    let omega = sqrt(9.81 * k_length * tanh(k_length * params.water_depth))
+        * params.speed;
     let phase = omega * params.time;
     let positive = vec2<f32>(cos(phase), sin(phase));
     let negative_phase = vec2<f32>(positive.x, -positive.y);
@@ -149,10 +151,19 @@ fn compose(@builtin(global_invocation_id) id: vec3<u32>) {
         - displaced(back, 1u, normalization)) / (2.0 * cell);
     let jacobian = (1.0 + dxdx) * (1.0 + dzdz) - dxdz * dzdx;
     let fold = max(1.0 - jacobian - params.foam_threshold, 0.0);
-    let previous = textureLoad(previous_gradient, vec2<i32>(id.xy), 0).a;
+    // Rare's Sea of Thieves ocean progressively blurs foam feedback so white
+    // water disperses instead of remaining a sharp simulation texel. A small
+    // periodic cross filter supplies that transport without another pass.
+    let previous_center = textureLoad(previous_gradient, vec2<i32>(id.xy), 0).a;
+    let previous = previous_center * 0.50
+        + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(x0, id.y)), 0).a * 0.125
+        + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(x1, id.y)), 0).a * 0.125
+        + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(id.x, y0)), 0).a * 0.125
+        + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(id.x, y1)), 0).a * 0.125;
     let decay = exp(-params.delta_time / max(params.foam_decay, 0.05));
-    let foam = clamp(max(fold * 3.0, previous * decay), 0.0, 1.0);
+    let grow = fold * (2.4 + params.delta_time * 9.0);
+    let foam = clamp(max(grow, previous * decay), 0.0, 1.0);
     textureStore(displacement_out, vec2<i32>(id.xy), vec4<f32>(dx, dz, height, jacobian));
     textureStore(gradient_out, vec2<i32>(id.xy), vec4<f32>(dhdx, dhdz,
-        max(abs(dhdx), abs(dhdz)), foam));
+        max(1.0 - jacobian, 0.0), foam));
 }

@@ -5,6 +5,11 @@ use wgpu::util::DeviceExt;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_SIZE: usize = 64;
 const RECORDS_PER_CASCADE: usize = 24;
+const WATER_DEPTH_METRES: f32 = 20.0;
+const FETCH_METRES: f32 = 150_000.0;
+const SPECTRUM_SWELL: f32 = 0.65;
+const SPECTRUM_SPREAD: f32 = 0.22;
+const SPECTRUM_DETAIL: f32 = 0.92;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -21,13 +26,15 @@ struct SpectrumParams {
     choppy: f32,
     foam_decay: f32,
     foam_threshold: f32,
-    _pad0: f32,
+    water_depth: f32,
     _pad1: [f32; 2],
 }
 
 struct Cascade {
     dimension: u32,
     patch_length: f32,
+    seed: u64,
+    initial_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     _displacement: wgpu::Texture,
     displacement_view: wgpu::TextureView,
@@ -51,6 +58,7 @@ pub struct WaterSpectrumPass {
     phase_time: f32,
     smoothed_simulation: [f32; 4],
     simulation_initialized: bool,
+    spectrum_wind_speed: f32,
 }
 
 impl WaterSpectrumPass {
@@ -128,6 +136,7 @@ impl WaterSpectrumPass {
             phase_time: 0.0,
             smoothed_simulation: [0.0; 4],
             simulation_initialized: false,
+            spectrum_wind_speed: 7.5,
         }
     }
 
@@ -170,6 +179,19 @@ impl WaterSpectrumPass {
                 smooth_controls(self.smoothed_simulation, simulation, delta_time);
         }
         let wind_speed = self.smoothed_simulation[1].clamp(0.1, 40.0);
+        let requested_wind = simulation[1].clamp(0.1, 40.0);
+        if (requested_wind - self.spectrum_wind_speed).abs() > 0.05 {
+            for cascade in &self.cascades {
+                let spectrum = initial_spectrum(
+                    cascade.dimension,
+                    cascade.patch_length,
+                    cascade.seed,
+                    requested_wind,
+                );
+                queue.write_buffer(&cascade.initial_buffer, 0, bytemuck::cast_slice(&spectrum));
+            }
+            self.spectrum_wind_speed = requested_wind;
+        }
         let phase_speed = (wind_speed / 11.0).sqrt().clamp(0.2, 2.0);
         self.phase_time += delta_time * phase_speed;
         let choppy = (0.45 + wind_speed * 0.045).clamp(0.45, 1.35);
@@ -194,7 +216,7 @@ impl WaterSpectrumPass {
                     choppy,
                     foam_decay,
                     foam_threshold,
-                    _pad0: 0.0,
+                    water_depth: WATER_DEPTH_METRES,
                     _pad1: [0.0; 2],
                 };
                 let start = record_count * PARAM_STRIDE as usize;
@@ -303,11 +325,11 @@ fn make_cascade(
     patch_length: f32,
     seed: u64,
 ) -> Cascade {
-    let initial = initial_spectrum(dimension, patch_length, seed);
+    let initial = initial_spectrum(dimension, patch_length, seed, 7.5);
     let initial_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Water initial wind spectrum"),
         contents: bytemuck::cast_slice(&initial),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
     let field_bytes = dimension as u64 * dimension as u64 * 3 * 8;
     let make_buffer = |label| {
@@ -389,6 +411,8 @@ fn make_cascade(
     Cascade {
         dimension,
         patch_length,
+        seed,
+        initial_buffer,
         bind_group,
         _displacement: displacement,
         displacement_view,
@@ -398,10 +422,19 @@ fn make_cascade(
     }
 }
 
-fn initial_spectrum(dimension: u32, patch_length: f32, mut state: u64) -> Vec<[f32; 2]> {
+fn initial_spectrum(
+    dimension: u32,
+    patch_length: f32,
+    mut state: u64,
+    wind_speed: f32,
+) -> Vec<[f32; 2]> {
     let count = (dimension * dimension) as usize;
     let mut values = Vec::with_capacity(count);
     let wind = glam::Vec2::new(0.944, 0.330).normalize();
+    let wind_speed = wind_speed.max(0.1);
+    let alpha = 0.076 * (wind_speed * wind_speed / (FETCH_METRES * 9.81)).powf(0.22);
+    let peak_frequency = 22.0 * (9.81 * 9.81 / (wind_speed * FETCH_METRES)).powf(1.0 / 3.0);
+    let delta_k = std::f32::consts::TAU / patch_length;
     let mut energy = 0.0f64;
     for y in 0..dimension {
         for x in 0..dimension {
@@ -421,10 +454,45 @@ fn initial_spectrum(dimension: u32, patch_length: f32, mut state: u64) -> Vec<[f
                 0.0
             } else {
                 let direction = k / length;
-                let alignment = direction.dot(wind).abs().powi(4);
-                let large_wave = (-1.0 / (length * 22.0).powi(2)).exp();
-                let capillary_cut = (-(length * 0.08).powi(2)).exp();
-                large_wave * capillary_cut * (0.08 + 0.92 * alignment) / length.powi(4)
+                let omega = (9.81 * length * (length * WATER_DEPTH_METRES).tanh()).sqrt();
+                let depth_term = length * WATER_DEPTH_METRES;
+                let tanh_depth = depth_term.tanh();
+                let derivative =
+                    0.5 * 9.81 * (tanh_depth + depth_term * (1.0 - tanh_depth * tanh_depth))
+                        / omega.max(1.0e-5);
+                let sigma = if omega <= peak_frequency { 0.07 } else { 0.09 };
+                let peak_shape = (-(omega - peak_frequency).powi(2)
+                    / (2.0 * sigma * sigma * peak_frequency * peak_frequency))
+                    .exp();
+                let jonswap = alpha * 9.81 * 9.81 / omega.powi(5)
+                    * (-1.25 * (peak_frequency / omega).powi(4)).exp()
+                    * 3.3_f32.powf(peak_shape);
+                let shallow_frequency = (omega * (WATER_DEPTH_METRES / 9.81).sqrt()).min(2.0);
+                let depth_attenuation = if shallow_frequency <= 1.0 {
+                    0.5 * shallow_frequency * shallow_frequency
+                } else {
+                    1.0 - 0.5 * (2.0 - shallow_frequency).powi(2)
+                };
+                let ratio = omega / peak_frequency;
+                let directional_power = if omega <= peak_frequency {
+                    6.97 * ratio.powf(4.06)
+                } else {
+                    9.77 * ratio.powf(-2.33 - 1.45 * (wind_speed * peak_frequency / 9.81 - 1.17))
+                };
+                let directional_power = directional_power
+                    + 16.0 * (peak_frequency / omega).tanh() * SPECTRUM_SWELL.powi(2);
+                let normalization = longuet_higgins_normalization(directional_power);
+                let cos_half_angle = ((direction.y.atan2(direction.x) - wind.y.atan2(wind.x))
+                    * 0.5)
+                    .cos()
+                    .abs();
+                let directional = normalization * cos_half_angle.powf(2.0 * directional_power);
+                let spread = (0.5 / std::f32::consts::PI) * SPECTRUM_SPREAD
+                    + directional * (1.0 - SPECTRUM_SPREAD);
+                let detail = (-(1.0 - SPECTRUM_DETAIL).powi(2) * length * length).exp();
+                jonswap * depth_attenuation * spread * detail * derivative / length
+                    * delta_k
+                    * delta_k
             };
             let g0 = gaussian(&mut state);
             let g1 = gaussian(&mut state);
@@ -442,6 +510,15 @@ fn initial_spectrum(dimension: u32, patch_length: f32, mut state: u64) -> Vec<[f
         value[1] *= inverse_scale as f32;
     }
     values
+}
+
+fn longuet_higgins_normalization(power: f32) -> f32 {
+    if power < 0.4 {
+        0.5 / std::f32::consts::PI + power * (0.220_636 + power * (-0.109 + power * 0.090))
+    } else {
+        let root = power.sqrt();
+        (root * 0.5 + 0.0625 / root) / std::f32::consts::PI.sqrt()
+    }
 }
 
 fn gaussian(state: &mut u64) -> f32 {
@@ -464,8 +541,8 @@ mod tests {
 
     #[test]
     fn deterministic_spectrum_is_finite_and_repeatable() {
-        let a = initial_spectrum(32, 53.0, 7);
-        let b = initial_spectrum(32, 53.0, 7);
+        let a = initial_spectrum(32, 53.0, 7, 7.5);
+        let b = initial_spectrum(32, 53.0, 7, 7.5);
         assert_eq!(a, b);
         assert!(a.iter().flatten().all(|value| value.is_finite()));
         assert!(
@@ -473,6 +550,14 @@ mod tests {
                 .skip(1)
                 .any(|value| value[0] != 0.0 || value[1] != 0.0)
         );
+    }
+
+    #[test]
+    fn tma_spectrum_responds_to_wind_without_losing_determinism() {
+        let calm = initial_spectrum(32, 53.0, 7, 3.0);
+        let storm = initial_spectrum(32, 53.0, 7, 18.0);
+        assert_ne!(calm, storm);
+        assert!(storm.iter().flatten().all(|value| value.is_finite()));
     }
 
     #[test]

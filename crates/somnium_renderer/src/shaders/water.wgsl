@@ -155,6 +155,65 @@ fn repeating_texel(p: vec2<f32>, patch_length: f32, dimensions: vec2<u32>) -> ve
     return vec2<i32>(floor(uv * vec2<f32>(dimensions))) % vec2<i32>(dimensions);
 }
 
+fn cubic_weights(a: f32) -> vec4<f32> {
+    let a2 = a * a;
+    let a3 = a2 * a;
+    return vec4<f32>(
+        -a3 + 3.0 * a2 - 3.0 * a + 1.0,
+        3.0 * a3 - 6.0 * a2 + 4.0,
+        -3.0 * a3 + 3.0 * a2 + 3.0 * a + 1.0,
+        a3,
+    ) / 6.0;
+}
+
+// Four-tap cubic B-spline filtering, blended with hardware bilinear according
+// to the cascade's world-space texel density. This is the GodotOceanWaves/Atlas
+// strategy: cubic filtering stabilizes sparsely sampled distant slopes while
+// bilinear preserves resolved close detail.
+fn sample_spectrum_bicubic(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(tex));
+    let texel = 1.0 / dimensions;
+    let coordinate = fract(uv) * dimensions + vec2<f32>(0.5);
+    let fraction = fract(coordinate);
+    let wx = cubic_weights(fraction.x);
+    let wy = cubic_weights(fraction.y);
+    let gx = vec2<f32>(wx.x + wx.y, wx.z + wx.w);
+    let gy = vec2<f32>(wy.x + wy.y, wy.z + wy.w);
+    let hx = (vec2<f32>(wx.y, wx.w) / max(gx, vec2<f32>(1e-6))
+        + vec2<f32>(-1.5, 0.5) + floor(coordinate.x)) * texel.x;
+    let hy = (vec2<f32>(wy.y, wy.w) / max(gy, vec2<f32>(1e-6))
+        + vec2<f32>(-1.5, 0.5) + floor(coordinate.y)) * texel.y;
+    let blend = vec2<f32>(gx.x / max(gx.x + gx.y, 1e-6),
+        gy.x / max(gy.x + gy.y, 1e-6));
+    let row0 = mix(
+        textureSampleLevel(tex, sampler_linear, vec2<f32>(hx.y, hy.y), 0.0),
+        textureSampleLevel(tex, sampler_linear, vec2<f32>(hx.x, hy.y), 0.0),
+        blend.x,
+    );
+    let row1 = mix(
+        textureSampleLevel(tex, sampler_linear, vec2<f32>(hx.y, hy.x), 0.0),
+        textureSampleLevel(tex, sampler_linear, vec2<f32>(hx.x, hy.x), 0.0),
+        blend.x,
+    );
+    return mix(row0, row1, blend.y);
+}
+
+fn sample_spectrum_filtered(
+    tex: texture_2d<f32>,
+    p: vec2<f32>,
+    patch_length: f32,
+    metres_per_pixel: f32,
+) -> vec4<f32> {
+    let dimensions = textureDimensions(tex);
+    let uv = fract(p / patch_length + vec2<f32>(16.0));
+    let world_texel = patch_length / f32(dimensions.x);
+    let linear = textureSampleLevel(tex, sampler_linear, uv, 0.0);
+    let cubic = sample_spectrum_bicubic(tex, uv);
+    let resolved = 1.0 - smoothstep(world_texel * 0.65, world_texel * 2.0,
+        metres_per_pixel);
+    return mix(cubic, linear, resolved);
+}
+
 fn spectral_displacement(p: vec2<f32>, shore: f32) -> vec3<f32> {
     let large = textureLoad(spectrum_displacement_large,
         repeating_texel(p, 192.0, textureDimensions(spectrum_displacement_large)), 0);
@@ -166,11 +225,11 @@ fn spectral_displacement(p: vec2<f32>, shore: f32) -> vec3<f32> {
     return vec3<f32>(combined.x, combined.z, combined.y) * scale;
 }
 
-fn spectral_gradient(p: vec2<f32>) -> vec4<f32> {
-    let large = textureLoad(spectrum_gradient_large,
-        repeating_texel(p, 192.0, textureDimensions(spectrum_gradient_large)), 0);
-    let small = textureLoad(spectrum_gradient_small,
-        repeating_texel(p, 53.0, textureDimensions(spectrum_gradient_small)), 0);
+fn spectral_gradient(p: vec2<f32>, metres_per_pixel: f32) -> vec4<f32> {
+    let large = sample_spectrum_filtered(spectrum_gradient_large, p, 192.0,
+        metres_per_pixel);
+    let small = sample_spectrum_filtered(spectrum_gradient_small, p, 53.0,
+        metres_per_pixel);
     let blend = clamp(material.simulation_params.x, 0.0, 1.0);
     return vec4<f32>((large.xy * 0.68 + small.xy * 0.32) * blend,
         max(large.z, small.z) * blend, max(large.a, small.a) * blend);
@@ -481,14 +540,14 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let shore = smoothstep(0.25, 2.0, authored_depth);
     let water_coord = local_coord(input.uv);
     let wave = evaluate_waves(water_coord, frame.current_time, shore);
-    let spectrum = spectral_gradient(water_coord);
+    let metres_per_pixel = max(length(dpdx(water_coord)), length(dpdy(water_coord)));
+    let spectrum = spectral_gradient(water_coord, metres_per_pixel);
     let wake = evaluate_wake(water_coord);
     let water_view_depth = view_depth(input.world_position);
 
     // A displaced vertex surface can keep its large silhouette waves, while
     // its sub-pixel slope energy must migrate into roughness. Otherwise the
     // regular Gerstner bands turn into a distant cross-hatch under highlights.
-    let metres_per_pixel = max(length(dpdx(water_coord)), length(dpdy(water_coord)));
     let shortest_wave = max(min(material.wave_params.x, material.wave_params.y) * 0.70, 0.5);
     let slope_resolve = 1.0 - smoothstep(shortest_wave * 0.035, shortest_wave * 0.18,
         metres_per_pixel);
@@ -571,6 +630,18 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
     let tint = mix(material.shallow_color.rgb, material.deep_color.rgb,
         smoothstep(0.5, max(material.surface_params.y * 6.0, 2.0), authored_depth));
     var transmitted = refracted * tint * transmittance + single_scatter;
+
+    // Sea of Thieves biases wave peaks toward its brighter subsurface colour:
+    // horizontally compressed FFT crests present a shorter optical path and
+    // catch more forward-scattered light. Keep it restrained for Somnium's
+    // less stylized lake and let physical transmission remain the foundation.
+    let crest_mask = smoothstep(material.simulation_params.w + 0.02,
+        material.simulation_params.w + 0.42, spectrum.z);
+    let backlit_crest = pow(max(dot(sun_l, -v), 0.0), 3.0);
+    let crest_scatter = material.shallow_color.rgb
+        * (env_up * 0.10 + light.color * backlit_crest * 0.000004)
+        * crest_mask;
+    transmitted += crest_scatter * (vec3<f32>(1.0) - transmittance);
 
     let shore_distance = max(sdf_cells, 0.0) * cell_metres;
     let foam_width = max(material.surface_params.y * 8.0, 6.0);

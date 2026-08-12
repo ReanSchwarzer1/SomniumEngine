@@ -1,6 +1,6 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-11
+> **Last updated:** 2026-08-12
 > **Current phase:** Phase IV complete (IV-A through IV-J)
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
 
@@ -3461,6 +3461,26 @@ license, hash, scale, and render/physics separation notes live in
 `dev records/phase IV/IV-I-J/`, never the repository root. The current
 post-TAA shoreline validation is
 `dev records/phase IV/IV-I-J/IV-I-J_shoreline_lod_validation.png`.
+
+**Phase IV ocean-spectrum refinement completed 2026-08-12.** The existing
+two-cascade GPU inverse FFT remains Somnium's implementation, but its initial
+Phillips-style spectrum is replaced by a finite-depth JONSWAP/TMA energy model
+with Hasselmann directional spreading, swell shaping, high-frequency detail
+control, and finite-depth dispersion. The authored `wind_speed` now rebuilds
+the deterministic spectra when it changes instead of merely scaling animation
+time, so calm and storm presets alter the actual wave-energy distribution.
+
+The surface pass now mixes four-tap cubic B-spline and hardware-bilinear
+gradient samples according to world-space pixel density, retaining close slope
+detail while suppressing distant cascade aliasing. Jacobian compression is
+preserved as an explicit crest mask. Foam history receives periodic spatial
+feedback before exponential decay, making crest white water spread instead of
+remaining sharp simulation texels, and compressed/back-lit crests add a small
+shallow-water scattering contribution. These are adaptations of the published
+GodotOceanWaves equations and Sea of Thieves rendering description; no
+third-party textures were required. Naga validates all Phase IV water modules,
+and the deterministic spectrum, wind response, parameter layout, and control
+smoothing tests pass.
 
 ## 18. Known Issues & Active Bugs
 

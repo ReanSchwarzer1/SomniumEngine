@@ -210,7 +210,7 @@ impl BloomPass {
         self.params.clear();
         self.binds.clear();
 
-        let mut make_bind = |src_view: &wgpu::TextureView, texel: [f32; 2], radius: f32| {
+        let make_bind = |src_view: &wgpu::TextureView, texel: [f32; 2], radius: f32| {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Bloom params"),
                 size: std::mem::size_of::<BloomParams>() as u64,

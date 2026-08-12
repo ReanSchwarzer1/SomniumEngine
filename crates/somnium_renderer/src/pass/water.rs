@@ -27,7 +27,7 @@ fn spectral_texture_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
@@ -166,6 +166,7 @@ pub fn create_default_texture_bind_group(
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: 8,
         ..Default::default()
     });
     device.create_bind_group(&wgpu::BindGroupDescriptor {

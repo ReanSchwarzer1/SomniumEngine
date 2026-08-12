@@ -19,12 +19,6 @@ const CUBE_SIZE: u32 = 256;
 /// Mip levels; mip `i` is prefiltered for roughness `i / (MIP_COUNT - 1)`.
 const MIP_COUNT: u32 = 6;
 
-/// Sky-dome luminance (cd/m²) per lux of sun illuminance.
-///
-/// Mirrors `somnium_core::light_units::SKY_LUMINANCE_PER_LUX`; duplicated
-/// because core depends on the renderer rather than the other way round.
-const SKY_LUMINANCE_PER_LUX: f32 = 0.08;
-
 /// Photometric luminance of a linear-RGB light colour (Rec. 709 weights).
 fn sun_luminance(color: glam::Vec3) -> f32 {
     color.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722))

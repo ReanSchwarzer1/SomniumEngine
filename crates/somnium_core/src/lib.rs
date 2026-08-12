@@ -214,12 +214,6 @@ pub struct LightComponent {
 }
 
 impl LightComponent {
-    /// Photometric intensity converted to the radiometric quantity shading
-    /// wants, scaled by colour.
-    ///
-    /// Directional lights hand over illuminance unchanged; point and spot
-    /// lights convert luminous power to intensity, since shading divides by
-    /// distance squared and needs candela rather than lumens.
     /// Linear-RGB tint, from colour temperature when one is set.
     #[must_use]
     pub fn tint(&self) -> glam::Vec3 {
@@ -230,6 +224,12 @@ impl LightComponent {
         }
     }
 
+    /// Photometric intensity converted to the quantity shading expects and
+    /// scaled by the light's linear-RGB tint.
+    ///
+    /// Directional lights hand over illuminance unchanged; point and spot
+    /// lights convert luminous power to intensity because shading divides by
+    /// distance squared and therefore needs candela rather than lumens.
     #[must_use]
     pub fn photometric_color(&self) -> glam::Vec3 {
         let scale = match self.light_type {
@@ -549,22 +549,29 @@ pub struct PostProcessComponent {
     /// rolls off. These decide what it feels like, and no amount of the former
     /// substitutes for the latter.
     pub temperature: f32,
+    /// Green-magenta colour balance; zero is neutral.
     pub tint: f32,
+    /// Contrast adjustment; one is neutral.
     pub contrast: f32,
+    /// Colour saturation adjustment; one is neutral.
     pub saturation: f32,
     /// ASC CDL slope / offset / power. Neutral is (1, 0, 1).
     pub gain: f32,
+    /// ASC CDL offset applied to the graded colour; zero is neutral.
     pub lift: f32,
+    /// ASC CDL power applied to the graded colour; one is neutral.
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
     /// Bloom (Phase 24T).
     pub bloom_enabled: bool,
+    /// Strength of the bloom contribution; zero disables its visible effect.
     pub bloom_intensity: f32,
     /// Screen-space occlusion (Phase 24I).
     pub gtao_enabled: bool,
     /// Depth of field (Phase 24Z). Focus distance is in metres.
     pub dof_enabled: bool,
+    /// Camera-space focus distance in metres.
     pub dof_focus_distance: f32,
     /// Temporal anti-aliasing (Phase 24F).
     pub taa_enabled: bool,
@@ -759,6 +766,7 @@ impl Tonemapper {
         }
     }
 
+    /// Human-readable name used by the editor inspector.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
