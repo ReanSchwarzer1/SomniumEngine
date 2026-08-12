@@ -25,9 +25,9 @@ use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
-    FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent, MeshKind, Name,
-    Parent, PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
-    simulate_particles,
+    BuoyantVessel, FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent,
+    MeshKind, Name, Parent, PostProcessComponent, TerrainComponent, Transform, WaterComponent,
+    WorldTransform, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -1020,6 +1020,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         water.wind_speed,
                         water.foam_decay,
                         water.foam_threshold,
+                        water.spectrum_blend,
+                        water.edge_scale,
+                        water.anisotropy,
+                        water.caustic_strength,
+                    ]
+                });
+            let sel_vessel = self
+                .selected_entity
+                .and_then(|entity| self.world.get::<BuoyantVessel>(entity).copied())
+                .map(|vessel| {
+                    [
+                        vessel.buoyancy_per_sample,
+                        vessel.linear_drag,
+                        vessel.angular_drag,
+                        vessel.propulsion_force,
+                        vessel.draft,
+                        vessel.righting,
                     ]
                 });
 
@@ -1059,6 +1076,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_water_inspector(sel_water);
+                ui.update_vessel_inspector(sel_vessel);
                 ui.update_foliage_inspector(sel_foliage);
             }
         }
@@ -2390,6 +2408,10 @@ impl<G: GameApp> Engine<G> {
                         | IF::WaterWindSpeed
                         | IF::WaterFoamDecay
                         | IF::WaterFoamThreshold
+                        | IF::WaterSpectrumBlend
+                        | IF::WaterEdgeScale
+                        | IF::WaterAnisotropy
+                        | IF::WaterCausticStrength
                 ) {
                     if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
                         match field {
@@ -2405,13 +2427,53 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterWaveSteepness => water.wave_steepness = value.clamp(0.0, 0.95),
                             IF::WaterWindSpeed => water.wind_speed = value.clamp(0.1, 40.0),
                             IF::WaterFoamDecay => water.foam_decay = value.clamp(0.01, 10.0),
-                            IF::WaterFoamThreshold => water.foam_threshold = value.clamp(-0.5, 0.95),
+                            IF::WaterFoamThreshold => {
+                                water.foam_threshold = value.clamp(0.05, 0.95)
+                            }
+                            IF::WaterSpectrumBlend => {
+                                water.spectrum_blend = value.clamp(0.0, 1.0)
+                            }
+                            IF::WaterEdgeScale => water.edge_scale = value.max(0.05),
+                            IF::WaterAnisotropy => water.anisotropy = value.clamp(-0.8, 0.8),
+                            IF::WaterCausticStrength => {
+                                water.caustic_strength = value.clamp(0.0, 4.0)
+                            }
                             _ => unreachable!(),
                         }
                     }
                     if field == IF::WaterSurface {
                         if let Some(transform) = self.world.get_mut::<Transform>(entity) {
                             transform.translation.y = value;
+                        }
+                    }
+                    let _ = live;
+                    return;
+                }
+
+                if matches!(
+                    field,
+                    IF::VesselBuoyancy
+                        | IF::VesselDrag
+                        | IF::VesselAngularDrag
+                        | IF::VesselThrust
+                        | IF::VesselDraft
+                        | IF::VesselRighting
+                ) {
+                    if let Some(vessel) = self.world.get_mut::<BuoyantVessel>(entity) {
+                        match field {
+                            IF::VesselBuoyancy => {
+                                vessel.buoyancy_per_sample = value.clamp(0.0, 80_000.0)
+                            }
+                            IF::VesselDrag => vessel.linear_drag = value.clamp(0.0, 20_000.0),
+                            IF::VesselAngularDrag => {
+                                vessel.angular_drag = value.clamp(0.0, 40_000.0)
+                            }
+                            IF::VesselThrust => {
+                                vessel.propulsion_force = value.clamp(0.0, 40_000.0)
+                            }
+                            IF::VesselDraft => vessel.draft = value.clamp(0.1, 3.0),
+                            IF::VesselRighting => vessel.righting = value.clamp(0.0, 80_000.0),
+                            _ => unreachable!(),
                         }
                     }
                     let _ = live;

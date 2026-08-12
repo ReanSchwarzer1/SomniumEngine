@@ -106,6 +106,17 @@ struct InspectorHandles {
     water_wind_speed: NodeHandle,
     water_foam_decay: NodeHandle,
     water_foam_threshold: NodeHandle,
+    water_spectrum_blend: NodeHandle,
+    water_edge_scale: NodeHandle,
+    water_anisotropy: NodeHandle,
+    water_caustic: NodeHandle,
+    vessel_section: NodeHandle,
+    vessel_buoyancy: NodeHandle,
+    vessel_drag: NodeHandle,
+    vessel_angular_drag: NodeHandle,
+    vessel_thrust: NodeHandle,
+    vessel_draft: NodeHandle,
+    vessel_righting: NodeHandle,
     foliage_section: NodeHandle,
     foliage_toggle: NodeHandle,
     foliage_label: NodeHandle,
@@ -858,7 +869,7 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 13]>) {
+    pub fn update_water_inspector(&mut self, values: Option<[f32; 17]>) {
         let h = &self.inspector_handles;
         match values {
             Some(values) => {
@@ -877,6 +888,10 @@ impl UiManager {
                     h.water_wind_speed,
                     h.water_foam_decay,
                     h.water_foam_threshold,
+                    h.water_spectrum_blend,
+                    h.water_edge_scale,
+                    h.water_anisotropy,
+                    h.water_caustic,
                 ]
                 .into_iter()
                 .zip(values)
@@ -886,6 +901,31 @@ impl UiManager {
                 }
             }
             None => self.native_ui.set_visibility(h.water_section, false),
+        }
+    }
+
+    /// Show buoyancy controls when a `BuoyantVessel` is selected.
+    pub fn update_vessel_inspector(&mut self, values: Option<[f32; 6]>) {
+        let h = &self.inspector_handles;
+        match values {
+            Some(values) => {
+                self.native_ui.set_visibility(h.vessel_section, true);
+                for (handle, value) in [
+                    h.vessel_buoyancy,
+                    h.vessel_drag,
+                    h.vessel_angular_drag,
+                    h.vessel_thrust,
+                    h.vessel_draft,
+                    h.vessel_righting,
+                ]
+                .into_iter()
+                .zip(values)
+                {
+                    self.native_ui
+                        .send(NumericFieldMessage::set_value(handle, value));
+                }
+            }
+            None => self.native_ui.set_visibility(h.vessel_section, false),
         }
     }
 
@@ -1029,6 +1069,16 @@ impl UiManager {
             (h.water_wind_speed, IF::WaterWindSpeed),
             (h.water_foam_decay, IF::WaterFoamDecay),
             (h.water_foam_threshold, IF::WaterFoamThreshold),
+            (h.water_spectrum_blend, IF::WaterSpectrumBlend),
+            (h.water_edge_scale, IF::WaterEdgeScale),
+            (h.water_anisotropy, IF::WaterAnisotropy),
+            (h.water_caustic, IF::WaterCausticStrength),
+            (h.vessel_buoyancy, IF::VesselBuoyancy),
+            (h.vessel_drag, IF::VesselDrag),
+            (h.vessel_angular_drag, IF::VesselAngularDrag),
+            (h.vessel_thrust, IF::VesselThrust),
+            (h.vessel_draft, IF::VesselDraft),
+            (h.vessel_righting, IF::VesselRighting),
             (h.foliage_density, IF::FoliageDensity),
             (h.foliage_seed, IF::FoliageSeed),
             (h.foliage_slope, IF::FoliageSlope),
@@ -2269,7 +2319,25 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let water_wind_speed = make_row_step(ui, "Wind", 34.0, font_id, water_section, 0.5);
     let water_foam_decay = make_row_step(ui, "Foam", 34.0, font_id, water_section, 0.05);
     let water_foam_threshold = make_row_step(ui, "Whitecap", 34.0, font_id, water_section, 0.01);
+    let water_spectrum_blend = make_row_step(ui, "Spect", 34.0, font_id, water_section, 0.01);
+    let water_edge_scale = make_row_step(ui, "Edge", 34.0, font_id, water_section, 0.05);
+    let water_anisotropy = make_row_step(ui, "Aniso", 34.0, font_id, water_section, 0.01);
+    let water_caustic = make_row_step(ui, "Caustic", 34.0, font_id, water_section, 0.05);
     ui.set_visibility(water_section, false);
+
+    let vessel_panel =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let vessel_section = ui.add_node(vessel_panel, parent);
+    sec_label(ui, "Vessel", font_id, vessel_section);
+    let vessel_buoyancy = make_row_step(ui, "Buoy", 34.0, font_id, vessel_section, 250.0);
+    let vessel_drag = make_row_step(ui, "Drag", 34.0, font_id, vessel_section, 50.0);
+    let vessel_angular_drag = make_row_step(ui, "YawD", 34.0, font_id, vessel_section, 50.0);
+    let vessel_thrust = make_row_step(ui, "Thrust", 34.0, font_id, vessel_section, 250.0);
+    let vessel_draft = make_row_step(ui, "Draft", 34.0, font_id, vessel_section, 0.05);
+    let vessel_righting = make_row_step(ui, "Right", 34.0, font_id, vessel_section, 250.0);
+    ui.set_visibility(vessel_section, false);
 
     InspectorHandles {
         pos_x,
@@ -2313,6 +2381,17 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         water_wind_speed,
         water_foam_decay,
         water_foam_threshold,
+        water_spectrum_blend,
+        water_edge_scale,
+        water_anisotropy,
+        water_caustic,
+        vessel_section,
+        vessel_buoyancy,
+        vessel_drag,
+        vessel_angular_drag,
+        vessel_thrust,
+        vessel_draft,
+        vessel_righting,
         foliage_section,
         foliage_toggle,
         foliage_label,

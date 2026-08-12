@@ -1198,11 +1198,13 @@ pub struct WaterComponent {
     pub ssr_strength: f32,
     /// Blend from deterministic Gerstner (0) to the two-cascade spectral tier (1).
     pub spectrum_blend: f32,
-    /// Authored wind speed for cinematic wave presets, metres per second.
+    /// Authored wind speed in metres per second. Scales the spectral cascade
+    /// roster (Wind = 10 leaves the design speeds untouched).
     pub wind_speed: f32,
-    /// Seconds for crest foam history to decay toward zero.
+    /// Crest foam persistence control forwarded to the cascade foam amount
+    /// (0–10). The inspector labels this Foam.
     pub foam_decay: f32,
-    /// Jacobian compression threshold that begins crest foam.
+    /// Jacobian whitecap threshold forwarded to every foam-bearing cascade.
     pub foam_threshold: f32,
     /// Multiplier for underwater projected caustics.
     pub caustic_strength: f32,
@@ -1300,12 +1302,9 @@ impl WaterComponent {
             anisotropy: 0.45,
             ssr_strength: 1.0,
             spectrum_blend: 0.64,
-            // Authored, but inert since IV-K: the spectral cascades carry their
-            // own wind field and run foam growth and decay against the
-            // Jacobian, so nothing downstream reads these three. They are kept
-            // because the Gerstner-only tier and the scene format still carry
-            // them, and because a body that says it is a 6.5 m/s sea should say
-            // so whether or not the current surface tier asks.
+            // Wind = 10 leaves the cascade roster at its design speeds; 6.5 is
+            // a calmer inland lake. Foam and Whitecap drive the spectral foam
+            // grow/decay and Jacobian threshold (see WaterSpectrumPass::record).
             wind_speed: 6.5,
             foam_decay: 4.5,
             foam_threshold: 0.54,
@@ -1336,6 +1335,48 @@ impl WaterComponent {
 }
 
 impl somnium_ecs::Component for WaterComponent {}
+
+/// Distributed buoyancy parameters for a floating vessel (Phase IV-I/J).
+///
+/// The demo boat and any future player craft share this component so the
+/// inspector can edit thrust, drag, and draft without reaching into the
+/// example binary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuoyantVessel {
+    /// Water body whose surface queries drive the samples.
+    pub water_id: u32,
+    /// World-space origin of that body's parent terrain.
+    pub water_origin: glam::Vec3,
+    /// Newtons of buoyancy applied at a fully submerged sample.
+    pub buoyancy_per_sample: f32,
+    /// Linear drag coefficient against relative water velocity.
+    pub linear_drag: f32,
+    /// Extra drag on the rotational part of sample velocity.
+    pub angular_drag: f32,
+    /// Constant bow thrust while afloat, in newtons.
+    pub propulsion_force: f32,
+    /// Metres of immersion that map a sample from dry to fully wet.
+    pub draft: f32,
+    /// Righting force that pulls a rolled hull back upright.
+    pub righting: f32,
+}
+
+impl Default for BuoyantVessel {
+    fn default() -> Self {
+        Self {
+            water_id: u32::MAX,
+            water_origin: glam::Vec3::ZERO,
+            buoyancy_per_sample: 16_000.0,
+            linear_drag: 1_200.0,
+            angular_drag: 2_400.0,
+            propulsion_force: 7_500.0,
+            draft: 0.65,
+            righting: 9_000.0,
+        }
+    }
+}
+
+impl somnium_ecs::Component for BuoyantVessel {}
 
 #[cfg(test)]
 mod camera_speed_tests {

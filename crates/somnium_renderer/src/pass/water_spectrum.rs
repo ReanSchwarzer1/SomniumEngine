@@ -342,8 +342,28 @@ impl WaterSpectrumPass {
         // interval but only runs one transform, which is what the fixed rate
         // is for.
         let step = TICK_SECONDS * ticks as f32;
-        for cascade in &mut self.cascades {
+        // Authored body controls: `[spectrum_blend, wind, foam_amount, whitecap]`.
+        // Wind scales the cascade roster relative to cascade 0's design speed
+        // (10 m/s), so Wind = 10 leaves the roster untouched. Foam and whitecap
+        // replace the cascade amounts on any cascade that was authored with
+        // foam; the middle cascade stays foamless so it does not double-count.
+        let wind_scale = (self.smoothed_simulation[1] / 10.0).clamp(0.05, 4.0);
+        let foam_amount = self.smoothed_simulation[2].clamp(0.0, 10.0);
+        let whitecap = self.smoothed_simulation[3].clamp(0.05, 0.95);
+        for (index, cascade) in self.cascades.iter_mut().enumerate() {
             cascade.time += step;
+            let base = OCEAN_CASCADES[index];
+            let new_wind = (base.wind_speed * wind_scale).clamp(0.5, 40.0);
+            if (new_wind - cascade.params.wind_speed).abs() > 0.05 {
+                cascade.needs_spectrum = true;
+            }
+            cascade.params.wind_speed = new_wind;
+            cascade.params.whitecap = whitecap;
+            cascade.params.foam_amount = if base.foam_amount > 0.01 {
+                foam_amount
+            } else {
+                0.0
+            };
         }
 
         let mut bytes = vec![0u8; (PARAM_STRIDE as usize) * self.cascades.len()];

@@ -22,8 +22,8 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    Children, Component, ComponentId, ComponentSet, Engine, EngineConfig, EngineContext,
-    EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent, LightType,
+    BuoyantVessel, Children, Component, ComponentId, ComponentSet, Engine, EngineConfig,
+    EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent, LightType,
     MaterialComponent, MeshComponent, MeshKind, Name, Parent, Transform, WorldTransform,
     propagate_transforms,
 };
@@ -41,16 +41,6 @@ struct PhysicsBody {
     id: BodyId,
 }
 impl Component for PhysicsBody {}
-
-#[derive(Debug, Clone, Copy)]
-struct BuoyantVessel {
-    water_id: u32,
-    water_origin: Vec3,
-    buoyancy_per_sample: f32,
-    linear_drag: f32,
-    propulsion_force: f32,
-}
-impl Component for BuoyantVessel {}
 
 #[derive(Debug, Clone, Copy)]
 struct BoatPart {
@@ -487,9 +477,7 @@ impl HelloGame {
             BuoyantVessel {
                 water_id: water.water_id,
                 water_origin: preset.terrain_translation,
-                buoyancy_per_sample: 16_000.0,
-                linear_drag: 1_200.0,
-                propulsion_force: 7_500.0,
+                ..BuoyantVessel::default()
             },
             Name::new("Gislinge Viking Boat (CC BY 4.0)"),
         ));
@@ -1172,16 +1160,21 @@ impl GameApp for HelloGame {
         let rotation = ctx.physics.get_rotation(boat.body);
         let linear_velocity = ctx.physics.get_linear_velocity(boat.body);
         let angular_velocity = ctx.physics.get_angular_velocity(boat.body);
+        // Eight samples along the 7.7 m hull: port/starboard pairs at four
+        // stations. Slightly deeper midships samples give the keel more bite
+        // when a wave rolls under, which is what makes the boat lean into the
+        // swell instead of hovering flat above it.
         let samples = [
-            Vec3::new(-3.0, -0.22, -0.42),
-            Vec3::new(-3.0, -0.22, 0.42),
-            Vec3::new(-1.0, -0.24, -0.58),
-            Vec3::new(-1.0, -0.24, 0.58),
-            Vec3::new(1.0, -0.24, -0.58),
-            Vec3::new(1.0, -0.24, 0.58),
-            Vec3::new(3.0, -0.22, -0.42),
-            Vec3::new(3.0, -0.22, 0.42),
+            Vec3::new(-3.2, -0.20, -0.48),
+            Vec3::new(-3.2, -0.20, 0.48),
+            Vec3::new(-1.1, -0.28, -0.62),
+            Vec3::new(-1.1, -0.28, 0.62),
+            Vec3::new(1.1, -0.28, -0.62),
+            Vec3::new(1.1, -0.28, 0.62),
+            Vec3::new(3.2, -0.20, -0.48),
+            Vec3::new(3.2, -0.20, 0.48),
         ];
+        let draft = vessel.draft.max(0.1);
         let mut wet_samples = 0.0;
         for local_offset in samples {
             let offset = rotation * local_offset;
@@ -1199,7 +1192,7 @@ impl GameApp for HelloGame {
             });
             let Some(surface) = surface else { continue };
             let surface_y = vessel.water_origin.y + surface.height;
-            let submerged = ((surface_y - point.y) / 0.65).clamp(0.0, 1.0);
+            let submerged = ((surface_y - point.y) / draft).clamp(0.0, 1.0);
             if submerged <= 0.0 {
                 continue;
             }
@@ -1208,17 +1201,41 @@ impl GameApp for HelloGame {
             let water_velocity =
                 Vec3::new(surface.velocity.x, surface.velocity.y, surface.velocity.z);
             let relative_velocity = water_velocity - point_velocity;
-            let buoyancy = surface.normal * vessel.buoyancy_per_sample * submerged;
+            // Archimedes is mostly vertical; a little surface normal lets the
+            // hull follow the wave face without tipping over on every crest.
+            let buoyancy_dir = (surface.normal * 0.35 + Vec3::Y * 0.65).normalize_or_zero();
+            let buoyancy = buoyancy_dir * vessel.buoyancy_per_sample * submerged;
             let drag = relative_velocity * vessel.linear_drag * submerged;
+            // Damp the rotational part of the sample velocity separately so a
+            // rolling hull settles instead of oscillating forever.
+            let rotational = angular_velocity.cross(offset);
+            let angular_drag = -rotational * vessel.angular_drag * submerged;
             ctx.physics
-                .add_force_at_position(boat.body, buoyancy + drag, point);
+                .add_force_at_position(boat.body, buoyancy + drag + angular_drag, point);
         }
 
         if wet_samples > 0.5 {
+            // Righting: push the keel back under the centre of mass whenever
+            // the mast leans. Strength scales with how wet the hull is so a
+            // beached boat is not yanked upright.
+            let local_up = rotation * Vec3::Y;
+            let lean = Vec3::new(local_up.x, 0.0, local_up.z);
+            if lean.length_squared() > 1.0e-4 {
+                let restore = -lean.normalize()
+                    * vessel.righting
+                    * (wet_samples / 8.0).clamp(0.0, 1.0)
+                    * lean.length().min(1.0);
+                ctx.physics.add_force_at_position(
+                    boat.body,
+                    restore,
+                    position + rotation * Vec3::new(0.0, -0.32, 0.0),
+                );
+            }
+
             // The imported hull's bow points along +X after its root transform.
-            // A modest constant
-            // thrust makes the default scene immediately demonstrate wakes;
-            // later input/vehicle work can replace this with throttle control.
+            // A modest constant thrust makes the default scene immediately
+            // demonstrate wakes; later input/vehicle work can replace this
+            // with throttle control.
             let forward_3d = rotation * Vec3::X;
             let forward = Vec3::new(forward_3d.x, 0.0, forward_3d.z).normalize_or_zero();
             let thrust = forward * vessel.propulsion_force * (wet_samples / 8.0).clamp(0.0, 1.0);
