@@ -865,9 +865,13 @@ surface ships without spray.
 
 **Met on 2026-08-13.** IV-A through IV-K are recorded above, with IV-K's two
 deferrals (the ocean clipmap and HDRI/Filmic environment) and one abandonment
-(sea spray) stated in 14.1 rather than left as implied work. Ray-traced water
-reflections, the largest remaining gap in water fidelity, are planned
-separately as [Phase VV — Halcyon](phase_VV.md).
+(sea spray) stated in 14.1 rather than left as implied work. Water deep /
+shallow / edge colours, absorption / scattering RGB, wave directions, and the
+underwater enable toggle remain authored in the component but were still missing
+from the inspector at close; exposing them is part of
+[Phase 26 — Iris](phase_26.md) (inspector colour pickers), not a Phase IV
+reopen. Ray-traced water reflections, the largest remaining gap in water
+fidelity, are planned separately as [Phase VV — Halcyon](phase_VV.md).
 
 Phase IV is complete only when:
 
