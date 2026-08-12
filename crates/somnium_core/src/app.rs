@@ -1017,6 +1017,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         water.wave_length_b,
                         water.wave_speed,
                         water.wave_steepness,
+                        water.wind_speed,
+                        water.foam_decay,
+                        water.foam_threshold,
                     ]
                 });
 
@@ -2384,6 +2387,9 @@ impl<G: GameApp> Engine<G> {
                         | IF::WaterWaveLengthB
                         | IF::WaterWaveSpeed
                         | IF::WaterWaveSteepness
+                        | IF::WaterWindSpeed
+                        | IF::WaterFoamDecay
+                        | IF::WaterFoamThreshold
                 ) {
                     if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
                         match field {
@@ -2397,6 +2403,9 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterWaveLengthB => water.wave_length_b = value.max(0.5),
                             IF::WaterWaveSpeed => water.wave_speed = value.max(0.0),
                             IF::WaterWaveSteepness => water.wave_steepness = value.clamp(0.0, 0.95),
+                            IF::WaterWindSpeed => water.wind_speed = value.clamp(0.1, 40.0),
+                            IF::WaterFoamDecay => water.foam_decay = value.clamp(0.01, 10.0),
+                            IF::WaterFoamThreshold => water.foam_threshold = value.clamp(-0.5, 0.95),
                             _ => unreachable!(),
                         }
                     }

@@ -103,6 +103,9 @@ struct InspectorHandles {
     water_wave_b: NodeHandle,
     water_speed: NodeHandle,
     water_steepness: NodeHandle,
+    water_wind_speed: NodeHandle,
+    water_foam_decay: NodeHandle,
+    water_foam_threshold: NodeHandle,
     foliage_section: NodeHandle,
     foliage_toggle: NodeHandle,
     foliage_label: NodeHandle,
@@ -855,7 +858,7 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 10]>) {
+    pub fn update_water_inspector(&mut self, values: Option<[f32; 13]>) {
         let h = &self.inspector_handles;
         match values {
             Some(values) => {
@@ -871,6 +874,9 @@ impl UiManager {
                     h.water_wave_b,
                     h.water_speed,
                     h.water_steepness,
+                    h.water_wind_speed,
+                    h.water_foam_decay,
+                    h.water_foam_threshold,
                 ]
                 .into_iter()
                 .zip(values)
@@ -1020,6 +1026,9 @@ impl UiManager {
             (h.water_wave_b, IF::WaterWaveLengthB),
             (h.water_speed, IF::WaterWaveSpeed),
             (h.water_steepness, IF::WaterWaveSteepness),
+            (h.water_wind_speed, IF::WaterWindSpeed),
+            (h.water_foam_decay, IF::WaterFoamDecay),
+            (h.water_foam_threshold, IF::WaterFoamThreshold),
             (h.foliage_density, IF::FoliageDensity),
             (h.foliage_seed, IF::FoliageSeed),
             (h.foliage_slope, IF::FoliageSlope),
@@ -2257,6 +2266,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let water_wave_b = make_row_step(ui, "Wave B", 34.0, font_id, water_section, 0.25);
     let water_speed = make_row_step(ui, "Speed", 34.0, font_id, water_section, 0.05);
     let water_steepness = make_row_step(ui, "Steep", 34.0, font_id, water_section, 0.01);
+    let water_wind_speed = make_row_step(ui, "Wind", 34.0, font_id, water_section, 0.5);
+    let water_foam_decay = make_row_step(ui, "Foam", 34.0, font_id, water_section, 0.05);
+    let water_foam_threshold = make_row_step(ui, "Whitecap", 34.0, font_id, water_section, 0.01);
     ui.set_visibility(water_section, false);
 
     InspectorHandles {
@@ -2298,6 +2310,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         water_wave_b,
         water_speed,
         water_steepness,
+        water_wind_speed,
+        water_foam_decay,
+        water_foam_threshold,
         foliage_section,
         foliage_toggle,
         foliage_label,

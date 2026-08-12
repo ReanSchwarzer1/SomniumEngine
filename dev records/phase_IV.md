@@ -630,14 +630,6 @@ Reference implementations are architectural/pattern sources only. No third-party
 - Monzon et al. (2024), [*Real-Time Underwater Spectral Rendering*](https://diglib.eg.org/items/1316f247-e9a8-48fe-8754-f3276191e6b5), DOI `10.1111/cgf.15009`.
 - Jeschke et al., [*Water Surface Wavelets*](https://research.nvidia.com/labs/prl/shallow-water-simulation/) — long-term interaction reference.
 - Opus Poly, [Gislinge Viking Boat](https://sketchfab.com/3d-models/gislinge-viking-boat-01098ad7973647a9b558f41d2ebc5193), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-
-### Local reference file index
-
-These files were read in the supplied repositories. They are pattern references, not copy sources.
-
-**Wicked Engine — MIT, copyright Turánszki János**
-
-- `New_Engines/WickedEngine-master/WickedEngine/wiOcean.h` and `wiOcean.cpp`: spectrum parameters, Phillips initialization, displacement resources, demand-gated readback, draw grids.
 - `New_Engines/WickedEngine-master/WickedEngine/wiFFTGenerator.*`: 512² inverse-FFT compute scheduling.
 - `New_Engines/WickedEngine-master/WickedEngine/shaders/oceanSimulatorCS.hlsl`: time evolution and height/horizontal-displacement packing.
 - `.../oceanUpdateDisplacementMapCS.hlsl`: spatial displacement output.
@@ -673,6 +665,78 @@ Relevant future pattern: continuous distance morphing to a coarser regular grid.
 - `New_Engines/FalcoEngine/.../Engine/Components/Water.*` and `StandardWater.shader` corroborate editor serialization, mirrored reflection, depth refraction, foam, and caustics.
 
 No controlling top-level license was found in the supplied tree. Do not translate Falco source unless its provenance is resolved.
+
+## 14. Phase IV-K — Ocean Fidelity Pass (GodotOceanWaves Parity)
+
+> [!WARNING]
+> **STATUS: UNFIXED / IN-PROGRESS / UNFINISHED**
+> 
+> Phase IV-K (Ocean Fidelity Pass) is **NOT YET COMPLETE** and is marked as **UNFIXED**. While the mathematical foundation, 3-cascade patch sizing ($88\text{m}$, $57\text{m}$, $16\text{m}$), Jacobian whitecap folding, temporal foam accumulation, SSS/GGX lighting, and `sea_spray.png` asset attribution have been implemented, the visual output still requires further tuning and auditing to fully match the `GodotOceanWaves` reference.
+> 
+> **MANDATORY INSTRUCTIONS FOR THE NEXT AI MODEL / SESSION:**
+> 1. Read and digest the **entire codebase** in `crates/` (`somnium_renderer`, `somnium_core`, `somnium_ui`, `somnium_asset`, etc.).
+> 2. Read all documentation files completely, especially `READ THIS FIRST.md`, `dev records/phase_IV.md`, `context.md`, `ATTRIBUTION.md`, `implementation_plan.md`, and `walkthrough.md`.
+> 3. Inspect reference repositories in `example_repo/` (specifically `GodotOceanWaves-main`, `WickedEngine`, `JoltPhysics`).
+> 4. Review cited papers and video talks (Tessendorf *Simulating Ocean Water*, Horvath *Empirical Directional Wave Spectra*, GDC 2019 *Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas*, Turánszki *Underwater effect updates*, SIGGRAPH '18 *Sea of Thieves Water*).
+> 5. Perform a full code audit of all written code and proposed changes to check for any subtle errors or discrepancies, and iterate on the water material/spectrum WGSL shaders until visual parity with `GodotOceanWaves` is completely achieved before declaring IV-K finished.
+
+### 14.1 Overview & Motivation
+The ocean rendering pipeline in Somnium Engine underwent a major fidelity pass (Phase IV-K) aimed at closing the visual gap with Retr0's `GodotOceanWaves` repository and the GDC 2019 reference talk *"Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas"*.
+
+### 14.2 Mathematical Formulas & Spectral Physics
+
+#### 1. TMA Spectral Synthesis & Dispersion
+For each cascade $c \in \{0, 1, 2\}$, wave frequencies $\omega(k)$ and TMA spectrum energy $S(\omega)$ are evaluated:
+$$\omega(k) = \sqrt{g \cdot k \cdot \tanh(k \cdot d)}$$
+$$S(\omega) = \frac{\alpha g^2}{\omega^5} \exp\left(-1.25 \left(\frac{\omega_p}{\omega}\right)^4\right) \cdot 3.3^r \cdot \Phi_{Kitaigorodskii}(\omega, d)$$
+where directional spreading $D(\omega, \theta)$ uses Hasselmann directional distribution combined with Longuet-Higgins normalization:
+$$\Phi_{LH}(s) = \frac{1}{\sqrt{\pi}} \left(\frac{\sqrt{s}}{2} + \frac{1}{16\sqrt{s}}\right) \quad (s \ge 0.4)$$
+Initial complex wave amplitudes $h_0(\mathbf{k})$ are sampled via Box-Muller Gaussian transformation:
+$$h_0(\mathbf{k}) = \frac{1}{\sqrt{2}} (\xi_1 + i \xi_2) \sqrt{2 \cdot S(\omega) \cdot D(\omega, \theta) \cdot \frac{d\omega}{dk} \frac{\Delta k_x \Delta k_y}{k}}$$
+
+#### 2. Spatial Derivatives & Jacobian Matrix
+FFT compute output stores spatial displacements $(D_x, D_y, D_z)$. The horizontal derivative matrix is evaluated via finite differences:
+$$J = \left(1 + \frac{\partial D_x}{\partial x}\right)\left(1 + \frac{\partial D_z}{\partial z}\right) - \left(\frac{\partial D_x}{\partial z}\right)\left(\frac{\partial D_z}{\partial x}\right)$$
+When waves steepen and crests compress horizontally, $J$ drops below $1.0$.
+
+#### 3. Additive Temporal Foam Accumulation
+Fold amount $f$ is evaluated from the whitecap threshold $w_{cap} = 1.0 - \text{foam\_threshold}$:
+$$f = \max(w_{cap} - J, 0.0)$$
+Foam is accumulated additively with exponential decay per frame $\Delta t$:
+$$F_t = \text{clamp}\left(F_{t-1} \cdot e^{-\gamma_{decay} \Delta t} + f \cdot \gamma_{grow} \Delta t, 0.0, 1.0\right)$$
+where $\gamma_{grow} = \text{clamp}(\Delta t \cdot \text{foam\_amount} \cdot 35.0, 0.05, 2.5)$ and $\gamma_{decay} = \Delta t \cdot \max(0.5, 12.0 - \text{foam\_amount}) \cdot 1.15$.
+
+#### 4. 3-Cascade Spectral Mapping
+The 3 cascades use tile lengths matching GodotOceanWaves default configuration:
+- **Cascade 0**: Tile length $L_0 = 88.0\text{ m}$, displacement scale $= 1.0$, normal scale $= 1.0$
+- **Cascade 1**: Tile length $L_1 = 57.0\text{ m}$, displacement scale $= 0.75$, normal scale $= 1.0$
+- **Cascade 2**: Tile length $L_2 = 16.0\text{ m}$, displacement scale $= 0.0$, normal scale $= 0.25$
+
+Summed world displacement $\mathbf{D}_{world}$ and normal gradient $\mathbf{G}$:
+$$\mathbf{D}_{world} = \mathbf{D}_0 \cdot 1.0 + \mathbf{D}_1 \cdot 0.75 + \mathbf{D}_2 \cdot 0.0$$
+$$\mathbf{G}_{slope} = \frac{\mathbf{G}_0 \cdot 1.0 + \mathbf{G}_1 \cdot 1.0 + \mathbf{G}_2 \cdot 0.25}{1 + |\mathbf{G}_{x,z}|}$$
+$$F_{accum} = F_0 + F_1 + F_2$$
+$$F_{factor} = \text{smoothstep}(0.0, 1.0, F_{accum} \cdot 0.75) \cdot e^{-\text{dist} \cdot 0.0075}$$
+
+#### 5. GDC 2019 / Godot Ocean Surface Lighting
+- **Albedo Blend**: $\mathbf{A} = \text{mix}(\mathbf{C}_{water}, \mathbf{C}_{foam}, F_{factor})$
+- **Roughness**: $R = (1.0 - \text{Fresnel}) \cdot F_{factor} + 0.4$
+- **Fresnel**: 
+$$\text{Fresnel} = \text{mix}\left(\frac{(1 - \mathbf{V} \cdot \mathbf{N})^{5 e^{-2.69 R}}}{1 + 22.7 R^{1.5}}, 1.0, 0.02\right)$$
+- **Subsurface Scattering (SSS)**:
+$$SSS_{height} = \max(0.0, h_{wave} + 2.5) \cdot \max(\mathbf{L} \cdot -\mathbf{V}, 0)^4 \cdot \left(0.5 - 0.5 (\mathbf{L} \cdot \mathbf{N})\right)^3$$
+$$SSS_{near} = 0.5 (\mathbf{N} \cdot \mathbf{V})^2$$
+$$\mathbf{C}_{diffuse} = \text{mix}\left(\frac{(SSS_{height} + SSS_{near}) \cdot \mathbf{C}_{sss}}{1 + \text{mask}} + 0.5(\mathbf{N} \cdot \mathbf{L}), \mathbf{C}_{foam}, F_{factor}\right) (1 - \text{Fresnel}) \mathbf{C}_{light}$$
+
+### 14.3 Third-Party Provenance & Attribution
+- **Source Repository**: `GodotOceanWaves` by 2Retr0 (https://github.com/2Retr0/GodotOceanWaves)
+- **License**: MIT License / Creative Commons
+- **Attributed Components**:
+  1. `sea_spray.png` asset copied to `assets/ocean_pbr/sea_spray.png`
+  2. TMA wave spectrum parameterization and 3-cascade patch scales (88m, 57m, 16m)
+  3. Exponential additive foam feedback and Jacobian folding math
+  4. GDC 2019 GGX/Smith ocean surface and SSS lighting formulation
+- **Attribution File**: [`assets/ocean_pbr/README.txt`](file:///C:/Users/adhir/OneDrive/Documents/GitHub/SomniumEngine/assets/ocean_pbr/README.txt)
 
 ## 13. Definition of done
 

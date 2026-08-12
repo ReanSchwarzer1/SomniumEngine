@@ -85,6 +85,8 @@ struct Instance {
 @group(3) @binding(5) var spectrum_gradient_large: texture_2d<f32>;
 @group(3) @binding(6) var spectrum_displacement_small: texture_2d<f32>;
 @group(3) @binding(7) var spectrum_gradient_small: texture_2d<f32>;
+@group(3) @binding(8) var spectrum_displacement_fine: texture_2d<f32>;
+@group(3) @binding(9) var spectrum_gradient_fine: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
@@ -216,23 +218,27 @@ fn sample_spectrum_filtered(
 
 fn spectral_displacement(p: vec2<f32>, shore: f32) -> vec3<f32> {
     let large = textureLoad(spectrum_displacement_large,
-        repeating_texel(p, 192.0, textureDimensions(spectrum_displacement_large)), 0);
-    let small = textureLoad(spectrum_displacement_small,
-        repeating_texel(p, 53.0, textureDimensions(spectrum_displacement_small)), 0);
-    let combined = (large.xyz * 0.68 + small.xyz * 0.32)
+        repeating_texel(p, 88.0, textureDimensions(spectrum_displacement_large)), 0);
+    let medium = textureLoad(spectrum_displacement_small,
+        repeating_texel(p, 57.0, textureDimensions(spectrum_displacement_small)), 0);
+    let combined = (large.xyz * 1.0 + medium.xyz * 0.75)
         * clamp(material.simulation_params.x, 0.0, 1.0);
-    let scale = material.surface_params.z * 0.42 * shore;
+    let scale = material.surface_params.z * shore;
     return vec3<f32>(combined.x, combined.z, combined.y) * scale;
 }
 
 fn spectral_gradient(p: vec2<f32>, metres_per_pixel: f32) -> vec4<f32> {
-    let large = sample_spectrum_filtered(spectrum_gradient_large, p, 192.0,
+    let large = sample_spectrum_filtered(spectrum_gradient_large, p, 88.0,
         metres_per_pixel);
-    let small = sample_spectrum_filtered(spectrum_gradient_small, p, 53.0,
+    let medium = sample_spectrum_filtered(spectrum_gradient_small, p, 57.0,
+        metres_per_pixel);
+    let fine = sample_spectrum_filtered(spectrum_gradient_fine, p, 16.0,
         metres_per_pixel);
     let blend = clamp(material.simulation_params.x, 0.0, 1.0);
-    return vec4<f32>((large.xy * 0.68 + small.xy * 0.32) * blend,
-        max(large.z, small.z) * blend, max(large.a, small.a) * blend);
+    let grad = (large.xy * 1.0 + medium.xy * 1.0 + fine.xy * 0.25) * blend;
+    let jacobian = max(max(large.z, medium.z), fine.z) * blend;
+    let foam = (large.a + medium.a + fine.a) * blend;
+    return vec4<f32>(grad, jacobian, foam);
 }
 
 struct WaveSample {
@@ -471,6 +477,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) screen_velocity: vec2<f32>,
+    @location(3) wave_height: f32,
 }
 
 @vertex
@@ -496,6 +503,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     output.world_position = current_world;
     output.uv = input.uv;
+    // IV-K3: Pass wave height to fragment for SSS calculation.
+    output.wave_height = (current_wave.displacement + spectrum_wave).y;
     output.screen_velocity = select(
         vec2<f32>(0.0),
         (previous_ndc - current_ndc) * vec2<f32>(0.5, -0.5),
@@ -631,16 +640,17 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         smoothstep(0.5, max(material.surface_params.y * 6.0, 2.0), authored_depth));
     var transmitted = refracted * tint * transmittance + single_scatter;
 
-    // Sea of Thieves biases wave peaks toward its brighter subsurface colour:
-    // horizontally compressed FFT crests present a shorter optical path and
-    // catch more forward-scattered light. Keep it restrained for Somnium's
-    // less stylized lake and let physical transmission remain the foundation.
-    let crest_mask = smoothstep(material.simulation_params.w + 0.02,
-        material.simulation_params.w + 0.42, spectrum.z);
-    let backlit_crest = pow(max(dot(sun_l, -v), 0.0), 3.0);
-    let crest_scatter = material.shallow_color.rgb
-        * (env_up * 0.10 + light.color * backlit_crest * 0.000004)
-        * crest_mask;
+    // IV-K3: GodotOceanWaves SSS model. Forward-scattered light through wave
+    // peaks produces a green-tinted glow visible when looking toward the sun.
+    // The old code multiplied by 0.000004, effectively zeroing the effect.
+    let sss_modifier = vec3<f32>(0.9, 1.15, 0.85); // green-shift for underwater
+    let sss_height = 1.0 * max(0.0, input.wave_height + 2.5)
+        * pow(max(dot(sun_l, -v), 0.0), 4.0)
+        * pow(max(0.5 - 0.5 * dot(sun_l, n), 0.0), 3.0);
+    let sss_near = 0.5 * pow(ndotv, 2.0);
+    let crest_scatter = sss_modifier
+        * (sss_height + sss_near)
+        * light.color * shadow * (1.0 - fresnel_schlick(ndotv).x);
     transmitted += crest_scatter * (vec3<f32>(1.0) - transmittance);
 
     let shore_distance = max(sdf_cells, 0.0) * cell_metres;
@@ -668,14 +678,18 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0),
         depth_contact * (0.62 + foam_noise * 0.28),
     );
-    let crest_foam = spectrum.a * smoothstep(0.8, 2.5, authored_depth);
+    let crest_foam = smoothstep(0.0, 1.0, spectrum.a * 1.35) * smoothstep(0.5, 2.0, authored_depth);
     let foam_amount = clamp(max(max(shore_foam, crest_foam), wake.foam), 0.0, 1.0);
     let wet_band = (1.0 - smoothstep(0.0, max(material.surface_params.y * 2.5, 1.5),
         shore_distance)) * (0.35 + foam_amount * 0.65);
     transmitted *= 1.0 - wet_band * 0.16;
-    let foam_light = max(env_up, vec3<f32>(0.28))
-        + light.color * shadow * max(dot(n, sun_l), 0.0) * 0.000006;
-    transmitted = mix(transmitted, material.edge_color.rgb * foam_light, foam_amount);
+    // IV-K3: Bright, rough foam — not a faint tint. Reference uses white foam
+    // albedo with full Lambertian lighting and distance fade.
+    let foam_albedo = vec3<f32>(0.85, 0.88, 0.82);
+    let foam_light = foam_albedo
+        * (env_up + light.color * shadow * max(dot(n, sun_l), 0.0) + moon_color * max(dot(n, moon_l), 0.0))
+        * exp(-water_view_depth * 0.0075);
+    transmitted = mix(transmitted, foam_light, foam_amount);
 
     let roughness_map = 0.5 * (
         textureSample(tex_orm, sampler_linear, detail_uv_a).g
@@ -683,10 +697,12 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         + textureSample(tex_orm, sampler_linear, detail_uv_c).g * 0.35) / 1.5;
     let unresolved_energy = 1.0 - min(slope_resolve, distance_resolve);
     let distance_roughness = unresolved_energy * 0.28;
+    // IV-K3: Raise base roughness from ~0.06 → ~0.40, matching GodotOceanWaves.
+    // Foam pushes roughness further up to ~0.85 for rough whitecap appearance.
     let roughness = clamp(
-        material.absorption_roughness.a + roughness_map * 0.08 + distance_roughness,
+        0.40 + roughness_map * 0.08 + distance_roughness + foam_amount * 0.45,
         0.04,
-        0.65,
+        0.95,
     );
     let reflection_dir = reflect(-v, n);
     let environment = textureSampleLevel(env_cube, env_sampler, reflection_dir, roughness * ENV_MAX_MIP).rgb

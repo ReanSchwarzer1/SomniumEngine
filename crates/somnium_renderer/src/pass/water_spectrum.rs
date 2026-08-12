@@ -1,4 +1,4 @@
-//! Phase IV-F two-cascade deterministic spectral water simulation.
+//! Phase IV-K multi-cascade deterministic spectral water simulation.
 
 use wgpu::util::DeviceExt;
 
@@ -24,10 +24,11 @@ struct SpectrumParams {
     speed: f32,
     wind_dir: [f32; 2],
     choppy: f32,
-    foam_decay: f32,
+    foam_decay_rate: f32,
     foam_threshold: f32,
     water_depth: f32,
-    _pad1: [f32; 2],
+    foam_grow_rate: f32,
+    _pad1: f32,
 }
 
 struct Cascade {
@@ -52,7 +53,7 @@ pub struct WaterSpectrumPass {
     stage_pipeline: wgpu::ComputePipeline,
     compose_pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
-    cascades: [Cascade; 2],
+    cascades: [Cascade; 3],
     enabled: bool,
     previous_time: f32,
     phase_time: f32,
@@ -118,19 +119,20 @@ impl WaterSpectrumPass {
         let compose_pipeline = pipeline("compose");
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water spectrum dispatch params"),
-            size: PARAM_STRIDE * (RECORDS_PER_CASCADE * 2) as u64,
+            size: PARAM_STRIDE * (RECORDS_PER_CASCADE * 3) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let first = make_cascade(device, &layout, &params, 256, 192.0, 0x5A17_0C3Du64);
-        let second = make_cascade(device, &layout, &params, 512, 53.0, 0xC041_DA7Au64);
+        let first = make_cascade(device, &layout, &params, 256, 88.0, 0x5A17_0C3Du64);
+        let second = make_cascade(device, &layout, &params, 512, 57.0, 0xC041_DA7Au64);
+        let third = make_cascade(device, &layout, &params, 256, 16.0, 0xB3AC_F1E5u64);
         Self {
             update_pipeline,
             reverse_pipeline,
             stage_pipeline,
             compose_pipeline,
             params,
-            cascades: [first, second],
+            cascades: [first, second, third],
             enabled: std::env::var("SOMNIUM_WATER_SPECTRUM").as_deref() != Ok("0"),
             previous_time: 0.0,
             phase_time: 0.0,
@@ -144,7 +146,7 @@ impl WaterSpectrumPass {
         self.enabled
     }
 
-    pub fn views(&self) -> [(&wgpu::TextureView, &wgpu::TextureView); 2] {
+    pub fn views(&self) -> [(&wgpu::TextureView, &wgpu::TextureView); 3] {
         [
             (
                 &self.cascades[0].displacement_view,
@@ -153,6 +155,10 @@ impl WaterSpectrumPass {
             (
                 &self.cascades[1].displacement_view,
                 &self.cascades[1].gradient_view,
+            ),
+            (
+                &self.cascades[2].displacement_view,
+                &self.cascades[2].gradient_view,
             ),
         ]
     }
@@ -197,7 +203,14 @@ impl WaterSpectrumPass {
         let choppy = (0.45 + wind_speed * 0.045).clamp(0.45, 1.35);
         let foam_decay = self.smoothed_simulation[2].clamp(0.05, 8.0);
         let foam_threshold = self.smoothed_simulation[3].clamp(0.0, 0.95);
-        let mut bytes = vec![0u8; (PARAM_STRIDE as usize) * RECORDS_PER_CASCADE * 2];
+        // IV-K2/K7: Delta-scaled foam growth/decay matching GodotOceanWaves.
+        // Previously foam_grow_rate was ~300x too weak because foam_amount was
+        // unscaled (1.1 instead of 5.0-15.0). Now properly scaled so open sea
+        // wave crests generate visible whitecaps.
+        let foam_amount = (1.0 / foam_decay.max(0.02)).clamp(1.5, 15.0);
+        let foam_grow_rate = (delta_time * foam_amount * 35.0).clamp(0.05, 2.5);
+        let foam_decay_rate = delta_time * (0.5_f32.max(12.0 - foam_amount)) * 1.15;
+        let mut bytes = vec![0u8; (PARAM_STRIDE as usize) * RECORDS_PER_CASCADE * 3];
         let mut record_count = 0usize;
         for cascade in &self.cascades {
             let mut push = |stage_size: u32, axis: u32, input_is_a: u32| {
@@ -214,10 +227,11 @@ impl WaterSpectrumPass {
                     speed: 1.0,
                     wind_dir: [0.944, 0.330],
                     choppy,
-                    foam_decay,
+                    foam_decay_rate,
                     foam_threshold,
                     water_depth: WATER_DEPTH_METRES,
-                    _pad1: [0.0; 2],
+                    foam_grow_rate,
+                    _pad1: 0.0,
                 };
                 let start = record_count * PARAM_STRIDE as usize;
                 bytes[start..start + PARAM_SIZE].copy_from_slice(bytemuck::bytes_of(&value));
@@ -435,7 +449,6 @@ fn initial_spectrum(
     let alpha = 0.076 * (wind_speed * wind_speed / (FETCH_METRES * 9.81)).powf(0.22);
     let peak_frequency = 22.0 * (9.81 * 9.81 / (wind_speed * FETCH_METRES)).powf(1.0 / 3.0);
     let delta_k = std::f32::consts::TAU / patch_length;
-    let mut energy = 0.0f64;
     for y in 0..dimension {
         for x in 0..dimension {
             let sx = if x <= dimension / 2 {
@@ -498,17 +511,10 @@ fn initial_spectrum(
             let g1 = gaussian(&mut state);
             let scale = (spectrum * 0.5).sqrt();
             let value = [g0 * scale, g1 * scale];
-            energy += f64::from(value[0] * value[0] + value[1] * value[1]);
             values.push(value);
         }
     }
-    // Normalize the inverse transform to approximately unit RMS so the ECS
-    // amplitude remains a meaningful metre-scale control for both cascades.
-    let inverse_scale = (dimension as f64 * dimension as f64) / energy.sqrt().max(1.0e-12);
-    for value in &mut values {
-        value[0] *= inverse_scale as f32;
-        value[1] *= inverse_scale as f32;
-    }
+    // Physical spectrum energy scaling matching GodotOceanWaves / Tessendorf.
     values
 }
 

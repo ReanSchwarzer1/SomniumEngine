@@ -68,7 +68,7 @@ pub fn create_default_texture_bind_group(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
-    spectrum_views: [(&wgpu::TextureView, &wgpu::TextureView); 2],
+    spectrum_views: [(&wgpu::TextureView, &wgpu::TextureView); 3],
 ) -> wgpu::BindGroup {
     fn view(
         device: &wgpu::Device,
@@ -204,6 +204,14 @@ pub fn create_default_texture_bind_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::TextureView(spectrum_views[1].1),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[2].0),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(spectrum_views[2].1),
             },
         ],
     })
@@ -427,6 +435,8 @@ impl WaterPass {
                     spectral_texture_layout(5),
                     spectral_texture_layout(6),
                     spectral_texture_layout(7),
+                    spectral_texture_layout(8),
+                    spectral_texture_layout(9),
                 ],
             });
 

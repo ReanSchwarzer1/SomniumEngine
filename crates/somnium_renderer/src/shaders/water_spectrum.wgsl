@@ -1,4 +1,4 @@
-// Somnium Engine Phase IV-F: deterministic two-cascade inverse FFT water.
+// Somnium Engine Phase IV-K: deterministic multi-cascade inverse FFT water.
 // The implementation is original WGSL. Initial amplitudes use a finite-depth
 // JONSWAP/TMA spectrum with Hasselmann directional spreading, following the
 // equations documented by Horvath and the MIT GodotOceanWaves reference. The
@@ -15,10 +15,11 @@ struct SpectrumParams {
     speed: f32,
     wind_dir: vec2<f32>,
     choppy: f32,
-    foam_decay: f32,
+    foam_decay_rate: f32,
     foam_threshold: f32,
     water_depth: f32,
-    _pad1: vec2<f32>,
+    foam_grow_rate: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var<storage, read> initial_spectrum: array<vec2<f32>>;
@@ -150,7 +151,8 @@ fn compose(@builtin(global_invocation_id) id: vec3<u32>) {
     let dzdz = (displaced(front, 1u, normalization)
         - displaced(back, 1u, normalization)) / (2.0 * cell);
     let jacobian = (1.0 + dxdx) * (1.0 + dzdz) - dxdz * dzdx;
-    let fold = max(1.0 - jacobian - params.foam_threshold, 0.0);
+    let whitecap = 1.0 - params.foam_threshold;
+    let fold = max(whitecap - jacobian, 0.0);
     // Rare's Sea of Thieves ocean progressively blurs foam feedback so white
     // water disperses instead of remaining a sharp simulation texel. A small
     // periodic cross filter supplies that transport without another pass.
@@ -160,9 +162,13 @@ fn compose(@builtin(global_invocation_id) id: vec3<u32>) {
         + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(x1, id.y)), 0).a * 0.125
         + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(id.x, y0)), 0).a * 0.125
         + textureLoad(previous_gradient, vec2<i32>(vec2<u32>(id.x, y1)), 0).a * 0.125;
-    let decay = exp(-params.delta_time / max(params.foam_decay, 0.05));
-    let grow = fold * (2.4 + params.delta_time * 9.0);
-    let foam = clamp(max(grow, previous * decay), 0.0, 1.0);
+    // IV-K2: Additive temporal foam accumulation matching GodotOceanWaves.
+    // Previous: max(grow, prev*decay) — foam could never exceed instantaneous
+    // fold, so it never built up over time. Now: prev*decay + grow, so foam
+    // accumulates additively and decays exponentially.
+    let decay = exp(-params.foam_decay_rate);
+    let grow = fold * params.foam_grow_rate;
+    let foam = clamp(previous * decay + grow, 0.0, 1.0);
     textureStore(displacement_out, vec2<i32>(id.xy), vec4<f32>(dx, dz, height, jacobian));
     textureStore(gradient_out, vec2<i32>(id.xy), vec4<f32>(dhdx, dhdz,
         max(1.0 - jacobian, 0.0), foam));

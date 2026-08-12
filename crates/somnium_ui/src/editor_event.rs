@@ -138,6 +138,9 @@ pub enum InspectorField {
     WaterWaveLengthB,
     WaterWaveSpeed,
     WaterWaveSteepness,
+    WaterWindSpeed,
+    WaterFoamDecay,
+    WaterFoamThreshold,
     // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
     FoliageDensity,
     FoliageSeed,

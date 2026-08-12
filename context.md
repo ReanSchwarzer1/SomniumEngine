@@ -1,14 +1,14 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-12
-> **Current phase:** Phase IV complete (IV-A through IV-J)
-> **Toolchain:** Rust 1.85, wgpu 29, winit 0.30
+> **Last updated:** 2026-08-12  
+> **Current phase:** Phase IV in-progress (IV-A through IV-J complete, IV-K ocean fidelity pass UNFIXED / IN-PROGRESS)  
+> **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
+>
+> **IMPORTANT NOTE FOR NEXT SESSION/MODEL:** Phase IV-K (Ocean Fidelity Pass) is **UNFIXED / IN-PROGRESS / UNFINISHED**. The next model MUST read the entire codebase and all `.md` files (such as `READ THIS FIRST.md`, `dev records/phase_IV.md`, `context.md`, `ATTRIBUTION.md`), inspect reference repositories (`GodotOceanWaves-main`, `WickedEngine`, `JoltPhysics`), review papers and video talks (GDC 2019 Atlas water, Tessendorf, Horvath, Wicked Engine updates, etc.), perform a full code audit of the engine implementation, and iterate to make the ocean visual quality match the Godot implementation even more closely before moving on.
 
 ---
 
 ## Table of Contents
-
-1. [Project Summary](#1-project-summary)
 2. [Repository Layout](#2-repository-layout)
 3. [High-Level Architecture](#3-high-level-architecture)
 4. [Crate Dependency Graph](#4-crate-dependency-graph)
