@@ -1280,7 +1280,12 @@ impl WaterComponent {
             wave_dir_b: [-0.243, 0.970],
             wave_length_a: 18.0,
             wave_length_b: 11.0,
-            wave_speed: 0.2,
+            // Authored Speed in the inspector was dialled to 0.2 because the FFT
+            // still carried the surface and the Gerstner layer barely showed.
+            // Buoyancy samples only that Gerstner layer — the spectral cascade
+            // is visual-only on the CPU — so 0.2 froze the boat while the water
+            // kept moving. 0.85 is the value the vessel was tuned against.
+            wave_speed: 0.85,
             wave_steepness: 0.42,
             edge_color: [0.88, 0.96, 1.0, 1.0],
             edge_scale: 1.35,

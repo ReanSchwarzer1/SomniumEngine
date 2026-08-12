@@ -715,8 +715,8 @@ open ocean under an HDRI and this is an inland lake under a procedural sky:
 | `roughness` | 0.02 | The microfacet distribution, and the floor the inspector allows. A near-mirror surface is what turns the sun into a tight glittering track rather than a broad sheen; the sky reflection is blurred separately by `reflection_roughness`, so it stays soft. |
 | `ssr_strength` | 1.0 | Screen-space reflection fully replaces the environment cube wherever the march finds a hit. |
 | `spectrum_blend` | 0.64 | Crossfade from Gerstner to spectral. This also scales displacement, so pushing it towards one folds the surface faster than the wet-cell grid resolves. |
-| `wave_speed`, `wave_steepness` | 0.2, 0.42 | The Gerstner tier underneath the crossfade. |
-| `wind_speed`, `foam_decay`, `foam_threshold` | 6.5, 4.5, 0.54 | Authored but inert: the cascades carry their own wind field and run foam growth and decay against the Jacobian. Kept because the scene format and the Gerstner-only tier still carry them. |
+| `wave_speed`, `wave_steepness` | 0.85, 0.42 | The Gerstner tier. Buoyancy samples this layer only — the spectral cascade is visual-only on the CPU — so Speed must stay near the vessel-tuned 0.85 even when the FFT already carries most of the look. An authored Speed of 0.2 froze the boat while the water kept moving. |
+| `wind_speed`, `foam_decay`, `foam_threshold` | 6.5, 4.5, 0.54 | Authored but inert for the spectral foam path: the cascades carry their own wind field and run foam growth and decay against the Jacobian. Kept because the scene format and the Gerstner-only tier still carry them. |
 
 ### 14.3 Mathematical formulas and physics architecture
 
