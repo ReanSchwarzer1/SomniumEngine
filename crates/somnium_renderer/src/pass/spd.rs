@@ -21,7 +21,6 @@ struct SpdParams {
 /// One dispatch: the level it reads, the levels it writes, and its bind group.
 struct SpdStage {
     bind_group: wgpu::BindGroup,
-    params: wgpu::Buffer,
     groups: (u32, u32),
 }
 
@@ -166,7 +165,6 @@ impl SpdPass {
             let (dw, dh) = mip_size(src_level + 1);
             self.stages.push(SpdStage {
                 bind_group,
-                params,
                 groups: (dw.div_ceil(32), dh.div_ceil(32)),
             });
 

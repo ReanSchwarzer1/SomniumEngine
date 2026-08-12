@@ -45,7 +45,8 @@ The engine is organized around three deliberate commitments:
 - **Image-based lighting** — the procedural sky is captured to a prefiltered environment cubemap, so metals reflect their surroundings (Karis split-sum)
 - Clustered forward lighting for point/spot lights (froxel binning)
 - HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
-- Water shader (FBM waves, dual-direction crossfade, Beer's-law depth)
+- Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps,
+  temporal foam, Beer's-law transport, and a shoreline SDF
 - GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters,
   and a Hi-Z depth pyramid driving two-phase occlusion culling
 - Cutout foliage support: sidecar alpha masks, alpha-weighted mip generation, and

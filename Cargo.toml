@@ -112,8 +112,6 @@ rand = "0.8"
 opt-level = 3
 [profile.dev.package.png]
 opt-level = 3
-[profile.dev.package.jpeg-decoder]
-opt-level = 3
 [profile.dev.package.miniz_oxide]
 opt-level = 3
 [profile.dev.package.zune-jpeg]

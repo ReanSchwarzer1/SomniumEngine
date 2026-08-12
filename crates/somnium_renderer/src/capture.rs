@@ -217,6 +217,16 @@ fn tonemap_to_srgb(frame: &CapturedFrame) -> Vec<u8> {
             n += 1;
         }
     }
+    if n == 0 {
+        // Water and other forward-rendered surfaces never enter the visibility
+        // buffer, so a frame looking out to sea meters as entirely sky. Falling
+        // back to the whole image is what keeps such a capture readable instead
+        // of exposing it against an assumed mean of one and clipping to white.
+        for i in 0..frame.terrain.len() {
+            sum += frame.luminance(i) as f64;
+            n += 1;
+        }
+    }
     let mean = if n > 0 { (sum / n as f64) as f32 } else { 1.0 };
     // Middle grey at 0.18, the usual photographic anchor.
     let exposure = 0.18 / mean.max(1e-6);

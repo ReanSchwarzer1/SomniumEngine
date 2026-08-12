@@ -46,6 +46,7 @@
   - 13.19 Ocean PBR Textures (Phase 13)
   - 13.20 Heightmap Terrain — Fyrox terrain + CDLOD + triplanar splatting (Phase 14 SSS)
   - 13.21 Light Gizmos — Bevy light gizmo shapes (Phase 13E)
+  - 13.35 GodotOceanWaves and Sea of Thieves water refinement (Phase IV)
 
 ---
 
@@ -1260,4 +1261,22 @@ and its LUT sizes were adopted; both are covered by §13.27's terms.
 | Wake and shoreline foam | **Wicked Engine** `wiScene.cpp`, `wiRenderPath3D.cpp`, and `shaders/oceanSurfacePS.hlsl` (MIT, Turánszki János) were inspected for ripple injection, pass placement, and scene-depth-difference shore foam. Eidos Montréal's *From Shore to Horizon* informed SDF-scaled coastal bands. Unreal Engine Water plugin `WaterBrushManager.cpp` and `WaterInfoMerge.usf` were inspected for landscape coupling, distance-field smoothing, dilated water, and terrain-depth ownership at the intersection. Somnium's analytic Kelvin-angle arms, prop wash, water-aware terrain LOD pinning, under-bank coverage dilation, metre-scaled SDF/contact band, three-frequency normal stack, and WGSL integration are original. No source was copied. |
 | Play/Pause/Stop | Unreal Engine's viewport transport convention informed the three-control editor UX. Somnium's `SimulationClock`, fixed accumulator, event routing, explicit pause/freeze, reset semantics, and player-visible-only Play viewport are original Rust implementation. Environmental preview runs in both Editing and Playing; Pause is the intentional freeze control. Editor overlays remain hidden through a paused Play session and return on Stop. No Unreal source was copied. |
 | Vessel geometry and materials | **Gislinge Viking Boat** by Opus Poly, 29,035 triangles, licensed under CC BY 4.0. The original Sketchfab page, license, source hash, scale, and unchanged embedded material/texture record are preserved in `assets/models/gislinge_viking_boat/README.md`. Somnium's multi-node submission, centimetre-to-metre root transform, ECS ownership, and separate buoyancy proxy are original integration. |
+
+### 13.35 GodotOceanWaves and Sea of Thieves water refinement (Phase IV / IV-K)
+
+| Piece | Reference / adaptation boundary |
+|---|---|
+| Finite-depth directional spectrum | **GodotOceanWaves** by 2Retr0 (`example_repo/GodotOceanWaves-main`, MIT), especially `spectrum_compute.glsl`, `spectrum_modulate.glsl`, `fft_unpack.glsl`, and `water.gdshader`, documents the TMA/JONSWAP spectrum, finite-depth dispersion, Hasselmann/Longuet-Higgins directional spreading, swell and detail terms, and wind/fetch parameterization derived from Christopher J. Horvath and Jerry Tessendorf. Somnium adapts those published equations into Rust and WGSL, maintaining 3 spectral cascades ($88\text{m}$, $57\text{m}$, $16\text{m}$). |
+| Pixel-density wave filtering & Bicubic sampling | GodotOceanWaves `water.gdshader` adapts the four-sample cubic B-spline optimization from NVIDIA GPU Gems 2 Chapter 20 and blends cubic/bilinear sampling using world-space texel density. Somnium implements the bicubic filter in WGSL for its gradient/foam textures. |
+| Crest colour, foam feedback & GDC 2019 lighting | **GodotOceanWaves** (`water.gdshader`, `fft_unpack.glsl`, MIT) and Nigel Ang et al. (*The Technical Art of Sea of Thieves*, SIGGRAPH '18 Talks) describe horizontal-displacement Jacobian whitecap fold calculations $f = \max(w_{cap} - J, 0)$, temporal additive foam accumulation $F_t = \text{clamp}(F_{t-1} e^{-\gamma_{decay} \Delta t} + f \gamma_{grow} \Delta t, 0, 1)$, and GDC 2019 ocean surface SSS height/near equations combined with GGX microfacet specular. |
+| Asset & GPU Spray Emitter (`sea_spray.png`) | **GodotOceanWaves** (`main.tscn`, `sea_spray.gdshader`, `sea_spray_particle.gdshader`, MIT) uses `sea_spray.png` as `albedo_texture` on a 32,768-particle `GPUParticles3D` emitter (`WaterSprayEmitter`). `sea_spray_particle.gdshader` samples wave crest foam ($F_{accum} > 0.9$) from the FFT normal map to spawn dynamic billboarded spray quads tinted by $\mathbf{C}_{foam} \cdot (1.65, 1.75, 1.65)$. `sea_spray.png` is copied to `assets/ocean_pbr/sea_spray.png`. **Somnium ships no spray emitter** — two attempts placed particles incorrectly and were removed — so this row records the asset's provenance and the design that was studied, not shipped code. |
+
+**Status: IV-K closed 2026-08-13.** Somnium's implementation of the above is
+original Rust and WGSL adapted from the published equations; no reference
+source was copied. Where Somnium departs from the reference — two Fresnel
+curves instead of one, π-normalised albedo-weighted diffuse, camera-gated total
+internal reflection, directionally gated subsurface scattering, and a fixed
+50 Hz cascade step — the departure and its cause are recorded in
+`dev records/phase_IV.md` section 14.4. The GPU spray emitter in the last row
+was studied but never shipped.
 

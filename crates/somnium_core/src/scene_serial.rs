@@ -201,7 +201,8 @@ mod tests {
         assert_eq!(water["water"]["preset"], 1);
         let surface_level = water["water"]["surface_level"].as_f64().unwrap();
         assert!((surface_level - 16.1).abs() < 1.0e-5);
-        assert_eq!(water["water"]["max_depth"], 12.0);
+        let max_depth = water["water"]["max_depth"].as_f64().unwrap();
+        assert!((max_depth - 18.6).abs() < 1.0e-5);
         assert_eq!(
             water["water"]["mask_asset"],
             somnium_renderer::water_body::GREAT_LAKES_MASK

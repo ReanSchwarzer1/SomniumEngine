@@ -203,7 +203,7 @@ impl TaaPass {
         width: u32,
         height: u32,
     ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
-        let make = |i: u32| {
+        let make = || {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("TAA history"),
                 size: wgpu::Extent3d {
@@ -221,8 +221,8 @@ impl TaaPass {
                 view_formats: &[],
             })
         };
-        let a = make(0);
-        let b = make(1);
+        let a = make();
+        let b = make();
         let va = a.create_view(&wgpu::TextureViewDescriptor::default());
         let vb = b.create_view(&wgpu::TextureViewDescriptor::default());
         ([a, b], [va, vb])
@@ -355,8 +355,8 @@ impl TaaPass {
 
     /// Resolve this frame. Returns the view holding the result, which the
     /// caller should use in place of the raw HDR target.
-    /// `view_proj_jittered` must match the matrix the depth buffer was rendered
-    /// with; `view_proj_unjittered` is what gets stored for the next frame.
+    /// `view_proj_unjittered` reconstructs this frame and is stored for the
+    /// next frame.
     ///
     /// **Both ends of the reprojection are un-jittered.**
     ///
@@ -385,7 +385,6 @@ impl TaaPass {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
-        view_proj_jittered: glam::Mat4,
         view_proj_unjittered: glam::Mat4,
         width: u32,
         height: u32,

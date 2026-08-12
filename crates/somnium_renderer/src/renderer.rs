@@ -406,7 +406,7 @@ impl SomniumRenderer {
             crate::pass::gtao::GtaoPass::new(&ctx.device, ctx.config.width, ctx.config.height);
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
-        let mut taa_pass = crate::pass::taa::TaaPass::new(
+        let taa_pass = crate::pass::taa::TaaPass::new(
             &ctx.device,
             HDR_FORMAT,
             ctx.config.width,
@@ -2308,8 +2308,8 @@ impl SomniumRenderer {
             self.velocity_pass.view(),
             self.water_pass.surface_view(),
         );
-        // Both matrices: the jittered one matches the depth buffer this frame,
-        // the unjittered one matches the resolved history. See `TaaPass::record`.
+        // TAA deliberately reprojects between unjittered matrices so a static
+        // scene has zero velocity. See `TaaPass::record`.
         self.profiler.end(&mut encoder);
 
         // ── 7.85 Motion blur (Phase 24Z) ─────────────────────────────────────
@@ -2336,7 +2336,6 @@ impl SomniumRenderer {
             .record(
                 &mut encoder,
                 &ctx.queue,
-                self.view_proj,
                 self.view_proj_unjittered,
                 ctx.config.width,
                 ctx.config.height,
