@@ -386,6 +386,12 @@ pub fn is_occluded(bounds: &ScreenBounds, furthest_depth: f32) -> bool {
     if furthest_depth >= 1.0 {
         return false;
     }
+    // Matches cull.wgsl: a candidate that covers a quarter of the screen is
+    // too close for four coarse Hi-Z samples to be a safe rejection.
+    let area = (bounds.rect[2] - bounds.rect[0]) * (bounds.rect[3] - bounds.rect[1]);
+    if area > 0.25 {
+        return false;
+    }
     bounds.min_depth > furthest_depth
 }
 
@@ -505,6 +511,17 @@ mod hiz_tests {
             min_depth: 0.5,
         };
         assert!(!is_occluded(&b, 0.5));
+    }
+
+    #[test]
+    fn a_large_screen_footprint_is_never_occluded() {
+        // Standing next to a scaled tree fills the view. The four Hi-Z samples
+        // would otherwise hit neighbouring geometry and delete the tree.
+        let b = ScreenBounds {
+            rect: [0.0, 0.0, 0.6, 0.6],
+            min_depth: 0.8,
+        };
+        assert!(!is_occluded(&b, 0.2));
     }
 }
 

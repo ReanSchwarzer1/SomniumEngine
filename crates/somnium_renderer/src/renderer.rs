@@ -1948,51 +1948,34 @@ impl SomniumRenderer {
                         .instanced_counts
                         .get(&cmd.vertex_offset)
                         .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
-                    if heavily_instanced && i > 0 {
-                        let prev = &self.draw_queue[i - 1];
-                        if self.is_double_sided(prev.material_id) == pass_two_sided
-                            && prev.vertex_offset == cmd.vertex_offset
-                            && prev.index_offset == cmd.index_offset
-                            && prev.material_id == cmd.material_id
-                            && prev.index_count == cmd.index_count
-                        {
-                            continue;
-                        }
-                    }
+                    // Skip cluster expansion once a mesh is clearly instanced,
+                    // but keep one argument per draw. Folding copies into
+                    // `instance_count > 1` made the cull shader (which writes
+                    // 0 or 1) keep only the first tree and drop the rest.
                     let meshlets = if self.meshlet_draws && !heavily_instanced {
                         self.geometry.mesh_meshlets(cmd.vertex_offset)
                     } else {
                         None
                     };
-                    let instance_count = if heavily_instanced {
-                        let mut n = 1u32;
-                        let mut j = i + 1;
-                        while j < self.draw_queue.len() {
-                            let next = &self.draw_queue[j];
-                            if self.is_double_sided(next.material_id) != pass_two_sided
-                                || next.vertex_offset != cmd.vertex_offset
-                                || next.index_offset != cmd.index_offset
-                                || next.material_id != cmd.material_id
-                                || next.index_count != cmd.index_count
-                            {
-                                break;
-                            }
-                            n += 1;
-                            j += 1;
-                        }
-                        n
-                    } else {
-                        1
-                    };
+                    let start = self.cull_aabbs.len();
                     crate::indirect::push_cluster_args(
                         i as u32,
                         cmd.index_count,
-                        instance_count,
+                        1,
                         meshlets,
                         self.geometry.mesh_aabb(cmd.vertex_offset),
                         &mut self.cluster_args,
                         &mut self.cull_aabbs,
                     );
+                    // Normal-cone rejection assumes the vis pass culls back
+                    // faces. Two-sided foliage keeps those faces, so a trunk
+                    // cluster that faces away is still the bark you should see
+                    // from the other side of a second tree.
+                    if pass_two_sided {
+                        for aabb in &mut self.cull_aabbs[start..] {
+                            aabb.cone[3] = 2.0;
+                        }
+                    }
                 }
             }
             self.indirect

@@ -136,6 +136,11 @@ struct FoliagePart {
     index_count: u32,
     material_id: u32,
     local: glam::Mat4,
+    /// Cutout / foliage material — the part LOD should drop first (leaves,
+    /// twigs). Bark stays until the impostor band, then we keep only this
+    /// being false. Index-count is the fallback when the glTF did not mark
+    /// any part this way.
+    is_leaf: bool,
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
@@ -2125,8 +2130,10 @@ impl<G: GameApp> Engine<G> {
                 let dist = (d.x * d.x + d.z * d.z).sqrt();
                 // Three mesh LODs. The old "impostor" was an untextured ground
                 // plane rotated toward the camera — a black triangle that FSR
-                // then ghosted. Past impostor_distance keep the cheapest real
-                // primitive (usually the trunk) instead.
+                // then ghosted. Past impostor_distance keep the solid parts
+                // (trunk / branches). Past lod_distance drop the leaf/twig
+                // cutouts. Index-count is only the fallback when the glTF did
+                // not mark any part as foliage.
                 let keep_only = impostor_distance > 0.0
                     && dist > impostor_distance
                     && parts.len() > 1;
@@ -2134,6 +2141,7 @@ impl<G: GameApp> Engine<G> {
                     && lod_distance > 0.0
                     && dist > lod_distance
                     && parts.len() > 1;
+                let has_leaf = parts.iter().any(|p| p.is_leaf);
                 let cheapest = parts
                     .iter()
                     .enumerate()
@@ -2145,11 +2153,23 @@ impl<G: GameApp> Engine<G> {
                     .max_by_key(|(_, p)| p.index_count)
                     .map(|(i, _)| i);
                 for (i, part) in parts.iter().enumerate() {
-                    if keep_only && cheapest != Some(i) {
-                        continue;
+                    if keep_only {
+                        if has_leaf {
+                            if part.is_leaf {
+                                continue;
+                            }
+                        } else if cheapest != Some(i) {
+                            continue;
+                        }
                     }
-                    if drop_heavy && heaviest == Some(i) {
-                        continue;
+                    if drop_heavy {
+                        if has_leaf {
+                            if part.is_leaf {
+                                continue;
+                            }
+                        } else if heaviest == Some(i) {
+                            continue;
+                        }
                     }
                     self.foliage_batch
                         .push((*part, model * placement * part.local, casts));
@@ -2272,12 +2292,26 @@ impl<G: GameApp> Engine<G> {
         let inv_node = node_xform.inverse();
         let built: Vec<FoliagePart> = parts
             .iter()
-            .map(|n| FoliagePart {
-                vertex_offset: n.vertex_offset,
-                index_offset: n.index_offset,
-                index_count: n.index_count,
-                material_id: n.material_id,
-                local: inv_node * n.transform,
+            .map(|n| {
+                let is_leaf = scene
+                    .nodes
+                    .iter()
+                    .find(|sn| sn.name == n.entity_name)
+                    .and_then(|sn| sn.material_index)
+                    .and_then(|i| scene.materials.get(i))
+                    .is_some_and(|m| {
+                        m.foliage
+                            || m.alpha_mode != somnium_asset::AlphaMode::Opaque
+                            || m.alpha_cutoff > 0.0
+                    });
+                FoliagePart {
+                    vertex_offset: n.vertex_offset,
+                    index_offset: n.index_offset,
+                    index_count: n.index_count,
+                    material_id: n.material_id,
+                    local: inv_node * n.transform,
+                    is_leaf,
+                }
             })
             .collect();
         let tris: u32 = built.iter().map(|p| p.index_count / 3).sum();
