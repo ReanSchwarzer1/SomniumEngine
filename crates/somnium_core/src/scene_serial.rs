@@ -65,6 +65,8 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                         LightType::Point       => "Point",
                         LightType::Spot        => "Spot",
                         LightType::Rect        => "Rect",
+                        LightType::Disc        => "Disc",
+                        LightType::Tube        => "Tube",
                     },
                     "color":       lc.color.to_array(),
                     "intensity":   lc.intensity,

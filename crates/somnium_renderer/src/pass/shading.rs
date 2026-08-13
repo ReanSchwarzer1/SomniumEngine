@@ -32,6 +32,7 @@ pub struct ShadingPass {
     lighting_aux_view: wgpu::TextureView,
     world_volume_view: wgpu::TextureView,
     lighting_extra: wgpu::Buffer,
+    sh_probes: wgpu::Buffer,
 }
 
 impl ShadingPass {
@@ -52,6 +53,7 @@ impl ShadingPass {
         volumetric_sampler: &wgpu::Sampler,
         lighting_aux_view: &wgpu::TextureView,
         world_volume_view: &wgpu::TextureView,
+        sh_probes: &wgpu::Buffer,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shading Pass Bind Group Layout"),
@@ -214,6 +216,16 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -274,6 +286,7 @@ impl ShadingPass {
             lighting_aux_view,
             world_volume_view,
             &lighting_extra,
+            sh_probes,
         );
 
         let shader_source = format!(
@@ -359,6 +372,7 @@ impl ShadingPass {
             lighting_aux_view: lighting_aux_view.clone(),
             world_volume_view: world_volume_view.clone(),
             lighting_extra,
+            sh_probes: sh_probes.clone(),
         }
     }
 
@@ -381,6 +395,7 @@ impl ShadingPass {
         lighting_aux_view: &wgpu::TextureView,
         world_volume_view: &wgpu::TextureView,
         lighting_extra: &wgpu::Buffer,
+        sh_probes: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -450,6 +465,10 @@ impl ShadingPass {
                     binding: 15,
                     resource: lighting_extra.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: sh_probes.as_entire_binding(),
+                },
             ],
         })
     }
@@ -505,6 +524,7 @@ impl ShadingPass {
             &self.lighting_aux_view,
             &self.world_volume_view,
             &self.lighting_extra,
+            &self.sh_probes,
         );
     }
 

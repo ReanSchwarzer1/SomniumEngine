@@ -135,6 +135,7 @@ impl somnium_ecs::Component for Transform {}
 ///
 /// `Directional` — infinite-range sun light (Phase 11).
 /// `Point` / `Spot` — local lights with range & falloff (Phase 13C).
+/// `Rect` / `Disc` / `Tube` — area lights (Phase 24R).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightType {
     /// Infinite-range sun light (direction only).
@@ -145,6 +146,10 @@ pub enum LightType {
     Spot,
     /// Rectangular area light (Phase 24R, LTC). Width/height are half-extents.
     Rect,
+    /// Disc area light (Phase 24R). `source_radius` is the disc radius; forward is the normal.
+    Disc,
+    /// Capsule / tube area light (Phase 24R). `area_width` is half-length; `source_radius` is radius.
+    Tube,
 }
 
 /// ECS component that marks an entity as a light source.
@@ -240,7 +245,9 @@ impl LightComponent {
     pub fn photometric_color(&self) -> glam::Vec3 {
         let scale = match self.light_type {
             LightType::Directional => self.intensity,
-            LightType::Point | LightType::Rect => light_units::point_candela(self.intensity),
+            LightType::Point | LightType::Rect | LightType::Disc | LightType::Tube => {
+                light_units::point_candela(self.intensity)
+            }
             LightType::Spot => light_units::spot_candela(self.intensity, self.outer_angle),
         };
         self.tint() * scale
@@ -311,6 +318,43 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: half_width,
             area_height: half_height,
+        }
+    }
+
+    /// Convenience constructor for a white disc area light, in **lumens**.
+    pub fn disc(intensity: f32, range: f32, radius: f32) -> Self {
+        Self {
+            light_type: LightType::Disc,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: radius.max(0.05),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white tube area light, in **lumens**.
+    ///
+    /// `half_length` is metres along the entity forward axis from the centre;
+    /// `radius` is the tube's cross-section.
+    pub fn tube(intensity: f32, range: f32, half_length: f32, radius: f32) -> Self {
+        Self {
+            light_type: LightType::Tube,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: radius.max(0.02),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: half_length.max(0.05),
+            area_height: 0.0,
         }
     }
 }
@@ -724,9 +768,9 @@ pub struct PostProcessComponent {
     pub path_bounces: u32,
     /// Mesh-SDF cone trace (Phase 24P). Default off.
     pub mesh_sdf: bool,
-    /// Probe/env fallback into the world cache (Phase 24Q). Default off.
+    /// SH irradiance probes (Phase 24Q). Default off.
     pub probes: bool,
-    /// Probe contribution when GI has no sample.
+    /// Probe contribution; scales the SH bake.
     pub probe_intensity: f32,
     /// Analytic UV gradients in vis-buffer shading (Phase 25N). Default on.
     pub analytic_grad: bool,
@@ -1489,6 +1533,23 @@ mod camera_speed_tests {
     #[test]
     fn directional_light_uses_the_accepted_moonlight_default() {
         assert_eq!(LightComponent::directional(100_000.0).moon_intensity, 0.010);
+    }
+
+    #[test]
+    fn disc_and_tube_convert_lumens_like_a_point() {
+        let point = LightComponent::point(800.0, 10.0).photometric_color();
+        let disc = LightComponent::disc(800.0, 10.0, 0.4).photometric_color();
+        let tube = LightComponent::tube(800.0, 10.0, 0.75, 0.04).photometric_color();
+        assert!((point - disc).length() < 1e-5);
+        assert!((point - tube).length() < 1e-5);
+        assert_eq!(
+            LightComponent::disc(800.0, 10.0, 0.4).light_type,
+            LightType::Disc
+        );
+        assert_eq!(
+            LightComponent::tube(800.0, 10.0, 0.75, 0.04).light_type,
+            LightType::Tube
+        );
     }
 
     #[test]

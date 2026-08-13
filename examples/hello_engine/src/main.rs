@@ -1547,11 +1547,17 @@ impl GameApp for HelloGame {
                                 );
                                 renderer.set_moon_intensity(light.moon_intensity);
                             }
-                            LightType::Point | LightType::Spot | LightType::Rect => {
+                            LightType::Point
+                            | LightType::Spot
+                            | LightType::Rect
+                            | LightType::Disc
+                            | LightType::Tube => {
                                 let l_type = match light.light_type {
                                     LightType::Point => 0,
                                     LightType::Spot => 1,
                                     LightType::Rect => 2,
+                                    LightType::Disc => 3,
+                                    LightType::Tube => 4,
                                     LightType::Directional => 0,
                                 };
                                 renderer.submit_local_light(

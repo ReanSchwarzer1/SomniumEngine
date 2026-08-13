@@ -18,6 +18,21 @@ pub struct MeshAllocation {
     pub index_capacity: u32,
 }
 
+/// Packed unsigned triangle SDF (Phase 24P). 16³, keyed with the mesh AABB.
+#[derive(Clone, Debug)]
+pub struct MeshSdfBrick {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub dist: Vec<f32>,
+}
+
+/// Side length of a packed mesh-SDF brick.
+pub const MESH_SDF_BRICK: u32 = 16;
+
+/// Cap on triangles walked when baking a brick. Photoscanned trees are huge;
+/// the clipmap is 64³ so extra triangles past this do not change the look.
+const MESH_SDF_TRI_CAP: usize = 1024;
+
 /// A freed region of the global buffers, reusable by pooled uploads.
 #[derive(Debug, Clone, Copy)]
 struct FreeBlock {
@@ -69,6 +84,9 @@ pub struct GeometryPool {
     /// every remesh would cost more than the culling saves, and a chunk is
     /// already small enough to cull as a unit.
     meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
+
+    /// Packed unsigned triangle SDF per static mesh (Phase 24P).
+    sdf_bricks: std::collections::HashMap<u32, std::sync::Arc<MeshSdfBrick>>,
 
     /// Reserved vertex spans, `offset -> capacity` (Phase 25A-2).
     ///
@@ -128,6 +146,7 @@ impl GeometryPool {
             free_blocks: Vec::new(),
             aabbs: std::collections::HashMap::new(),
             meshlets: std::collections::HashMap::new(),
+            sdf_bricks: std::collections::HashMap::new(),
             vertex_spans: std::collections::HashMap::new(),
             index_spans: std::collections::HashMap::new(),
             vertex_bytes,
@@ -176,6 +195,9 @@ impl GeometryPool {
         self.write_mesh(queue, &alloc, vertices, indices);
         if !build.meshlets.is_empty() {
             self.meshlets.insert(v_offset, build.meshlets);
+        }
+        if let Some(brick) = bake_mesh_sdf(vertices, indices) {
+            self.sdf_bricks.insert(v_offset, std::sync::Arc::new(brick));
         }
         alloc
     }
@@ -350,6 +372,7 @@ impl GeometryPool {
         if alloc.vertex_capacity == 0 && alloc.index_capacity == 0 {
             return;
         }
+        self.sdf_bricks.remove(&alloc.vertex_offset);
         self.free_blocks.push(FreeBlock {
             vertex_offset: alloc.vertex_offset,
             vertex_capacity: alloc.vertex_capacity,
@@ -401,6 +424,11 @@ impl GeometryPool {
     /// Local-space bounds of the mesh at `vertex_offset`, if it is known.
     pub fn mesh_aabb(&self, vertex_offset: u32) -> Option<([f32; 3], [f32; 3])> {
         self.aabbs.get(&vertex_offset).copied()
+    }
+
+    /// Packed triangle SDF for the mesh at `vertex_offset`, if one was baked.
+    pub fn mesh_sdf(&self, vertex_offset: u32) -> Option<std::sync::Arc<MeshSdfBrick>> {
+        self.sdf_bricks.get(&vertex_offset).cloned()
     }
 
     fn write_mesh(
@@ -479,6 +507,148 @@ fn span_accepts(
     true
 }
 
+fn bake_mesh_sdf(vertices: &[Vertex], indices: &[u32]) -> Option<MeshSdfBrick> {
+    if vertices.is_empty() || indices.len() < 3 {
+        return None;
+    }
+    let (min, max) = compute_aabb(vertices);
+    if !min[0].is_finite() || min[0] > max[0] {
+        return None;
+    }
+    let min_v = glam::Vec3::from_array(min);
+    let max_v = glam::Vec3::from_array(max);
+    let extent = (max_v - min_v).max(glam::Vec3::splat(1e-3));
+    let pad = extent.max_element() * 0.08 + 0.02;
+    let bmin = min_v - glam::Vec3::splat(pad);
+    let bmax = max_v + glam::Vec3::splat(pad);
+    let bext = (bmax - bmin).max(glam::Vec3::splat(1e-4));
+    let n = MESH_SDF_BRICK;
+    let mut dist = vec![f32::MAX; (n * n * n) as usize];
+    let tri_count = (indices.len() / 3).min(MESH_SDF_TRI_CAP);
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let uvw = (glam::Vec3::new(x as f32, y as f32, z as f32) + glam::Vec3::splat(0.5))
+                    / n as f32;
+                let p = bmin + uvw * bext;
+                let mut d = f32::MAX;
+                for t in 0..tri_count {
+                    let ia = indices[t * 3] as usize;
+                    let ib = indices[t * 3 + 1] as usize;
+                    let ic = indices[t * 3 + 2] as usize;
+                    if ia >= vertices.len() || ib >= vertices.len() || ic >= vertices.len() {
+                        continue;
+                    }
+                    let a = glam::Vec3::from_array(vertices[ia].position);
+                    let b = glam::Vec3::from_array(vertices[ib].position);
+                    let c = glam::Vec3::from_array(vertices[ic].position);
+                    d = d.min(point_triangle_distance(p, a, b, c));
+                }
+                dist[(z * n * n + y * n + x) as usize] = d;
+            }
+        }
+    }
+    Some(MeshSdfBrick {
+        min: bmin.to_array(),
+        max: bmax.to_array(),
+        dist,
+    })
+}
+
+/// Unsigned distance from `p` to triangle `abc` (Ericson).
+fn point_triangle_distance(p: glam::Vec3, a: glam::Vec3, b: glam::Vec3, c: glam::Vec3) -> f32 {
+    (closest_point_on_triangle(p, a, b, c) - p).length()
+}
+
+fn closest_point_on_triangle(
+    p: glam::Vec3,
+    a: glam::Vec3,
+    b: glam::Vec3,
+    c: glam::Vec3,
+) -> glam::Vec3 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return a + ab * v;
+    }
+    let cp = p - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return a + ac * w;
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b) * w;
+    }
+    let denom = va + vb + vc;
+    if denom.abs() < 1e-12 {
+        return a;
+    }
+    let v = vb / denom;
+    let w = vc / denom;
+    a + ab * v + ac * w
+}
+
+/// Sample a packed brick with trilinear interpolation. `None` if `local` is
+/// outside the brick.
+pub fn sample_mesh_sdf(brick: &MeshSdfBrick, local: glam::Vec3) -> Option<f32> {
+    let min = glam::Vec3::from_array(brick.min);
+    let max = glam::Vec3::from_array(brick.max);
+    let extent = (max - min).max(glam::Vec3::splat(1e-4));
+    let uvw = (local - min) / extent;
+    if uvw.x < 0.0 || uvw.y < 0.0 || uvw.z < 0.0 || uvw.x > 1.0 || uvw.y > 1.0 || uvw.z > 1.0 {
+        return None;
+    }
+    let n = MESH_SDF_BRICK as f32;
+    let p =
+        (uvw * n - glam::Vec3::splat(0.5)).clamp(glam::Vec3::ZERO, glam::Vec3::splat(n - 1.001));
+    let i0 = p.floor().as_ivec3();
+    let f = p.fract();
+    let n_i = MESH_SDF_BRICK as i32;
+    let at = |x: i32, y: i32, z: i32| {
+        let x = x.clamp(0, n_i - 1) as u32;
+        let y = y.clamp(0, n_i - 1) as u32;
+        let z = z.clamp(0, n_i - 1) as u32;
+        brick.dist[(z * MESH_SDF_BRICK * MESH_SDF_BRICK + y * MESH_SDF_BRICK + x) as usize]
+    };
+    let d000 = at(i0.x, i0.y, i0.z);
+    let d100 = at(i0.x + 1, i0.y, i0.z);
+    let d010 = at(i0.x, i0.y + 1, i0.z);
+    let d110 = at(i0.x + 1, i0.y + 1, i0.z);
+    let d001 = at(i0.x, i0.y, i0.z + 1);
+    let d101 = at(i0.x + 1, i0.y, i0.z + 1);
+    let d011 = at(i0.x, i0.y + 1, i0.z + 1);
+    let d111 = at(i0.x + 1, i0.y + 1, i0.z + 1);
+    let x00 = d000 + (d100 - d000) * f.x;
+    let x10 = d010 + (d110 - d010) * f.x;
+    let x01 = d001 + (d101 - d001) * f.x;
+    let x11 = d011 + (d111 - d011) * f.x;
+    let y0 = x00 + (x10 - x00) * f.y;
+    let y1 = x01 + (x11 - x01) * f.y;
+    Some(y0 + (y1 - y0) * f.z)
+}
+
 /// Local-space AABB of a vertex list.
 ///
 /// An empty mesh yields an inverted box (min > max), which the culling test
@@ -523,6 +693,24 @@ mod tests {
     fn empty_mesh_yields_an_inverted_box() {
         let (min, max) = compute_aabb(&[]);
         assert!(min[0] > max[0], "empty mesh must not produce a visible box");
+    }
+
+    #[test]
+    fn a_unit_triangle_sdf_is_near_zero_on_the_surface() {
+        let verts = [
+            vert([0.0, 0.0, 0.0]),
+            vert([1.0, 0.0, 0.0]),
+            vert([0.0, 1.0, 0.0]),
+        ];
+        let brick = bake_mesh_sdf(&verts, &[0, 1, 2]).expect("bake");
+        let on = sample_mesh_sdf(&brick, glam::Vec3::new(0.25, 0.25, 0.0)).unwrap();
+        let away = sample_mesh_sdf(&brick, glam::Vec3::new(0.25, 0.25, 0.05)).unwrap();
+        assert!(on < 0.12, "surface sample {on}");
+        assert!(
+            away > on,
+            "distance must grow off the plane ({away} vs {on})"
+        );
+        assert_eq!(brick.dist.len(), (MESH_SDF_BRICK.pow(3)) as usize);
     }
 
     // ── Rewritable spans (Phase 25A-2) ──────────────────────────────────────

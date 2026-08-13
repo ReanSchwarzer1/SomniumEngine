@@ -505,6 +505,7 @@ impl SomniumRenderer {
             &volumetric_pass.sampler,
             lighting_extra_pass.aux_view(),
             lighting_extra_pass.volume_view(),
+            lighting_extra_pass.sh_buffer(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -2158,14 +2159,17 @@ impl SomniumRenderer {
 
         {
             self.profiler.cpu_begin("Lighting extra");
-            let mesh_aabbs: Vec<(glam::Vec3, glam::Vec3)> = self
+            let mesh_sdf: Vec<crate::pass::lighting_extra::MeshSdfDraw> = self
                 .draw_queue
                 .iter()
                 .filter_map(|cmd| {
                     let (min, max) = self.geometry.mesh_aabb(cmd.vertex_offset)?;
-                    let a = cmd.transform.transform_point3(glam::Vec3::from_array(min));
-                    let b = cmd.transform.transform_point3(glam::Vec3::from_array(max));
-                    Some((a.min(b), a.max(b)))
+                    Some(crate::pass::lighting_extra::MeshSdfDraw {
+                        model: cmd.transform,
+                        local_min: min,
+                        local_max: max,
+                        brick: self.geometry.mesh_sdf(cmd.vertex_offset),
+                    })
                 })
                 .collect();
             self.profiler.begin(&mut encoder, "Lighting extra");
@@ -2186,7 +2190,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 ctx.config.width,
                 ctx.config.height,
-                &mesh_aabbs,
+                &mesh_sdf,
             );
             self.profiler.end(&mut encoder);
             self.profiler.cpu_end();

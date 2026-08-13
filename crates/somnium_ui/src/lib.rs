@@ -399,6 +399,17 @@ const TERRAIN_BRUSH_NAMES: [&str; 6] = ["Raise", "Lower", "Smooth", "Flatten", "
 
 pub type LightInspectorValues = [f32; 11];
 
+/// Light Details rows. Visibility depends on the selected fixture, not a single
+/// "is rect" flag — disc hides width/height, tube shows Half W as half-length.
+pub struct LightInspectorState {
+    pub values: LightInspectorValues,
+    pub kelvin: f32,
+    pub directional: bool,
+    pub show_cone: bool,
+    pub show_width: bool,
+    pub show_height: bool,
+}
+
 // ── Layout build result ───────────────────────────────────────────────────────
 
 struct EditorLayout {
@@ -1822,13 +1833,7 @@ impl UiManager {
 
     /// Show or hide the inspector's Light section and refresh it
     /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
-    ///
-    /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b, moon_intensity]`, paired
-    /// with whether the light is directional.
-    pub fn update_light_inspector(
-        &mut self,
-        values: Option<(LightInspectorValues, bool, f32, bool)>,
-    ) {
+    pub fn update_light_inspector(&mut self, values: Option<LightInspectorState>) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section,
@@ -1847,12 +1852,14 @@ impl UiManager {
             h.light_moon_int,
         );
         match values {
-            Some((
-                [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
-                directional,
+            Some(LightInspectorState {
+                values: [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
                 kelvin,
-                rect,
-            )) => {
+                directional,
+                show_cone,
+                show_width,
+                show_height,
+            }) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
                     .send(NumericFieldMessage::set_value(intensity, i));
@@ -1883,13 +1890,12 @@ impl UiManager {
                 self.native_ui
                     .send(NumericFieldMessage::set_value(h.light_height, height));
                 self.native_ui.set_visibility(range_row, !directional);
-                self.native_ui
-                    .set_visibility(inner_row, !directional && !rect);
-                self.native_ui
-                    .set_visibility(outer_row, !directional && !rect);
+                self.native_ui.set_visibility(inner_row, show_cone);
+                self.native_ui.set_visibility(outer_row, show_cone);
                 self.native_ui.set_visibility(moon_row, directional);
-                self.native_ui.set_visibility(h.light_width_row, rect);
-                self.native_ui.set_visibility(h.light_height_row, rect);
+                self.native_ui.set_visibility(h.light_width_row, show_width);
+                self.native_ui
+                    .set_visibility(h.light_height_row, show_height);
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -5715,6 +5721,8 @@ fn build_create_popup(
         CreateKind::PointLight,
         CreateKind::SpotLight,
         CreateKind::RectLight,
+        CreateKind::DiscLight,
+        CreateKind::TubeLight,
         CreateKind::Particle,
         CreateKind::Terrain,
         CreateKind::VoxelTerrain,

@@ -34,7 +34,8 @@
 @group(1) @binding(14) var world_volume: texture_3d<f32>;
 @group(1) @binding(15) var<uniform> lighting_extra: vec4<f32>;
 // x = flags (bit0 cache, 1 specular, 2 path tracer, 3 sdf, 4 probes)
-// y = cache/probe intensity, z = cell size metres, w = volume half-extent cells
+// y = cache intensity, z = cell size metres, w = volume half-extent cells
+@group(1) @binding(16) var<storage, read> sh_probes: array<vec4<f32>>;
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -162,11 +163,99 @@ fn ltc_quad_diffuse(
     return max(sum, 0.0) * 0.5 / 3.14159265;
 }
 
+fn ltc_disc_diffuse(
+    pos: vec3<f32>,
+    n: vec3<f32>,
+    center: vec3<f32>,
+    light_n: vec3<f32>,
+    radius: f32,
+) -> f32 {
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if abs(dot(light_n, up)) > 0.95 {
+        up = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t = normalize(cross(up, light_n));
+    let b = cross(light_n, t);
+    var prev = vec3<f32>(0.0);
+    var sum = 0.0;
+    let sides = 8;
+    for (var i = 0; i <= sides; i++) {
+        let a = 6.2831853 * f32(i % sides) / f32(sides);
+        let v = center + (t * cos(a) + b * sin(a)) * radius;
+        let p = normalize(v - pos);
+        if i > 0 {
+            let h = acos(clamp(dot(prev, p), -1.0, 1.0));
+            let x = cross(prev, p);
+            let xl = length(x);
+            if xl > 1e-6 {
+                sum += h * dot(x / xl, n);
+            }
+        }
+        prev = p;
+    }
+    return max(sum, 0.0) * 0.5 / 3.14159265;
+}
+
+fn closest_on_segment(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let ab = b - a;
+    let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
+    return a + ab * t;
+}
+
+fn sh_irradiance(n: vec3<f32>, base: u32) -> vec3<f32> {
+    let c1 = 0.429043;
+    let c2 = 0.511664;
+    let c3 = 0.743125;
+    let c4 = 0.886227;
+    let c5 = 0.247708;
+    let l00 = sh_probes[base + 0u].rgb;
+    let l1m1 = sh_probes[base + 1u].rgb;
+    let l10 = sh_probes[base + 2u].rgb;
+    let l11 = sh_probes[base + 3u].rgb;
+    let l2m2 = sh_probes[base + 4u].rgb;
+    let l2m1 = sh_probes[base + 5u].rgb;
+    let l20 = sh_probes[base + 6u].rgb;
+    let l21 = sh_probes[base + 7u].rgb;
+    let l22 = sh_probes[base + 8u].rgb;
+    let x = n.x;
+    let y = n.y;
+    let z = n.z;
+    return c1 * l22 * (x * x - y * y)
+        + c3 * l20 * z * z
+        + c4 * l00
+        - c5 * l20
+        + 2.0 * c1 * (l2m2 * x * y + l21 * x * z + l2m1 * y * z)
+        + 2.0 * c2 * (l11 * x + l1m1 * y + l10 * z);
+}
+
 fn world_volume_uvw(pos: vec3<f32>) -> vec3<f32> {
     let cell = max(lighting_extra.z, 0.25);
     let half_cells = max(lighting_extra.w, 1.0);
     let origin = floor(view.camera_pos / cell) * cell;
     return ((pos - origin) / cell + vec3<f32>(half_cells)) / (half_cells * 2.0);
+}
+
+fn sample_sh_probes(pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let uvw = clamp(world_volume_uvw(pos), vec3<f32>(0.0), vec3<f32>(1.0));
+    let g = uvw * 3.0;
+    let i0 = vec3<u32>(clamp(floor(g), vec3<f32>(0.0), vec3<f32>(3.0)));
+    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(3u));
+    let f = fract(g);
+    let b000 = (i0.x + i0.y * 4u + i0.z * 16u) * 9u;
+    let b100 = (i1.x + i0.y * 4u + i0.z * 16u) * 9u;
+    let b010 = (i0.x + i1.y * 4u + i0.z * 16u) * 9u;
+    let b110 = (i1.x + i1.y * 4u + i0.z * 16u) * 9u;
+    let b001 = (i0.x + i0.y * 4u + i1.z * 16u) * 9u;
+    let b101 = (i1.x + i0.y * 4u + i1.z * 16u) * 9u;
+    let b011 = (i0.x + i1.y * 4u + i1.z * 16u) * 9u;
+    let b111 = (i1.x + i1.y * 4u + i1.z * 16u) * 9u;
+    let x00 = mix(sh_irradiance(n, b000), sh_irradiance(n, b100), f.x);
+    let x10 = mix(sh_irradiance(n, b010), sh_irradiance(n, b110), f.x);
+    let x01 = mix(sh_irradiance(n, b001), sh_irradiance(n, b101), f.x);
+    let x11 = mix(sh_irradiance(n, b011), sh_irradiance(n, b111), f.x);
+    let y0 = mix(x00, x10, f.y);
+    let y1 = mix(x01, x11, f.y);
+    return mix(y0, y1, f.z);
 }
 
 /// Image-based ambient: diffuse irradiance + split-sum specular.
@@ -1225,7 +1314,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let extra_flags = bitcast<u32>(lighting_extra.x);
         let vol_uvw = world_volume_uvw(hit_point);
         let vol_sample = textureSampleLevel(world_volume, volumetric_sampler, vol_uvw, 0.0);
-        if (extra_flags & 1u) != 0u || (extra_flags & 16u) != 0u {
+        if (extra_flags & 16u) != 0u {
+            let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
+            let gather_n = normalize(mix(surface.normal, surface.bent_normal, 0.75));
+            ambient += sample_sh_probes(hit_point, gather_n) * surface.albedo * kd * surface.occlusion;
+        } else if (extra_flags & 1u) != 0u {
             let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
             ambient += vol_sample.rgb * surface.albedo * kd * lighting_extra.y * surface.occlusion;
         }
@@ -1264,6 +1357,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let light_idx = light_index_list[cluster_data.offset + i];
                 let ll = local_lights[light_idx];
 
+                if ll.light_type == 4u {
+                    let axis = normalize(ll.direction_ws);
+                    let half_len = max(ll._pad1, 0.05);
+                    let a = ll.position_ws - axis * half_len;
+                    let b = ll.position_ws + axis * half_len;
+                    let q = closest_on_segment(hit_point, a, b);
+                    let to_l = q - hit_point;
+                    let dist_t = length(to_l);
+                    if dist_t > ll.range { continue; }
+                    let Lt = to_l / max(dist_t, 1e-4);
+                    let atten_t = smooth_distance_attenuation(dist_t, ll.range);
+                    let r = max(ll.radius, 0.01);
+                    let angular = atan(r / max(dist_t, 1e-3));
+                    let facing = max(length(cross(Lt, axis)), 0.15);
+                    local_light_contrib += evaluate_brdf_area(surface, Lt, angular)
+                        * ll.color * atten_t * facing;
+                    continue;
+                }
+
                 let light_vec = ll.position_ws - hit_point;
                 let dist = length(light_vec);
                 if dist > ll.range { continue; }
@@ -1278,6 +1390,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         hit_point, surface.normal, ll.position_ws, ln, half_x, half_y);
                     let eq_r = sqrt(half_x * half_y / 3.14159265);
                     let angular = atan(eq_r / max(dist, 1e-3));
+                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
+                        * ll.color * atten_val * irr * 3.14159265;
+                    continue;
+                }
+                if ll.light_type == 3u {
+                    let r = max(ll.radius, 0.05);
+                    let ln = normalize(ll.direction_ws);
+                    let irr = ltc_disc_diffuse(
+                        hit_point, surface.normal, ll.position_ws, ln, r);
+                    let angular = atan(r / max(dist, 1e-3));
                     local_light_contrib += evaluate_brdf_area(surface, L, angular)
                         * ll.color * atten_val * irr * 3.14159265;
                     continue;

@@ -15,6 +15,18 @@ pub const FLAG_PATH: u32 = 4;
 pub const FLAG_SDF: u32 = 8;
 pub const FLAG_PROBES: u32 = 16;
 
+pub const PROBE_GRID: u32 = 4;
+pub const SH_COEFFS: u32 = 9;
+const SH_BUFFER_BYTES: u64 = (PROBE_GRID * PROBE_GRID * PROBE_GRID * SH_COEFFS * 16) as u64;
+
+/// One mesh contribution to the world SDF clipmap.
+pub struct MeshSdfDraw {
+    pub model: glam::Mat4,
+    pub local_min: [f32; 3],
+    pub local_max: [f32; 3],
+    pub brick: Option<std::sync::Arc<crate::geometry::MeshSdfBrick>>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ExtraParams {
@@ -46,6 +58,12 @@ mod tests {
         assert_eq!(super::f32_to_f16_bits(0.0), 0);
         assert_eq!(super::f32_to_f16_bits(-2.0), 0xc000);
     }
+
+    #[test]
+    fn the_sh_probe_buffer_holds_a_4x4x4_l2_grid() {
+        assert_eq!(super::SH_BUFFER_BYTES, 64u64 * 9 * 16);
+        assert_eq!(super::SH_BUFFER_BYTES % 16, 0);
+    }
 }
 
 pub struct LightingExtraPass {
@@ -53,8 +71,10 @@ pub struct LightingExtraPass {
     cache_splat: Option<wgpu::ComputePipeline>,
     specular: Option<wgpu::ComputePipeline>,
     path: Option<wgpu::ComputePipeline>,
+    bake_probes: Option<wgpu::ComputePipeline>,
     layout: Option<wgpu::BindGroupLayout>,
     params: Option<wgpu::Buffer>,
+    sh_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     volume: wgpu::Texture,
     volume_view: wgpu::TextureView,
@@ -71,6 +91,7 @@ pub struct LightingExtraPass {
     pub flags: u32,
     pub cell_size: f32,
     pub intensity: f32,
+    pub probe_intensity: f32,
     pub spec_rough: f32,
     pub path_bounces: u32,
     sdf_cpu: Vec<[f32; 4]>,
@@ -100,13 +121,22 @@ impl LightingExtraPass {
         let (aux, aux_view) = aux_tex(device, width, height, "Lighting aux");
         let (aux_hist, aux_hist_view) = aux_tex(device, width, height, "Lighting aux history");
 
+        let sh_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SH probes"),
+            size: SH_BUFFER_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let mut pass = Self {
             cache_decay: None,
             cache_splat: None,
             specular: None,
             path: None,
+            bake_probes: None,
             layout: None,
             params: None,
+            sh_buffer,
             sampler,
             volume,
             volume_view,
@@ -123,6 +153,7 @@ impl LightingExtraPass {
             flags: 0,
             cell_size: 2.0,
             intensity: 1.0,
+            probe_intensity: 1.0,
             spec_rough: 0.15,
             path_bounces: 3,
             sdf_cpu: vec![[1.0e3; 4]; (VOLUME * VOLUME * VOLUME) as usize],
@@ -163,6 +194,7 @@ impl LightingExtraPass {
                 storage_2d(9),
                 uniform_entry(10),
                 sampler_entry(11),
+                storage_rw(12),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -184,6 +216,7 @@ impl LightingExtraPass {
         pass.cache_splat = Some(make("cache_from_screen", "World cache splat"));
         pass.specular = Some(make("specular_gi", "Scene specular GI"));
         pass.path = Some(make("path_trace", "Path tracer"));
+        pass.bake_probes = Some(make("bake_probes", "SH probes"));
         pass.layout = Some(layout);
         pass.params = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lighting extra params"),
@@ -204,6 +237,10 @@ impl LightingExtraPass {
 
     pub fn volume_view(&self) -> &wgpu::TextureView {
         &self.volume_view
+    }
+
+    pub fn sh_buffer(&self) -> &wgpu::Buffer {
+        &self.sh_buffer
     }
 
     pub fn flags_bits(&self) -> u32 {
@@ -246,7 +283,7 @@ impl LightingExtraPass {
         camera_pos: glam::Vec3,
         width: u32,
         height: u32,
-        mesh_aabbs: &[(glam::Vec3, glam::Vec3)],
+        mesh_sdf: &[MeshSdfDraw],
     ) {
         if self.flags == 0 {
             self.history_valid = false;
@@ -262,7 +299,7 @@ impl LightingExtraPass {
         self.last_camera = Some(camera_pos.to_array());
 
         if (self.flags & FLAG_SDF) != 0 && (self.flags & FLAG_CACHE) == 0 {
-            self.fill_sdf(queue, camera_pos, mesh_aabbs);
+            self.fill_sdf(queue, camera_pos, mesh_sdf);
         }
 
         let Some(tlas) = tlas.filter(|_| self.supported) else {
@@ -291,7 +328,11 @@ impl LightingExtraPass {
                 origin: origin.to_array(),
                 cell_size: cell,
                 flags: self.flags,
-                intensity: self.intensity,
+                intensity: if (self.flags & FLAG_PROBES) != 0 {
+                    self.probe_intensity
+                } else {
+                    self.intensity
+                },
                 spec_rough: self.spec_rough,
                 path_bounces: self.path_bounces.max(1).min(8),
                 inv_res: [1.0 / width as f32, 1.0 / height as f32],
@@ -352,10 +393,14 @@ impl LightingExtraPass {
                     binding: 11,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.sh_buffer.as_entire_binding(),
+                },
             ],
         });
 
-        if (self.flags & (FLAG_CACHE | FLAG_PROBES)) != 0 {
+        if (self.flags & FLAG_CACHE) != 0 {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("World cache decay"),
                 timestamp_writes: None,
@@ -383,6 +428,20 @@ impl LightingExtraPass {
                     depth_or_array_layers: VOLUME,
                 },
             );
+        }
+
+        if (self.flags & FLAG_PROBES) != 0 {
+            if let Some(bake) = self.bake_probes.as_ref() {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SH probes"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(bake);
+                cpass.set_bind_group(0, Some(global_bind), &[]);
+                cpass.set_bind_group(1, Some(&bind), &[]);
+                cpass.dispatch_workgroups(1, 1, 1);
+                drop(cpass);
+            }
         }
 
         let hw = (width / 2).max(1);
@@ -431,21 +490,40 @@ impl LightingExtraPass {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    fn fill_sdf(
-        &mut self,
-        queue: &wgpu::Queue,
-        camera_pos: glam::Vec3,
-        aabbs: &[(glam::Vec3, glam::Vec3)],
-    ) {
+    fn fill_sdf(&mut self, queue: &wgpu::Queue, camera_pos: glam::Vec3, draws: &[MeshSdfDraw]) {
         let cell = self.cell_size.max(0.25);
         let origin = (camera_pos / cell).floor() * cell;
         let half = VOLUME as f32 * 0.5;
         for v in &mut self.sdf_cpu {
             *v = [8.0 * cell, 8.0 * cell, 8.0 * cell, 8.0 * cell];
         }
-        for &(min, max) in aabbs.iter().take(256) {
-            let expanded_min = min - glam::Vec3::splat(cell * 2.0);
-            let expanded_max = max + glam::Vec3::splat(cell * 2.0);
+        for draw in draws.iter().take(256) {
+            let local_min = glam::Vec3::from_array(draw.local_min);
+            let local_max = glam::Vec3::from_array(draw.local_max);
+            let brick_min = draw
+                .brick
+                .as_ref()
+                .map(|b| glam::Vec3::from_array(b.min))
+                .unwrap_or(local_min);
+            let brick_max = draw
+                .brick
+                .as_ref()
+                .map(|b| glam::Vec3::from_array(b.max))
+                .unwrap_or(local_max);
+            let mut world_min = glam::Vec3::splat(f32::INFINITY);
+            let mut world_max = glam::Vec3::splat(f32::NEG_INFINITY);
+            for &x in &[brick_min.x, brick_max.x] {
+                for &y in &[brick_min.y, brick_max.y] {
+                    for &z in &[brick_min.z, brick_max.z] {
+                        let w = draw.model.transform_point3(glam::Vec3::new(x, y, z));
+                        world_min = world_min.min(w);
+                        world_max = world_max.max(w);
+                    }
+                }
+            }
+            let inv = draw.model.inverse();
+            let expanded_min = world_min - glam::Vec3::splat(cell * 2.0);
+            let expanded_max = world_max + glam::Vec3::splat(cell * 2.0);
             let i0 = (((expanded_min - origin) / cell) + glam::Vec3::splat(half))
                 .floor()
                 .as_ivec3();
@@ -466,13 +544,13 @@ impl LightingExtraPass {
                                 - glam::Vec3::splat(half)
                                 + glam::Vec3::splat(0.5))
                                 * cell;
-                        let q = (p - max).max(min - p).max(glam::Vec3::ZERO);
-                        let outside = q.length();
-                        let inside = (p - min).min(max - p).min_element().min(0.0);
-                        let d = if min.cmple(p).all() && p.cmple(max).all() {
-                            inside
+                        let d = if let Some(brick) = draw.brick.as_deref() {
+                            let local = inv.transform_point3(p);
+                            crate::geometry::sample_mesh_sdf(brick, local).unwrap_or_else(|| {
+                                aabb_signed_distance(p, world_min, world_max).abs()
+                            })
                         } else {
-                            outside
+                            aabb_signed_distance(p, world_min, world_max)
                         };
                         let idx =
                             (z as u32 * VOLUME * VOLUME + y as u32 * VOLUME + x as u32) as usize;
@@ -510,6 +588,17 @@ impl LightingExtraPass {
                 depth_or_array_layers: VOLUME,
             },
         );
+    }
+}
+
+fn aabb_signed_distance(p: glam::Vec3, min: glam::Vec3, max: glam::Vec3) -> f32 {
+    let q = (p - max).max(min - p).max(glam::Vec3::ZERO);
+    let outside = q.length();
+    let inside = (p - min).min(max - p).min_element().min(0.0);
+    if min.cmple(p).all() && p.cmple(max).all() {
+        inside
+    } else {
+        outside
     }
 }
 
@@ -695,6 +784,18 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+fn storage_rw(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
             has_dynamic_offset: false,
             min_binding_size: None,
         },

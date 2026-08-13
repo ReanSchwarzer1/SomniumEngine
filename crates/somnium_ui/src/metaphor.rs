@@ -228,6 +228,8 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         PointLight => IconId::PointLight,
         SpotLight => IconId::SpotLight,
         RectLight => IconId::PointLight,
+        DiscLight => IconId::PointLight,
+        TubeLight => IconId::SpotLight,
         Particle => IconId::Particle,
         Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
@@ -256,6 +258,9 @@ mod tests {
         assert_eq!(help_page(4), HELP_ABOUT);
         assert!(HELP_WATER.contains("RT Reflect"));
         assert!(HELP_WATER.contains("RT Refraction"));
+        assert!(HELP_LIGHTING.contains("Disc Light"));
+        assert!(HELP_LIGHTING.contains("Tube Light"));
+        assert!(HELP_LIGHTING.contains("4×4×4"));
         let blocks = parse_help_markdown("# Title\n\nHello **world**.\n- item\n");
         assert_eq!(
             blocks,

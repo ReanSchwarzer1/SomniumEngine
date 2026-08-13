@@ -31,6 +31,7 @@ struct ExtraParams {
 @group(1) @binding(9) var aux_out: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(10) var<uniform> extra: ExtraParams;
 @group(1) @binding(11) var default_sampler: sampler;
+@group(1) @binding(12) var<storage, read_write> sh_probes: array<vec4<f32>>;
 
 fn extra_rand(seed: ptr<function, u32>) -> f32 {
     *seed = *seed * 747796405u + 2891336453u;
@@ -249,4 +250,79 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         outc = vec4<f32>(mix(prev.rgb, radiance, max(f, 0.02)), 1.0);
     }
     textureStore(aux_out, gid.xy, outc);
+}
+
+const PROBE_GRID: u32 = 4u;
+const SH_COEFFS: u32 = 9u;
+const SH_SAMPLES: u32 = 32u;
+
+fn sh_y(n: vec3<f32>) -> array<f32, 9> {
+    var y: array<f32, 9>;
+    y[0] = 0.282095;
+    y[1] = 0.488603 * n.y;
+    y[2] = 0.488603 * n.z;
+    y[3] = 0.488603 * n.x;
+    y[4] = 1.092548 * n.x * n.y;
+    y[5] = 1.092548 * n.y * n.z;
+    y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    y[7] = 1.092548 * n.x * n.z;
+    y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+    return y;
+}
+
+fn fibonacci_dir(i: u32, n: u32) -> vec3<f32> {
+    let z = 1.0 - 2.0 * (f32(i) + 0.5) / f32(n);
+    let r = sqrt(max(1.0 - z * z, 0.0));
+    let phi = 2.399963229728653 * f32(i);
+    return vec3<f32>(cos(phi) * r, sin(phi) * r, z);
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn bake_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= PROBE_GRID || gid.y >= PROBE_GRID || gid.z >= PROBE_GRID {
+        return;
+    }
+    let uvw = (vec3<f32>(gid) + 0.5) / f32(PROBE_GRID);
+    let pos = extra.origin + (uvw * extra.half_cells * 2.0 - extra.half_cells) * extra.cell_size;
+    var sh0 = vec3<f32>(0.0);
+    var sh1 = vec3<f32>(0.0);
+    var sh2 = vec3<f32>(0.0);
+    var sh3 = vec3<f32>(0.0);
+    var sh4 = vec3<f32>(0.0);
+    var sh5 = vec3<f32>(0.0);
+    var sh6 = vec3<f32>(0.0);
+    var sh7 = vec3<f32>(0.0);
+    var sh8 = vec3<f32>(0.0);
+    let weight = 12.5663706144 / f32(SH_SAMPLES);
+    for (var i = 0u; i < SH_SAMPLES; i++) {
+        let dir = fibonacci_dir(i, SH_SAMPLES);
+        var col = textureSampleLevel(env_cube, env_sampler, dir, 4.0).rgb;
+        if (extra.flags & 1u) != 0u {
+            let local = (pos - extra.origin) / extra.cell_size + vec3<f32>(extra.half_cells);
+            let dims = vec3<f32>(textureDimensions(cache_history));
+            let uvw_c = clamp(local / max(dims, vec3<f32>(1.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+            col += textureSampleLevel(cache_history, default_sampler, uvw_c, 0.0).rgb;
+        }
+        let y = sh_y(dir);
+        let wcol = col * weight * extra.intensity;
+        sh0 += wcol * y[0];
+        sh1 += wcol * y[1];
+        sh2 += wcol * y[2];
+        sh3 += wcol * y[3];
+        sh4 += wcol * y[4];
+        sh5 += wcol * y[5];
+        sh6 += wcol * y[6];
+        sh7 += wcol * y[7];
+        sh8 += wcol * y[8];
+    }
+    let base = (gid.x + gid.y * PROBE_GRID + gid.z * PROBE_GRID * PROBE_GRID) * SH_COEFFS;
+    sh_probes[base + 0u] = vec4<f32>(sh0, 1.0);
+    sh_probes[base + 1u] = vec4<f32>(sh1, 1.0);
+    sh_probes[base + 2u] = vec4<f32>(sh2, 1.0);
+    sh_probes[base + 3u] = vec4<f32>(sh3, 1.0);
+    sh_probes[base + 4u] = vec4<f32>(sh4, 1.0);
+    sh_probes[base + 5u] = vec4<f32>(sh5, 1.0);
+    sh_probes[base + 6u] = vec4<f32>(sh6, 1.0);
+    sh_probes[base + 7u] = vec4<f32>(sh7, 1.0);
+    sh_probes[base + 8u] = vec4<f32>(sh8, 1.0);
 }

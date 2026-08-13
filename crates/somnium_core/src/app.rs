@@ -15,7 +15,7 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
 use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
-use somnium_ui::{ColorField, EditorEvent, TerrainInspectorState, UiManager};
+use somnium_ui::{ColorField, EditorEvent, LightInspectorState, TerrainInspectorState, UiManager};
 
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
@@ -1129,25 +1129,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_light = self
                 .selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
-                .map(|lc| {
-                    (
-                        [
-                            lc.intensity,
-                            lc.range,
-                            lc.inner_angle.to_degrees(),
-                            lc.outer_angle.to_degrees(),
-                            lc.tint().x,
-                            lc.tint().y,
-                            lc.tint().z,
-                            lc.moon_intensity,
-                            lc.source_radius,
-                            lc.area_width,
-                            lc.area_height,
-                        ],
-                        lc.light_type == LightType::Directional,
-                        lc.color_temperature_k,
-                        lc.light_type == LightType::Rect,
-                    )
+                .map(|lc| LightInspectorState {
+                    values: [
+                        lc.intensity,
+                        lc.range,
+                        lc.inner_angle.to_degrees(),
+                        lc.outer_angle.to_degrees(),
+                        lc.tint().x,
+                        lc.tint().y,
+                        lc.tint().z,
+                        lc.moon_intensity,
+                        lc.source_radius,
+                        lc.area_width,
+                        lc.area_height,
+                    ],
+                    kelvin: lc.color_temperature_k,
+                    directional: lc.light_type == LightType::Directional,
+                    show_cone: lc.light_type == LightType::Spot,
+                    show_width: matches!(lc.light_type, LightType::Rect | LightType::Tube),
+                    show_height: lc.light_type == LightType::Rect,
                 });
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
@@ -1909,11 +1909,8 @@ impl<G: GameApp> Engine<G> {
                     flags |= FLAG_PROBES;
                 }
                 r.lighting_extra_pass.flags = flags;
-                r.lighting_extra_pass.intensity = if pp.world_cache {
-                    pp.cache_intensity
-                } else {
-                    pp.probe_intensity
-                };
+                r.lighting_extra_pass.intensity = pp.cache_intensity;
+                r.lighting_extra_pass.probe_intensity = pp.probe_intensity;
                 r.lighting_extra_pass.cell_size = pp.cache_cell_size;
                 r.lighting_extra_pass.spec_rough = pp.spec_roughness;
                 r.lighting_extra_pass.path_bounces = pp.path_bounces;
@@ -2427,8 +2424,8 @@ impl<G: GameApp> Engine<G> {
                 let transform = self.world.get::<Transform>(e)?;
                 let kind = match light.light_type {
                     LightType::Directional => LightGizmoKind::Directional,
-                    LightType::Point | LightType::Rect => LightGizmoKind::Point,
-                    LightType::Spot => LightGizmoKind::Spot,
+                    LightType::Point | LightType::Rect | LightType::Disc => LightGizmoKind::Point,
+                    LightType::Spot | LightType::Tube => LightGizmoKind::Spot,
                 };
                 Some(LightGizmoDesc {
                     kind,
@@ -2698,6 +2695,17 @@ impl<G: GameApp> Engine<G> {
                         15.0,
                         0.5,
                         0.25,
+                    )),
+                    CreateKind::DiscLight => Some(LightComponent::disc(
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        0.4,
+                    )),
+                    CreateKind::TubeLight => Some(LightComponent::tube(
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        0.75,
+                        0.04,
                     )),
                     _ => None,
                 };

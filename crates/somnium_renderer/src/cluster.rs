@@ -58,9 +58,10 @@ pub struct GpuLocalLight {
     pub range: f32,
     /// Linear RGB × intensity (pre-multiplied).
     pub color: [f32; 3],
-    /// `0` = point, `1` = spot, `2` = rect (LTC).
+    /// `0` = point, `1` = spot, `2` = rect, `3` = disc, `4` = tube.
     pub light_type: u32,
-    /// Spot-light direction (world space); ignored for point lights.
+    /// Spot/area axis (world space). Disc uses this as the emitting-plane normal;
+    /// tube uses it as the capsule axis. Ignored for point lights.
     pub direction_ws: [f32; 3],
     /// `cos(outer cone angle)` for spot lights.
     pub spot_cos_outer: f32,
