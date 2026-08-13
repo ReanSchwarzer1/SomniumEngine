@@ -90,6 +90,7 @@ pub enum IconId {
     Check,
     Minimize,
     Maximize,
+    ImmersivePlay,
 }
 
 impl IconId {
@@ -165,6 +166,7 @@ impl IconId {
         Self::Check,
         Self::Minimize,
         Self::Maximize,
+        Self::ImmersivePlay,
     ];
 
     pub fn index(self) -> u32 {
@@ -672,6 +674,19 @@ impl IconAtlas {
             }
             IconId::Maximize => {
                 self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w);
+            }
+            IconId::ImmersivePlay => {
+                self.line(s(4.0), t(4.0), s(9.0), t(4.0), w);
+                self.line(s(4.0), t(4.0), s(4.0), t(9.0), w);
+                self.line(s(20.0), t(4.0), s(15.0), t(4.0), w);
+                self.line(s(20.0), t(4.0), s(20.0), t(9.0), w);
+                self.line(s(4.0), t(20.0), s(9.0), t(20.0), w);
+                self.line(s(4.0), t(20.0), s(4.0), t(15.0), w);
+                self.line(s(20.0), t(20.0), s(15.0), t(20.0), w);
+                self.line(s(20.0), t(20.0), s(20.0), t(15.0), w);
+                self.line(s(9.0), t(8.0), s(9.0), t(16.0), w);
+                self.line(s(9.0), t(8.0), s(17.0), t(12.0), w);
+                self.line(s(9.0), t(16.0), s(17.0), t(12.0), w);
             }
         }
     }

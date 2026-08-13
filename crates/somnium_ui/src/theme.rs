@@ -73,3 +73,5 @@ pub const ICON_TREE: f32 = 24.0;
 pub const ICON_MARK: f32 = 28.0;
 /// Check-box tick box.
 pub const ICON_CHECK: f32 = 16.0;
+/// Content Drawer tile glyph.
+pub const ICON_DRAWER: f32 = 80.0;

@@ -244,6 +244,8 @@ pub enum EditorEvent {
     PauseSimulation,
     /// Return to edit mode and reset the simulation clock.
     StopSimulation,
+    /// Hide editor chrome and fill the monitor with the 3D view. Esc toggles off.
+    ToggleImmersiveViewport,
     SaveScene,
     NewScene,
     LoadScene(String),

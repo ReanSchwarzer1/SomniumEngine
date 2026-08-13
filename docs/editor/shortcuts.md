@@ -3,7 +3,7 @@
 ## General
 
 - **F1** — this Help
-- **Esc** — close the top popup, Help, or command palette
+- **Esc** — close the top popup, Help, or command palette; exit immersive play
 - **Ctrl+P** or **Ctrl+Shift+P** — command palette
 - **Ctrl+S** — save scene · **Ctrl+N** — new scene
 - **Ctrl+Z / Ctrl+Y** — undo / redo

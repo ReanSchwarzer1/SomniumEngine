@@ -3330,10 +3330,37 @@ impl<G: GameApp> Engine<G> {
                     r.set_editor_overlays_enabled(true);
                 }
                 if let Some(ui) = &mut self.ui_manager {
+                    ui.set_immersive(false);
                     ui.update_simulation_controls(0);
                     ui.set_play_overlays_hidden(false);
                 }
                 info!("Simulation stopped");
+            }
+
+            EditorEvent::ToggleImmersiveViewport => {
+                let entering = self
+                    .ui_manager
+                    .as_ref()
+                    .is_some_and(|ui| !ui.is_immersive());
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.set_immersive(entering);
+                }
+                if entering {
+                    self.simulation_clock.state = SimulationState::Playing;
+                    self.play_session_active = true;
+                    self.gizmo_drag = None;
+                    self.terrain_stroke = None;
+                    if let Some(r) = &mut self.renderer {
+                        r.set_editor_overlays_enabled(false);
+                    }
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.update_simulation_controls(1);
+                        ui.set_play_overlays_hidden(true);
+                    }
+                    info!("Immersive viewport");
+                } else {
+                    info!("Immersive viewport exited");
+                }
             }
 
             EditorEvent::ImportModel => {

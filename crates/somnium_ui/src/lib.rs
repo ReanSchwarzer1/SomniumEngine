@@ -63,7 +63,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::Window;
+use winit::window::{Fullscreen, Window};
 
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
@@ -363,6 +363,7 @@ struct EditorLayout {
     camera_speed_label: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
+    immersive_button: NodeHandle,
     pause_button: NodeHandle,
     pause_label: NodeHandle,
     stop_button: NodeHandle,
@@ -477,6 +478,7 @@ pub struct UiManager {
     camera_speed_label: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
+    immersive_button: NodeHandle,
     pause_button: NodeHandle,
     #[allow(dead_code)]
     pause_label: NodeHandle,
@@ -590,6 +592,8 @@ pub struct UiManager {
     help_close: NodeHandle,
     log_panel: NodeHandle,
     title_last_click: Option<std::time::Instant>,
+    immersive: bool,
+    immersive_restore_fullscreen: Option<Fullscreen>,
 }
 
 impl UiManager {
@@ -664,6 +668,7 @@ impl UiManager {
             camera_speed_label: layout.camera_speed_label,
             play_button: layout.play_button,
             play_label: layout.play_label,
+            immersive_button: layout.immersive_button,
             pause_button: layout.pause_button,
             pause_label: layout.pause_label,
             stop_button: layout.stop_button,
@@ -768,6 +773,8 @@ impl UiManager {
             help_close: layout.help_close,
             log_panel: layout.log_panel,
             title_last_click: None,
+            immersive: false,
+            immersive_restore_fullscreen: None,
         };
         this.refresh_content_list();
         this
@@ -828,6 +835,10 @@ impl UiManager {
         // Flush all queued widget messages; convert outgoing to EditorEvents.
         let outgoing = self.native_ui.update();
         self.process_outgoing(outgoing);
+        // Apply layout messages sent from those handlers (drawer row height, etc.)
+        // before measure/draw, so a just-opened pane is never laid out at 0px.
+        let extra = self.native_ui.update();
+        self.process_outgoing(extra);
 
         let (w, h) = self.window_size;
         self.native_ui.perform_layout();
@@ -845,6 +856,19 @@ impl UiManager {
 
     /// Route a winit event into the widget tree.  Returns true if consumed.
     pub fn process_os_event(&mut self, event: &WindowEvent) -> bool {
+        if self.immersive {
+            if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
+                let pressed = key_ev.state == ElementState::Pressed;
+                if pressed {
+                    if let PhysicalKey::Code(KeyCode::Escape) = key_ev.physical_key {
+                        self.editor_events
+                            .push_back(EditorEvent::ToggleImmersiveViewport);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
         if let WindowEvent::ModifiersChanged(m) = event {
             self.ctrl_held = m.state().control_key();
         }
@@ -1419,8 +1443,8 @@ impl UiManager {
         for entry in entries {
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(96.0)
-                    .with_height(92.0)
+                    .with_width(112.0)
+                    .with_height(120.0)
                     .with_background(theme::BG_RAISED),
             )
             .build();
@@ -1430,20 +1454,19 @@ impl UiManager {
                     .with_orientation(Orientation::Vertical)
                     .build();
             let col_h = self.native_ui.add_node(col, bh);
-            let icon_size = 48.0;
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(icon_size)
-                    .with_height(icon_size)
+                    .with_width(112.0)
+                    .with_height(theme::ICON_DRAWER)
                     .with_margin(Thickness {
-                        left: 24.0,
+                        left: 0.0,
                         top: 8.0,
                         right: 0.0,
                         bottom: 0.0,
                     }),
             )
             .with_icon(entry.icon)
-            .with_size(icon_size)
+            .with_size(theme::ICON_DRAWER)
             .with_tint(if entry.is_dir {
                 theme::FOLDER_SAND
             } else {
@@ -1547,6 +1570,29 @@ impl UiManager {
             .send(ButtonMessage::set_selected(self.pause_button, state == 2));
         self.native_ui
             .send(ButtonMessage::set_selected(self.stop_button, state == 0));
+    }
+
+    pub fn is_immersive(&self) -> bool {
+        self.immersive
+    }
+
+    /// Borderless fullscreen and hide chrome. Esc (or a second toggle) restores.
+    pub fn set_immersive(&mut self, on: bool) {
+        if self.immersive == on {
+            return;
+        }
+        self.immersive = on;
+        self.native_ui
+            .send(ButtonMessage::set_selected(self.immersive_button, on));
+        if on {
+            self.set_play_overlays_hidden(true);
+            self.immersive_restore_fullscreen = self.window.fullscreen();
+            self.window
+                .set_fullscreen(Some(Fullscreen::Borderless(None)));
+        } else {
+            self.window
+                .set_fullscreen(self.immersive_restore_fullscreen.take());
+        }
     }
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
@@ -2483,6 +2529,11 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::PlaySimulation);
                     continue;
                 }
+                if msg.destination == self.immersive_button {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleImmersiveViewport);
+                    continue;
+                }
                 if msg.destination == self.pause_button {
                     self.editor_events.push_back(EditorEvent::PauseSimulation);
                     continue;
@@ -3177,6 +3228,12 @@ fn build_editor_layout(
     let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
     let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
     let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "");
+    let immersive_button = icon_tool_button(
+        ui,
+        main_tb_stack_h,
+        IconId::ImmersivePlay,
+        "Immersive play (Esc to exit)",
+    );
     let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "");
     let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "");
     let play_label_n =
@@ -4017,6 +4074,7 @@ fn build_editor_layout(
         camera_speed_label,
         play_button,
         play_label,
+        immersive_button,
         pause_button,
         pause_label,
         stop_button,

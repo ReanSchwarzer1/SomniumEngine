@@ -30,10 +30,11 @@ impl ScrollViewer {
     }
 
     fn thumb_rect(&self, b: Rect) -> Rect {
-        let track_h = b.h;
-        let content_h = self.content_h.get().max(self.view_h.get());
+        let track_h = b.h.max(0.0);
+        let content_h = self.content_h.get().max(self.view_h.get()).max(1.0);
         let view_h = self.view_h.get().max(1.0);
-        let thumb_h = (view_h / content_h * track_h).clamp(MIN_THUMB, track_h);
+        let min_thumb = MIN_THUMB.min(track_h);
+        let thumb_h = (view_h / content_h * track_h).clamp(min_thumb, track_h);
         let travel = (track_h - thumb_h).max(0.0);
         let max = self.max_scroll();
         let t = if max > 0.0 { self.scroll_y / max } else { 0.0 };
@@ -184,5 +185,19 @@ mod tests {
             drag_scroll0: 0.0,
         };
         assert_eq!(v.max_scroll(), 0.0);
+    }
+
+    #[test]
+    fn zero_height_track_does_not_panic() {
+        let v = ScrollViewer {
+            scroll_y: 0.0,
+            content_h: Cell::new(200.0),
+            view_h: Cell::new(0.0),
+            dragging: false,
+            drag_anchor_y: 0.0,
+            drag_scroll0: 0.0,
+        };
+        let thumb = v.thumb_rect(Rect::new(0.0, 0.0, 40.0, 0.0));
+        assert_eq!(thumb.h, 0.0);
     }
 }
