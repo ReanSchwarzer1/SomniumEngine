@@ -38,7 +38,7 @@ use crate::{
         combo_box::{ComboBoxBuilder, ComboBoxMessage},
         command_palette::{CommandPaletteBuilder, CommandPaletteMessage, PaletteItem},
         context_menu::{ContextMenuBuilder, MenuItem},
-        grid::{Column, GridBuilder, Row},
+        grid::{Column, GridBuilder, GridMessage, Row},
         image::ImageBuilder,
         menu::{MenuBuilder, MenuMessage},
         numeric_field::{NumericFieldBuilder, NumericFieldMessage},
@@ -51,7 +51,6 @@ use crate::{
         slider::{SliderBuilder, SliderMessage},
         splitter::{SplitterBuilder, SplitterMessage, SplitterOrientation},
         stack_panel::{Orientation, StackPanelBuilder},
-        tab_control::{TabControlBuilder, TabControlMessage},
         text::TextBuilder,
         toast::{ToastHostBuilder, ToastMessage},
         tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
@@ -340,7 +339,6 @@ const TERRAIN_LAYER_SHORT: [&str; 32] = [
     "Crust",
 ];
 
-const TERRAIN_BRUSH_SHORT: [&str; 6] = ["Rs", "Lw", "Sm", "Fl", "Nz", "Pt"];
 const TERRAIN_BRUSH_NAMES: [&str; 6] = ["Raise", "Lower", "Smooth", "Flatten", "Noise", "Paint"];
 
 pub type LightInspectorValues = [f32; 8];
@@ -431,12 +429,20 @@ struct EditorLayout {
     unsaved_cancel: NodeHandle,
     color_popup: NodeHandle,
     color_picker: NodeHandle,
+    title_drag: NodeHandle,
+    win_min: NodeHandle,
+    win_max: NodeHandle,
+    win_close: NodeHandle,
+    help_toc: Vec<(NodeHandle, u8)>,
+    help_close: NodeHandle,
+    log_panel: NodeHandle,
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
 
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
 pub struct UiManager {
+    window: Arc<Window>,
     window_size: (u32, u32),
     native_ui: UserInterface,
     ui_pass: UiPass,
@@ -549,6 +555,7 @@ pub struct UiManager {
     color_picker: NodeHandle,
     help_open: bool,
     drawer_open: bool,
+    #[allow(dead_code)]
     drawer_docked: bool,
     show_engine_content: bool,
     ctrl_held: bool,
@@ -573,6 +580,15 @@ pub struct UiManager {
     color_live: [f32; 4],
     scene_dirty: bool,
     chrome_layout: crate::layout_persist::ChromeLayout,
+    log_open: bool,
+    title_drag: NodeHandle,
+    win_min: NodeHandle,
+    win_max: NodeHandle,
+    win_close: NodeHandle,
+    help_toc: Vec<(NodeHandle, u8)>,
+    help_close: NodeHandle,
+    log_panel: NodeHandle,
+    title_last_click: Option<std::time::Instant>,
 }
 
 impl UiManager {
@@ -611,14 +627,18 @@ impl UiManager {
             }
         };
 
-        let layout_sizes = crate::layout_persist::load();
+        let mut layout_sizes = crate::layout_persist::load();
+        if layout_sizes.tools < 88.0 {
+            layout_sizes.tools = 100.0;
+        }
         let layout = build_editor_layout(&mut native_ui, font_id, layout_sizes);
         let ui_pass = UiPass::new(device, queue, output_format);
 
         // Tell the UserInterface which handle is the viewport so mouse events pass through.
         native_ui.set_viewport_handle(layout.viewport_handle);
 
-        Self {
+        let mut this = Self {
+            window: Arc::clone(&window),
             window_size: (size.width, size.height),
             native_ui,
             ui_pass,
@@ -713,8 +733,8 @@ impl UiManager {
             color_popup: layout.color_popup,
             color_picker: layout.color_picker,
             help_open: false,
-            drawer_open: false,
-            drawer_docked: false,
+            drawer_open: true,
+            drawer_docked: true,
             show_engine_content: false,
             ctrl_held: false,
             inspector_filter: String::new(),
@@ -738,7 +758,18 @@ impl UiManager {
             color_live: [1.0, 1.0, 1.0, 1.0],
             scene_dirty: false,
             chrome_layout: layout_sizes,
-        }
+            log_open: false,
+            title_drag: layout.title_drag,
+            win_min: layout.win_min,
+            win_max: layout.win_max,
+            win_close: layout.win_close,
+            help_toc: layout.help_toc,
+            help_close: layout.help_close,
+            log_panel: layout.log_panel,
+            title_last_click: None,
+        };
+        this.refresh_content_list();
+        this
     }
 
     // ── Window integration ────────────────────────────────────────────────────
@@ -816,6 +847,9 @@ impl UiManager {
         if let WindowEvent::ModifiersChanged(m) = event {
             self.ctrl_held = m.state().control_key();
         }
+        if let WindowEvent::CursorMoved { position, .. } = event {
+            self.native_ui.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+        }
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
@@ -841,6 +875,55 @@ impl UiManager {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+            ..
+        } = event
+        {
+            let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+            if self.is_title_chrome_hit(hit) {
+                if hit == self.win_min || hit == self.win_max || hit == self.win_close {
+                    // Fall through so the button Click is delivered.
+                } else {
+                    let now = std::time::Instant::now();
+                    let double = self
+                        .title_last_click
+                        .map(|t| now.duration_since(t).as_millis() < 400)
+                        .unwrap_or(false);
+                    self.title_last_click = Some(now);
+                    if double {
+                        self.window.set_maximized(!self.window.is_maximized());
+                    } else {
+                        let _ = self.window.drag_window();
+                    }
+                    return true;
+                }
+            }
+            if self.transient_overlay_open() {
+                if self.hit_is_inside_transient_content(hit) {
+                    // Keep the overlay; let the widget handle the click.
+                } else if self.menu_button_for(hit).is_some() {
+                    let opener = self.menu_button_for(hit);
+                    let current_opener = self.open_menu_button();
+                    if opener != current_opener {
+                        self.close_all_menus();
+                    }
+                    if self.help_open {
+                        self.help_open = false;
+                        self.native_ui.send(UiMessage::new(
+                            self.help_overlay,
+                            MessageDirection::ToWidget,
+                            PopupMessage::Close,
+                        ));
+                    }
+                    // Fall through so the clicked menu can toggle.
+                } else {
+                    self.close_top_overlay();
+                    return true;
                 }
             }
         }
@@ -883,18 +966,21 @@ impl UiManager {
     }
 
     pub fn set_play_overlays_hidden(&mut self, hidden: bool) {
-        if hidden && self.drawer_open && !self.drawer_docked {
-            self.drawer_open = false;
-            self.native_ui.set_visibility(self.content_drawer, false);
-            self.native_ui.send(UiMessage::new(
-                self.content_drawer,
-                MessageDirection::ToWidget,
-                PopupMessage::Close,
-            ));
-        }
-        if hidden && self.help_open {
-            self.help_open = false;
-            self.native_ui.set_visibility(self.help_overlay, false);
+        if hidden {
+            if self.drawer_open || self.log_open {
+                self.drawer_open = false;
+                self.log_open = false;
+                self.apply_bottom_panel();
+            }
+            if self.help_open {
+                self.help_open = false;
+                self.native_ui.send(UiMessage::new(
+                    self.help_overlay,
+                    MessageDirection::ToWidget,
+                    PopupMessage::Close,
+                ));
+            }
+            self.close_all_menus();
         }
     }
 
@@ -905,8 +991,15 @@ impl UiManager {
         } else {
             self.help_open = !self.help_open;
         }
-        self.native_ui
-            .set_visibility(self.help_overlay, self.help_open);
+        self.native_ui.send(UiMessage::new(
+            self.help_overlay,
+            MessageDirection::ToWidget,
+            if self.help_open {
+                PopupMessage::Open
+            } else {
+                PopupMessage::Close
+            },
+        ));
         if self.help_open {
             self.set_help_page(self.help_page);
         }
@@ -922,26 +1015,53 @@ impl UiManager {
     }
 
     fn toggle_drawer(&mut self) {
-        self.drawer_open = !self.drawer_open;
-        let open = self.drawer_open;
+        if self.drawer_open {
+            self.drawer_open = false;
+        } else {
+            self.drawer_open = true;
+            self.log_open = false;
+        }
+        self.apply_bottom_panel();
+    }
+
+    fn toggle_log_panel(&mut self) {
+        if self.log_open {
+            self.log_open = false;
+        } else {
+            self.log_open = true;
+            self.drawer_open = false;
+        }
+        self.apply_bottom_panel();
+    }
+
+    fn apply_bottom_panel(&mut self) {
+        let show = self.drawer_open || self.log_open;
+        self.native_ui
+            .set_visibility(self.content_drawer, self.drawer_open);
+        self.native_ui.set_visibility(self.log_panel, self.log_open);
         self.native_ui.send(UiMessage::new(
-            self.content_drawer,
+            self.outer_grid,
             MessageDirection::ToWidget,
-            if open {
-                PopupMessage::Open
-            } else {
-                PopupMessage::Close
-            },
+            GridMessage::SetRowSize(
+                5,
+                if show {
+                    theme::BOTTOM_DRAWER_HEIGHT
+                } else {
+                    0.0
+                },
+            ),
         ));
         self.native_ui.send(TextMessage::set_text(
             self.status_text,
-            if open {
+            if self.drawer_open {
                 "Content Drawer".to_string()
+            } else if self.log_open {
+                "Output Log".to_string()
             } else {
                 "Ready".to_string()
             },
         ));
-        self.native_ui.invalidate_ancestors(self.content_drawer);
+        self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
     fn close_top_overlay(&mut self) -> bool {
@@ -969,13 +1089,8 @@ impl UiManager {
         }
         if self.help_open {
             self.help_open = false;
-            self.native_ui.set_visibility(self.help_overlay, false);
-            return true;
-        }
-        if self.drawer_open && !self.drawer_docked {
-            self.drawer_open = false;
             self.native_ui.send(UiMessage::new(
-                self.content_drawer,
+                self.help_overlay,
                 MessageDirection::ToWidget,
                 PopupMessage::Close,
             ));
@@ -999,6 +1114,91 @@ impl UiManager {
                 MessageDirection::ToWidget,
                 PopupMessage::Close,
             ));
+        }
+    }
+
+    fn is_title_chrome_hit(&self, hit: NodeHandle) -> bool {
+        hit == self.title_drag || self.native_ui.is_under(hit, self.title_drag)
+    }
+
+    fn transient_overlay_open(&self) -> bool {
+        self.file_popup_open
+            || self.create_popup_open
+            || self.edit_popup_open
+            || self.view_popup_open
+            || self.window_popup_open
+            || self.help_menu_open
+            || self.help_open
+            || self.palette_open
+            || self.color_open
+            || self.unsaved_open
+    }
+
+    fn open_transient_popup(&self) -> Option<NodeHandle> {
+        if self.file_popup_open {
+            Some(self.file_popup)
+        } else if self.create_popup_open {
+            Some(self.create_popup)
+        } else if self.edit_popup_open {
+            Some(self.edit_popup)
+        } else if self.view_popup_open {
+            Some(self.view_popup)
+        } else if self.window_popup_open {
+            Some(self.window_popup)
+        } else if self.help_menu_open {
+            Some(self.help_menu_popup)
+        } else if self.help_open {
+            Some(self.help_overlay)
+        } else if self.palette_open {
+            Some(self.palette_popup)
+        } else if self.color_open {
+            Some(self.color_popup)
+        } else if self.unsaved_open {
+            Some(self.unsaved_popup)
+        } else {
+            None
+        }
+    }
+
+    fn hit_is_inside_transient_content(&self, hit: NodeHandle) -> bool {
+        let Some(popup) = self.open_transient_popup() else {
+            return false;
+        };
+        let content = self.native_ui.first_child(popup);
+        self.native_ui.is_under(hit, content) || hit == content
+    }
+
+    fn menu_button_for(&self, hit: NodeHandle) -> Option<NodeHandle> {
+        for btn in [
+            self.file_button,
+            self.create_button,
+            self.edit_button,
+            self.view_button,
+            self.window_button,
+            self.help_menu_button,
+        ] {
+            if hit == btn || self.native_ui.is_under(hit, btn) {
+                return Some(btn);
+            }
+        }
+        None
+    }
+
+    fn open_menu_button(&self) -> Option<NodeHandle> {
+        if self.file_popup_open {
+            Some(self.file_button)
+        } else if self.create_popup_open {
+            Some(self.create_button)
+        } else if self.edit_popup_open {
+            Some(self.edit_button)
+        } else if self.view_popup_open {
+            Some(self.view_button)
+        } else if self.window_popup_open {
+            Some(self.window_button)
+        } else if self.help_menu_open {
+            Some(self.help_menu_button)
+        } else {
+            None
         }
     }
 
@@ -1166,12 +1366,6 @@ impl UiManager {
                 ));
             }
         }
-        if self.drawer_open {
-            let panel = self.native_ui.first_child(self.content_drawer);
-            let y = (self.window_size.1 as f32 - 280.0).max(0.0);
-            self.native_ui
-                .set_desired_position(panel, Vec2::new(0.0, y));
-        }
         let outgoing = self.native_ui.update();
         let _ = outgoing;
     }
@@ -1221,7 +1415,7 @@ impl UiManager {
         for entry in entries {
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
-                    .with_height(22.0)
+                    .with_height(28.0)
                     .with_background(theme::TRANSPARENT),
             )
             .build();
@@ -1607,14 +1801,14 @@ impl UiManager {
             self.native_ui.set_visibility(panel, false);
             self.native_ui.send(TextMessage::set_text(
                 self.profiler_toggle_lbl,
-                "[ ] Profiler".to_string(),
+                "Profiler".to_string(),
             ));
             return;
         };
         self.native_ui.set_visibility(panel, true);
         self.native_ui.send(TextMessage::set_text(
             self.profiler_toggle_lbl,
-            "[x] Profiler".to_string(),
+            "Profiler".to_string(),
         ));
 
         let names = self.profiler_names.clone();
@@ -1690,7 +1884,7 @@ impl UiManager {
                 }
                 let active_brush = if v.terrain_edit { Some(brush) } else { None };
                 for &(_, lbl, tool) in &h.terrain_brush_items {
-                    let name = TERRAIN_BRUSH_SHORT[tool as usize];
+                    let name = TERRAIN_BRUSH_NAMES[tool as usize];
                     let mark = if active_brush == Some(tool as usize) {
                         ">"
                     } else {
@@ -1700,7 +1894,7 @@ impl UiManager {
                         .send(TextMessage::set_text(lbl, format!("{mark}{name}")));
                 }
                 for &(_btn, lbl, tool) in &self.terrain_tool_items {
-                    let name = TERRAIN_BRUSH_SHORT[tool as usize];
+                    let name = TERRAIN_BRUSH_NAMES[tool as usize];
                     let mark = if active_brush == Some(tool as usize) {
                         ">"
                     } else {
@@ -2400,10 +2594,32 @@ impl UiManager {
                     continue;
                 }
                 if msg.destination == self.log_button {
+                    self.toggle_log_panel();
                     continue;
                 }
                 if msg.destination == self.drawer_button {
                     self.toggle_drawer();
+                    continue;
+                }
+                if msg.destination == self.win_min {
+                    self.window.set_minimized(true);
+                    continue;
+                }
+                if msg.destination == self.win_max {
+                    self.window.set_maximized(!self.window.is_maximized());
+                    continue;
+                }
+                if msg.destination == self.win_close {
+                    self.editor_events.push_back(EditorEvent::CloseWindow);
+                    continue;
+                }
+                if let Some(&(_, page)) = self.help_toc.iter().find(|(h, _)| *h == msg.destination)
+                {
+                    self.set_help_page(page);
+                    continue;
+                }
+                if msg.destination == self.help_close {
+                    self.toggle_help(None);
                     continue;
                 }
                 if msg.destination == self.save_button {
@@ -2523,8 +2739,8 @@ impl UiManager {
                 if msg.destination == self.help_menu_popup {
                     self.help_menu_open = false;
                 }
-                if msg.destination == self.content_drawer {
-                    self.drawer_open = false;
+                if msg.destination == self.help_overlay {
+                    self.help_open = false;
                 }
             } else if let Some(CheckBoxMessage::Check(_)) = msg.data::<CheckBoxMessage>() {
                 if msg.destination == self.content_engine_toggle {
@@ -2686,10 +2902,6 @@ impl UiManager {
                     }
                     self.refresh_content_list();
                 }
-            } else if let Some(TabControlMessage::Select(i)) = msg.data::<TabControlMessage>() {
-                if self.help_open {
-                    self.set_help_page(*i as u8);
-                }
             }
 
             // — Camera speed slider (Phase 20B) ————————
@@ -2729,22 +2941,108 @@ fn build_editor_layout(
 ) -> EditorLayout {
     let root = ui.root();
 
-    // ── Outer grid: menu | toolbar | viewport bar | main | log | status ──────
+    // ── Outer grid: title | menu | toolbar | viewport bar | main | drawer | status
     let outer_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(theme::MENU_HEIGHT)) // menu bar
-        .add_row(Row::strict(theme::TOOLBAR_HEIGHT)) // main toolbar (Phase 26-C)
-        .add_row(Row::strict(26.0)) // viewport toolbar (camera speed)
-        .add_row(Row::stretch()) // main area
-        .add_row(Row::strict(160.0)) // output log
-        .add_row(Row::strict(24.0)) // status bar
+        .add_row(Row::strict(theme::TITLEBAR_HEIGHT))
+        .add_row(Row::strict(theme::MENU_HEIGHT))
+        .add_row(Row::strict(theme::TOOLBAR_HEIGHT))
+        .add_row(Row::strict(26.0))
+        .add_row(Row::stretch())
+        .add_row(Row::strict(theme::BOTTOM_DRAWER_HEIGHT))
+        .add_row(Row::strict(theme::STATUS_HEIGHT))
         .add_column(Column::stretch())
         .build();
     let outer_h = ui.add_node(outer_grid, root);
 
-    // ── Row 0: menu bar ───────────────────────────────────────────────────────
-    let menu_bar = BorderBuilder::new(
+    // ── Row 0: custom title bar ──────────────────────────────────────────────
+    let title_bar = BorderBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_VOID)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 1.0,
+    })
+    .build();
+    let title_bar_h = ui.add_node(title_bar, outer_h);
+    let title_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let title_grid_h = ui.add_node(title_grid, title_bar_h);
+
+    let title_drag = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_column(0)
+            .with_background(theme::TRANSPARENT)
+            .with_foreground(theme::TRANSPARENT),
+    )
+    .with_stroke_thickness(Thickness::ZERO)
+    .build();
+    let title_drag = ui.add_node(title_drag, title_grid_h);
+    let title_left =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let title_left_h = ui.add_node(title_left, title_drag);
+    let mark = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_width(36.0)
+            .with_height(theme::TITLEBAR_HEIGHT)
+            .with_margin(Thickness {
+                left: 10.0,
+                top: 4.0,
+                right: 4.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_icon(IconId::EngineMark)
+    .with_size(theme::ICON_MARK)
+    .with_tint(theme::ACCENT)
+    .build();
+    ui.add_node(mark, title_left_h);
+    let title_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 4.0,
+        top: 10.0,
+        right: 12.0,
+        bottom: 0.0,
+    }))
+    .with_text("Somnium Engine")
+    .with_font_size(13.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(title_lbl, title_left_h);
+
+    let title_right = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_column(1)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let title_right_h = ui.add_node(title_right, title_grid_h);
+    let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 10.0)))
+        .with_text("— fps")
+        .with_font_size(11.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_SECONDARY)
+        .build();
+    let fps_text = ui.add_node(fps_node, title_right_h);
+    let win_min = window_chrome_button(ui, title_right_h, IconId::Minimize, "Minimize");
+    let win_max = window_chrome_button(ui, title_right_h, IconId::Maximize, "Maximize");
+    let win_close = window_chrome_button(ui, title_right_h, IconId::Close, "Close");
+
+    // ── Row 1: menu bar ───────────────────────────────────────────────────────
+    let menu_bar = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -2776,42 +3074,6 @@ fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let menu_stack_h = ui.add_node(menu_stack, menu_grid_h);
-
-    let mark = ImageBuilder::new(
-        WidgetBuilder::new()
-            .with_width(22.0)
-            .with_height(22.0)
-            .with_margin(Thickness {
-                left: 8.0,
-                top: 3.0,
-                right: 4.0,
-                bottom: 0.0,
-            })
-            .with_tooltip("Somnium Engine"),
-    )
-    .with_icon(IconId::EngineMark)
-    .with_size(theme::ICON_TREE)
-    .with_tint(theme::ACCENT)
-    .build();
-    ui.add_node(mark, menu_stack_h);
-
-    // Engine title
-    let title = TextBuilder::new(
-        WidgetBuilder::new()
-            .with_margin(Thickness {
-                left: 4.0,
-                right: 16.0,
-                top: 6.0,
-                bottom: 0.0,
-            })
-            .with_foreground(theme::TEXT_SECONDARY),
-    )
-    .with_text("Somnium Engine")
-    .with_font_size(12.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    ui.add_node(title, menu_stack_h);
 
     // "File" — Menu so clicks are captured (holds Import).
     let file_btn_node =
@@ -2861,19 +3123,12 @@ fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let fps_col_h = ui.add_node(fps_col, menu_grid_h);
-    let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-        .with_text("— fps")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
-        .build();
-    let fps_text = ui.add_node(fps_node, fps_col_h);
     let help_button = icon_tool_button(ui, fps_col_h, IconId::HelpCircle, "Help (F1)");
 
-    // ── Row 1: main toolbar ──────────────────────────────────────────────────
+    // ── Row 2: main toolbar ──────────────────────────────────────────────────
     let main_tb = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(1)
+            .with_row(2)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -2909,11 +3164,10 @@ fn build_editor_layout(
     let pause_label = play_label;
     let stop_label = play_label;
 
-    // ── Row 2: viewport toolbar — camera speed (Phase 20B) ───────────────────
-    // Sits between the menu bar and the viewport, like UE5's viewport toolbar.
+    // ── Row 3: viewport toolbar — camera speed (Phase 20B) ───────────────────
     let vp_bar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(2)
+            .with_row(3)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -2980,23 +3234,15 @@ fn build_editor_layout(
     // Phase 29: the profiler switch lives on the viewport toolbar rather than
     // in a menu, because it is a thing you flick on and off while looking at
     // the scene — the same reason UE5 puts its stat toggles there.
-    let prof_btn = ButtonBuilder::new(WidgetBuilder::new().with_height(20.0).with_margin(
-        Thickness {
-            left: 12.0,
-            top: 3.0,
-            right: 6.0,
-            bottom: 0.0,
-        },
-    ))
-    .build();
-    let profiler_toggle = ui.add_node(prof_btn, vp_stack_h);
-    let prof_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 3.0)))
-        .with_text("[ ] Profiler")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
-    let profiler_toggle_lbl = ui.add_node(prof_lbl, profiler_toggle);
+    let (profiler_toggle, profiler_toggle_lbl) = labeled_icon_button(
+        ui,
+        vp_stack_h,
+        IconId::Profiler,
+        "Profiler",
+        "Toggle GPU profiler overlay",
+        font_id,
+        22.0,
+    );
 
     let hint = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 4.0,
@@ -3011,16 +3257,16 @@ fn build_editor_layout(
     .build();
     ui.add_node(hint, vp_stack_h);
 
-    // ── Row 3: resizable columns — tools | viewport | details ────────────────
+    // ── Row 4: resizable columns — tools | viewport | details ────────────────
     let tools_split = SplitterBuilder::new(
         WidgetBuilder::new()
-            .with_row(3)
+            .with_row(4)
             .with_column(0)
             .with_background(theme::TRANSPARENT),
     )
     .with_orientation(SplitterOrientation::Horizontal)
     .with_first_size(layout.tools)
-    .with_min_first(36.0)
+    .with_min_first(88.0)
     .with_min_second(240.0)
     .build();
     let inner_h = ui.add_node(tools_split, outer_h);
@@ -3058,47 +3304,61 @@ fn build_editor_layout(
     let tool_stack_h = ui.add_node(tool_stack, toolbar_h);
 
     let ter_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 7.0,
+        left: 8.0,
         top: 8.0,
         right: 0.0,
-        bottom: 2.0,
+        bottom: 4.0,
     }))
-    .with_text("TER")
-    .with_font_size(10.0)
+    .with_text("Sculpt")
+    .with_font_size(11.0)
     .with_font_id(font_id)
     .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(ter_lbl, tool_stack_h);
 
-    // (label, BrushMode index): Raise, Lower, Smooth, Flatten, Noise, Paint.
-    const TERRAIN_TOOLS: &[(&str, u8)] = &[
-        ("Rs", 0),
-        ("Lw", 1),
-        ("Sm", 2),
-        ("Fl", 3),
-        ("Nz", 4),
-        ("Pt", 5),
+    const TERRAIN_TOOLS: &[(IconId, &str, u8)] = &[
+        (IconId::Landscape, "Raise", 0),
+        (IconId::Landscape, "Lower", 1),
+        (IconId::Landscape, "Smooth", 2),
+        (IconId::Landscape, "Flatten", 3),
+        (IconId::Landscape, "Noise", 4),
+        (IconId::Texture, "Paint", 5),
     ];
     let mut terrain_tool_items = Vec::with_capacity(TERRAIN_TOOLS.len());
-    for &(label, tool) in TERRAIN_TOOLS {
+    for &(icon, label, tool) in TERRAIN_TOOLS {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
-                .with_height(24.0)
+                .with_height(26.0)
                 .with_margin(Thickness {
                     left: 4.0,
                     top: 2.0,
                     right: 4.0,
                     bottom: 0.0,
                 })
+                .with_tooltip(label)
                 .with_background(theme::BG_DARK),
         )
         .build();
         let btn_h = ui.add_node(btn, tool_stack_h);
-
+        let row = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+        let row_h = ui.add_node(row, btn_h);
+        let img = ImageBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 4.0,
+            top: 4.0,
+            right: 2.0,
+            bottom: 0.0,
+        }))
+        .with_icon(icon)
+        .with_size(16.0)
+        .with_tint(theme::TEXT_PRIMARY)
+        .build();
+        ui.add_node(img, row_h);
         let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 8.0,
+            left: 2.0,
             top: 5.0,
-            right: 0.0,
+            right: 4.0,
             bottom: 0.0,
         }))
         .with_text(label)
@@ -3106,7 +3366,7 @@ fn build_editor_layout(
         .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)
         .build();
-        let lbl_h = ui.add_node(lbl, btn_h);
+        let lbl_h = ui.add_node(lbl, row_h);
         terrain_tool_items.push((btn_h, lbl_h, tool));
     }
 
@@ -3365,10 +3625,10 @@ fn build_editor_layout(
 
     let inspector_handles = build_inspector(ui, inspector_stack, font_id);
 
-    // ── Row 4: bottom log panel ───────────────────────────────────────────────
+    // ── Row 5: docked Content Drawer / Output Log ────────────────────────────
     let bottom = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(4)
+            .with_row(5)
             .with_column(0)
             .with_background(theme::BG_DARK)
             .with_foreground(theme::BORDER_DARK),
@@ -3382,15 +3642,28 @@ fn build_editor_layout(
     .build();
     let bottom_h = ui.add_node(bottom, outer_h);
 
-    // Inner grid: header (strict) + scrollable log content (stretch)
-    let log_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(22.0)) // header bar
-        .add_row(Row::stretch()) // log content
+    let bottom_swap = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build();
-    let log_grid_h = ui.add_node(log_grid, bottom_h);
+    let bottom_swap_h = ui.add_node(bottom_swap, bottom_h);
 
-    // Header
+    let (content_drawer, content_search, content_breadcrumb, content_engine_toggle, content_list) =
+        build_content_drawer(ui, bottom_swap_h, font_id);
+
+    let log_panel = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT)
+            .with_visibility(false),
+    )
+    .add_row(Row::strict(22.0))
+    .add_row(Row::stretch())
+    .add_column(Column::stretch())
+    .build();
+    let log_panel = ui.add_node(log_panel, bottom_swap_h);
+
     let log_hdr_border = BorderBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
@@ -3405,7 +3678,7 @@ fn build_editor_layout(
         bottom: 1.0,
     })
     .build();
-    let log_hdr_h = ui.add_node(log_hdr_border, log_grid_h);
+    let log_hdr_h = ui.add_node(log_hdr_border, log_panel);
 
     let log_header = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 8.0,
@@ -3420,7 +3693,6 @@ fn build_editor_layout(
     .build();
     ui.add_node(log_header, log_hdr_h);
 
-    // Scrollable log content
     let log_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
             .with_row(1)
@@ -3428,7 +3700,7 @@ fn build_editor_layout(
             .with_background(theme::BG_DARK),
     )
     .build();
-    let log_scroll_h = ui.add_node(log_scroll, log_grid_h);
+    let log_scroll_h = ui.add_node(log_scroll, log_panel);
 
     let log_stack_node =
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
@@ -3436,10 +3708,10 @@ fn build_editor_layout(
             .build();
     let log_stack = ui.add_node(log_stack_node, log_scroll_h);
 
-    // ── Row 5: status bar ────────────────────────────────────────────────────
+    // ── Row 6: status bar ────────────────────────────────────────────────────
     let status_bar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(5)
+            .with_row(6)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -3457,15 +3729,26 @@ fn build_editor_layout(
             .with_orientation(Orientation::Horizontal)
             .build();
     let status_stack_h = ui.add_node(status_stack, status_h);
-    let drawer_button = icon_tool_button(
+    let (drawer_button, _) = labeled_icon_button(
         ui,
         status_stack_h,
         IconId::ContentDrawer,
-        "Content Drawer (Ctrl+Space)",
+        "Content Drawer",
+        "Show or hide the Content Drawer (Ctrl+Space)",
+        font_id,
+        theme::STATUS_HEIGHT,
     );
-    let log_button = icon_tool_button(ui, status_stack_h, IconId::OutputLog, "Output Log");
+    let (log_button, _) = labeled_icon_button(
+        ui,
+        status_stack_h,
+        IconId::OutputLog,
+        "Output Log",
+        "Show or hide the Output Log",
+        font_id,
+        theme::STATUS_HEIGHT,
+    );
     let status_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-        .with_text("Ready")
+        .with_text("Content Drawer")
         .with_font_size(11.0)
         .with_font_id(font_id)
         .with_color(theme::TEXT_SECONDARY)
@@ -3492,7 +3775,7 @@ fn build_editor_layout(
     let (view_popup, view_items) = popup_items(ui, root, font_id, &["Profiler", "Content Drawer"]);
     let view_profiler = view_items[0];
     let view_content = view_items[1];
-    let (window_popup, window_items) = popup_items(ui, root, font_id, &["Dock Content in Layout"]);
+    let (window_popup, window_items) = popup_items(ui, root, font_id, &["Show Content Drawer"]);
     let window_dock_content = window_items[0];
     let (help_menu_popup, help_items) = popup_items(
         ui,
@@ -3504,9 +3787,7 @@ fn build_editor_layout(
     let help_shortcuts = help_items[1];
     let help_about = help_items[2];
 
-    let (help_overlay, help_body) = build_help_overlay(ui, root, font_id);
-    let (content_drawer, content_search, content_breadcrumb, content_engine_toggle, content_list) =
-        build_content_drawer(ui, root, font_id);
+    let (help_overlay, help_body, help_toc, help_close) = build_help_overlay(ui, root, font_id);
 
     let tooltip_node = TooltipBuilder::new(
         WidgetBuilder::new()
@@ -3777,6 +4058,13 @@ fn build_editor_layout(
         unsaved_cancel,
         color_popup,
         color_picker,
+        title_drag,
+        win_min,
+        win_max,
+        win_close,
+        help_toc,
+        help_close,
+        log_panel,
     }
 }
 
@@ -4112,7 +4400,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         for col in 0..3 {
             let tool = (row * 3 + col) as u8;
             let (btn, lbl) =
-                make_palette_button(ui, TERRAIN_BRUSH_SHORT[tool as usize], font_id, row_h);
+                make_palette_button(ui, TERRAIN_BRUSH_NAMES[tool as usize], font_id, row_h);
             terrain_brush_items.push((btn, lbl, tool));
         }
     }
@@ -4533,82 +4821,236 @@ fn icon_tool_button(
     h
 }
 
+fn window_chrome_button(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    icon: IconId,
+    tooltip: &str,
+) -> NodeHandle {
+    let btn = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_width(46.0)
+            .with_height(theme::TITLEBAR_HEIGHT)
+            .with_tooltip(tooltip)
+            .with_background(theme::TRANSPARENT),
+    )
+    .build();
+    let h = ui.add_node(btn, parent);
+    let img = ImageBuilder::new(WidgetBuilder::new())
+        .with_icon(icon)
+        .with_size(16.0)
+        .with_tint(theme::TEXT_PRIMARY)
+        .build();
+    ui.add_node(img, h);
+    h
+}
+
+fn labeled_icon_button(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    icon: IconId,
+    label: &str,
+    tooltip: &str,
+    font_id: u8,
+    height: f32,
+) -> (NodeHandle, NodeHandle) {
+    let btn = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(height)
+            .with_margin(Thickness::axes(2.0, 1.0))
+            .with_tooltip(tooltip)
+            .with_background(theme::BG_RAISED),
+    )
+    .build();
+    let h = ui.add_node(btn, parent);
+    let row = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_orientation(Orientation::Horizontal)
+        .build();
+    let row_h = ui.add_node(row, h);
+    let img = ImageBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 6.0,
+        top: ((height - 16.0) * 0.5).max(2.0),
+        right: 4.0,
+        bottom: 0.0,
+    }))
+    .with_icon(icon)
+    .with_size(16.0)
+    .with_tint(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(img, row_h);
+    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 0.0,
+        top: ((height - 14.0) * 0.5).max(2.0),
+        right: 8.0,
+        bottom: 0.0,
+    }))
+    .with_text(label)
+    .with_font_size(12.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let lbl_h = ui.add_node(lbl, row_h);
+    (h, lbl_h)
+}
+
 fn build_help_overlay(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, NodeHandle) {
-    let overlay = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_background([0x0E, 0x10, 0x14, 0xE0])
-            .with_visibility(false)
-            .with_foreground(theme::BORDER_DARK),
-    )
-    .with_stroke_thickness(Thickness::uniform(0.0))
-    .build();
+) -> (NodeHandle, NodeHandle, Vec<(NodeHandle, u8)>, NodeHandle) {
+    let overlay = PopupBuilder::new(WidgetBuilder::new().with_background([0x0E, 0x10, 0x14, 0xE0]))
+        .with_placement(PopupPlacement::Center)
+        .build();
     let overlay_h = ui.add_node(overlay, root);
 
-    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::stretch())
-        .add_column(Column::strict(180.0))
-        .add_column(Column::stretch())
-        .build();
-    let grid_h = ui.add_node(grid, overlay_h);
-
-    let tabs = TabControlBuilder::new(
+    let card = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_column(0)
-            .with_row(0)
-            .with_background(theme::BG_PANEL),
-    )
-    .with_titles([
-        "Welcome",
-        "Viewport",
-        "Shortcuts",
-        "Content Drawer",
-        "About",
-    ])
-    .with_font_id(font_id)
-    .build();
-    ui.add_node(tabs, grid_h);
-
-    let body = TextBuilder::new(
-        WidgetBuilder::new()
-            .with_column(1)
-            .with_row(0)
-            .with_margin(Thickness::uniform(16.0)),
-    )
-    .with_text(crate::metaphor::HELP_WELCOME)
-    .with_font_size(13.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
-    .build();
-    let body_h = ui.add_node(body, grid_h);
-    (overlay_h, body_h)
-}
-
-fn build_content_drawer(
-    ui: &mut UserInterface,
-    root: NodeHandle,
-    font_id: u8,
-) -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
-    let popup = PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 90]))
-        .with_placement(PopupPlacement::BottomCenter)
-        .build();
-    let popup_h = ui.add_node(popup, root);
-
-    let panel = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_width(640.0)
-            .with_height(320.0)
+            .with_width(720.0)
+            .with_height(480.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
-            .with_vertical_alignment(VerticalAlignment::Bottom)
+            .with_vertical_alignment(VerticalAlignment::Center)
             .with_background(theme::BG_PANEL)
             .with_foreground(theme::BORDER_DARK),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
-    let panel_h = ui.add_node(panel, popup_h);
+    let card_h = ui.add_node(card, overlay_h);
+
+    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::strict(36.0))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .build();
+    let grid_h = ui.add_node(grid, card_h);
+
+    let header = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 1.0,
+    })
+    .build();
+    let header_h = ui.add_node(header, grid_h);
+    let header_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let header_grid_h = ui.add_node(header_grid, header_h);
+    let title = TextBuilder::new(WidgetBuilder::new().with_column(0).with_margin(Thickness {
+        left: 12.0,
+        top: 10.0,
+        right: 0.0,
+        bottom: 0.0,
+    }))
+    .with_text("Editor Help")
+    .with_font_size(14.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(title, header_grid_h);
+    let close_col = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_column(1)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let close_col_h = ui.add_node(close_col, header_grid_h);
+    let help_close = window_chrome_button(ui, close_col_h, IconId::Close, "Close Help");
+
+    let body_grid = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT),
+    )
+    .add_row(Row::stretch())
+    .add_column(Column::strict(168.0))
+    .add_column(Column::stretch())
+    .build();
+    let body_grid_h = ui.add_node(body_grid, grid_h);
+
+    let toc_border = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_column(0)
+            .with_row(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 1.0,
+        top: 0.0,
+        bottom: 0.0,
+    })
+    .build();
+    let toc_border_h = ui.add_node(toc_border, body_grid_h);
+    let toc_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let toc_stack_h = ui.add_node(toc_stack, toc_border_h);
+    let mut help_toc = Vec::new();
+    for (i, title) in crate::metaphor::help_titles().iter().enumerate() {
+        let btn = ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_height(28.0)
+                .with_margin(Thickness::axes(6.0, 2.0))
+                .with_background(theme::BG_RAISED),
+        )
+        .build();
+        let bh = ui.add_node(btn, toc_stack_h);
+        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 6.0)))
+            .with_text(*title)
+            .with_font_size(12.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_PRIMARY)
+            .build();
+        ui.add_node(lbl, bh);
+        help_toc.push((bh, i as u8));
+    }
+
+    let scroll = ScrollViewerBuilder::new(
+        WidgetBuilder::new()
+            .with_column(1)
+            .with_row(0)
+            .with_background(theme::BG_PANEL),
+    )
+    .build();
+    let scroll_h = ui.add_node(scroll, body_grid_h);
+    let body = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(16.0)))
+        .with_text(crate::metaphor::HELP_WELCOME)
+        .with_font_size(13.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_PRIMARY)
+        .build();
+    let body_h = ui.add_node(body, scroll_h);
+    (overlay_h, body_h, help_toc, help_close)
+}
+
+fn build_content_drawer(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    font_id: u8,
+) -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
+    let panel = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_PANEL)
+            .with_foreground(theme::TRANSPARENT),
+    )
+    .with_stroke_thickness(Thickness::ZERO)
+    .build();
+    let panel_h = ui.add_node(panel, parent);
 
     let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .add_row(Row::strict(26.0))
@@ -4665,7 +5107,7 @@ fn build_content_drawer(
         .build();
     let list_h = ui.add_node(list, list_scroll_h);
 
-    (popup_h, search_h, crumb_h, engine_h, list_h)
+    (panel_h, search_h, crumb_h, engine_h, list_h)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).

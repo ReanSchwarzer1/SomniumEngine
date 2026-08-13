@@ -88,6 +88,8 @@ pub enum IconId {
     Warn,
     Error,
     Check,
+    Minimize,
+    Maximize,
 }
 
 impl IconId {
@@ -161,6 +163,8 @@ impl IconId {
         Self::Warn,
         Self::Error,
         Self::Check,
+        Self::Minimize,
+        Self::Maximize,
     ];
 
     pub fn index(self) -> u32 {
@@ -234,6 +238,34 @@ impl IconAtlas {
         self.pixels[i + 1] = 255;
         self.pixels[i + 2] = 255;
         self.pixels[i + 3] = self.pixels[i + 3].max(a);
+    }
+
+    fn punch(&mut self, x: i32, y: i32) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as u32, y as u32);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let i = ((y * self.width + x) * 4) as usize;
+        self.pixels[i + 3] = 0;
+    }
+
+    fn erase_circle(&mut self, cx: f32, cy: f32, r: f32) {
+        let minx = (cx - r - 1.0).floor() as i32;
+        let maxx = (cx + r + 1.0).ceil() as i32;
+        let miny = (cy - r - 1.0).floor() as i32;
+        let maxy = (cy + r + 1.0).ceil() as i32;
+        for y in miny..=maxy {
+            for x in minx..=maxx {
+                let dx = x as f32 + 0.5 - cx;
+                let dy = y as f32 + 0.5 - cy;
+                if (dx * dx + dy * dy).sqrt() <= r {
+                    self.punch(x, y);
+                }
+            }
+        }
     }
 
     fn stamp(&mut self, x: f32, y: f32, coverage: f32) {
@@ -310,11 +342,9 @@ impl IconAtlas {
         let w = 1.8;
         match id {
             IconId::EngineMark => {
-                self.circle(s(12.0), t(13.0), 9.0, w, false);
-                self.circle(s(15.0), t(11.0), 6.5, w, false);
-                self.line(s(9.0), t(18.0), s(9.0), t(8.0), w);
-                self.line(s(9.0), t(8.0), s(14.0), t(8.0), w);
-                self.line(s(9.0), t(13.0), s(13.0), t(13.0), w);
+                // Filled crescent — readable at 24–32 px, unlike a 1.8 px stroke.
+                self.circle(s(12.0), t(12.0), 10.0, 1.0, true);
+                self.erase_circle(s(16.5), t(10.0), 7.2);
             }
             IconId::File => {
                 self.line(s(8.0), t(4.0), s(14.0), t(4.0), w);
@@ -636,6 +666,12 @@ impl IconAtlas {
             IconId::Check => {
                 self.line(s(6.0), t(12.0), s(10.0), t(17.0), w);
                 self.line(s(10.0), t(17.0), s(18.0), t(7.0), w);
+            }
+            IconId::Minimize => {
+                self.line(s(6.0), t(16.0), s(18.0), t(16.0), w + 0.6);
+            }
+            IconId::Maximize => {
+                self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w);
             }
         }
     }

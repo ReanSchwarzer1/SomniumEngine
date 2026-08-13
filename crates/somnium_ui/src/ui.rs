@@ -410,6 +410,28 @@ impl UserInterface {
         to_nh(self.pick_node(self.root_ih, point))
     }
 
+    /// True if `handle` is `ancestor` or a descendant of it.
+    pub fn is_under(&self, handle: NodeHandle, ancestor: NodeHandle) -> bool {
+        if handle.is_none() || ancestor.is_none() {
+            return false;
+        }
+        let mut h = to_ih(handle);
+        for _ in 0..64 {
+            if to_nh(h) == ancestor {
+                return true;
+            }
+            let parent = match self.nodes.try_borrow(h) {
+                Ok(n) => to_ih(n.widget.parent),
+                Err(_) => return false,
+            };
+            if parent.is_none() {
+                return false;
+            }
+            h = parent;
+        }
+        false
+    }
+
     /// Cursor for the widget under the pointer (or the captured widget while dragging).
     pub fn cursor_kind(&self) -> crate::node::CursorKind {
         let handle = if self.captured_ih.is_some() {

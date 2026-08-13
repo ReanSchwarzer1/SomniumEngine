@@ -40,22 +40,25 @@ impl Control for TreeView {
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(
             available.x,
-            (self.items.len() as f32 * theme::ROW_HEIGHT).max(theme::ROW_HEIGHT),
+            (self.items.len() as f32 * theme::TREE_ROW_HEIGHT).max(theme::TREE_ROW_HEIGHT),
         )
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         for (i, item) in self.items.iter().enumerate() {
-            let y = b.y + i as f32 * theme::ROW_HEIGHT;
-            let row = Rect::new(b.x, y, b.w, theme::ROW_HEIGHT);
+            let y = b.y + i as f32 * theme::TREE_ROW_HEIGHT;
+            let row = Rect::new(b.x, y, b.w, theme::TREE_ROW_HEIGHT);
             if self.selected == Some(item.id) {
                 ctx.push_rect_filled(row, theme::ACCENT_DIM);
-                ctx.push_rect_filled(Rect::new(b.x, y, 2.0, theme::ROW_HEIGHT), theme::ACCENT);
+                ctx.push_rect_filled(
+                    Rect::new(b.x, y, 2.0, theme::TREE_ROW_HEIGHT),
+                    theme::ACCENT,
+                );
             }
-            let indent = 8.0 + item.depth as f32 * 12.0;
+            let indent = 8.0 + item.depth as f32 * 14.0;
             if item.has_children {
-                let chev = Rect::new(b.x + indent, y + 3.0, 16.0, 16.0);
+                let chev = Rect::new(b.x + indent, y + 6.0, 16.0, 16.0);
                 let icon = if item.expanded {
                     IconId::ChevronDown
                 } else {
@@ -66,7 +69,7 @@ impl Control for TreeView {
             }
             let ic = Rect::new(
                 b.x + indent + 18.0,
-                y + 1.0,
+                y + (theme::TREE_ROW_HEIGHT - theme::ICON_TREE) * 0.5,
                 theme::ICON_TREE,
                 theme::ICON_TREE,
             );
@@ -74,7 +77,10 @@ impl Control for TreeView {
             ctx.push_textured_rect(ic, uv, theme::TEXT_PRIMARY, tex);
             ctx.push_text(
                 &item.label,
-                Vec2::new(b.x + indent + 40.0, y + 4.0),
+                Vec2::new(
+                    b.x + indent + 18.0 + theme::ICON_TREE + 6.0,
+                    y + (theme::TREE_ROW_HEIGHT - 14.0) * 0.5,
+                ),
                 self.font_id,
                 self.px,
                 theme::TEXT_PRIMARY,
@@ -105,7 +111,7 @@ impl Control for TreeView {
         }
         if let Some(WidgetMessage::MouseDown { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
-            let idx = ((pos.y - b.y) / theme::ROW_HEIGHT).floor() as isize;
+            let idx = ((pos.y - b.y) / theme::TREE_ROW_HEIGHT).floor() as isize;
             if idx >= 0 && (idx as usize) < self.items.len() {
                 let item = &self.items[idx as usize];
                 let indent = 8.0 + item.depth as f32 * 12.0;

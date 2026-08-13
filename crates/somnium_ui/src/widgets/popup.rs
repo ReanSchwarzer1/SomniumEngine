@@ -50,7 +50,7 @@ impl Control for Popup {
         // so StackPanel/Border children size to their labels, not the screen.
         let content_avail = match self.placement {
             PopupPlacement::AnchorBelow => Vec2::new(available.x.min(280.0), 10_000.0),
-            PopupPlacement::Center => Vec2::new(available.x.min(520.0), available.y.min(480.0)),
+            PopupPlacement::Center => Vec2::new(available.x.min(780.0), available.y.min(560.0)),
             PopupPlacement::BottomCenter => {
                 Vec2::new(available.x.min(720.0), available.y.min(360.0))
             }

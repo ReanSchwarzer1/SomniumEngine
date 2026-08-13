@@ -303,4 +303,6 @@ pub enum EditorEvent {
         rgba: [f32; 4],
     },
     ToggleWaterUnderwater,
+    /// Title-bar close — same path as the native window X.
+    CloseWindow,
 }

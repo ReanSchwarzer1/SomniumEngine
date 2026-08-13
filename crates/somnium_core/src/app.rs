@@ -6,6 +6,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use somnium_audio::engine::AudioEngine;
@@ -216,6 +218,8 @@ pub struct Engine<G: GameApp> {
     simulation_accumulator: f32,
     /// True after a mutating editor action until Save or New.
     scene_dirty: bool,
+    /// Title-bar close requested a shutdown.
+    ui_wants_exit: bool,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -288,6 +292,7 @@ impl<G: GameApp + 'static> Engine<G> {
             play_session_active: false,
             simulation_accumulator: 0.0,
             scene_dirty: false,
+            ui_wants_exit: false,
         };
 
         event_loop
@@ -334,10 +339,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         info!("Creating window");
 
         let size = LogicalSize::new(self.config.window_size.0, self.config.window_size.1);
-        let attrs = WindowAttributes::default()
-            .with_title(&self.config.window_title)
+        let mut attrs = WindowAttributes::default()
+            .with_title("Somnium Engine")
             .with_inner_size(size)
-            .with_resizable(self.config.resizable);
+            .with_resizable(self.config.resizable)
+            .with_decorations(false);
+        #[cfg(target_os = "windows")]
+        {
+            attrs = attrs.with_undecorated_shadow(true);
+        }
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
@@ -1332,6 +1342,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             for ev in events {
                 self.handle_editor_event(ev);
             }
+        }
+        if self.ui_wants_exit {
+            self.initiate_shutdown(event_loop);
+            return;
         }
 
         // ── Forward log entries to the output log panel ───────────────────────
@@ -3345,6 +3359,10 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::CancelInspectorColor { field, rgba } => {
                 self.apply_inspector_color(field, rgba, true, true);
+            }
+
+            EditorEvent::CloseWindow => {
+                self.ui_wants_exit = true;
             }
 
             // Phase 29. The toggle drives collection as well as visibility: a

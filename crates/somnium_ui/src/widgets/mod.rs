@@ -35,7 +35,7 @@ pub use command_palette::{
     CommandPalette, CommandPaletteBuilder, CommandPaletteMessage, PaletteItem,
 };
 pub use context_menu::{ContextMenu, ContextMenuBuilder, ContextMenuMessage, MenuItem};
-pub use grid::{Grid, GridBuilder, GridDimension, SizeMode};
+pub use grid::{Grid, GridBuilder, GridDimension, GridMessage, SizeMode};
 pub use image::{IconBuilder, Image, ImageBuilder};
 pub use numeric_field::{NumericField, NumericFieldBuilder, NumericFieldMessage};
 pub use popup::{Popup, PopupBuilder, PopupMessage, PopupPlacement};

@@ -55,15 +55,21 @@ pub const RADIUS_POPUP: f32 = 3.0;
 
 /// Inspector / outliner row height.
 pub const ROW_HEIGHT: f32 = 24.0;
+/// Outliner tree rows — taller so type icons stay readable.
+pub const TREE_ROW_HEIGHT: f32 = 30.0;
 pub const TOOLBAR_HEIGHT: f32 = 32.0;
 pub const MENU_HEIGHT: f32 = 28.0;
-pub const STATUS_HEIGHT: f32 = 24.0;
+pub const TITLEBAR_HEIGHT: f32 = 36.0;
+pub const STATUS_HEIGHT: f32 = 28.0;
+pub const BOTTOM_DRAWER_HEIGHT: f32 = 220.0;
 pub const SPLITTER_THICKNESS: f32 = 6.0;
 pub const TOOLTIP_DELAY_MS: u64 = 400;
 
 /// Toolbar / status-bar icon size (atlas cells are 32 px).
 pub const ICON_TOOL: f32 = 24.0;
-/// Outliner / tree / menu chevron size.
-pub const ICON_TREE: f32 = 20.0;
+/// Outliner / tree icon size.
+pub const ICON_TREE: f32 = 24.0;
+/// Engine mark in the title bar.
+pub const ICON_MARK: f32 = 28.0;
 /// Check-box tick box.
 pub const ICON_CHECK: f32 = 16.0;

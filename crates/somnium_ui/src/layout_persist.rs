@@ -13,7 +13,7 @@ pub struct ChromeLayout {
 impl Default for ChromeLayout {
     fn default() -> Self {
         Self {
-            tools: 40.0,
+            tools: 100.0,
             viewport: 720.0,
             outliner: 240.0,
         }

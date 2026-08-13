@@ -163,6 +163,12 @@ fn arrange_dims(dims: &mut [GridDimension], final_size: f32) {
 // Grid control
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+pub enum GridMessage {
+    /// Set a strict row's height in pixels (0 hides the row).
+    SetRowSize(usize, f32),
+}
+
 pub struct Grid {
     pub rows: RefCell<Vec<Row>>,
     pub columns: RefCell<Vec<Column>>,
@@ -453,10 +459,18 @@ impl Control for Grid {
 
     fn handle_routed_message(
         &mut self,
-        _widget: &mut Widget,
-        _msg: &mut UiMessage,
+        widget: &mut Widget,
+        msg: &mut UiMessage,
         _emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(GridMessage::SetRowSize(i, h)) = msg.data::<GridMessage>() {
+            if let Some(row) = self.rows.borrow_mut().get_mut(*i) {
+                row.desired_size = *h;
+                row.actual_size = *h;
+            }
+            widget.invalidate_layout();
+            msg.handled = true;
+        }
     }
 }
 

@@ -2180,7 +2180,7 @@ fn list_assets_dir() -> Vec<serde_json::Value> {
 
 fn main() -> Result<(), somnium_core::EngineError> {
     let config = EngineConfig {
-        window_title: "Somnium Engine — glTF Demo".into(),
+        window_title: "Somnium Engine".into(),
         window_size: (1280, 720),
         target_fps: Some(60),
         ..Default::default()
