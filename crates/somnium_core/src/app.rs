@@ -524,19 +524,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         }
                         // ── Phase 14F: terrain edit mode + brush shortcuts ──
                         WKC::F6 => {
-                            if self.selected_terrain().is_some() {
-                                self.terrain_edit_active = !self.terrain_edit_active;
-                                info!(
-                                    "Terrain edit mode: {}",
-                                    if self.terrain_edit_active {
-                                        "ON"
-                                    } else {
-                                        "off"
-                                    }
-                                );
-                            } else {
-                                info!("Select a terrain entity before pressing F6");
-                            }
+                            self.handle_editor_event(EditorEvent::ToggleTerrainEdit);
                         }
                         WKC::F8 => {
                             // Phase 17A: toggle scattered foliage on the
@@ -1185,6 +1173,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 });
                 ui.update_material_inspector(material);
                 ui.set_scene_dirty(self.scene_dirty);
+                ui.refresh_inspector_filter();
             }
         }
 
@@ -3335,6 +3324,32 @@ impl<G: GameApp> Engine<G> {
                     ui.set_play_overlays_hidden(false);
                 }
                 info!("Simulation stopped");
+            }
+
+            EditorEvent::SetGizmoMode(mode) => {
+                if let Some(r) = &mut self.renderer {
+                    r.gizmo_mode = match mode {
+                        1 => somnium_renderer::pass::gizmo::GizmoMode::Rotate,
+                        2 => somnium_renderer::pass::gizmo::GizmoMode::Scale,
+                        _ => somnium_renderer::pass::gizmo::GizmoMode::Translate,
+                    };
+                }
+            }
+
+            EditorEvent::ToggleTerrainEdit => {
+                if self.selected_terrain().is_some() {
+                    self.terrain_edit_active = !self.terrain_edit_active;
+                    info!(
+                        "Terrain edit mode: {}",
+                        if self.terrain_edit_active {
+                            "ON"
+                        } else {
+                            "off"
+                        }
+                    );
+                } else {
+                    info!("Select a terrain entity before pressing F6");
+                }
             }
 
             EditorEvent::ToggleImmersiveViewport => {

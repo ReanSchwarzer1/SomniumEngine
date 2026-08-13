@@ -67,11 +67,12 @@ impl Control for Popup {
         }
         for &ch in &widget.children {
             let ds = ctx.desired_size(ch);
-            let w = ds.x.max(1.0);
+            let mut w = ds.x.max(1.0);
             let h = ds.y.max(1.0);
             let (x, y) = match self.placement {
                 PopupPlacement::AnchorBelow if self.anchor.is_some() => {
                     let b = ctx.screen_bounds(self.anchor);
+                    w = w.max(b.w);
                     let mut x = b.x;
                     let mut y = b.y + b.h;
                     if x + w > final_size.x {
