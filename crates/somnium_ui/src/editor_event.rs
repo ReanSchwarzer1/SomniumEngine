@@ -246,6 +246,10 @@ pub enum EditorEvent {
     StopSimulation,
     /// Hide editor chrome and fill the monitor with the 3D view. Esc toggles off.
     ToggleImmersiveViewport,
+    /// 0 translate, 1 rotate, 2 scale — same as T / R / S.
+    SetGizmoMode(u8),
+    /// Arm or disarm terrain sculpt (F6).
+    ToggleTerrainEdit,
     SaveScene,
     NewScene,
     LoadScene(String),

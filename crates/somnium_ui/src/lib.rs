@@ -35,7 +35,7 @@ use crate::{
         color_picker::{
             ColorPickerBuilder, ColorPickerMessage, ColorSwatchBuilder, ColorSwatchMessage,
         },
-        combo_box::{ComboBoxBuilder, ComboBoxMessage},
+        combo_box::{ComboBoxBuilder, ComboBoxMessage, ComboDropdownBuilder},
         command_palette::{CommandPaletteBuilder, CommandPaletteMessage, PaletteItem},
         context_menu::{ContextMenuBuilder, MenuItem},
         grid::{Column, GridBuilder, GridMessage, Row},
@@ -332,6 +332,8 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Island Tree",
 ];
 
+const TONEMAP_NAMES: [&str; 3] = ["AgX", "ACES", "Reinhard"];
+
 /// Short paint-palette labels (Phase XV-I / XV-Zeta). Indices match the renderer roster.
 const TERRAIN_LAYER_SHORT: [&str; 32] = [
     "Grass", "Forest", "Rock", "Snow", "Meadow", "Mud", "Coast", "Gravel", "DrySd", "DampSd",
@@ -368,6 +370,9 @@ struct EditorLayout {
     pause_label: NodeHandle,
     stop_button: NodeHandle,
     stop_label: NodeHandle,
+    select_button: NodeHandle,
+    landscape_button: NodeHandle,
+    foliage_toolbar_button: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: InspectorHandles,
     viewport_handle: NodeHandle,
@@ -421,6 +426,8 @@ struct EditorLayout {
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
     post_tonemap_combo: NodeHandle,
+    foliage_kind_popup: NodeHandle,
+    post_tonemap_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -470,6 +477,7 @@ pub struct UiManager {
     file_button: NodeHandle,
     file_popup: NodeHandle,
     file_popup_open: bool,
+    open_combo_popup: NodeHandle,
     file_import_item: NodeHandle,
     file_new_item: NodeHandle,
     file_save_item: NodeHandle,
@@ -485,6 +493,9 @@ pub struct UiManager {
     stop_button: NodeHandle,
     #[allow(dead_code)]
     stop_label: NodeHandle,
+    select_button: NodeHandle,
+    landscape_button: NodeHandle,
+    foliage_toolbar_button: NodeHandle,
     // Terrain tool buttons (Phase 14F / XV-Zeta): (button, label, BrushMode index)
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -546,6 +557,8 @@ pub struct UiManager {
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
     post_tonemap_combo: NodeHandle,
+    foliage_kind_popup: NodeHandle,
+    post_tonemap_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -594,6 +607,7 @@ pub struct UiManager {
     title_last_click: Option<std::time::Instant>,
     immersive: bool,
     immersive_restore_fullscreen: Option<Fullscreen>,
+    immersive_restore_maximized: bool,
 }
 
 impl UiManager {
@@ -661,6 +675,7 @@ impl UiManager {
             file_button: layout.file_button,
             file_popup: layout.file_popup,
             file_popup_open: false,
+            open_combo_popup: NodeHandle::NONE,
             file_import_item: layout.file_import_item,
             file_new_item: layout.file_new_item,
             file_save_item: layout.file_save_item,
@@ -673,6 +688,9 @@ impl UiManager {
             pause_label: layout.pause_label,
             stop_button: layout.stop_button,
             stop_label: layout.stop_label,
+            select_button: layout.select_button,
+            landscape_button: layout.landscape_button,
+            foliage_toolbar_button: layout.foliage_toolbar_button,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             inspector_handles: layout.inspector_handles,
@@ -728,6 +746,8 @@ impl UiManager {
             inspector_search: layout.inspector_search,
             foliage_kind_combo: layout.foliage_kind_combo,
             post_tonemap_combo: layout.post_tonemap_combo,
+            foliage_kind_popup: layout.foliage_kind_popup,
+            post_tonemap_popup: layout.post_tonemap_popup,
             save_button: layout.save_button,
             palette_popup: layout.palette_popup,
             palette_widget: layout.palette_widget,
@@ -775,6 +795,7 @@ impl UiManager {
             title_last_click: None,
             immersive: false,
             immersive_restore_fullscreen: None,
+            immersive_restore_maximized: false,
         };
         this.refresh_content_list();
         this
@@ -1092,6 +1113,39 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
+    fn close_combo_dropdowns(&mut self) {
+        if self.open_combo_popup.is_none() {
+            return;
+        }
+        for (combo, popup) in [
+            (self.foliage_kind_combo, self.foliage_kind_popup),
+            (self.post_tonemap_combo, self.post_tonemap_popup),
+        ] {
+            self.native_ui.send(UiMessage::new(
+                popup,
+                MessageDirection::ToWidget,
+                PopupMessage::Close,
+            ));
+            self.native_ui.send(ComboBoxMessage::close(combo));
+            self.native_ui.invalidate_ancestors(popup);
+        }
+        self.open_combo_popup = NodeHandle::NONE;
+    }
+
+    fn combo_popup_for(&self, combo: NodeHandle) -> Option<NodeHandle> {
+        if combo == self.foliage_kind_combo
+            || combo == self.inspector_handles.foliage_kind_button
+        {
+            Some(self.foliage_kind_popup)
+        } else if combo == self.post_tonemap_combo
+            || combo == self.inspector_handles.post_tonemap_button
+        {
+            Some(self.post_tonemap_popup)
+        } else {
+            None
+        }
+    }
+
     fn close_top_overlay(&mut self) -> bool {
         if self.palette_open {
             self.close_palette();
@@ -1103,6 +1157,10 @@ impl UiManager {
         }
         if self.unsaved_open {
             self.close_unsaved();
+            return true;
+        }
+        if self.open_combo_popup.is_some() {
+            self.close_combo_dropdowns();
             return true;
         }
         if self.file_popup_open
@@ -1160,6 +1218,7 @@ impl UiManager {
             || self.palette_open
             || self.color_open
             || self.unsaved_open
+            || self.open_combo_popup.is_some()
     }
 
     fn open_transient_popup(&self) -> Option<NodeHandle> {
@@ -1183,6 +1242,8 @@ impl UiManager {
             Some(self.color_popup)
         } else if self.unsaved_open {
             Some(self.unsaved_popup)
+        } else if self.open_combo_popup.is_some() {
+            Some(self.open_combo_popup)
         } else {
             None
         }
@@ -1330,6 +1391,7 @@ impl UiManager {
 
     fn open_menu(&mut self, which: u8) {
         self.close_all_menus();
+        self.close_combo_dropdowns();
         let (flag, popup, anchor) = match which {
             0 => (&mut self.file_popup_open, self.file_popup, self.file_button),
             1 => (
@@ -1393,6 +1455,18 @@ impl UiManager {
                     PopupMessage::SetAnchor(anchor),
                 ));
             }
+        }
+        if self.open_combo_popup.is_some() {
+            let (popup, anchor) = if self.open_combo_popup == self.foliage_kind_popup {
+                (self.foliage_kind_popup, self.foliage_kind_combo)
+            } else {
+                (self.post_tonemap_popup, self.post_tonemap_combo)
+            };
+            self.native_ui.send(UiMessage::new(
+                popup,
+                MessageDirection::ToWidget,
+                PopupMessage::SetAnchor(anchor),
+            ));
         }
         let outgoing = self.native_ui.update();
         let _ = outgoing;
@@ -1519,9 +1593,16 @@ impl UiManager {
             return;
         }
         for (section, names) in pairs {
-            self.native_ui
-                .set_visibility(section, names.contains(q.as_str()));
+            let hit = names.split_whitespace().any(|w| w.contains(&q));
+            if !hit {
+                self.native_ui.set_visibility(section, false);
+            }
         }
+    }
+
+    /// Re-apply Details search after the per-frame inspector refresh.
+    pub fn refresh_inspector_filter(&mut self) {
+        self.apply_inspector_filter();
     }
 
     /// Returns true if a text-input widget (TextBox or NumericField) has keyboard focus.
@@ -1586,12 +1667,16 @@ impl UiManager {
             .send(ButtonMessage::set_selected(self.immersive_button, on));
         if on {
             self.set_play_overlays_hidden(true);
+            self.immersive_restore_maximized = self.window.is_maximized();
             self.immersive_restore_fullscreen = self.window.fullscreen();
             self.window
                 .set_fullscreen(Some(Fullscreen::Borderless(None)));
         } else {
             self.window
                 .set_fullscreen(self.immersive_restore_fullscreen.take());
+            if self.immersive_restore_maximized {
+                self.window.set_maximized(true);
+            }
         }
     }
 
@@ -1954,6 +2039,12 @@ impl UiManager {
                     self.native_ui.send(TextMessage::set_text(
                         *label,
                         TERRAIN_LAYER_SHORT[i].to_string(),
+                    ));
+                }
+                for (i, &btn) in h.terrain_palette.iter().enumerate() {
+                    self.native_ui.send(ButtonMessage::set_selected(
+                        btn,
+                        i == paint,
                     ));
                 }
                 let active_brush = if v.terrain_edit { Some(brush) } else { None };
@@ -2529,6 +2620,18 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::PlaySimulation);
                     continue;
                 }
+                if msg.destination == self.select_button {
+                    self.editor_events.push_back(EditorEvent::SetGizmoMode(0));
+                    continue;
+                }
+                if msg.destination == self.landscape_button {
+                    self.editor_events.push_back(EditorEvent::ToggleTerrainEdit);
+                    continue;
+                }
+                if msg.destination == self.foliage_toolbar_button {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliage);
+                    continue;
+                }
                 if msg.destination == self.immersive_button {
                     self.editor_events
                         .push_back(EditorEvent::ToggleImmersiveViewport);
@@ -2577,14 +2680,6 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.foliage_single_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleFoliageSingle);
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.foliage_kind_button {
-                    // Advance to the next palette entry. The label shows the
-                    // current one, so the control reads as a cycler.
-                    let next = (self.foliage_kind_shown + 1) % FOLIAGE_KIND_NAMES.len() as u8;
-                    self.editor_events
-                        .push_back(EditorEvent::SelectFoliageKind(next));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_fxaa_toggle {
@@ -2819,6 +2914,19 @@ impl UiManager {
                 if msg.destination == self.help_overlay {
                     self.help_open = false;
                 }
+                if msg.destination == self.foliage_kind_popup
+                    || msg.destination == self.post_tonemap_popup
+                {
+                    if let Some(combo) = if msg.destination == self.foliage_kind_popup {
+                        Some(self.foliage_kind_combo)
+                    } else {
+                        Some(self.post_tonemap_combo)
+                    } {
+                        self.native_ui.send(ComboBoxMessage::close(combo));
+                    }
+                    self.open_combo_popup = NodeHandle::NONE;
+                    self.native_ui.invalidate_ancestors(msg.destination);
+                }
             } else if let Some(CheckBoxMessage::Check(_)) = msg.data::<CheckBoxMessage>() {
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
@@ -2943,6 +3051,38 @@ impl UiManager {
                         .push_back(EditorEvent::SelectFoliageKind(*i as u8));
                     continue;
                 }
+            } else if let Some(ComboBoxMessage::Open) = msg.data::<ComboBoxMessage>() {
+                self.close_all_menus();
+                if let Some(popup) = self.combo_popup_for(msg.destination) {
+                    if self.open_combo_popup.is_some() && self.open_combo_popup != popup {
+                        let other = self.open_combo_popup;
+                        if other == self.foliage_kind_popup {
+                            self.native_ui.send(ComboBoxMessage::close(self.foliage_kind_combo));
+                            self.native_ui.send(UiMessage::new(
+                                self.foliage_kind_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::Close,
+                            ));
+                        } else if other == self.post_tonemap_popup {
+                            self.native_ui.send(ComboBoxMessage::close(self.post_tonemap_combo));
+                            self.native_ui.send(UiMessage::new(
+                                self.post_tonemap_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::Close,
+                            ));
+                        }
+                    }
+                    self.open_combo_popup = popup;
+                    self.native_ui.invalidate_ancestors(popup);
+                }
+                continue;
+            } else if let Some(ComboBoxMessage::Close) = msg.data::<ComboBoxMessage>() {
+                if self.combo_popup_for(msg.destination) == Some(self.open_combo_popup)
+                    || msg.destination == self.open_combo_popup
+                {
+                    self.open_combo_popup = NodeHandle::NONE;
+                }
+                continue;
             } else if let Some(TreeViewMessage::Select(id)) = msg.data::<TreeViewMessage>() {
                 if msg.destination == self.outliner_tree {
                     self.editor_events
@@ -3224,9 +3364,11 @@ fn build_editor_layout(
             .build();
     let main_tb_stack_h = ui.add_node(main_tb_stack, main_tb_h);
     let save_button = icon_tool_button(ui, main_tb_stack_h, IconId::Save, "Save (Ctrl+S)");
-    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Select, "Select");
-    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
-    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
+    let select_button = icon_tool_button(ui, main_tb_stack_h, IconId::Select, "Select (T)");
+    let landscape_button =
+        icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
+    let foliage_toolbar_button =
+        icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
     let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "");
     let immersive_button = icon_tool_button(
         ui,
@@ -4056,6 +4198,9 @@ fn build_editor_layout(
 
     let foliage_kind_combo = inspector_handles.foliage_kind_button;
     let post_tonemap_combo = inspector_handles.post_tonemap_button;
+    let foliage_kind_popup =
+        attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
+    let post_tonemap_popup = attach_combo_popup(ui, post_tonemap_combo, &TONEMAP_NAMES, font_id);
 
     EditorLayout {
         outliner_scroll,
@@ -4079,6 +4224,9 @@ fn build_editor_layout(
         pause_label,
         stop_button,
         stop_label,
+        select_button,
+        landscape_button,
+        foliage_toolbar_button,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
@@ -4131,6 +4279,8 @@ fn build_editor_layout(
         inspector_search,
         foliage_kind_combo,
         post_tonemap_combo,
+        foliage_kind_popup,
+        post_tonemap_popup,
         save_button,
         palette_popup,
         palette_widget,
@@ -4326,11 +4476,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_shutter = make_row_step(ui, "1/s", 34.0, font_id, post_section, 1.0);
     let post_iso = make_row_step(ui, "ISO", 34.0, font_id, post_section, 2.0);
     let (post_tonemap_button, post_tonemap_label) = {
-        let tonemap_combo =
-            ComboBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-                .with_items(["AgX", "ACES", "Reinhard"])
-                .with_font_id(font_id)
-                .build();
+        let tonemap_combo = ComboBoxBuilder::new(WidgetBuilder::new())
+            .with_items(TONEMAP_NAMES)
+            .with_font_id(font_id)
+            .build();
         let (_, h) = build_property_row(ui, post_section, "Tonemap", font_id, tonemap_combo);
         (h, h)
     };
@@ -4422,7 +4571,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Erase", font_id, foliage_section);
     let (foliage_single_toggle, foliage_single_label) =
         make_toggle(ui, "Single", font_id, foliage_section);
-    let kind_combo = ComboBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
+    let kind_combo = ComboBoxBuilder::new(WidgetBuilder::new())
         .with_items(FOLIAGE_KIND_NAMES)
         .with_font_id(font_id)
         .build();
@@ -4820,6 +4969,28 @@ fn make_toggle(
     .build();
     let h = ui.add_node(cb, parent);
     (h, h)
+}
+
+fn attach_combo_popup(
+    ui: &mut UserInterface,
+    combo: NodeHandle,
+    items: &[&str],
+    font_id: u8,
+) -> NodeHandle {
+    let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_anchor(combo)
+        .with_placement(PopupPlacement::AnchorBelow)
+        .build();
+    let popup_h = ui.add_node(popup, ui.root());
+    let list = ComboDropdownBuilder::new(WidgetBuilder::new())
+        .with_items(items.iter().copied())
+        .with_combo(combo)
+        .with_popup(popup_h)
+        .with_font_id(font_id)
+        .build();
+    let list_h = ui.add_node(list, popup_h);
+    ui.send(ComboBoxMessage::bind_popup(combo, popup_h, list_h));
+    popup_h
 }
 
 fn menu_button(ui: &mut UserInterface, parent: NodeHandle, label: &str, font_id: u8) -> NodeHandle {

@@ -270,7 +270,7 @@ pub fn build_property_row(
 ) -> (NodeHandle, NodeHandle) {
     let row = StackPanelBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::ROW_HEIGHT)
+            .with_clip_to_bounds(false)
             .with_background(theme::TRANSPARENT),
     )
     .with_orientation(Orientation::Horizontal)

@@ -547,6 +547,16 @@ impl UserInterface {
                         for e in emit {
                             self.message_queue.push_back(e);
                         }
+                        // Widget.invalidate_layout only dirties this node. Ancestors
+                        // still hold cached measure and would skip the child.
+                        let dirty = self
+                            .nodes
+                            .try_borrow(current_ih)
+                            .map(|n| !n.widget.measure_valid)
+                            .unwrap_or(false);
+                        if dirty {
+                            self.invalidate_ancestors(to_nh(current_ih));
+                        }
                         // If handled or no parent, stop bubbling.
                         if msg.handled || !parent_nh.is_some() {
                             break;

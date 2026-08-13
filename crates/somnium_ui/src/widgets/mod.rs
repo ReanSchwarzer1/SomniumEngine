@@ -31,7 +31,9 @@ pub use color_picker::{
     ColorPicker, ColorPickerBuilder, ColorPickerMessage, ColorSwatch, ColorSwatchBuilder,
     ColorSwatchMessage,
 };
-pub use combo_box::{ComboBox, ComboBoxBuilder, ComboBoxMessage};
+pub use combo_box::{
+    ComboBox, ComboBoxBuilder, ComboBoxMessage, ComboDropdownBuilder,
+};
 pub use command_palette::{
     CommandPalette, CommandPaletteBuilder, CommandPaletteMessage, PaletteItem,
 };
