@@ -37,6 +37,8 @@ A couple of conventions keep this codebase coherent — please follow them:
    exception is the vendored Jolt Physics subtree, which the build compiles.
 3. **Keep the living docs current.** Architectural changes should be reflected in
    [`context.md`](context.md) (and `ATTRIBUTION.md` if a new reference was used).
+   New authoring UI also needs a [`docs/editor/`](docs/editor/) Help page or
+   section — Metaphor chrome is not closed; it grows with the engine.
 4. **Match the surrounding style.** New code should read like the code around it —
    naming, comment density, and idiom.
 

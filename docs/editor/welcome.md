@@ -14,3 +14,5 @@ This window stays inside the editor. Press **F1** or the **?** button to open it
 - Play, pause, and stop the simulation from the toolbar. Overlays hide while you play.
 
 Nothing in Help is a web page. If a control looks like a button, it is a button — click it, it highlights, and it does the thing.
+
+Help will gain topics as the engine does. Missing a page for a new panel usually means the chrome for that feature is still being written.

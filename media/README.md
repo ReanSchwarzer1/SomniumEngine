@@ -7,7 +7,7 @@ section. Suggested captures:
 
 | Filename | What to show |
 |---|---|
-| `editor.png` | The editor — viewport with the demo scene, outliner, inspector, log |
+| `editor.png` | Custom title bar, viewport, Outliner/Details, docked Content Drawer |
 | `terrain.png` | Heightmap terrain with splatmap painting / sculpted hills |
 | `voxel.png` | The voxel world streaming around the camera |
 | `shadows.png` | Cascaded shadows + PBR materials on the glTF scene |

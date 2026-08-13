@@ -66,7 +66,8 @@ The engine is organized around three deliberate commitments:
 - Archetype ECS with parent/child hierarchy and world-transform propagation
 - Transform gizmos, light gizmos (range/cone visualization), selection outline, infinite editor grid
 - Undo/redo (command stack), scene save/load (`.somnium` JSON)
-- Native UI widget library (Grid, StackPanel, ScrollViewer, TextBox, NumericField, …)
+- Native UI widget library (Grid, StackPanel, ScrollViewer, WrapPanel, TextBox, NumericField, …)
+- Custom title bar (undecorated window), docked Content Drawer, F1 Help
 - Jolt physics integration; Kira audio scaffolding
 - CPU particle system with GPU billboard instancing
 
@@ -112,14 +113,20 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **RMB + scroll wheel** — adjust fly speed (0.5–500 m/s), or drag the **Camera Speed** slider above the viewport
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
+- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
+- **Ctrl+Space** — show or hide the docked Content Drawer · **Ctrl+P** — command palette
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
 - **F10** — A/B GPU frustum culling (a correct cull is invisible)
 - **File > Import Model…** — import any glTF/GLB into the scene at the origin
 - **Create menu** — spawn primitives, lights, particle emitter, heightmap terrain, or voxel terrain
-- Select a light to edit its intensity / range / cone angles in the inspector
-  (full colour swatches: planned Phase 26 — Iris, see `dev records/phase_26.md`)
+- Select a light to edit its intensity / range / cone angles / colour in the inspector
+  (Iris swatches shipped as Metaphor 26-F; see `dev records/phase_26.md`)
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
-  pick a brush, `[` / `]` size, `-` / `=` strength
+  pick Raise / Lower / Smooth / Flatten / Noise / Paint, `[` / `]` size, `-` / `=` strength
+
+Metaphor editor chrome (26-A–I) is in the tree, but **the UI phase is not
+over**. Later engine features will keep needing new inspector fields, panels,
+and Help pages.
 
 ## Repository layout
 

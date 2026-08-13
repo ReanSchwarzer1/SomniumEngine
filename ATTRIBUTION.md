@@ -97,14 +97,22 @@
 | Viewport right-click fly-cam (W/A/S/D/Q/E + Shift) | `EditorCamera` in `hello_engine/src/main.rs` | Identical bindings and speed-boost via Shift |
 | Outliner panel (actor hierarchy) | Native `TreeView` in `somnium_ui` | Parent/child depth, type icons, search (Phase 26-E) |
 | Details panel (per-actor properties) | Native inspector `CheckBox` / `ComboBox` / `NumericField` | Every `InspectorField` kept; foliage kind + tonemapper are combos |
-| Content Browser (asset grid) | Content Drawer overlay | Ctrl+Space; project `assets/`; Show Engine Content off by default (26-D) |
-| Toolbar (Play/Pause/Stop) | Icon buttons on the main toolbar | `EditorEvent::PlaySimulation` / Pause / Stop |
-| FPS counter (top-right toolbar) | Menu-bar `fps_text` | `UiManager::set_fps` each frame |
+| Content Browser (asset grid) | Docked Content Drawer (`WrapPanel` tiles) | Ctrl+Space; project `assets/`; Show Engine Content off by default (26-D). Click-away does **not** close it. |
+| Toolbar (Play/Pause/Stop) | Icon buttons on the main toolbar | `EditorEvent::PlaySimulation` / Pause / Stop; selected/hover/press fills, no tooltips |
+| FPS counter (top-right toolbar) | Custom title bar `fps_text` | `UiManager::set_fps` each frame |
 
 ### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor)
 
-**Status:** 26-A through 26-I implemented (2026-08-13). 26-H SDF/cosmic-text slipped (bitmap Inter, supersampled). 26-J not started.
-Controlling plan: `dev records/phase_26.md`. Codename is thematic (Atlus);
+**Status:** 26-A through 26-I plus the 2026-08-13 UX polish (custom title bar,
+docked drawer, wrapped Help, button states, scrollbars, tile browser)
+implemented 2026-08-13. 26-H SDF/cosmic-text slipped (bitmap Inter, supersampled).
+26-J not started.
+
+**This phase is not closed.** New renderer, terrain, animation, and gameplay
+features will keep needing inspector sections, menus, drawers, and Help
+pages. Treat Metaphor as living chrome.
+
+Controlling contract: `dev records/phase_26.md`. Codename is thematic (Atlus);
 **no Atlus art**. Visual IA is Unreal Editor 5. **No** `EditorStyle` / Starship
 icons, Slate, or UMG source.
 
@@ -122,7 +130,7 @@ lunar indigo `#7A86FF`, Inter, cool `#14161C` void. Unreal IA only; **not** Epic
 Linear storage, approximate sRGB display. Kelvin > 0 locks the light swatch.
 
 **Boundary:** UE EULA — pattern and information architecture only. No Slate
-source is copied. Widget implementation will be original Rust on the existing
+source is copied. Widget implementation is original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
 ### 1.5.1 Colour picker — Details property editor (26-F Iris)
@@ -138,7 +146,7 @@ Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 | Light Details colour + temperature | Swatch edits tint; Intensity and Kelvin stay separate; temperature can override the swatch | Keep `LightColorTemperature`; Kelvin > 0 locks the swatch to the derived tint |
 
 **Boundary:** UE EULA — pattern and information architecture only. No Slate
-source is copied. Widget implementation will be original Rust on the existing
+source is copied. Widget implementation is original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
 ### 1.6 Terrain materials — Phase XV Appalachia (A–J complete)

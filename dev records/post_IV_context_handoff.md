@@ -5,7 +5,7 @@
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
 > **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Metaphor) and Phase VV (Halcyon) **planned only**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI as later features land; 26-J not started); Phase VV (Halcyon) **planned only**
 
 **Current live contract** (supersedes “research-complete / not implemented”
 below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
@@ -24,7 +24,7 @@ This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_hand
 The next session should read these files **in order**:
 
 1. [`context.md`](../context.md) — living architecture (XV-A–Zeta in engine; §20 is still Phase 14).
-2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Metaphor / colour picker planned; §1.6 XV A–Zeta).
+2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Metaphor chrome / colour picker; §1.6 XV A–Zeta).
 3. [`phase_IV.md`](phase_IV.md) — completed Great Lakes water/terrain record, especially **§14 IV-K**.
 4. **This file** — post-IV contracts and XV history. Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 5. [`phase_XV.md`](phase_XV.md) — full plan (XV-A–J). XV-J is complete.
@@ -61,14 +61,15 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 | Phase | Codename | Status | Plan |
 |---|---|---|---|
 | **XV** | Appalachia | **A–J complete** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
-| **26** | Metaphor | Planned UI framework + editor rebuild (Iris colour pickers = 26-F) | [`phase_26.md`](phase_26.md) |
+| **26** | Metaphor | **26-A–I shipped**; chrome stays open as later features need UI. 26-J not started. | [`phase_26.md`](phase_26.md) |
 | **VV** | Halcyon | Planned RT water reflections | [`phase_VV.md`](phase_VV.md) |
 
 **Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; XV-J GPU PNGs are in `phase XV/evidence/`.
 
 ### Session estimate
 
-XV-A–J are done. Next planned tracks are **Phase 26 (Metaphor)** and **Phase VV (Halcyon)**.
+XV-A–J are done. Next planned tracks are **Phase 26 (Metaphor) remaining
+chrome** (the shell shipped; the phase is not closed) and **Phase VV (Halcyon)**.
 
 ---
 
@@ -136,7 +137,12 @@ Full plan-vs-code list: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codeba
 
 ### 5.1 Phase 26 — Metaphor
 
-UI framework hardening, Unreal-like editor rebuild, Content Drawer (project `assets/` + Show Engine Content), icon atlas, inspector/outliner UX. Colour pickers are **26-F** (former Iris plan: Unreal `SColorBlock` / `SColorPicker`). **Independent** of XV. Start at 26-A, not at the Drawer. Plan: [`phase_26.md`](phase_26.md).
+26-A–I plus the 2026-08-13 UX polish shipped (Nocturne shell, docked Content
+Drawer, Iris 26-F, custom title bar, F1 Help). **The UI phase is not over:**
+new engine features keep needing inspector fields, menus, drawers, and
+`docs/editor/` pages. Do not restart at 26-A. Queued: 26-J (only if
+requested), 26-H SDF, 26-D2 drag-drop. Contract: [`phase_26.md`](phase_26.md).
+**Independent** of XV.
 
 ### 5.2 Phase VV — Halcyon
 
@@ -285,24 +291,25 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 
 ## 10. Next-session start checklist (Phase 26 Metaphor / VV)
 
-XV-A–J are done. Next authorized work is **Metaphor** (UI) or Halcyon
+XV-A–J are done. Next authorized work is **Metaphor remaining chrome**
+(new UI/UX as features land — do not rebuild 26-A) or Halcyon
 reflections unless the user reopens terrain.
 BC7: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 **If the session is Metaphor**, ignore the old XV numbered steps below and
-follow [`phase_26.md`](phase_26.md) §20 instead:
+follow [`phase_26.md`](phase_26.md) §13.2 (shipped vs still open):
 
-1. Confirm branch `dev`. Read `phase_26.md` in full (§3, §4, §13, §14).
+1. Confirm branch `dev`. Read `phase_26.md` status + §3, §13.2, §14.
 2. Then `context.md` §8, `theme.rs`, `editor_event.rs`, `numeric_field.rs`.
 3. `cargo check --workspace` before edits.
 4. User must have **authorized implementation**. Research-only → stop after docs.
-5. **Start at 26-A** (anchored popups, icon atlas, splitter, bundled font).
-   Do not start at the Content Drawer or water colour.
+5. **Do not restart at 26-A.** Extend chrome for the feature in hand (inspector,
+   menu, drawer type, Help page). 26-J only if explicitly requested.
 6. UI/UX only. Do not retune `WaterComponent::great_lakes`. Do not rewrite
    `context.md` §20. Do not copy Unreal/Atlus art.
 7. Keep every §14 must-not-break behaviour. `EditorEvent` stays the seam.
-8. `cargo fmt` / tests green per sub-phase. Evidence under `dev records/phase 26/`.
+8. `cargo fmt` / tests green. Evidence under `dev records/phase 26/`.
 
 **If the session is still Halcyon (VV):** read [`phase_VV.md`](phase_VV.md);
 do not fold Metaphor widgets into it.

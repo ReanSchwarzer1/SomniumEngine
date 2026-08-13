@@ -18,3 +18,5 @@ The drawer is the project file browser. It stays docked above the status bar, li
 ## Import
 
 **File → Import Model** still opens a native picker for glTF/GLB. Imported nodes appear in the Outliner and can be selected immediately.
+
+New asset kinds (cooked packs, animation clips, prefabs, …) will show up here as those systems land. The drawer is not a finished catalog.

@@ -6,4 +6,4 @@ Editor chrome is **Nocturne** — cool night panels, lunar indigo accent, Inter.
 
 Inter is SIL OFL 1.1. Icon glyphs are original geometry packed into an atlas. Third-party patterns (Fyrox UI port, Jolt, wgpu, glTF) are listed in ATTRIBUTION.md at the repo root.
 
-This Help overlay is curated editor documentation, not a dump of engineering phase plans.
+This Help overlay is curated editor documentation, not a dump of engineering phase plans. Pages are added as the editor grows — Metaphor chrome is a living product, not a finished UI pass.

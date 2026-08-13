@@ -9,7 +9,16 @@
 > **Codename:** Metaphor, after Atlus's *Metaphor: ReFantazio* (and the
 > Persona-family discipline of treating UI as identity, not chrome). The name
 > is thematic. **Zero Atlus art, fonts, motion, or layout is copied.**
-> **Status:** 26-A through 26-I implemented 2026-08-13. 26-H SDF/cosmic-text slipped (bundled bitmap Inter, supersampled + HiDPI raster). 26-J not started.
+> **Status:** 26-A through 26-I implemented 2026-08-13. UX polish (custom title
+> bar, docked Content Drawer, click-away, named sculpt tools, wrapped Help,
+> button hover/press, visible scrollbars, tile browser) landed the same day.
+> 26-H SDF/cosmic-text slipped (bundled bitmap Inter, supersampled + HiDPI
+> raster). 26-J (reflection inspector) not started.
+>
+> **This phase is not closed.** The 26-A–I toolkit and Nocturne shell are the
+> baseline. New renderer, terrain, lighting, animation, and gameplay features
+> will keep needing inspector sections, menus, drawers, and Help pages. Treat
+> Metaphor as living chrome, not a finished product.
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85 docs / 1.88 effective, wgpu 29, winit 0.30
@@ -33,9 +42,11 @@ implementation is original Rust on the existing Fyrox-inspired stack
 
 ## 0. How to use this document (handoff)
 
-This file is the **start-here** for a Metaphor implementation session. A
-different chat will execute it. Do not re-audit engines unless a cited path
-moved.
+This file is the chrome contract for Metaphor. 26-A–I plus the 2026-08-13
+UX polish are in the tree. A later session should **extend** this chrome
+(new inspector sections, menus, drawers, Help pages) as other engine
+features land — not restart at 26-A. Do not re-audit engines unless a cited
+path moved.
 
 **Read in this order before writing code:**
 
@@ -54,16 +65,18 @@ moved.
    inspector rebuilds. This is the file the chrome lives in today (~2.8k
    lines). The refactor migrates it; it is not deleted on day one.
 
-**Then begin at 26-A.** Do not begin at the Content Drawer, water colour, or
-SDF text. Those are later consumers of widgets that do not exist yet.
+**26-A–I are done.** Do not rebuild the toolkit. Remaining Metaphor work is
+living chrome: 26-J (only if requested), 26-H SDF/shaping, 26-D2 drag-drop,
+async thumbs, and **every new authoring surface** later phases need. Help
+pages in `docs/editor/` grow with those surfaces.
 
 **Authorized work:** UI and UX only. Renderer, terrain, water optics, lighting,
 physics, and ECS layout stay frozen except **inspector bindings** to fields
 that already exist. `WaterComponent::great_lakes` stays frozen. Do not
 reintroduce per-pixel terrain sample-count LOD.
 
-This file is a plan only. No Phase 26 engine code was added as part of its
-creation.
+This file began as the Metaphor plan. Keep using it as the contract (`§3`,
+`§14`) when adding UI for later features. Do not treat 26-I as “UI is done.”
 
 ---
 
@@ -248,10 +261,10 @@ Folder tint in the Drawer: warm sand `#C4A574` (readable on cool panels).
 |---|---|
 | Visibility of system status | Status bar always shows FPS, selection name, dirty save dot, active tool |
 | Match the real world | Unreal slot names (Details, Content Drawer, Outliner) so DCC users transfer |
-| User control | Esc closes the top popup / Help / Drawer; Ctrl+Z for transforms |
+| User control | Esc / click-away closes the top popup, Help, palette, colour, unsaved; docked Content Drawer stays; Ctrl+Z for transforms |
 | Consistency | One PropertyRow, one Combo, one CheckBox; no cyclers |
 | Error prevention | Unsaved modal on New Scene; disabled Open until LoadScene is real |
-| Recognition not recall | Icon + tooltip on every chrome button; F1 Help |
+| Recognition not recall | Icon + **label** on chrome (Play/Sculpt are not tooltip-only); hover/press/selected fills; F1 Help |
 | Flexibility | Menu path and shortcut for every command |
 | Aesthetic / minimal | One accent; no decorative gradients on panels |
 | Recover | Undo; colour Cancel restores |
@@ -589,27 +602,26 @@ storage, sRGB display. Kelvin sibling. Water abs/scatter = normalised swatch
 ## 7. Target information architecture
 
 ```
-┌─ MenuBar ────────────────────────────────────── FPS  [?]  save ● ─┐
+┌─ TitleBar (undecorated window) ── Somnium Engine ── fps ─ _ □ × ─┐
 │  [S] File  Edit  Create  View  Window  Help                         │
 ├─ MainToolbar ────────────────────────────────────────────────────────┤
 │  Save  |  Select Landscape Foliage  |  Create ▾  |  ▶  ❚❚  ■  |     │
 ├─ ViewportToolbar ────────────────────────────────────────────────────┤
 │  T R S  |  snap  |  Camera speed ───── 5.0 m/s  |  Lit ▾  |  Prof   │
-├─ L tool ─┬─ Viewport (passthrough) ──────────────┬─ Outliner ────────┤
-│  icons   │                                       │  tree + search    │
-│          │                                       ├─ Details ─────────┤
-│          │                                       │  categories       │
-├──────────┴───────────────────────────────────────┴───────────────────┤
-│  [Content Drawer]  [Output Log]     status: entity · tool · 60 fps   │
-└──────────────────────────────────────────────────────────────────────┘
-
-Content Drawer (overlay from status bar, or docked as bottom tab):
-┌─ breadcrumb /Game/foliage ──────────── [search] [filters] [engine ☑] ┐
-│ Folders          │ Tiles / list                                      │
-│ ▸ Game           │  [icon] grass_medium_01                           │
-│ ▸ Engine (off)   │  [icon] island_tree_02                            │
-└──────────────────┴───────────────────────────────────────────────────┘
+├─ L Sculpt ┬─ Viewport (passthrough) ─────────────┬─ Outliner ────────┤
+│  Raise    │                                       │  tree + search    │
+│  Lower …  │                                       ├─ Details ─────────┤
+│           │                                       │  categories       │
+├───────────┴───────────────────────────────────────┴───────────────────┤
+│  Content Drawer tiles (docked; Output Log swaps this row)             │
+├───────────────────────────────────────────────────────────────────────┤
+│  [Content Drawer]  [Output Log]     status: entity · tool · 60 fps    │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+Shipped default: Content Drawer **docked** in the bottom row (not a popup).
+Click-away does **not** dismiss it. Output Log occupies the same slot when
+its status-bar button is pressed.
 
 Column widths: **resizable splitters** (left tools, right details). Bottom
 log/drawer: **resizable**. Default roughly 40 | \* | 320, bottom 220 when
@@ -666,7 +678,12 @@ menu — hit-test must distinguish passthrough.
 
 ### 9.1 Two hosts, one widget
 
-`ContentBrowser` is a widget. Hosts:
+`ContentBrowser` is a widget. **Shipped default (2026-08-13):** the widget
+is **docked** in outer-grid row 5. Ctrl+Space and the status-bar button
+show/hide that row. Click-away does not dismiss it. Output Log swaps into
+the same slot.
+
+Original two-host design (still valid if we add an undocked popup later):
 
 1. **Drawer** — rises from the status-bar "Content Drawer" button (and
    Ctrl+Space). Dismisses when it loses focus unless pinned.
@@ -896,7 +913,7 @@ the pages next to the engine so Help cannot rot:
 | Selection & gizmos | README T/R/S; `context.md` §8 routing; L light gizmos |
 | Outliner & Details | This plan §7 / §12; existing inspector sections |
 | Create & Import | README Create menu + File → Import Model |
-| Content Drawer | This plan §9 (after 26-D lands; stub page until then) |
+| Content Drawer | `docs/editor/content_drawer.md` (docked tiles; keep in sync as types grow) |
 | Terrain | README F6 / 1–6 / `[` `]` / `-` `=`; XV-I palette; paint vs foliage |
 | Foliage | 17F tools; F8; kind combo |
 | Lights & Post FX | Inspector field list; F5 shading; Kelvin note |
@@ -942,6 +959,24 @@ Requires Widget drag-drop restored. If not ready, ship double-click spawn.
 **26-J (explicitly out of v1 unless requested):** reflection-driven inspector
 (NeoAxis/Falco). World-space 3D canvases can also wait until 26-G screen-space
 is real.
+
+### 13.2 Shipped vs still open (2026-08-13)
+
+| Shipped | Still open |
+|---|---|
+| Toolkit A/B, Nocturne shell C, docked Content Drawer D (tiles, not a popup), Details/Outliner E, Iris F, `UiCanvas` G, bitmap Inter H (SDF slipped), palette/toasts/HiDPI/layout persist/unsaved I | 26-J reflection inspector; 26-H SDF/shaping; 26-D2 drag-drop spawn; async PNG thumbs |
+| Custom title bar (engine mark, “Somnium Engine”, min/max/close) | Native OS chrome is gone on purpose; keep engine widgets if the bar grows |
+| Click-away closes menus/Help/palette/colour/unsaved | Docked drawer does **not** close on click-away |
+| Named Sculpt tools with selected/hover/press fills | New tools (foliage modes, voxel brushes, etc.) must ship as labelled buttons, not two-letter codes |
+| F1 Help: wrapped pages + TOC (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain) | Add a Help page (or section) whenever a feature adds authoring UI |
+| Visible scrollbars on Outliner, Details, Help, Drawer | Any new tall pane should use `ScrollViewer` |
+
+**Open by design:** Metaphor does not end when 26-J lands. Each later phase
+that adds an authoring lever (animation graphs, cooked assets, networking
+debug, new post-fx, terrain material UI in 25J, …) is expected to extend
+this chrome — inspector bindings, menus, Content Drawer types, and
+`docs/editor/*.md` — rather than bolting on a one-off panel. Help is a
+living product surface, not a one-shot dump.
 
 ### 13.1 Suggested calendar (not a promise)
 
@@ -1097,7 +1132,7 @@ Logs beside PNGs if a capture path exists. `cargo test` / `cargo check
 |---|---|
 | Big-bang rewrite blanks the editor | Strangler: A/B widgets, then migrate; never delete `build_editor_layout` until the new shell is wired to the same events |
 | Popup clip in ScrollViewer | Root-canvas host (already File menu pattern) |
-| Drawer focus vs viewport | Hit-test: drawer consumes; click in viewport dismisses undocked drawer and passes pick |
+| Drawer focus vs viewport | Hit-test: docked drawer consumes; click-away does **not** dismiss it. An undocked popup (if reintroduced) dismisses and passes pick |
 | Ctrl+Space vs camera | Space is not a fly key today; still only handle Ctrl+Space when the editor shell is up |
 | Thumbnail hitch | Async only; icon placeholder first |
 | Icon atlas legal | Lucide/Phosphor; no UE |
@@ -1115,25 +1150,27 @@ Logs beside PNGs if a capture path exists. `cargo test` / `cargo check
 
 A Metaphor **implementation** session should:
 
-1. Confirm branch `dev` and that this file is the plan (`dev records/phase_26.md`).
-2. Skim §3, §4, §13, §14 — do not start coding from memory of Iris.
+1. Confirm branch `dev` and that this file is the chrome contract.
+2. Read the status block + §13.2 (shipped vs still open) + §3 + §14.
 3. `cargo check --workspace` **before** edits (known-good baseline).
-4. User must have **authorized implementation**. This research session did
-   not.
-5. **Start at 26-A.** Anchored popups + icon atlas + splitter + **Nocturne
-   tokens** + bundled Inter. Do not open water colour or the Drawer first.
-   Help overlay is **26-C** (needs Popup + ScrollViewer + SearchBox).
+4. User must have **authorized implementation**.
+5. **Do not restart at 26-A.** 26-A–I plus UX polish are in the tree. Extend
+   chrome for the feature in hand (inspector section, menu, drawer type,
+   `docs/editor/` page). 26-J only if explicitly requested. 26-H SDF and
+   26-D2 remain queued.
 6. Keep `EditorEvent` stable; add variants only when a new command has an
-   `app.rs` handler in the same sub-phase.
+   `app.rs` handler in the same change.
 7. Do not retune `WaterComponent::great_lakes`. Do not rewrite `context.md`
    §20. Do not download Quixel/Megascans. Do not copy UE/Atlus art.
-8. `cargo fmt`, tests, and a short completion note per sub-phase.
-9. Update `context.md` roadmap row 26 and ATTRIBUTION **after** working code,
-   except the planned-pointer edits already made with this plan.
+8. `cargo fmt`, tests, and a short completion note.
+9. Update `context.md` §8 / roadmap row 26 and ATTRIBUTION §1.4–1.5 when
+   chrome changes.
 10. Evidence PNGs only from a real capture.
 
 **Do not implement inside a Halcyon (VV) or terrain session** unless the user
-redirects.
+redirects. Terrain/lighting/animation work that *needs* new inspector fields
+is expected to add those fields — that is Metaphor staying open, not a
+forbidden fold-in.
 
 ---
 
@@ -1213,7 +1250,9 @@ Build widgets (A/B), land **Nocturne** tokens, rebuild the Unreal-*like*
 editor with Somnium paint (C, including **F1 Help**), ship a Content
 Drawer with project files + Show Engine Content (D), make Details/Outliner
 feel like a product (E), add colour (F), then let games use the same UI (G).
-Text quality (H) and polish (I) close the phase.
+Text quality (H) and polish (I) were the v1 close; **the UI phase is not
+over.** New engine features keep needing new chrome. 26-J and SDF text are
+still queued; so is every inspector/menu/Help addition those features bring.
 
 The editor must still sculpt terrain, paint foliage, play the boat, and
 import glTF on the day the Drawer ships. If it does not, the sub-phase is

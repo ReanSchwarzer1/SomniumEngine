@@ -15,4 +15,4 @@ The panel under the Outliner is the inspector for the current selection.
 - **Post Processing** — exposure, bloom, tonemap, and the other scene-wide toggles.
 - **Terrain / Foliage / Water** — authoring fields for those components. Water defaults are frozen; do not expect per-pixel LOD knobs here.
 
-Search at the top of Details hides sections that do not match.
+Search at the top of Details hides sections that do not match. New component types add rows here as they ship — the inspector is not a closed list.
