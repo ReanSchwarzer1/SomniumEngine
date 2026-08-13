@@ -49,6 +49,7 @@ pub struct UserInterface {
     focused_ih: IH,
     #[allow(dead_code)]
     captured_ih: IH,
+    hovered_ih: IH,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
 }
@@ -76,6 +77,7 @@ impl UserInterface {
             cursor_pos: Vec2::ZERO,
             focused_ih: IH::NONE,
             captured_ih: IH::NONE,
+            hovered_ih: IH::NONE,
             viewport_handle: NodeHandle::NONE,
         }
     }
@@ -715,8 +717,6 @@ impl UserInterface {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
-                // While a widget holds the mouse (a slider being dragged), it
-                // keeps receiving moves even when the cursor leaves its bounds.
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;
@@ -725,6 +725,26 @@ impl UserInterface {
                         MessageDirection::ToWidget,
                         WidgetMessage::MouseMove { pos },
                     ));
+                }
+                let hit = self.hit_test(self.cursor_pos);
+                let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                let new_hover = if over_viewport { IH::NONE } else { to_ih(hit) };
+                if new_hover != self.hovered_ih {
+                    if self.hovered_ih.is_some() {
+                        self.send(UiMessage::new(
+                            to_nh(self.hovered_ih),
+                            MessageDirection::ToWidget,
+                            WidgetMessage::MouseLeave,
+                        ));
+                    }
+                    if new_hover.is_some() {
+                        self.send(UiMessage::new(
+                            to_nh(new_hover),
+                            MessageDirection::ToWidget,
+                            WidgetMessage::MouseEnter,
+                        ));
+                    }
+                    self.hovered_ih = new_hover;
                 }
                 false // Never consumed — both UI and game need cursor tracking
             }

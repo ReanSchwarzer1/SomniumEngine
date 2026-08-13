@@ -121,11 +121,17 @@ impl FontAtlas {
             .horizontal_line_metrics(px)
             .map(|m| m.ascent - m.descent)
             .unwrap_or(px);
-        let total_w: f32 = text
-            .chars()
-            .map(|ch| font.metrics(ch, px).advance_width)
-            .sum();
-        Vec2::new(total_w, line_h)
+        let mut max_w = 0.0f32;
+        let mut lines = 0u32;
+        for line in text.split('\n') {
+            let w: f32 = line
+                .chars()
+                .map(|ch| font.metrics(ch, px).advance_width)
+                .sum();
+            max_w = max_w.max(w);
+            lines += 1;
+        }
+        Vec2::new(max_w, line_h * lines.max(1) as f32)
     }
 
     /// Ascent above baseline in pixels (used by push_text to place glyphs).

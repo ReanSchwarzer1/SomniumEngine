@@ -156,13 +156,15 @@ impl DrawingContext {
     pub fn push_text(&mut self, text: &str, origin: Vec2, font_id: u8, px: f32, color: [u8; 4]) {
         // Ascent: distance from top-of-line to baseline (positive).
         let ascent = self.font_atlas.ascent(px, font_id);
-        let baseline_y = origin.y + ascent;
+        let mut baseline_y = origin.y + ascent;
         let mut cursor_x = origin.x;
 
         for ch in text.chars() {
             if ch == '\n' {
+                cursor_x = origin.x;
+                baseline_y += self.font_atlas.measure_text("Ag", px, font_id).y.max(px);
                 continue;
-            } // multi-line not yet supported in single Text widget
+            }
             let Some(info) = self.font_atlas.get_or_rasterize(ch, px, font_id) else {
                 cursor_x += px * 0.5;
                 continue;

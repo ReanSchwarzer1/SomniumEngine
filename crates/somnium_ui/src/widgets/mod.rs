@@ -21,6 +21,7 @@ pub mod text;
 pub mod text_box;
 pub mod toast;
 pub mod tree_view;
+pub mod wrap_panel;
 
 pub use border::{Border, BorderBuilder};
 pub use button::{Button, ButtonBuilder, ButtonMessage};
@@ -52,5 +53,6 @@ pub use text::{Text, TextBuilder};
 pub use text_box::{TextBox, TextBoxBuilder, TextBoxMessage};
 pub use toast::{ToastHost, ToastHostBuilder, ToastMessage};
 pub use tree_view::{TreeItem, TreeView, TreeViewBuilder, TreeViewMessage};
+pub use wrap_panel::{WrapPanel, WrapPanelBuilder};
 
 pub use menu::{Menu, MenuBuilder, MenuMessage};

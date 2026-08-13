@@ -54,6 +54,7 @@ use crate::{
         text::TextBuilder,
         toast::{ToastHostBuilder, ToastMessage},
         tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
+        wrap_panel::WrapPanelBuilder,
     },
 };
 use glam::Vec2;
@@ -628,8 +629,8 @@ impl UiManager {
         };
 
         let mut layout_sizes = crate::layout_persist::load();
-        if layout_sizes.tools < 88.0 {
-            layout_sizes.tools = 100.0;
+        if layout_sizes.tools < 120.0 {
+            layout_sizes.tools = 128.0;
         }
         let layout = build_editor_layout(&mut native_ui, font_id, layout_sizes);
         let ui_pass = UiPass::new(device, queue, output_format);
@@ -1008,10 +1009,13 @@ impl UiManager {
 
     fn set_help_page(&mut self, page: u8) {
         self.help_page = page;
-        self.native_ui.send(TextMessage::set_text(
-            self.help_body,
-            crate::metaphor::help_page(page).to_string(),
-        ));
+        fill_help_body(&mut self.native_ui, self.help_body, self.font_id, page);
+        let toc = self.help_toc.clone();
+        for (handle, id) in toc {
+            self.native_ui
+                .send(ButtonMessage::set_selected(handle, id == page));
+        }
+        self.native_ui.invalidate_ancestors(self.help_body);
     }
 
     fn toggle_drawer(&mut self) {
@@ -1415,32 +1419,51 @@ impl UiManager {
         for entry in entries {
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
-                    .with_height(28.0)
-                    .with_background(theme::TRANSPARENT),
+                    .with_width(96.0)
+                    .with_height(92.0)
+                    .with_background(theme::BG_RAISED),
             )
             .build();
             let bh = self.native_ui.add_node(btn, parent);
-            let row =
+            let col =
                 StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-                    .with_orientation(Orientation::Horizontal)
+                    .with_orientation(Orientation::Vertical)
                     .build();
-            let row_h = self.native_ui.add_node(row, bh);
+            let col_h = self.native_ui.add_node(col, bh);
+            let icon_size = 48.0;
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(theme::ICON_TREE)
-                    .with_height(theme::ICON_TREE),
+                    .with_width(icon_size)
+                    .with_height(icon_size)
+                    .with_margin(Thickness {
+                        left: 24.0,
+                        top: 8.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
             )
             .with_icon(entry.icon)
-            .with_size(theme::ICON_TREE)
+            .with_size(icon_size)
+            .with_tint(if entry.is_dir {
+                theme::FOLDER_SAND
+            } else {
+                theme::TEXT_PRIMARY
+            })
             .build();
-            self.native_ui.add_node(icon, row_h);
-            let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 3.0)))
-                .with_text(&entry.name)
-                .with_font_size(12.0)
-                .with_font_id(font_id)
-                .with_color(theme::TEXT_PRIMARY)
-                .build();
-            self.native_ui.add_node(lbl, row_h);
+            self.native_ui.add_node(icon, col_h);
+            let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                left: 4.0,
+                top: 6.0,
+                right: 4.0,
+                bottom: 0.0,
+            }))
+            .with_text(&entry.name)
+            .with_font_size(11.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_PRIMARY)
+            .with_wrap(true)
+            .build();
+            self.native_ui.add_node(lbl, col_h);
             self.content_entries.push((bh, entry));
         }
         let mut parts = vec!["Game".to_string()];
@@ -1518,6 +1541,12 @@ impl UiManager {
         };
         self.native_ui
             .send(TextMessage::set_text(self.play_label, play.to_string()));
+        self.native_ui
+            .send(ButtonMessage::set_selected(self.play_button, state == 1));
+        self.native_ui
+            .send(ButtonMessage::set_selected(self.pause_button, state == 2));
+        self.native_ui
+            .send(ButtonMessage::set_selected(self.stop_button, state == 0));
     }
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
@@ -1876,32 +1905,29 @@ impl UiManager {
                     v.hex_tiling,
                 ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
-                    let mark = if i == paint { ">" } else { " " };
                     self.native_ui.send(TextMessage::set_text(
                         *label,
-                        format!("{mark}{}", TERRAIN_LAYER_SHORT[i]),
+                        TERRAIN_LAYER_SHORT[i].to_string(),
                     ));
                 }
                 let active_brush = if v.terrain_edit { Some(brush) } else { None };
-                for &(_, lbl, tool) in &h.terrain_brush_items {
+                for &(btn, lbl, tool) in &h.terrain_brush_items {
                     let name = TERRAIN_BRUSH_NAMES[tool as usize];
-                    let mark = if active_brush == Some(tool as usize) {
-                        ">"
-                    } else {
-                        " "
-                    };
                     self.native_ui
-                        .send(TextMessage::set_text(lbl, format!("{mark}{name}")));
+                        .send(TextMessage::set_text(lbl, name.to_string()));
+                    self.native_ui.send(ButtonMessage::set_selected(
+                        btn,
+                        active_brush == Some(tool as usize),
+                    ));
                 }
-                for &(_btn, lbl, tool) in &self.terrain_tool_items {
+                for &(btn, lbl, tool) in &self.terrain_tool_items {
                     let name = TERRAIN_BRUSH_NAMES[tool as usize];
-                    let mark = if active_brush == Some(tool as usize) {
-                        ">"
-                    } else {
-                        " "
-                    };
                     self.native_ui
-                        .send(TextMessage::set_text(lbl, format!("{mark}{name}")));
+                        .send(TextMessage::set_text(lbl, name.to_string()));
+                    self.native_ui.send(ButtonMessage::set_selected(
+                        btn,
+                        active_brush == Some(tool as usize),
+                    ));
                 }
             }
             None => self.native_ui.set_visibility(section, false),
@@ -3150,9 +3176,9 @@ fn build_editor_layout(
     let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Select, "Select");
     let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
     let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
-    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "Play");
-    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "Pause");
-    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "Stop / Reset");
+    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "");
+    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "");
+    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "");
     let play_label_n =
         TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 5.0)))
             .with_text("Stopped")
@@ -3266,7 +3292,7 @@ fn build_editor_layout(
     )
     .with_orientation(SplitterOrientation::Horizontal)
     .with_first_size(layout.tools)
-    .with_min_first(88.0)
+    .with_min_first(120.0)
     .with_min_second(240.0)
     .build();
     let inner_h = ui.add_node(tools_split, outer_h);
@@ -3328,15 +3354,14 @@ fn build_editor_layout(
     for &(icon, label, tool) in TERRAIN_TOOLS {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
-                .with_height(26.0)
+                .with_height(28.0)
                 .with_margin(Thickness {
                     left: 4.0,
                     top: 2.0,
                     right: 4.0,
                     bottom: 0.0,
                 })
-                .with_tooltip(label)
-                .with_background(theme::BG_DARK),
+                .with_background(theme::BG_RAISED),
         )
         .build();
         let btn_h = ui.add_node(btn, tool_stack_h);
@@ -4802,15 +4827,15 @@ fn icon_tool_button(
     icon: IconId,
     tooltip: &str,
 ) -> NodeHandle {
-    let btn = ButtonBuilder::new(
-        WidgetBuilder::new()
-            .with_width(36.0)
-            .with_height(theme::TOOLBAR_HEIGHT)
-            .with_margin(Thickness::axes(2.0, 2.0))
-            .with_tooltip(tooltip)
-            .with_background(theme::BG_RAISED),
-    )
-    .build();
+    let mut wb = WidgetBuilder::new()
+        .with_width(36.0)
+        .with_height(theme::TOOLBAR_HEIGHT)
+        .with_margin(Thickness::axes(2.0, 2.0))
+        .with_background(theme::BG_RAISED);
+    if !tooltip.is_empty() {
+        wb = wb.with_tooltip(tooltip);
+    }
+    let btn = ButtonBuilder::new(wb).build();
     let h = ui.add_node(btn, parent);
     let img = ImageBuilder::new(WidgetBuilder::new())
         .with_icon(icon)
@@ -4819,6 +4844,59 @@ fn icon_tool_button(
         .build();
     ui.add_node(img, h);
     h
+}
+
+fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id: u8, page: u8) {
+    ui.clear_children(parent);
+    for block in crate::metaphor::help_blocks(page) {
+        match block {
+            crate::metaphor::HelpBlock::Heading(text) => {
+                let n = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 0.0,
+                    top: 10.0,
+                    right: 8.0,
+                    bottom: 6.0,
+                }))
+                .with_text(text)
+                .with_font_size(16.0)
+                .with_font_id(font_id)
+                .with_color(theme::ACCENT)
+                .with_wrap(true)
+                .build();
+                ui.add_node(n, parent);
+            }
+            crate::metaphor::HelpBlock::Paragraph(text) => {
+                let n = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 8.0,
+                    bottom: 8.0,
+                }))
+                .with_text(text)
+                .with_font_size(13.0)
+                .with_font_id(font_id)
+                .with_color(theme::TEXT_PRIMARY)
+                .with_wrap(true)
+                .build();
+                ui.add_node(n, parent);
+            }
+            crate::metaphor::HelpBlock::Bullet(text) => {
+                let n = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 12.0,
+                    top: 0.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                }))
+                .with_text(format!("• {text}"))
+                .with_font_size(13.0)
+                .with_font_id(font_id)
+                .with_color(theme::TEXT_PRIMARY)
+                .with_wrap(true)
+                .build();
+                ui.add_node(n, parent);
+            }
+        }
+    }
 }
 
 fn window_chrome_button(
@@ -4905,8 +4983,8 @@ fn build_help_overlay(
 
     let card = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_width(720.0)
-            .with_height(480.0)
+            .with_width(860.0)
+            .with_height(540.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
             .with_background(theme::BG_PANEL)
@@ -5026,13 +5104,15 @@ fn build_help_overlay(
     )
     .build();
     let scroll_h = ui.add_node(scroll, body_grid_h);
-    let body = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(16.0)))
-        .with_text(crate::metaphor::HELP_WELCOME)
-        .with_font_size(13.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
+    let body = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::uniform(16.0))
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
     let body_h = ui.add_node(body, scroll_h);
+    fill_help_body(ui, body_h, font_id, 0);
     (overlay_h, body_h, help_toc, help_close)
 }
 
@@ -5102,9 +5182,13 @@ fn build_content_drawer(
     )
     .build();
     let list_scroll_h = ui.add_node(list_scroll, grid_h);
-    let list = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .with_orientation(Orientation::Vertical)
-        .build();
+    let list = WrapPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::uniform(8.0))
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_gap(10.0, 10.0)
+    .build();
     let list_h = ui.add_node(list, list_scroll_h);
 
     (panel_h, search_h, crumb_h, engine_h, list_h)

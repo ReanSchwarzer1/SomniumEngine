@@ -8,6 +8,8 @@ pub const HELP_VIEWPORT: &str = include_str!("../../../docs/editor/viewport.md")
 pub const HELP_SHORTCUTS: &str = include_str!("../../../docs/editor/shortcuts.md");
 pub const HELP_DRAWER: &str = include_str!("../../../docs/editor/content_drawer.md");
 pub const HELP_ABOUT: &str = include_str!("../../../docs/editor/about.md");
+pub const HELP_OUTLINER: &str = include_str!("../../../docs/editor/outliner.md");
+pub const HELP_TERRAIN: &str = include_str!("../../../docs/editor/terrain.md");
 
 pub fn help_page(id: u8) -> &'static str {
     match id {
@@ -15,6 +17,8 @@ pub fn help_page(id: u8) -> &'static str {
         2 => HELP_SHORTCUTS,
         3 => HELP_DRAWER,
         4 => HELP_ABOUT,
+        5 => HELP_OUTLINER,
+        6 => HELP_TERRAIN,
         _ => HELP_WELCOME,
     }
 }
@@ -26,7 +30,58 @@ pub fn help_titles() -> &'static [&'static str] {
         "Shortcuts",
         "Content Drawer",
         "About",
+        "Outliner",
+        "Terrain",
     ]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HelpBlock {
+    Heading(String),
+    Paragraph(String),
+    Bullet(String),
+}
+
+pub fn help_blocks(id: u8) -> Vec<HelpBlock> {
+    parse_help_markdown(help_page(id))
+}
+
+fn strip_md(s: &str) -> String {
+    s.replace("**", "")
+}
+
+pub fn parse_help_markdown(src: &str) -> Vec<HelpBlock> {
+    let mut out = Vec::new();
+    let mut para = String::new();
+    let flush_para = |para: &mut String, out: &mut Vec<HelpBlock>| {
+        let t = para.trim();
+        if !t.is_empty() {
+            out.push(HelpBlock::Paragraph(strip_md(t)));
+        }
+        para.clear();
+    };
+    for line in src.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            flush_para(&mut para, &mut out);
+        } else if let Some(rest) = t.strip_prefix("## ") {
+            flush_para(&mut para, &mut out);
+            out.push(HelpBlock::Heading(strip_md(rest)));
+        } else if let Some(rest) = t.strip_prefix("# ") {
+            flush_para(&mut para, &mut out);
+            out.push(HelpBlock::Heading(strip_md(rest)));
+        } else if let Some(rest) = t.strip_prefix("- ") {
+            flush_para(&mut para, &mut out);
+            out.push(HelpBlock::Bullet(strip_md(rest)));
+        } else {
+            if !para.is_empty() {
+                para.push(' ');
+            }
+            para.push_str(t);
+        }
+    }
+    flush_para(&mut para, &mut out);
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -190,8 +245,17 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 5);
+        assert_eq!(help_titles().len(), 7);
         assert_eq!(help_page(4), HELP_ABOUT);
+        let blocks = parse_help_markdown("# Title\n\nHello **world**.\n- item\n");
+        assert_eq!(
+            blocks,
+            vec![
+                HelpBlock::Heading("Title".into()),
+                HelpBlock::Paragraph("Hello world.".into()),
+                HelpBlock::Bullet("item".into()),
+            ]
+        );
     }
 
     #[test]
