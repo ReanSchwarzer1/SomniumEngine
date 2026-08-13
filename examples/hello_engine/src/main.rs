@@ -784,7 +784,7 @@ impl GameApp for HelloGame {
                             // The same path Create > Terrain takes, so the demo
                             // scene and an editor-created terrain cannot diverge.
                             terrain.apply_default_relief(amplitude);
-                            brush::auto_splat(terrain, amplitude * 0.62);
+                            brush::auto_splat(terrain, amplitude * 0.48);
 
                             // `SOMNIUM_FOLIAGE=1` scatters foliage without the
                             // editor (Phase 17E). Painting by hand was the only way
@@ -889,7 +889,7 @@ impl GameApp for HelloGame {
                         }
                         brush::auto_splat(
                             terrain,
-                            somnium_renderer::terrain::DEFAULT_RELIEF_METRES * 0.62,
+                            somnium_renderer::terrain::DEFAULT_RELIEF_METRES * 0.48,
                         );
                     }
 

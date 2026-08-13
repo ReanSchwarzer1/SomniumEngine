@@ -1,6 +1,9 @@
 # Phase XV-A — Codebase map (research gate)
 
-> **Status:** RESEARCH ONLY. No shaders, splat layout, texture downloads, or engine code were changed.  
+> **Status:** XV-A research freeze, 2026-08-13. **Live engine truth is now XV-Zeta** —
+> [`XV-Zeta_plan.md`](XV-Zeta_plan.md) (32 layers, sidecar v4, 1664-byte GPU
+> material, biome v3, landscape v4). Do not treat the eight-layer / version-1
+> numbers below as current API.  
 > **Date:** 2026-08-13  
 > **Purpose:** file-level “codebases understood” briefing before XV-A/XV implementation.
 

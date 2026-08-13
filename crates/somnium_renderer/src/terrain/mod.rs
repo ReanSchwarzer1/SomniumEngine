@@ -510,6 +510,15 @@ impl TerrainData {
         }
     }
 
+    /// Metres of camera height above the ground at which hex and POM turn off
+    /// for the whole frame.
+    ///
+    /// These flags are storage-buffer uniforms. Zeroing them here keeps every
+    /// wavefront on one sample path. A per-pixel hit-distance branch compiled
+    /// hex, non-hex, and a mean-albedo path into one shader and made walking
+    /// *slower* (Phase XV shading, 2026-08-13).
+    const AERIAL_DETAIL_METRES: f32 = 80.0;
+
     /// The GPU-side material for this terrain, rebuilt each frame.
     ///
     /// Cheap enough to rebuild rather than track dirty: the brush cursor moves
@@ -563,6 +572,23 @@ impl TerrainData {
             wetness_gloss: 0.55,
             wetness_f0: 0.02,
         }
+    }
+
+    /// [`gpu_material`] with hex and POM off when the camera is aerial.
+    ///
+    /// Walking (a couple of metres above the heightfield) is unchanged. The
+    /// default overview camera sits ~150 m up; that view cannot resolve hex
+    /// or relief, and turning them off uniformly is what actually drops the
+    /// shading pass — not a per-pixel LOD inside the material.
+    pub fn gpu_material_for_camera(&self, local_camera: glam::Vec3) -> GpuTerrainMaterial {
+        let mut material = self.gpu_material();
+        let ground = self.world_height_at(local_camera.x, local_camera.z);
+        if local_camera.y - ground > Self::AERIAL_DETAIL_METRES {
+            material.hex_tiling = 0;
+            material.parallax_steps = 0;
+            material.parallax_shadow_steps = 0;
+        }
+        material
     }
 
     // ── Height accessors (Phase 14A-3) ──────────────────────────────────────

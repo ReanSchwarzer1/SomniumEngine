@@ -630,6 +630,11 @@ fn evaluate_terrain_material(
     // 330 m with the default 60–400 m window) a pixel already covers many
     // tiles and the unique-colour macro owns the hue — three rotated taps
     // buy nothing the eye can resolve.
+    //
+    // Do **not** branch sampling on a per-pixel close/far flag. That compiles
+    // hex, non-hex, and a mean-albedo path into one shader; warps then pay
+    // the union, and walking got *slower*. Aerial cut is a uniform: the CPU
+    // zeros `hex_tiling` / `parallax_steps` when the camera is high.
     let hex = tm.hex_tiling != 0u && fade < 0.8;
 
     let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);

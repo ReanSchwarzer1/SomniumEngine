@@ -4,11 +4,11 @@
 > Sixteen terrain materials. It had to be Appalachia.
 
 > **Codename:** Appalachia, after the setting of Bethesda Game Studios' *Fallout 76*  
-> **Status:** RESEARCH COMPLETE — IMPLEMENTATION NOT STARTED  
+> **Status:** XV-A through XV-Zeta **IN ENGINE** (2026-08-13). **XV-J** (verification, GPU evidence) is next.  
 > **Plan date:** 2026-08-12  
 > **Research expanded:** 2026-08-13 (second pass — papers, talks, open-source terrain systems, wetness)  
-> **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded; no textures downloaded.  
-> **XV-Zeta:** 2026-08-13 — 32-layer landscape identity, paint UX, distant hue. In engine. **XV-J is next.**  
+> **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded.  
+> **XV-Zeta:** 2026-08-13 — 32-layer landscape identity, paint UX, distant hue, aerial shading LOD, biome v3. Canonical live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) (Live contract).  
 > **Project:** Somnium Engine  
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
 
@@ -405,11 +405,11 @@ Procedural results must be bakeable into the same four splatmaps. Manual paint i
 
 ## 8. Implementation phases
 
-All subphases **XV-A through XV-I are implemented in engine** as of 2026-08-13.
-**XV-Zeta is in engine** (32 materials, paint UX, landscape-scale colour) —
-[`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J stays after
-Zeta.** Completing a subphase's *acceptance evidence* still requires captures,
-not only compiling code.
+All subphases **XV-A through XV-Zeta are implemented in engine** as of 2026-08-13
+(including biome v3, landscape v4, and aerial hex/POM LOD). Canonical live
+numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J is the
+evidence pass.** Completing a subphase's *acceptance evidence* still requires
+captures, not only compiling code.
 
 ### XV-A — Baseline and provenance gate
 
@@ -526,12 +526,12 @@ Palette: sixteen abbreviated names. Paint stepper kept. Tile 0–3 replaced by t
 
 ### XV-Zeta — 32-layer landscape identity (before XV-J)
 
-**Status: IN ENGINE — 2026-08-13.** XV-J still waits.
+**Status: IN ENGINE — 2026-08-13**, including aerial LOD and biome v3. Live look signed off the same day. Canonical numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 
-Live default landscape after XV-I: close-up scans work; from the overview camera
-the ground is one ochre. Inspector palette clicks select a layer but do not
-paint (foliage Paint Mode was on; terrain paint still needs F6 + key 6 + a
-viewport drag; default brush is Raise).
+Live default landscape after XV-I: close-up scans worked; from the overview
+camera the ground was one ochre; inspector palette clicks selected a layer but
+did not paint. **Those are fixed.** Remaining XV-J work is GPU evidence, not
+paint UX.
 
 **PBR channels (already used):** albedo RGB, displacement as height (blend +
 dominant POM, not tessellation), DirectX normal XY, roughness, AO. Metallic
@@ -550,27 +550,38 @@ dropped. Distant brown is kit + biome + macro, not missing maps.
   dirt). 16–31 load at 1024 until BC7 exists (32×2K RGBA8 ~1365 MiB fails the
   700 MiB budget).
 - **Zeta-E** — 32-weight biome on Create → Terrain / startup; bump landscape
-  version.
+  version. **v3 biome / landscape v4 (same day):** warped FBM (no ruler
+  isolines), overlapping forest/meadow, snow cap at `relief * 0.48` plus
+  mid-slope patches, unused layers scatter, rock height-blend widened.
+  Aerial LOD: `gpu_material_for_camera` (hex/POM off > 80 m above ground).
+  Live look signed off 2026-08-13.
+
+**Deferred (not XV-J):** further shading LOD. Per-pixel sample-count branches
+made walking *slower* (20→27 ms). Aerial hex/POM is a CPU uniform
+(`gpu_material_for_camera`, 80 m above ground). Next real cuts are a second
+shading PSO and BC7. See [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) §11.
 
 **Exit criteria**
 
-- Clicking a palette name and dragging the ground paints that material.
+- Clicking a palette name and dragging the ground paints that material. **Met.**
 - Overview camera reads green / gray / tan / shore / snow without zooming in.
+  **Met in live look 2026-08-13;** GPU evidence PNGs still XV-J.
 - 32 photographed (or explicitly substituted) CC0 layers; v3 scenes keep 0–15.
-  Layers 16 and 24 are the substitutions (procedural lush/wildgrass).
+  Layers 16 and 24 are the substitutions (procedural lush/wildgrass). **Met.**
 - Strongest-four tap caps unchanged. Residency logged. Water datum / Great Lakes
-  body untouched.
+  body untouched. **Met.**
 
 ### XV-J — Verification, attribution, and handoff
 
-**Status: PLANNED — after XV-Zeta, not before.**
+**Status: NEXT — Zeta is closed in engine; J is the evidence pass.**
 
 **Work**
 
 - Run formatting, build, unit/integration tests, shader validation, migration fixtures, and performance captures.
 - Test day/night, wet/dry shoreline, distant landscape, eye-level, extreme cliff, four-way junction, and old-scene cases.
-- Update `context.md`, `ATTRIBUTION.md`, `assets/LICENSE.md`, and this file with actual results and Pattern Index entries.
-- Store evidence only under `dev records/phase XV/evidence/` with phase-specific names.
+- Record adapter identity, shading-pass timings (overview vs walking), tap counts, and residency. Aerial LOD: hex/POM off when the camera is > 80 m above ground.
+- Store evidence only under `dev records/phase XV/evidence/` as `phase_XV-J_<purpose>.png`.
+- Fold live numbers already in the Zeta plan into `context.md` as a completion record (do not rewrite Phase 14 §20 as if it were XV).
 
 **Exit criteria**
 
@@ -586,10 +597,10 @@ This list is planning guidance, not permission to perform unrelated refactors.
 |---|---|
 | Asset provenance | `assets/terrain/materials.json` + `assets/terrain/materials.schema.json`, `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` §1.6 |
 | Fetch/pack tools | `tools/fetch_terrain_textures.sh`, `crates/somnium_asset/examples/pack_terrain.rs` |
-| Terrain storage/upload | `textures.rs`, `terrain/mod.rs`, `terrain/biome.rs`, `terrain/brush.rs` (paint 0–15, `splat_lock`) |
-| Terrain shading | `terrain_material.wgsl` (880-byte `TerrainMaterial` + wetness), `restir_gi.wgsl` (mean albedo × weights × wetness), `hextile.wgsl` |
-| Editor commands/UI | `app.rs` (paint 0–15), `somnium_ui` sixteen-name palette + Wet + Dbg |
-| Layout lock | `material/pool.rs`, `tests/shaders_validate.rs` (`GpuTerrainMaterial` == 880) |
+| Terrain storage/upload | `textures.rs`, `terrain/mod.rs`, `terrain/biome.rs`, `terrain/brush.rs` (paint 0–31, `splat_lock`) |
+| Terrain shading | `terrain_material.wgsl` (1664-byte `TerrainMaterial` + wetness), `restir_gi.wgsl` (mean albedo × weights × wetness), `hextile.wgsl` |
+| Editor commands/UI | `app.rs` (paint 0–31), `somnium_ui` 32-name palette + Terrain Paint + Hex + Wet + Dbg |
+| Layout lock | `material/pool.rs`, `tests/shaders_validate.rs` (`GpuTerrainMaterial` == 1664) |
 | Tests/docs | renderer/asset tests, `context.md` (§20 is Phase 14 — do not treat as live terrain; do not rewrite as if XV shipped), `ATTRIBUTION.md`, `assets/LICENSE.md`, this plan |
 
 Before editing, the implementing session must re-open the current files and check for changes made after this plan date. File names and layouts are not contractual APIs.
@@ -606,6 +617,7 @@ Before editing, the implementing session must re-open the current files and chec
 - Median terrain shader target: at most 1.10 ms in the exact Phase 25 reference adapter, resolution, and camera corpus.
 - No more than a 20–25% median regression from the captured pre-Phase-XV baseline without an approved image-quality justification.
 - Report control, macro, projected-material, and POM taps separately.
+- **Live 2026-08-13 (not a section-11 pass):** overview-camera shading ~20 ms is the terrain material path, not Post FX. Per-pixel sample-count LOD made walking 20→27 ms and was reverted. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second PSO + BC7, not XV-J.
 
 ### 10.2 Memory and disk
 
@@ -833,9 +845,11 @@ The next **implementation** session should begin with
 `context.md`, `ATTRIBUTION.md`, this plan, and
 [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
-XV-A through XV-Zeta are in the engine. Next authorized subphase is **XV-J**
-(verification, attribution close-out, GPU evidence). Do not retile
-shipping 0–7 to 1:1 physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31
-pack at 2K and load at 1024. Layers 16 and 24 are procedural lush/wildgrass
-(`grass_path_*` failed the ochre gate). BC7 encoder is still absent.
-`WaterComponent::great_lakes` stays frozen.
+XV-A through XV-Zeta are in the engine (including biome v3 / landscape v4 and
+aerial hex/POM LOD). Next authorized subphase is **XV-J** (verification,
+attribution close-out, GPU evidence). Do not retile shipping 0–7 to 1:1
+physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31 pack at 2K and load at
+1024. Layers 16 and 24 are procedural lush/wildgrass (`grass_path_*` failed the
+ochre gate). BC7 encoder is still absent. `WaterComponent::great_lakes` stays
+frozen. Do **not** reintroduce a per-pixel terrain sample-count LOD (walking
+regressed 20→27 ms). Snow cap is `relief * 0.48`, not `* 0.62`.

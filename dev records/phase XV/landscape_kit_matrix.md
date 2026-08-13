@@ -1,17 +1,22 @@
 # Phase XV-A landscape-kit review matrix
 
 Frozen from `DefaultLandscapePreset::current()` — **not** F7 auto-splat (snow at 10 m).
+Recipe version **4**. Biome preset version **3**.
 
 | Item | Value |
 |------|-------|
 | Relief | 105 m (`DEFAULT_RELIEF_METRES`) |
-| Snow / auto-splat height | ~65.1 m (`relief * 0.62`) |
+| Snow / auto-splat height | ~50.4 m (`relief * 0.48`); mid-slope snow patches below that |
 | Terrain world size | 1024 m × 1024 m |
 | Terrain translation | (−512, 0, −512) |
-| Water local translation | (512, 15, 512) — shipping Great Lakes water |
+| Water local translation | (512, 16.1, 512) — shipping Great Lakes water |
 | Default camera | position `(0, 150.75, 460.8)`, yaw −90°, pitch −22° |
-| Runtime texture res | `SOMNIUM_TERRAIN_RES` default 2048 |
+| Aerial shading LOD | hex + POM off when camera is > 80 m above the heightfield (`gpu_material_for_camera`) |
+| Runtime texture res | `SOMNIUM_TERRAIN_RES` default 2048; layers 16–31 load at 1024 |
 | Engine tiling | 0.25 / m (4 m repeat) for layers 0–7; 8–31 use `1 / physical_width_m` |
+| Macro | splat-weighted unique colour 512², Lerp 0.55; `great_lakes/macro_color.png` not auto-loaded |
+| Paint | Terrain Paint vs Foliage Paint mutually exclusive; palette click arms paint |
+| GPU material | 1664 bytes, 32 layers, eight splatmaps, sidecar v4 |
 
 ## Capture set
 
@@ -30,7 +35,7 @@ pending an engine run; do not invent timings or images.
 | `red_clay_day` | exposed bank | noon | layer 11 (not gravel 7) |
 | `cliff_day` | looking at a steep face | noon | layer 14 biplanar, no albedo stretch |
 | `talus_day` | cliff base | noon | layer 15 vs 14 vs 2 |
-| `snow_day` | high ridge (~65 m+) | noon | layer 3 band |
+| `snow_day` | high ridge (~50 m+) | noon | layer 3 / 31 band plus patches |
 | `lush_inland_day` | default cam, inland | noon | layers 16/24 lawn+wildgrass vs ochre 0 |
 | `cool_cliff_day` | steep face | noon | layers 18/19/26 with cliff 14 |
 | `cliff_triplanar_debug` | same as cliff_day | noon | `SOMNIUM_TERRAIN_TRIPLANAR=1` |

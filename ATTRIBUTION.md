@@ -118,9 +118,10 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
-### 1.6 Terrain materials — Phase XV Appalachia (A–I shipped; Zeta in engine)
+### 1.6 Terrain materials — Phase XV Appalachia (A–Zeta in engine)
 
-**Status:** XV-A–I 2026-08-13; **XV-Zeta** 2026-08-13. Provenance:
+**Status:** XV-A–I 2026-08-13; **XV-Zeta** 2026-08-13 (including aerial LOD and
+biome v3; live look signed off the same day). Provenance:
 [`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md),
 [`dev records/phase XV/XV-Zeta_plan.md`](dev%20records/phase%20XV/XV-Zeta_plan.md).
 Controlling reference: `dev records/phase_XV.md`. Live GPU evidence PNGs and
@@ -129,19 +130,21 @@ adapter freeze remain pending XV-J.
 | Reference | Pattern studied | Somnium implementation |
 |---|---|---|
 | O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local | **32** global / strongest-four local; eight RGBA splatmaps; VT still deferred |
-| O3DE / Frostbite unique colour | Distant identity is splat-weighted mean, not satellite overlay | `macro_map::from_splat` at 512², Lerp default; Great Lakes `macro_color.png` is no longer auto-loaded |
+| O3DE / Frostbite unique colour | Distant identity is splat-weighted mean, not satellite overlay | `macro_map::from_splat` at 512², Lerp 0.55; Great Lakes `macro_color.png` is no longer auto-loaded |
 | Mikkelsen JCGT 2020 surface gradients + hex tiling | Layered/projected normal composition | Surface-gradient blend in `evaluate_terrain_material`; hex packed-surface counter-rotation |
 | Godot 4.7.1 mip roughness / full-channel projection | Specular AA + complete projection | Independent Toksvig fixture in `terrain/mips.rs`; full-PBR biplanar cliffs (POM off on that path) |
 | Bevy `bevy_triplanar_splatting` biplanar.wgsl | Two dominant axes | `terrain_projected_pbr` default biplanar, triplanar debug via `SOMNIUM_TERRAIN_TRIPLANAR` |
-| Terrain3D autoshade vs paint / wetness | Base rules + paint lock; porous wetting | `BiomePreset::appalachia` v2 + `splat_lock`; global wetness × per-layer moisture affinity |
+| Terrain3D autoshade vs paint / wetness | Base rules + paint lock; porous wetting | `BiomePreset::appalachia` **v3** (warped FBM, overlapping cover, snow patches) + `splat_lock`; global wetness × per-layer moisture affinity |
 | Unreal Landscape / Fyrox terrain | Palette selects, stroke paints; mutually exclusive brushes | Inspector Terrain Paint vs Foliage Paint; palette click arms `BrushMode::Paint` |
+| GPU LOD / occupancy | Wave-uniform vs per-pixel sample-count branches | Aerial hex/POM via `gpu_material_for_camera` (uniform, 80 m above ground). Per-pixel `close`/`use_maps` compiled three paths and made walking slower — reverted |
 | Poly Haven / ambientCG CC0 | Photogrammetry with clear redistribution | `assets/terrain/materials.json`; `fetch_terrain` fail-closed MD5; layers 16 and 24 procedural (no CC0 lawn passed ΔE) |
 
 **Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
 CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
 references. Histogram-preserving blend and a painted wetness channel are not in
 this drop. XV-J verification is still open. Extra bank (16–31) loads at 1024
-until a BC7 encoder exists.
+until a BC7 encoder exists. `GpuTerrainMaterial` is **1664** bytes. Snow cap is
+`relief * 0.48`. `WaterComponent::great_lakes` is frozen.
 
 ---
 

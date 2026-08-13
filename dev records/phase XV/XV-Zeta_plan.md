@@ -1,13 +1,35 @@
 # XV-Zeta — 32-layer landscape identity (plan)
 
-**Status:** IN ENGINE — 2026-08-13. XV-J is next.  
+**Status:** IN ENGINE — 2026-08-13, including post-E follow-up (aerial shading
+LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J is next**
+(GPU evidence, adapter freeze, `context.md` close-out as a completion record).  
 **Sits between:** XV-I (done) and XV-J (verification).  
 **Parent:** [`phase_XV.md`](../phase_XV.md).
+
+## Live contract (do not silently retune)
+
+| Item | Value |
+|---|---|
+| Global layers | 32 (`TERRAIN_LAYER_COUNT`); strongest-four local |
+| Splat | 8 RGBA maps; ≤4 non-zero stored channels; sidecar **v4** |
+| `GpuTerrainMaterial` | **1664** bytes; WGSL `array<vec4<T>, 8>` |
+| Layers 16, 24 | Procedural lush lawn / wildgrass (`grass_path_*` failed ochre ΔE) |
+| Extra bank load | 16–31 at **1024** until BC7; 0–15 at `SOMNIUM_TERRAIN_RES` (2048) |
+| Unique colour | `macro_map::from_splat` 512²; Great Lakes `macro_color.png` **not** auto-loaded; default Lerp **0.55** |
+| Biome | `BIOME_PRESET_VERSION = 3`; warped 4-octave FBM; overlapping forest/meadow |
+| Landscape recipe | `DEFAULT_LANDSCAPE_VERSION = 4`; snow cap `relief * 0.48` (~50.4 m) |
+| Aerial LOD | `gpu_material_for_camera`: hex + POM off when camera is **> 80 m** above the heightfield (uniform). Walking is the full close path. |
+| Water | `WaterComponent::great_lakes` frozen (`wave_speed` 0.85, datum 16.1 m, optical `max_depth` 18.6 m) |
+| Paint UX | Terrain Paint vs Foliage Paint mutually exclusive; palette click arms `BrushMode::Paint` |
+
+Do **not** reintroduce a per-pixel `close` / `use_maps` / `layer_budget` sample
+branch. That compiled three paths into one shader and made walking 20→27 ms.
 
 Runtime inspection of the default Great Lakes landscape after XV-A–I: close-up
 photogrammetry is present; from the preset camera the land reads as one
 desaturated brown. Inspector palette clicks select a layer but do not paint.
 This plan is the response.
+
 
 ## 1. What the live scene actually showed
 
@@ -172,16 +194,16 @@ asks. Painted wetness channel still later.
 
 ## 8. Subphase slices (implement in this order)
 
-| Slice | Work | Exit |
-|---|---|---|
-| **Zeta-A** | Terrain Paint Mode + palette arms paint; foliage paint cannot steal the stroke; current layer name visible | Click Mud, drag ground, mud appears. F6/6 still work. |
-| **Zeta-B** | Splat-derived unique colour / macro; Great Lakes satellite overlay no longer dominates; biome retune of 0–15 toward green/gray | Overview camera is not one brown. Shore/cliff/snow readable without zoom. |
-| **Zeta-C** | `TERRAIN_LAYER_COUNT = 32`, eight splatmaps, sidecar v4, 880→~1600 layout tests, inspector second bank | Old v3 scenes keep 0–15; 16–31 zero until packed. |
-| **Zeta-D** | Audit + fetch + pack layers 16–31 (skip overwrite of 0–15). Fail closed on license/hash/maps. | 30 photographed layers; 16 and 24 stay procedural (`grass_path_*` failed ΔE). |
-| **Zeta-E** | 32-weight biome; Create → Terrain / startup only. Bump `DEFAULT_LANDSCAPE_VERSION`. | Same seed → bit-identical weights. Landscape kit matrix rows for new hues. |
+| Slice | Work | Exit | Status |
+|---|---|---|---|
+| **Zeta-A** | Terrain Paint Mode + palette arms paint; foliage paint cannot steal the stroke; current layer name visible | Click Mud, drag ground, mud appears. F6/6 still work. | **IN ENGINE** 2026-08-13 |
+| **Zeta-B** | Splat-derived unique colour / macro; Great Lakes satellite overlay no longer dominates; biome retune of 0–15 toward green/gray | Overview camera is not one brown. Shore/cliff/snow readable without zoom. | **IN ENGINE** 2026-08-13 |
+| **Zeta-C** | `TERRAIN_LAYER_COUNT = 32`, eight splatmaps, sidecar v4, 880→1664 layout tests, inspector second bank | Old v3 scenes keep 0–15; 16–31 zero until packed. | **IN ENGINE** 2026-08-13 |
+| **Zeta-D** | Audit + fetch + pack layers 16–31 (skip overwrite of 0–15). Fail closed on license/hash/maps. | 30 photographed layers; 16 and 24 stay procedural (`grass_path_*` failed ΔE). | **IN ENGINE** 2026-08-13 |
+| **Zeta-E** | 32-weight biome; Create → Terrain / startup only. Bump `DEFAULT_LANDSCAPE_VERSION`. | Same seed → bit-identical weights. Landscape kit matrix rows for new hues. | **IN ENGINE** 2026-08-13; **v3 biome / landscape v4** same day |
 
-Then **XV-J**. Do not start J until Zeta-A–E are in engine (GPU evidence still
-belongs to J).
+Then **XV-J**. Zeta-A–E and the §11 follow-up are in engine. GPU evidence still
+belongs to J.
 
 ## 9. Inspiration (pattern study, no code lift)
 
@@ -201,3 +223,59 @@ belongs to J).
 - Replacing the Great Lakes heightfield or water (`WaterComponent::great_lakes` stays frozen).
 - Keeping an eight-layer “old look” as default (already removed).
 - XV-J captures, adapter freeze, `context.md` close-out.
+
+## 11. Follow-up (2026-08-13, after Zeta-E)
+
+Live sign-off the same day: seams and snow look right; aerial LOD restored
+walking cost. GPU captures and adapter freeze remain **XV-J**.
+
+### 11.1 Shading pass — diagnosis and aerial LOD
+
+Default overview camera is `(0, 150.75, 460.8)`. Ground under it is already
+~150 m away. Detail fade is 60→400 m, so fade ≈ 0.26 across most of that view
+and the **entire screen was still on the close-up material path**.
+
+**What 20 ms is not.** Inspector Post FX **Soft Shadows** / **Contact Shadows**
+(and GI / GTAO) sit *around* the terrain material. Hex lives on the **Terrain**
+panel. Disabling all of those left shading ~20 ms because every vis-buffer hit
+still runs `evaluate_terrain_material` (up to 4 layers × 2 maps × 3 hex taps,
+plus POM 24+8 mip-0 steps, plus cliff biplanar).
+
+**Tried and reverted:** per-pixel hit-distance LOD (`close = fade < 0.12`,
+`use_maps = fade < 0.45`, `layer_budget` 2 vs 4). Naga/DXC compiled hex,
+non-hex, and mean-albedo into one program. Warps paid the union; walking went
+**20 ms → 27 ms**.
+
+**What shipped:** `TerrainData::gpu_material_for_camera` /
+`AERIAL_DETAIL_METRES = 80`. Height above the heightfield (not world Y) zeros
+`hex_tiling` and `parallax_steps` as **storage-buffer uniforms** for the whole
+frame. Walking (a couple of metres above ground, including a 105 m ridge) keeps
+full hex, POM, four layers, cliff biplanar. Overview skips hex and POM
+uniformly.
+
+Also kept: when ReSTIR DI wrote sun visibility (`traced.a > 0.5`), do not run
+PCSS then discard it (that also threw away POM self-shadow). `shading_mode`
+bit 1 = PCSS, bit 2 = contact; defaults on. Inspector toggles default **on**.
+
+**Later (not XV-J):** a second shading PSO / permutation so aerial can drop to
+unique-colour / two-layer maps without compiling the close path into the same
+program. Do **not** reintroduce a per-pixel sample-count branch. BC7 (RGBA8
+bandwidth) is the other real lever; extra bank is already 1024.
+
+### 11.2 Biome v3 — seams and sparse layers
+
+Live captures: ruler-straight grass|rock contour; snow almost absent; several
+of 16–31 never appeared.
+
+| Cause | Fix |
+|---|---|
+| One octave of bilinear value noise (~100 m cells) makes isolines that read as a diagonal ruler | Domain-warped 4-octave FBM (`biome_fbm` + 90 m warp) |
+| Forest/meadow `smoothstep(0.50, 0.78, n2)` went 0/1 over huge regions | Overlapping shares (forest 0.20–0.75 of cover; meadow the rest) |
+| Rock `blend_width` 0.15 + `height_scale` 1.0 zeroed grass at the remaining 50/50 band | Rock/gravel/cliff/talus `blend_width` ~0.32–0.42, `height_scale` ~0.58–0.70 |
+| Snow only in a 9 m band at `relief * 0.62` (~65 m), mostly edge-on from the preset cam | Cap at `relief * 0.48` (~50 m), 24 m fade, plus mid-slope patches (`n3`) above the waterline |
+| Layer 30 was weight 0; limestone/autumn/moss rare | Scatter path, limestone, moss, extra rock inland (fantasy placement OK) |
+
+`BIOME_PRESET_VERSION = 3`, `DEFAULT_LANDSCAPE_VERSION = 4`. Restart or
+Create → Terrain rebakes splat + unique colour. Height-blend softening is live
+without a rebake. Waterline still prefers damp sand; cliffs still win on
+~70° faces (unit tests).

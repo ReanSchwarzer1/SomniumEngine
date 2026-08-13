@@ -1705,7 +1705,7 @@ impl SomniumRenderer {
             self.terrain_materials.write(
                 &ctx.queue,
                 terrain.terrain_index,
-                &terrain.gpu_material(),
+                &terrain.gpu_material_for_camera(local_cam),
             );
 
             let material_id = terrain.material_id;

@@ -1,14 +1,21 @@
 # Somnium Engine — Post–Phase IV Context Handoff
 
-> **Purpose:** authoritative next-session context for starting **Phase XV — Appalachia** after Phase IV closed  
-> **Snapshot date:** 2026-08-13  
+> **Purpose:** start-here history for Phase XV after Phase IV closed.  
+> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-Zeta are **in engine**. Next is **XV-J**.  
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
 > **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Worktree note:** as of this handoff write-up, the 2026-08-13 Phase XV research expansion and related doc sync may still be **uncommitted** local changes (`phase_XV.md`, `context.md`, `ATTRIBUTION.md`, `dev records/README.md`, `post_25M2_context_handoff.md`). Confirm `git status` before assuming they are on `origin/dev`.  
-> **Implementation status:** Phase IV **complete** (IV-A through IV-K, closed 2026-08-13); Phase XV **research-complete, not implemented**; Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–Zeta in engine** (live look signed off); **XV-J** (GPU evidence) next; Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
+
+**Current live contract** (supersedes “research-complete / not implemented”
+below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
+colour from splat, biome v3 / landscape v4, snow `relief * 0.48`, aerial hex/POM
+off > 80 m above ground. Canonical: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
+Do not reintroduce a per-pixel terrain sample-count LOD. Do not retune
+`WaterComponent::great_lakes`.
 
 This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) as the **start-here** file for a Phase XV implementation session. Keep the 25M-2 handoff for historical Phase IV A–J detail and the post-25M-2 shadow/night corrections; do not treat it as the current XV entry point.
+
 
 ---
 
@@ -16,11 +23,11 @@ This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_hand
 
 The next session should read these files **in order**:
 
-1. [`context.md`](../context.md) — living architecture and roadmap (XV is research-only until authorized).
-2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Iris planned; §1.6 XV planned).
+1. [`context.md`](../context.md) — living architecture (XV-A–Zeta in engine; §20 is still Phase 14).
+2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Iris planned; §1.6 XV A–Zeta).
 3. [`phase_IV.md`](phase_IV.md) — completed Great Lakes water/terrain record, especially **§14 IV-K**.
-4. **This file** — post-IV contracts, parallel phases, and XV start checklist.
-5. [`phase_XV.md`](phase_XV.md) — full sixteen-material plan (XV-A–J), research §5.5, budgets, bibliography. XV-A audit: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
+4. **This file** — post-IV contracts and XV history. Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
+5. [`phase_XV.md`](phase_XV.md) — full plan (XV-A–J). XV-J is the next authorized subphase.
 6. [`assets/LICENSE.md`](../assets/LICENSE.md), [`assets/terrain/great_lakes/README.md`](../assets/terrain/great_lakes/README.md), and existing terrain material provenance under `assets/terrain/` / `assets/LICENSE.md`.
 
 Optional depth (do not skip (1)–(5) for these):
@@ -49,19 +56,19 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 - Vessel inspector fields (buoyancy / drag / yaw damp / thrust / draft / righting) and missing water inspector fields (`spectrum_blend`, anisotropy, caustic, edge; Wind/Foam/Whitecap drive spectral cascades).
 - Improved buoyancy (up-biased force, angular drag, righting, draft).
 
-### Researched / planned — not shipped
+### Parallel tracks
 
 | Phase | Codename | Status | Plan |
 |---|---|---|---|
-| **XV** | Appalachia | Research complete; **no code/textures** | [`phase_XV.md`](phase_XV.md) |
+| **XV** | Appalachia | **A–Zeta in engine; XV-J next** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) |
 | **26** | Iris | Planned colour pickers | [`phase_26.md`](phase_26.md) |
 | **VV** | Halcyon | Planned RT water reflections | [`phase_VV.md`](phase_VV.md) |
 
-**Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water.
+**Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; GPU evidence is still XV-J.
 
-### Session estimate (implementation, when authorized)
+### Session estimate
 
-**~12–16 sessions** for XV-A through XV-J (midpoint ~14). See prior roadmap discussion; research pass added wetness + mandatory surface-gradient work (~+2–3) without adding VT/clipmaps.
+XV-A–Zeta are done. **XV-J** is the remaining verification session.
 
 ---
 
@@ -184,18 +191,19 @@ and hashes: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
 
 | ID | Scope | Est. sessions | Status |
 |---|---|---:|---|
-| XV-A | Baseline, provenance, landscape-kit matrix, codebase map | 1–2 | **Research complete** 2026-08-13 (provenance + codebase map); live GPU capture + `assets/terrain/materials.json` install still need implementation authorization |
-| XV-B | Manifest fetch/pack, semantic mips, BC7/RGBA8, Godot roughness fixture | 2 | PLANNED |
-| XV-C | Sixteen-layer CPU/editor, four-splat, sidecar v3. **Paint/UI today is 0–3 only** — must widen, not assume 8-layer authoring works | 1–2 | PLANNED |
-| XV-D | GPU layout, strongest-four, shared indexing with GI. GI is mean-albedo only — do not pretend packed PBR | 1–2 | PLANNED |
-| XV-E | Compression residency, specular stability | 1 | PLANNED |
-| XV-F | Full-PBR biplanar cliffs, surface-gradient projection | 1–2 | PLANNED |
-| XV-G | Biome preset + paint overrides + Create Terrain | 1–2 | PLANNED |
-| XV-H | Physical scale, gradients, wetness response, hex/macro | 2 | PLANNED |
-| XV-I | Sixteen-material UI + diagnostics (incl. wetness / projection) | 1–2 | PLANNED |
-| XV-J | Verification, attribution, handoff | 1 | PLANNED |
+| XV-A | Baseline, provenance, landscape-kit matrix, codebase map | 1–2 | **IN ENGINE** 2026-08-13 |
+| XV-B | Manifest fetch/pack, semantic mips, BC7/RGBA8, Godot roughness fixture | 2 | **IN ENGINE** 2026-08-13 (BC7 encoder still absent) |
+| XV-C | Sixteen-layer CPU/editor, four-splat, sidecar v3. **Superseded by Zeta-C (32 / v4)** | 1–2 | **IN ENGINE** 2026-08-13 |
+| XV-D | GPU layout, strongest-four, shared indexing with GI. GI is mean-albedo only | 1–2 | **IN ENGINE** 2026-08-13 |
+| XV-E | Compression residency, specular stability | 1 | **IN ENGINE** 2026-08-13 |
+| XV-F | Full-PBR biplanar cliffs, surface-gradient projection | 1–2 | **IN ENGINE** 2026-08-13 |
+| XV-G | Biome preset + paint overrides + Create Terrain | 1–2 | **IN ENGINE** 2026-08-13 (biome **v3**) |
+| XV-H | Physical scale, gradients, wetness response, hex/macro | 2 | **IN ENGINE** 2026-08-13 |
+| XV-I | Sixteen-material UI + diagnostics (incl. wetness / projection) | 1–2 | **IN ENGINE** 2026-08-13 (palette now 32) |
+| XV-Zeta | 32 layers, unique colour, paint UX, aerial LOD, biome v3 | 1 | **IN ENGINE** 2026-08-13 |
+| XV-J | Verification, attribution, handoff | 1 | **NEXT** |
 
-**Total ~12–16.** Research for XV-A is done. Implementation still starts at remaining XV-A ops, then **XV-B**, only when authorized.
+**A–Zeta are in engine.** Next authorized session is **XV-J** (GPU evidence, adapter freeze). Do not start XV-J's captures with invented PNGs.
 
 ### 6.5 Second research pass consequences (2026-08-13)
 
@@ -213,7 +221,7 @@ Do not treat the older plan wording as live API. Details: [`phase XV/XV-A_codeba
 
 - Paint/UI clamp to **0–3**; GPU/auto-splat/sidecar already have 8.
 - Terrain3D / PlumeSplat / Mikkelsen surfgrad demo are **not** in `example_repo` (web/GitHub only).
-- F7 snow height is **10 m**; Create → Terrain / preset is **~65 m**.
+- F7 snow height is **10 m** (debug); Create → Terrain / preset snow cap is **`relief * 0.48` (~50.4 m)** as of landscape v4. Historical XV-A freeze used `* 0.62` (~65 m).
 
 ### 6.7 Explicitly deferred / rejected for XV
 
@@ -252,10 +260,11 @@ From [`phase_XV.md`](phase_XV.md) §10 — historical Phase 25D numbers are comp
 - `dev records/phase IV/IV-I-J/` — runtime + shoreline LOD
 - `dev records/phase IV/IV-K/` — `ivk_before_shading.png`, `ivk_after_shading.png`, `ivk_authored_water_body.png`
 
-### Phase XV (empty until implementation)
+### Phase XV (code in engine; GPU PNGs still XV-J)
 
 - Path: `dev records/phase XV/evidence/phase_XV-<subphase>_<purpose>.png`
 - Captures **after tonemapping** only.
+- Live contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 
 Historical test counts in `phase_IV.md` are evidence of a past worktree, not a guarantee. Re-run `cargo fmt`, `cargo check`, and relevant tests before claiming XV-A ready.
 

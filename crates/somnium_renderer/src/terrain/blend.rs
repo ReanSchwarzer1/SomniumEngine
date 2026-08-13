@@ -90,10 +90,10 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
         min_weight: 0.10,
         parallax_depth: 0.035,
     },
-    // 2 aerial_rocks_04 — deep crevices, and the edge of a rock is an edge.
+    // 2 aerial_rocks_04 — crevices, but not a knife-edge against grass.
     LayerBlend {
-        height_scale: 1.0,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.42,
         min_weight: 0.08,
         parallax_depth: 0.060,
     },
@@ -129,8 +129,8 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     // 7 gravel_floor — the case this phase exists for: gravel settling into
     //   the cracks of whatever it meets.
     LayerBlend {
-        height_scale: 0.9,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.050,
     },
@@ -171,22 +171,22 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     },
     // 13 mossy_rock — deep moss pockets.
     LayerBlend {
-        height_scale: 0.85,
-        blend_width: 0.20,
+        height_scale: 0.58,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.050,
     },
     // 14 rock_face_03 — dedicated cliff; hard interlocking.
     LayerBlend {
-        height_scale: 1.0,
-        blend_width: 0.15,
+        height_scale: 0.70,
+        blend_width: 0.32,
         min_weight: 0.08,
         parallax_depth: 0.060,
     },
     // 15 ganges_river_pebbles — talus settling into cracks.
     LayerBlend {
-        height_scale: 0.90,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.045,
     },
@@ -206,15 +206,15 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     },
     // 18 cool gray aerial rock
     LayerBlend {
-        height_scale: 0.95,
-        blend_width: 0.18,
+        height_scale: 0.62,
+        blend_width: 0.40,
         min_weight: 0.08,
         parallax_depth: 0.055,
     },
     // 19 dark slate
     LayerBlend {
-        height_scale: 1.0,
-        blend_width: 0.15,
+        height_scale: 0.70,
+        blend_width: 0.32,
         min_weight: 0.08,
         parallax_depth: 0.058,
     },
@@ -262,8 +262,8 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     },
     // 26 gray granite talus
     LayerBlend {
-        height_scale: 0.95,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.050,
     },
@@ -276,8 +276,8 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     },
     // 28 lichen rock
     LayerBlend {
-        height_scale: 0.85,
-        blend_width: 0.20,
+        height_scale: 0.58,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.048,
     },
