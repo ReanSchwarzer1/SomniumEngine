@@ -2636,7 +2636,9 @@ impl SomniumRenderer {
         }
 
         // ── 9. UI Overlay ────────────────────────────────────────────────────
-        ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
+        if !ui.is_immersive() {
+            ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
+        }
 
         let stats_draws = if self.cull_stats {
             self.indirect.len()

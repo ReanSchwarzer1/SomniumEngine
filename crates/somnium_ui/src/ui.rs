@@ -49,6 +49,7 @@ pub struct UserInterface {
     focused_ih: IH,
     #[allow(dead_code)]
     captured_ih: IH,
+    hovered_ih: IH,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
 }
@@ -76,6 +77,7 @@ impl UserInterface {
             cursor_pos: Vec2::ZERO,
             focused_ih: IH::NONE,
             captured_ih: IH::NONE,
+            hovered_ih: IH::NONE,
             viewport_handle: NodeHandle::NONE,
         }
     }
@@ -410,6 +412,44 @@ impl UserInterface {
         to_nh(self.pick_node(self.root_ih, point))
     }
 
+    /// True if `handle` is `ancestor` or a descendant of it.
+    pub fn is_under(&self, handle: NodeHandle, ancestor: NodeHandle) -> bool {
+        if handle.is_none() || ancestor.is_none() {
+            return false;
+        }
+        let mut h = to_ih(handle);
+        for _ in 0..64 {
+            if to_nh(h) == ancestor {
+                return true;
+            }
+            let parent = match self.nodes.try_borrow(h) {
+                Ok(n) => to_ih(n.widget.parent),
+                Err(_) => return false,
+            };
+            if parent.is_none() {
+                return false;
+            }
+            h = parent;
+        }
+        false
+    }
+
+    /// Cursor for the widget under the pointer (or the captured widget while dragging).
+    pub fn cursor_kind(&self) -> crate::node::CursorKind {
+        let handle = if self.captured_ih.is_some() {
+            to_nh(self.captured_ih)
+        } else {
+            self.hit_test(self.cursor_pos)
+        };
+        if handle.is_none() || handle == self.viewport_handle {
+            return crate::node::CursorKind::Default;
+        }
+        let Ok(node) = self.nodes.try_borrow(to_ih(handle)) else {
+            return crate::node::CursorKind::Default;
+        };
+        node.control.cursor_icon(&node.widget, self.cursor_pos)
+    }
+
     fn pick_node(&self, handle: IH, pt: Vec2) -> IH {
         let node = match self.nodes.try_borrow(handle) {
             Ok(n) => n,
@@ -450,6 +490,22 @@ impl UserInterface {
 
     pub fn set_focus(&mut self, handle: NodeHandle) {
         self.focused_ih = to_ih(handle);
+    }
+
+    /// Tooltip string on the widget under `pos`, walking parents if empty.
+    pub fn tooltip_at(&self, pos: Vec2) -> String {
+        let mut h = self.hit_test(pos);
+        while h.is_some() {
+            if let Ok(n) = self.nodes.try_borrow(to_ih(h)) {
+                if !n.widget.tooltip.is_empty() {
+                    return n.widget.tooltip.clone();
+                }
+                h = n.widget.parent;
+            } else {
+                break;
+            }
+        }
+        String::new()
     }
 
     // -----------------------------------------------------------------------
@@ -613,6 +669,22 @@ impl UserInterface {
         }
     }
 
+    pub fn first_child(&self, handle: NodeHandle) -> NodeHandle {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .ok()
+            .and_then(|n| n.widget.children.first().copied())
+            .unwrap_or(NodeHandle::NONE)
+    }
+
+    pub fn set_desired_position(&mut self, handle: NodeHandle, pos: Vec2) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            node.widget.desired_local_position = pos;
+            node.widget.measure_valid = false;
+            node.widget.arrange_valid = false;
+        }
+    }
+
     /// Show or hide a widget and invalidate layout.
     pub fn set_visibility(&mut self, handle: NodeHandle, visible: bool) {
         if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
@@ -645,8 +717,6 @@ impl UserInterface {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
-                // While a widget holds the mouse (a slider being dragged), it
-                // keeps receiving moves even when the cursor leaves its bounds.
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;
@@ -656,17 +726,40 @@ impl UserInterface {
                         WidgetMessage::MouseMove { pos },
                     ));
                 }
+                let hit = self.hit_test(self.cursor_pos);
+                let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                let new_hover = if over_viewport { IH::NONE } else { to_ih(hit) };
+                if new_hover != self.hovered_ih {
+                    if self.hovered_ih.is_some() {
+                        self.send(UiMessage::new(
+                            to_nh(self.hovered_ih),
+                            MessageDirection::ToWidget,
+                            WidgetMessage::MouseLeave,
+                        ));
+                    }
+                    if new_hover.is_some() {
+                        self.send(UiMessage::new(
+                            to_nh(new_hover),
+                            MessageDirection::ToWidget,
+                            WidgetMessage::MouseEnter,
+                        ));
+                    }
+                    self.hovered_ih = new_hover;
+                }
                 false // Never consumed — both UI and game need cursor tracking
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                // RMB always passes through for camera look
-                if *button == winit::event::MouseButton::Right {
-                    return false;
-                }
-
                 let pos = self.cursor_pos;
                 let hit = self.hit_test(pos);
+                // RMB over the viewport is fly-cam. RMB over chrome can open
+                // context menus (Phase 26-B).
+                if *button == winit::event::MouseButton::Right {
+                    let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                    if over_viewport {
+                        return false;
+                    }
+                }
 
                 // Check if the hit widget is a viewport area (transparent/non-interactive)
                 let over_viewport = !hit.is_some() || hit == self.viewport_handle;

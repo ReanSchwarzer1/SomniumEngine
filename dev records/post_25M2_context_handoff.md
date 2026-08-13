@@ -6,7 +6,7 @@
 > **Branch at audit:** `dev`  
 > **25M-2 boundary commit:** `4e56482`  
 > **Audited HEAD:** `846dea7` (`Phase XV BGS and Godot ref update`) — docs after this snapshot include the 2026-08-13 Phase XV research expansion in `phase_XV.md` and the post-IV handoff  
-> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13); Phase XV researched and planned but **not implemented** (research expanded 2026-08-13); Phase 26 (Iris — inspector colour pickers) planned in [`phase_26.md`](phase_26.md); Phase VV (Halcyon — ray-traced water reflections) planned in [`phase_VV.md`](phase_VV.md)
+> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13). Phase XV is complete (see [`post_IV_context_handoff.md`](post_IV_context_handoff.md)). Phase 26 (Metaphor) **26-A–I shipped, phase remains open** — see [`phase_26.md`](phase_26.md). Phase VV (Halcyon) planned in [`phase_VV.md`](phase_VV.md). This file stays the Phase IV A–J / asset-license record; do not treat the snapshot HEAD as current engine status.
 
 ## 1. Read this first
 

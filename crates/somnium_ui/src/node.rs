@@ -56,6 +56,17 @@ impl LayoutCtx {
         }
     }
 
+    /// Screen-space bounds of any node (valid after arrange).
+    pub fn screen_bounds(&self, handle: NodeHandle) -> Rect {
+        unsafe {
+            (*self.ui_ptr)
+                .nodes
+                .try_borrow(handle.transmute())
+                .map(|n| n.widget.screen_bounds())
+                .unwrap_or(Rect::ZERO)
+        }
+    }
+
     /// Read a child's grid row index.
     pub fn row(&self, handle: NodeHandle) -> usize {
         unsafe {
@@ -86,6 +97,37 @@ impl LayoutCtx {
                 .draw_ctx
                 .font_atlas
                 .measure_text(text, px, font_id)
+        }
+    }
+}
+
+/// Native mouse cursor to show while hovering a widget (Phase 26-I).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorKind {
+    #[default]
+    Default,
+    /// Clickable chrome (buttons, menus, swatches).
+    Pointer,
+    /// Text / numeric fields.
+    Text,
+    /// Vertical splitter bar (resize columns).
+    ColResize,
+    /// Horizontal splitter bar (resize rows).
+    RowResize,
+    /// Slider track or numeric slider.
+    EwResize,
+}
+
+impl CursorKind {
+    pub fn to_winit(self) -> winit::window::CursorIcon {
+        use winit::window::CursorIcon;
+        match self {
+            Self::Default => CursorIcon::Default,
+            Self::Pointer => CursorIcon::Pointer,
+            Self::Text => CursorIcon::Text,
+            Self::ColResize => CursorIcon::ColResize,
+            Self::RowResize => CursorIcon::RowResize,
+            Self::EwResize => CursorIcon::EwResize,
         }
     }
 }
@@ -125,6 +167,11 @@ pub trait Control: Send + 'static {
     /// instead of passing through to the game (WASD camera, gizmo shortcuts, etc.).
     fn is_text_input(&self) -> bool {
         false
+    }
+
+    /// Cursor shown when the pointer is over this widget.
+    fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> CursorKind {
+        CursorKind::Default
     }
 }
 

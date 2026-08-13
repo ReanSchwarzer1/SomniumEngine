@@ -166,6 +166,26 @@ pub enum InspectorField {
     /// Metres from the camera past which foliage stops casting shadows
     /// (Phase 24AE). Nearer than the draw distance on purpose.
     FoliageShadowDistance,
+    WaterWaveDirAX,
+    WaterWaveDirAZ,
+    WaterWaveDirBX,
+    WaterWaveDirBZ,
+    WaterAbsorptionMag,
+    WaterScatteringMag,
+}
+
+/// Colour property a swatch / picker writes (Phase 26-F Iris).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorField {
+    Light,
+    WaterDeep,
+    WaterShallow,
+    WaterEdge,
+    WaterAbsorption,
+    WaterScattering,
+    ParticleStart,
+    ParticleEnd,
+    MaterialBase,
 }
 
 /// Which post-processing effect a toggle click targets (Phase 15A1).
@@ -224,6 +244,8 @@ pub enum EditorEvent {
     PauseSimulation,
     /// Return to edit mode and reset the simulation clock.
     StopSimulation,
+    /// Hide editor chrome and fill the monitor with the 3D view. Esc toggles off.
+    ToggleImmersiveViewport,
     SaveScene,
     NewScene,
     LoadScene(String),
@@ -259,6 +281,8 @@ pub enum EditorEvent {
     TogglePostFx(PostFxToggle),
     /// Cycle the tone-mapping curve (AgX → ACES → Reinhard).
     CycleTonemapper,
+    /// Set the tone-mapping curve by index (0 AgX, 1 ACES, 2 Reinhard).
+    SetTonemapper(u8),
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
     /// (the engine maps it exponentially to a world speed).
     SetCameraSpeed(f32),
@@ -269,4 +293,18 @@ pub enum EditorEvent {
     /// File > Import Model — opens a native file picker and imports a glTF/GLB
     /// model into the scene at the world origin (Phase 19B).
     ImportModel,
+    /// Live vs commit matches [`SetInspectorValue`]. `rgba` is linear.
+    SetInspectorColor {
+        field: ColorField,
+        rgba: [f32; 4],
+        live: bool,
+    },
+    /// Restore the colour captured when the picker opened; no undo entry.
+    CancelInspectorColor {
+        field: ColorField,
+        rgba: [f32; 4],
+    },
+    ToggleWaterUnderwater,
+    /// Title-bar close — same path as the native window X.
+    CloseWindow,
 }

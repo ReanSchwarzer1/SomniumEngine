@@ -6,7 +6,8 @@
 use crate::{
     draw::DrawingContext,
     message::{KeyCode, MessageDirection, NodeHandle, UiMessage, WidgetMessage},
-    node::{Control, LayoutCtx, UiNode},
+    node::{Control, CursorKind, LayoutCtx, UiNode},
+    theme,
     types::Rect,
     widget::{Widget, WidgetBuilder},
 };
@@ -75,17 +76,75 @@ pub struct NumericField {
     /// Set once the pointer has moved far enough for the gesture to count as a
     /// scrub rather than a click.
     scrubbing: bool,
+    /// Optional slider range. `None` infers a range from `drag_step`.
+    slider_range: Option<(f32, f32)>,
+    slider_dragging: bool,
 }
 
 /// Pixels of travel before a press becomes a drag instead of a click. Without
 /// a threshold, the hand tremor in an ordinary click would nudge the value.
 const SCRUB_THRESHOLD: f32 = 3.0;
+const FIELD_W: f32 = 72.0;
+const SLIDER_GAP: f32 = 6.0;
+const HANDLE_W: f32 = 8.0;
+const TRACK_H: f32 = 4.0;
+
+fn infer_slider_range(step: f32) -> (f32, f32) {
+    if step <= 0.0005 {
+        (0.0, 0.01)
+    } else if step <= 0.005 {
+        (0.0, 1.0)
+    } else if step <= 0.02 {
+        (0.0, 2.0)
+    } else if step <= 0.05 {
+        (-50.0, 50.0)
+    } else if step <= 0.15 {
+        (0.0, 200.0)
+    } else if step <= 0.25 {
+        (-180.0, 180.0)
+    } else if step <= 1.0 {
+        (0.0, 400.0)
+    } else if step <= 5.0 {
+        (0.0, 12_000.0)
+    } else if step <= 50.0 {
+        (0.0, 20_000.0)
+    } else {
+        (0.0, 80_000.0)
+    }
+}
 
 impl NumericField {
     fn display_text(&self) -> String {
         self.editing_text
             .clone()
             .unwrap_or_else(|| format!("{:.3}", self.value))
+    }
+
+    fn effective_range(&self) -> (f32, f32) {
+        let (mut lo, mut hi) = self
+            .slider_range
+            .unwrap_or_else(|| infer_slider_range(self.drag_step));
+        if lo >= hi {
+            hi = lo + 1.0;
+        }
+        lo = lo.min(self.value);
+        hi = hi.max(self.value);
+        (lo, hi)
+    }
+
+    fn split_rects(b: Rect) -> (Rect, Rect) {
+        let field = FIELD_W.min(b.w * 0.45).max(56.0);
+        let slider_w = (b.w - field - SLIDER_GAP).max(40.0);
+        (
+            Rect::new(b.x, b.y, slider_w, b.h),
+            Rect::new(b.x + slider_w + SLIDER_GAP, b.y, field, b.h),
+        )
+    }
+
+    fn value_from_slider(slider: Rect, x: f32, lo: f32, hi: f32) -> f32 {
+        let usable = (slider.w - HANDLE_W).max(1.0);
+        let t = ((x - slider.x - HANDLE_W * 0.5) / usable).clamp(0.0, 1.0);
+        lo + t * (hi - lo)
     }
 }
 
@@ -99,38 +158,80 @@ impl Control for NumericField {
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let text = self.display_text();
         let sz = ctx.measure_text(&text, self.px, self.font_id);
-        Vec2::new(available.x.min(sz.x.max(60.0)), sz.y.max(self.px + 6.0))
+        Vec2::new(
+            available.x.min(220.0).max(140.0),
+            sz.y.max(self.px + 6.0).max(theme::ROW_HEIGHT),
+        )
+    }
+
+    fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
+        let (slider, field) = Self::split_rects(widget.screen_bounds());
+        if self.slider_dragging || slider.contains(pos) {
+            CursorKind::EwResize
+        } else if field.contains(pos) {
+            CursorKind::Text
+        } else {
+            CursorKind::Default
+        }
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
+        let (slider, field) = Self::split_rects(b);
+        let (lo, hi) = self.effective_range();
+        let t = if hi > lo {
+            ((self.value - lo) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let mid_y = slider.y + slider.h * 0.5;
+        ctx.push_rect_filled(
+            Rect::new(slider.x, mid_y - TRACK_H * 0.5, slider.w, TRACK_H),
+            theme::BORDER_DARK,
+        );
+        let usable = (slider.w - HANDLE_W).max(1.0);
+        let handle_x = slider.x + t * usable;
+        ctx.push_rect_filled(
+            Rect::new(
+                slider.x,
+                mid_y - TRACK_H * 0.5,
+                handle_x - slider.x,
+                TRACK_H,
+            ),
+            theme::ACCENT,
+        );
+        ctx.push_rect_filled(
+            Rect::new(handle_x, slider.y + 3.0, HANDLE_W, slider.h - 6.0),
+            theme::ACCENT,
+        );
+
         let bg = if self.focused {
             [40, 40, 60, 255]
         } else {
-            [28, 28, 28, 255]
+            theme::BG_INPUT
         };
         let bdr = if self.focused {
-            [100, 140, 200, 255]
+            theme::BORDER_FOCUS
         } else {
-            [60, 60, 60, 255]
+            theme::BORDER_DARK
         };
-        ctx.push_rect_filled(b, bg);
-        ctx.push_rect_border(b, 1.0, bdr);
+        ctx.push_rect_filled(field, bg);
+        ctx.push_rect_border(field, 1.0, bdr);
         let text = self.display_text();
-        let origin = Vec2::new(b.x + 4.0, b.y + 3.0);
-        // Selection highlight goes down before the glyphs so the text stays legible.
+        let origin = Vec2::new(field.x + 4.0, field.y + 3.0);
         if self.focused && self.select_all && !text.is_empty() {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
             ctx.push_rect_filled(
-                Rect::new(b.x + 4.0, b.y + 3.0, advance, self.px),
+                Rect::new(field.x + 4.0, field.y + 3.0, advance, self.px),
                 [60, 90, 150, 255],
             );
         }
         ctx.push_text(&text, origin, self.font_id, self.px, self.color);
         if self.focused && !self.select_all {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
-            let cx = b.x + 4.0 + advance;
-            ctx.push_rect_filled(Rect::new(cx, b.y + 3.0, 1.0, self.px), self.color);
+            let cx = field.x + 4.0 + advance;
+            ctx.push_rect_filled(Rect::new(cx, field.y + 3.0, 1.0, self.px), self.color);
         }
     }
 
@@ -156,12 +257,36 @@ impl Control for NumericField {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {
                 WidgetMessage::MouseDown { pos, .. } => {
-                    self.drag_origin = Some((pos.x, self.value));
-                    self.scrubbing = false;
+                    let (slider, _field) = Self::split_rects(widget.screen_bounds());
+                    if slider.contains(pos) {
+                        self.slider_dragging = true;
+                        self.focused = false;
+                        self.select_all = false;
+                        self.editing_text = None;
+                        let (lo, hi) = self.effective_range();
+                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        if v != self.value {
+                            self.value = v;
+                            emit.push(NumericFieldMessage::value_changing(widget.handle, v));
+                        }
+                    } else {
+                        self.drag_origin = Some((pos.x, self.value));
+                        self.scrubbing = false;
+                    }
                     msg.handled = true;
                 }
                 WidgetMessage::MouseMove { pos } => {
-                    if let Some((start_x, start_value)) = self.drag_origin {
+                    if self.slider_dragging {
+                        let (slider, _) = Self::split_rects(widget.screen_bounds());
+                        let (lo, hi) = self.effective_range();
+                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        if v != self.value {
+                            self.value = v;
+                            emit.push(NumericFieldMessage::value_changing(widget.handle, v));
+                            widget.invalidate_layout();
+                        }
+                        msg.handled = true;
+                    } else if let Some((start_x, start_value)) = self.drag_origin {
                         let dx = pos.x - start_x;
                         if !self.scrubbing && dx.abs() >= SCRUB_THRESHOLD {
                             self.scrubbing = true;
@@ -184,12 +309,12 @@ impl Control for NumericField {
                     }
                 }
                 WidgetMessage::MouseUp { .. } => {
+                    let was_slider = self.slider_dragging;
+                    self.slider_dragging = false;
                     let was_scrubbing = self.scrubbing;
                     self.drag_origin = None;
                     self.scrubbing = false;
-                    if was_scrubbing {
-                        // Closes the gesture: this is the one the receiver
-                        // turns into a single undo entry.
+                    if was_scrubbing || was_slider {
                         emit.push(NumericFieldMessage::value_changed(
                             widget.handle,
                             self.value,
@@ -302,6 +427,7 @@ pub struct NumericFieldBuilder {
     color: [u8; 4],
     font_id: u8,
     drag_step: f32,
+    slider_range: Option<(f32, f32)>,
 }
 
 impl NumericFieldBuilder {
@@ -313,6 +439,7 @@ impl NumericFieldBuilder {
             color: [200, 200, 200, 255],
             font_id: 0,
             drag_step: 0.05,
+            slider_range: None,
         }
     }
 
@@ -334,6 +461,11 @@ impl NumericFieldBuilder {
         self
     }
 
+    pub fn with_range(mut self, min: f32, max: f32) -> Self {
+        self.slider_range = Some((min, max));
+        self
+    }
+
     pub fn build(self) -> UiNode {
         UiNode::new(
             self.widget.build(),
@@ -348,7 +480,21 @@ impl NumericFieldBuilder {
                 drag_step: self.drag_step,
                 drag_origin: None,
                 scrubbing: false,
+                slider_range: self.slider_range,
+                slider_dragging: false,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slider_maps_left_edge_to_min_and_right_edge_to_max() {
+        let r = Rect::new(0.0, 0.0, 108.0, 18.0);
+        assert!((NumericField::value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
+        assert!((NumericField::value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
     }
 }

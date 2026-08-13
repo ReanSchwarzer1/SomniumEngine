@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Iris) and Phase VV (Halcyon) planned  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI/UX as later features land; 26-J not started); Phase VV (Halcyon) planned  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
@@ -26,9 +26,11 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Planned next (independent tracks):
-> - **Phase 26 — Iris** — inspector colour pickers (swatch + popup), modelled on
->   Unreal's `SColorBlock` / `SColorPicker`, covering lights, water
->   deep/shallow/edge, absorption/scattering, particles, and materials. Plan:
+> - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish are in
+>   the tree (Nocturne shell, docked Content Drawer, Iris, Help, custom title
+>   bar). **The UI phase is not closed:** later engine work keeps needing
+>   inspector fields, menus, drawers, and Help pages. Queued: 26-J reflection
+>   inspector (only if requested), 26-H SDF text, 26-D2 drag-drop. Contract:
 >   `dev records/phase_26.md`.
 > - **Phase VV — Halcyon** — ray-traced water reflections. Plan:
 >   `dev records/phase_VV.md`. Reflections are currently a 28-step screen-space
@@ -44,7 +46,7 @@
 5. [somnium_core — Lifecycle & Events](#5-somnium_core--lifecycle--events)
 6. [somnium_renderer — Visibility Buffer Pipeline](#6-somnium_renderer--visibility-buffer-pipeline)
 7. [somnium_ecs — Entity Component System](#7-somnium_ecs--entity-component-system)
-8. [somnium_ui — Native Editor UI](#8-somnium_ui--native-editor-ui-phase-12-complete)
+8. [somnium_ui — Native Editor UI](#8-somnium_ui--native-editor-ui-phase-12--metaphor-chrome-still-growing)
 9. [somnium_physics — Jolt Integration](#9-somnium_physics--jolt-integration)
 10. [somnium_audio — Kira Integration](#10-somnium_audio--kira-integration)
 11. [somnium_asset — Asset Pipeline](#11-somnium_asset--asset-pipeline)
@@ -91,7 +93,7 @@ GE/
 │   ├── somnium_core/           App lifecycle, events, timing, config, ECS re-exports
 │   ├── somnium_renderer/       wgpu backend, Visibility Buffer, shading passes
 │   ├── somnium_ecs/            Archetype ECS (no external deps)
-│   ├── somnium_ui/             wry WebView manager, HTML editor, IPC bridge
+│   ├── somnium_ui/             Native wgpu widget tree, Nocturne editor chrome, UiPass
 │   ├── somnium_physics/        Jolt Physics high-level wrapper
 │   ├── somnium_physics_sys/    Raw FFI bindings to libjolt
 │   ├── somnium_audio/          Kira audio engine wrapper
@@ -525,26 +527,33 @@ The query filters archetypes whose `ComponentSet` is a superset of `required` an
 
 ---
 
-## 8. somnium_ui — Native Editor UI (Phase 12 Complete)
+## 8. somnium_ui — Native Editor UI (Phase 12 + Metaphor; chrome still growing)
 
 ### 8.1 Architecture
 
 The editor UI is rendered entirely by the wgpu backend — no OS WebView dependency. `UiPass` composites the widget tree over the 3D viewport each frame using an alpha-blending screen-space render pass.
 
 ```
-OS Window (HWND)  ← wgpu renders 3D scene, then UI overlay
+OS Window (HWND, undecorated)  ← wgpu 3D scene, then UI overlay
   │
   └── UiPass (wgpu, alpha blend, LoadOp::Load)
         │
-        └── UserInterface widget tree
-              ┌──────────────────────────────┐  Row 0  28 px  (menu bar)
-              │ Somnium Engine │ File │ Edit │
-              ├────────┬───────────────┬─────┤
-              │Toolbar │  3D Viewport  │Right│  Row 1  *  (main area)
-              │ 40 px  │ (transparent) │280px│
-              ├────────┴───────────────┴─────┤
-              │      Output Log  192 px      │  Row 2
-              └──────────────────────────────┘
+        └── UserInterface widget tree  (outer_grid, 7 rows)
+              ┌──────────────────────────────────────────────┐  Row 0  36 px  title bar
+              │ mark  Somnium Engine              fps  _ □ × │
+              ├──────────────────────────────────────────────┤  Row 1  menu
+              │ File Edit Create View Window Help            │
+              ├──────────────────────────────────────────────┤  Row 2  toolbar
+              │ Save  Select Landscape Foliage  ▶ ❚❚ ■       │
+              ├──────────────────────────────────────────────┤  Row 3  26 px  viewport bar
+              ├────────┬──────────────────────┬──────────────┤  Row 4  *  main
+              │ Sculpt │  3D Viewport         │ Outliner     │
+              │        │  (transparent)       │ Details      │
+              ├────────┴──────────────────────┴──────────────┤  Row 5  220 px
+              │ Content Drawer (tiles)  or  Output Log       │
+              ├──────────────────────────────────────────────┤  Row 6  status
+              │ Content Drawer   Output Log    status text   │
+              └──────────────────────────────────────────────┘
 ```
 
 ### 8.2 Key types
@@ -554,7 +563,7 @@ OS Window (HWND)  ← wgpu renders 3D scene, then UI overlay
 | `UserInterface` | `ui.rs` | Widget tree, two-pass layout (measure/arrange), hit-test, message queue, draw dispatch |
 | `UiPass` | `pass.rs` | wgpu render pass: ortho proj, vertex/index buffers, font atlas, scissor, alpha blend |
 | `UiManager` | `lib.rs` | Entry point: `new()`, `end_frame()`, `build_editor_layout()`, outliner/inspector rebuilds |
-| `FontAtlas` | `font.rs` | fontdue 0.7, 512×512 Rgba8, shelf packing, `measure_text`, `ascent` |
+| `FontAtlas` | `font.rs` | fontdue 0.7, 1024×1024 Rgba8, shelf packing, `measure_text`, `ascent` |
 | `DrawingContext` | `draw.rs` | Command list: `push_rect`, `push_text`, clip stack |
 
 ### 8.3 Widget Library
@@ -566,38 +575,68 @@ All widgets port the Fyrox UI architecture (see ATTRIBUTION §13.13–13.17):
 | `Canvas` | `widgets/canvas.rs` | Absolute positioning container |
 | `StackPanel` | `widgets/stack_panel.rs` | Linear layout (Horizontal / Vertical) |
 | `Border` | `widgets/border.rs` | Background fill + per-side stroke |
-| `Button` | `widgets/button.rs` | Click emission via `ButtonMessage::Click` |
-| `Text` | `widgets/text.rs` | fontdue-rendered text label |
-| `Grid` | `widgets/grid.rs` | WPF-style rows/columns: Strict / Auto / Stretch size modes |
-| `ScrollViewer` | `widgets/scroll_viewer.rs` | Clipped vertical scroll container |
+| `Button` | `widgets/button.rs` | Click via `ButtonMessage::Click`; hover / press / `SetSelected` fills |
+| `Text` | `widgets/text.rs` | fontdue-rendered label; optional wrap + newlines (`with_wrap`) |
+| `Grid` | `widgets/grid.rs` | WPF-style rows/columns: Strict / Auto / Stretch; `SetRowSize` for the docked drawer |
+| `ScrollViewer` | `widgets/scroll_viewer.rs` | Clipped vertical scroll; always-visible right gutter, wheel + thumb drag |
+| `WrapPanel` | `widgets/wrap_panel.rs` | Left-to-right wrapping tiles (Content Drawer) |
 | `TextBox` | `widgets/text_box.rs` | Single-line keyboard text input |
-| `NumericField` | `widgets/numeric_field.rs` | f32 numeric input with `NumericFieldMessage::Value` |
+| `NumericField` | `widgets/numeric_field.rs` | f32 numeric input with live `ValueChanging` / commit `ValueChanged` |
+| `UiCanvas` | `runtime.rs` | Game HUD/pause canvas without editor chrome (26-G) |
+| `ColorSwatch` / `ColorPicker` | `widgets/color_picker.rs` | Iris colour property + HSV popup (26-F) |
+| `CommandPalette` | `widgets/command_palette.rs` | Ctrl+P command search (26-I) |
+| `ToastHost` | `widgets/toast.rs` | Transient status toasts (26-I) |
+| `Splitter` | `widgets/splitter.rs` | Two-pane resizable container (Phase 26-A) |
+| `CheckBox` | `widgets/check_box.rs` | Real checkbox; replaces `[x]`/`[ ]` buttons (26-B) |
+| `ComboBox` | `widgets/combo_box.rs` | Dropdown; replaces foliage/tonemapper cyclers (26-B) |
+| `TreeView` | `widgets/tree_view.rs` | Hierarchical outliner / content tree (26-B/E) |
+| `TabControl` | `widgets/tab_control.rs` | Header strip + one visible page (26-B) |
+| `Image` / `Icon` | `widgets/image.rs` | Icon-atlas textured quad (26-A) |
+| `SearchBox` / `Breadcrumb` / `Tooltip` | `widgets/search_box.rs` | Filter, path crumbs, hover hint (26-B) |
+| `ContextMenu` | `widgets/context_menu.rs` | Right-click action list (26-B) |
+| `Popup` | `widgets/popup.rs` | Anchored overlay; File/Create follow their buttons on resize (26-A) |
 
-### 8.4 Editor Layout (Phase 12D-full)
+### 8.4 Editor Layout (Phase 26-A–I Metaphor — chrome still growing)
 
-`UiManager::build_editor_layout()` constructs the full editor tree on init:
+`UiManager::build_editor_layout()` constructs the Nocturne editor tree on init.
+The OS window is **undecorated**; row 0 is a custom title bar (engine mark,
+“Somnium Engine”, fps, min/max/close). Font is bundled Inter
+(`crates/somnium_ui/assets/fonts/Inter-Regular.ttf`), rasterized with 1.5×
+supersampling and window DPI (26-H SDF slipped).
+Popups size to their content; File/Create follow their buttons. Columns are
+nested `Splitter`s with persisted widths. Inspector numerics include a slider
+beside the typed field. Native cursors follow splitter/slider/button hit tests.
+FPS is written every frame via `UiManager::set_fps`.
+
+**Metaphor is not closed.** 26-A–I plus the 2026-08-13 UX polish are the
+baseline shell. Later features (animation, cooking, 25J terrain material UI,
+networking debug, …) must add inspector sections, menus, drawer types, and
+`docs/editor/*.md` pages rather than one-off panels. 26-J (reflection
+inspector) is still out unless requested.
 
 ```
-outer_grid (3 rows: 28px | * | 192px)
-├── menu_bar_h  (row 0) — Grid(stretch col | auto col)
-│     ├── menu_stack (col 0) — StackPanel(Horizontal)
-│     │     └── Buttons: [Somnium Engine, File, Edit, View, Create]
-│     └── fps_text  (col 1) — Text "FPS: --" (right-aligned)
-│
-├── main_grid (row 1) — Grid(40px | * | 280px cols)
-│     ├── toolbar_h  (col 0) — StackPanel(Vertical): tool mode buttons
-│     ├── viewport_h (col 1) — Border(transparent): 3D render target area
-│     └── right_panel_h (col 2)
-│           ├── outliner_scroll — ScrollViewer
-│           │     └── outliner_stack — StackPanel(Vertical): entity Buttons (rebuilt per-frame)
-│           └── inspector_h — Grid(rows per TRS field)
-│                 └── NumericFields ×9: tx/ty/tz, rx/ry/rz, sx/sy/sz
-│
-└── bottom_h (row 2) — Grid(22px | * rows)
-      ├── log_header_border (row 0) — Border + Text "Output Log"
-      └── log_scroll (row 1) — ScrollViewer
-            └── log_stack — StackPanel(Vertical): log Text lines (rebuilt as logs arrive)
+outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 status)
+├── title bar — EngineMark, “Somnium Engine”, fps, Minimize / Maximize / Close
+├── menu_bar — File/Edit/Create/View/Window/Help
+├── main toolbar — Save, Select, Landscape, Foliage, Play/Pause/Stop (selected fill, no tooltips)
+├── viewport toolbar — camera speed, profiler
+├── tools_split | content_split | details_split (resizable, persisted)
+│     ├── left Sculpt (named Raise/Lower/Smooth/Flatten/Noise/Paint, selected fill)
+│     ├── viewport (transparent passthrough)
+│     └── Outliner TreeView + Details (CheckBox/Combo/ColorSwatch/slider; visible scrollbars)
+├── bottom row — Content Drawer (WrapPanel tiles, default on) or Output Log (same slot)
+└── status bar — labeled Content Drawer / Output Log buttons, status text
 ```
+
+Overlays (root children): compact File/Edit/Create/View/Window/Help menus,
+F1 Help (`docs/editor/*.md`, wrapped + TOC), command palette (Ctrl+P),
+unsaved-changes modal, colour picker, toasts. Click-away closes those
+transients; it does **not** close the docked drawer. Evidence PNGs were not
+invented — capture from a live session into `dev records/phase 26/` if needed.
+
+**Keyboard:** F1 Help, Ctrl+Space toggles the docked Drawer, Esc closes the
+top overlay then falls through to quit. RMB over chrome can hit the UI; RMB
+over the viewport is still fly-cam.
 
 **UI event routing** (`app.rs::window_event`):
 1. `ui_consumed = ui.process_os_event(&event)` — routes mouse/keyboard to widget tree
@@ -1258,7 +1297,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | ⬜ Planned | **Phase 26 — Iris: inspector colour pickers.** Lights still expose tint as three anonymous `Col R/G/B` floats; water deep/shallow/edge, absorption, scattering, particle colours, and material base colour are not in the inspector at all. Iris adds a reusable swatch + popup picker modelled on Unreal's `SColorBlock` / `SColorPicker` / `FColorPickerArgs` (interactive preview, Cancel restores, linear storage with sRGB display), then adopts it across lights, water, particles, and materials. Plan: `dev records/phase_26.md`. |
+| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX (inspector, menus, drawers, Help). 26-J reflection inspector not started. Contract: `dev records/phase_26.md`. |
 | VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
 ---
@@ -2210,6 +2249,13 @@ popups and the cycler that replaced them in 17G. References: Flax
 `Engine/UI/UICanvas` and `GUI/`, Wicked `wiGUI` / `wiFont`, Stride `Stride.UI`,
 rbfx's Urho-derived UI.
 
+> **Shipped (2026-08-13):** 26-A–I plus UX polish are in the tree. **The UI
+> phase is not over** — later features still need chrome. 26-J is out unless
+> requested; 26-H SDF remains slipped. Contract:
+> [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
+> above is the original gap statement; do not treat it as the implementation
+> order, and do not restart at 26-A.
+
 **Phase 27 — Skeletal animation.** GPU skinning with a joint palette, clip
 sampling, blend trees, a state machine, IK, root motion, and animation events.
 Esoterica is the reference to study hardest: its animation system is the most
@@ -2307,6 +2353,11 @@ Three changes, and five additions:
   is not cosmetic — every new component in Somnium currently needs inspector
   code written by hand, which is why the Foliage panel ended up with a cycler
   rather than a popup in 17G.
+  **Metaphor v1 (2026-08-13) did not ship this.** 26-E still hand-builds
+  Details on Checkbox/Combo/PropertyRow so the chrome rewrite is not blocked on
+  a reflection system. Tracked as optional 26-J in
+  [`dev records/phase_26.md`](dev%20records/phase_26.md). Metaphor itself stays
+  open: new components still need inspector UI until 26-J exists.
 - **Phase 27 (animation) gains motion matching** as a later sub-phase, from
   O3DE `MotionMatching`. EMotionFX joins Esoterica as the primary reference.
 - **Phase 30** is confirmed as Recast/Detour-based by three independent engines.
@@ -3562,10 +3613,11 @@ shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
 artifacts — `dev records/phase XV/evidence/XV-BC7_visual_check.md`).
 
-**Phase 26 — Iris (planned 2026-08-13).** Inspector colour pickers. Lights still
-edit tint as three floats; water deep/shallow/edge and absorption/scattering are
-not in the inspector at all. Plan: `dev records/phase_26.md`. Independent of
-Phase VV.
+**Phase 26 — Metaphor (26-A–I shipped 2026-08-13; phase remains open).**
+Nocturne editor chrome, docked Content Drawer, Iris colour pickers (26-F),
+custom title bar, F1 Help. Later engine features keep needing new UI/UX.
+26-J (reflection inspector) not started. Contract: `dev records/phase_26.md`.
+Independent of Phase VV.
 
 ## 18. Known Issues & Active Bugs
 

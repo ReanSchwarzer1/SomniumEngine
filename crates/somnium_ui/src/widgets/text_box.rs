@@ -68,6 +68,10 @@ impl Control for TextBox {
         }
     }
 
+    fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {
+        crate::node::CursorKind::Text
+    }
+
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,

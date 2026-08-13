@@ -100,6 +100,24 @@ impl MaterialPool {
     }
 }
 
+impl MaterialPool {
+    pub fn get(&self, id: u32) -> Option<GpuMaterial> {
+        self.materials.get(id as usize).copied()
+    }
+
+    pub fn set_material(&mut self, queue: &wgpu::Queue, id: u32, material: GpuMaterial) {
+        let Some(slot) = self.materials.get_mut(id as usize) else {
+            return;
+        };
+        *slot = material;
+        queue.write_buffer(
+            &self.buffer,
+            (id as usize * std::mem::size_of::<GpuMaterial>()) as u64,
+            bytemuck::bytes_of(&material),
+        );
+    }
+}
+
 /// Storage buffer of `GpuTerrainMaterial`, bound at `@group(0) @binding(11)`.
 ///
 /// Separate from `MaterialPool` because the two are written on different

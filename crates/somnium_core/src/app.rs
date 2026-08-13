@@ -6,6 +6,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use somnium_audio::engine::AudioEngine;
@@ -13,7 +15,7 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
 use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
-use somnium_ui::{EditorEvent, TerrainInspectorState, UiManager};
+use somnium_ui::{ColorField, EditorEvent, TerrainInspectorState, UiManager};
 
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
@@ -26,8 +28,8 @@ use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
     BuoyantVessel, FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent,
-    MeshKind, Name, Parent, PostProcessComponent, TerrainComponent, Transform, WaterComponent,
-    WorldTransform, simulate_particles,
+    MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent, Transform,
+    WaterComponent, WorldTransform, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -214,6 +216,10 @@ pub struct Engine<G: GameApp> {
     play_session_active: bool,
     /// Carries fractional wall-clock time between 60 Hz physics steps.
     simulation_accumulator: f32,
+    /// True after a mutating editor action until Save or New.
+    scene_dirty: bool,
+    /// Title-bar close requested a shutdown.
+    ui_wants_exit: bool,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -285,6 +291,8 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_clock: SimulationClock::default(),
             play_session_active: false,
             simulation_accumulator: 0.0,
+            scene_dirty: false,
+            ui_wants_exit: false,
         };
 
         event_loop
@@ -331,10 +339,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         info!("Creating window");
 
         let size = LogicalSize::new(self.config.window_size.0, self.config.window_size.1);
-        let attrs = WindowAttributes::default()
-            .with_title(&self.config.window_title)
+        let mut attrs = WindowAttributes::default()
+            .with_title("Somnium Engine")
             .with_inner_size(size)
-            .with_resizable(self.config.resizable);
+            .with_resizable(self.config.resizable)
+            .with_decorations(false);
+        #[cfg(target_os = "windows")]
+        {
+            attrs = attrs.with_undecorated_shadow(true);
+        }
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
@@ -463,7 +476,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             return;
                         }
                         WKC::KeyN => {
-                            self.handle_editor_event(EditorEvent::NewScene);
+                            if let Some(ui) = &mut self.ui_manager {
+                                ui.set_scene_dirty(self.scene_dirty);
+                                ui.prompt_unsaved_new();
+                            } else {
+                                self.handle_editor_event(EditorEvent::NewScene);
+                            }
                             return;
                         }
                         WKC::KeyD => {
@@ -883,7 +901,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Update native UI panels with current frame state ─────────────────
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
-            let entity_list: Vec<(u32, String)> = all_entities
+            let mut names: Vec<(u32, String, Option<u32>)> = all_entities
                 .iter()
                 .map(|&e| {
                     let name = self
@@ -891,9 +909,57 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .get::<Name>(e)
                         .map(|n| n.as_str().to_owned())
                         .unwrap_or_else(|| format!("Entity {}", e.index()));
-                    (e.index(), name)
+                    let parent = self.world.get::<Parent>(e).and_then(|p| {
+                        if p.entity == somnium_ecs::Entity::DANGLING {
+                            None
+                        } else {
+                            Some(p.entity.index())
+                        }
+                    });
+                    (e.index(), name, parent)
                 })
                 .collect();
+            names.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+            let mut children: std::collections::HashMap<u32, Vec<u32>> =
+                std::collections::HashMap::new();
+            let mut name_of: std::collections::HashMap<u32, String> =
+                std::collections::HashMap::new();
+            for (id, name, parent) in &names {
+                name_of.insert(*id, name.clone());
+                if let Some(p) = parent {
+                    children.entry(*p).or_default().push(*id);
+                }
+            }
+            fn walk(
+                id: u32,
+                depth: u8,
+                name_of: &std::collections::HashMap<u32, String>,
+                children: &std::collections::HashMap<u32, Vec<u32>>,
+                out: &mut Vec<(u32, String, u8, bool)>,
+            ) {
+                let has = children.get(&id).map(|c| !c.is_empty()).unwrap_or(false);
+                out.push((
+                    id,
+                    name_of.get(&id).cloned().unwrap_or_default(),
+                    depth,
+                    has,
+                ));
+                if let Some(kids) = children.get(&id) {
+                    for kid in kids {
+                        walk(*kid, depth.saturating_add(1), name_of, children, out);
+                    }
+                }
+            }
+            let mut tree = Vec::new();
+            for (id, _, parent) in &names {
+                let is_root = match parent {
+                    None => true,
+                    Some(p) => !name_of.contains_key(p),
+                };
+                if is_root {
+                    walk(*id, 0, &name_of, &children, &mut tree);
+                }
+            }
             let selected_idx = self.selected_entity.map(|e| e.index());
             let sel_t = self
                 .selected_entity
@@ -1058,16 +1124,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             lc.range,
                             lc.inner_angle.to_degrees(),
                             lc.outer_angle.to_degrees(),
-                            lc.color.x,
-                            lc.color.y,
-                            lc.color.z,
+                            lc.tint().x,
+                            lc.tint().y,
+                            lc.tint().z,
                             lc.moon_intensity,
                         ],
                         lc.light_type == LightType::Directional,
+                        lc.color_temperature_k,
                     )
                 });
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_outliner(&entity_list, selected_idx);
+                ui.update_outliner_tree(&tree, selected_idx);
+                ui.set_fps(self.time.fps());
                 if let Some(t) = sel_t {
                     let (rx, ry, rz) = t.rotation.to_euler(glam::EulerRot::XYZ);
                     ui.update_inspector(
@@ -1085,6 +1153,38 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_water_inspector(sel_water);
                 ui.update_vessel_inspector(sel_vessel);
                 ui.update_foliage_inspector(sel_foliage);
+                let water_iris = self.selected_entity.and_then(|entity| {
+                    let water = self.world.get::<WaterComponent>(entity)?;
+                    Some((
+                        water.deep_color,
+                        water.shallow_color,
+                        water.edge_color,
+                        water.absorption,
+                        water.scattering,
+                        water.underwater_enabled,
+                        [
+                            water.wave_dir_a[0],
+                            water.wave_dir_a[1],
+                            water.wave_dir_b[0],
+                            water.wave_dir_b[1],
+                        ],
+                    ))
+                });
+                ui.update_water_iris(water_iris);
+                let particle = self.selected_entity.and_then(|entity| {
+                    let p = self.world.get::<ParticleEmitter>(entity)?;
+                    Some((p.color_start, p.color_end))
+                });
+                ui.update_particle_inspector(particle);
+                let material = self.selected_entity.and_then(|entity| {
+                    let id = self.world.get::<MaterialComponent>(entity)?.id;
+                    self.renderer
+                        .as_ref()
+                        .and_then(|r| r.materials_pool.get(id))
+                        .map(|m| m.base_color)
+                });
+                ui.update_material_inspector(material);
+                ui.set_scene_dirty(self.scene_dirty);
             }
         }
 
@@ -1242,6 +1342,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             for ev in events {
                 self.handle_editor_event(ev);
             }
+        }
+        if self.ui_wants_exit {
+            self.initiate_shutdown(event_loop);
+            return;
         }
 
         // ── Forward log entries to the output log panel ───────────────────────
@@ -2172,6 +2276,141 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    fn apply_inspector_color(
+        &mut self,
+        field: ColorField,
+        rgba: [f32; 4],
+        live: bool,
+        cancel: bool,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        match field {
+            ColorField::Light => {
+                if cancel {
+                    if let Some((_, old)) = self.scrub_light.take() {
+                        if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
+                            *l = old;
+                        }
+                    }
+                    return;
+                }
+                if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
+                    let mut new_light = old_light;
+                    new_light.color = glam::Vec3::new(rgba[0], rgba[1], rgba[2]);
+                    new_light.color_temperature_k = 0.0;
+                    if live {
+                        if self.scrub_light.is_none() {
+                            self.scrub_light = Some((entity.index(), old_light));
+                        }
+                        if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
+                            *l = new_light;
+                        }
+                        if cancel {
+                            self.scrub_light = None;
+                        }
+                    } else {
+                        let base = self
+                            .scrub_light
+                            .take()
+                            .filter(|(idx, _)| *idx == entity.index())
+                            .map(|(_, l)| l)
+                            .unwrap_or(old_light);
+                        if new_light != base {
+                            if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
+                                *l = base;
+                            }
+                            self.undo_stack.push(
+                                Box::new(SetLightCmd::new(entity.index(), base, new_light)),
+                                &mut self.world,
+                                &mut self.selected_entity,
+                            );
+                            self.scene_dirty = true;
+                        }
+                    }
+                }
+            }
+            ColorField::WaterDeep => {
+                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
+                    w.deep_color = rgba;
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::WaterShallow => {
+                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
+                    w.shallow_color = rgba;
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::WaterEdge => {
+                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
+                    w.edge_color = rgba;
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::WaterAbsorption => {
+                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
+                    let mag = somnium_ui::color::split_magnitude(w.absorption).1;
+                    w.absorption =
+                        somnium_ui::color::join_magnitude([rgba[0], rgba[1], rgba[2]], mag);
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::WaterScattering => {
+                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
+                    let mag = somnium_ui::color::split_magnitude(w.scattering).1;
+                    w.scattering =
+                        somnium_ui::color::join_magnitude([rgba[0], rgba[1], rgba[2]], mag);
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::ParticleStart => {
+                if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
+                    p.color_start = rgba;
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::ParticleEnd => {
+                if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
+                    p.color_end = rgba;
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+            ColorField::MaterialBase => {
+                if let Some(mat) = self.world.get::<MaterialComponent>(entity).copied() {
+                    if let (Some(renderer), Some(ctx)) =
+                        (self.renderer.as_mut(), self.render_ctx.as_ref())
+                    {
+                        if let Some(mut gpu) = renderer.materials_pool.get(mat.id) {
+                            gpu.base_color = rgba;
+                            renderer
+                                .materials_pool
+                                .set_material(&ctx.queue, mat.id, gpu);
+                        }
+                    }
+                }
+                if !live {
+                    self.scene_dirty = true;
+                }
+            }
+        }
+    }
+
     fn handle_editor_event(&mut self, ev: EditorEvent) {
         use somnium_ui::{CreateKind, InspectorField as IF};
 
@@ -2351,6 +2590,7 @@ impl<G: GameApp> Engine<G> {
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack
                     .push(cmd, &mut self.world, &mut self.selected_entity);
+                self.scene_dirty = true;
             }
 
             EditorEvent::DeleteSelected => {
@@ -2407,6 +2647,9 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::SetInspectorValue { field, value, live } => {
+                if !live {
+                    self.scene_dirty = true;
+                }
                 let Some(entity) = self.selected_entity else {
                     return;
                 };
@@ -2430,6 +2673,12 @@ impl<G: GameApp> Engine<G> {
                         | IF::WaterEdgeScale
                         | IF::WaterAnisotropy
                         | IF::WaterCausticStrength
+                        | IF::WaterWaveDirAX
+                        | IF::WaterWaveDirAZ
+                        | IF::WaterWaveDirBX
+                        | IF::WaterWaveDirBZ
+                        | IF::WaterAbsorptionMag
+                        | IF::WaterScatteringMag
                 ) {
                     if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
                         match field {
@@ -2453,6 +2702,22 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterAnisotropy => water.anisotropy = value.clamp(-0.8, 0.8),
                             IF::WaterCausticStrength => {
                                 water.caustic_strength = value.clamp(0.0, 4.0)
+                            }
+                            IF::WaterWaveDirAX => water.wave_dir_a[0] = value,
+                            IF::WaterWaveDirAZ => water.wave_dir_a[1] = value,
+                            IF::WaterWaveDirBX => water.wave_dir_b[0] = value,
+                            IF::WaterWaveDirBZ => water.wave_dir_b[1] = value,
+                            IF::WaterAbsorptionMag => {
+                                let (tint, _) =
+                                    somnium_ui::color::split_magnitude(water.absorption);
+                                water.absorption =
+                                    somnium_ui::color::join_magnitude(tint, value.max(0.0));
+                            }
+                            IF::WaterScatteringMag => {
+                                let (tint, _) =
+                                    somnium_ui::color::split_magnitude(water.scattering);
+                                water.scattering =
+                                    somnium_ui::color::join_magnitude(tint, value.max(0.0));
                             }
                             _ => unreachable!(),
                         }
@@ -2849,8 +3114,19 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::SaveScene => {
                 let path = "scene.somnium";
                 match crate::scene_serial::save_scene(&self.world, path) {
-                    Ok(()) => info!("Scene saved to {}", path),
-                    Err(e) => warn!("Failed to save scene: {}", e),
+                    Ok(()) => {
+                        info!("Scene saved to {}", path);
+                        self.scene_dirty = false;
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast("Scene saved");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to save scene: {}", e);
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast("Save failed");
+                        }
+                    }
                 }
                 // Phase 14F-3: heightmap + splatmap sidecars, one per terrain.
                 if let Some(r) = &self.renderer {
@@ -2904,6 +3180,7 @@ impl<G: GameApp> Engine<G> {
                     WorldTransform::identity(),
                 ));
                 self.undo_stack = UndoStack::new(128);
+                self.scene_dirty = false;
             }
 
             EditorEvent::DuplicateSelected => {
@@ -3026,6 +3303,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_simulation_controls(1);
+                    ui.set_play_overlays_hidden(true);
                 }
                 info!("Simulation playing");
             }
@@ -3052,13 +3330,66 @@ impl<G: GameApp> Engine<G> {
                     r.set_editor_overlays_enabled(true);
                 }
                 if let Some(ui) = &mut self.ui_manager {
+                    ui.set_immersive(false);
                     ui.update_simulation_controls(0);
+                    ui.set_play_overlays_hidden(false);
                 }
                 info!("Simulation stopped");
             }
 
+            EditorEvent::ToggleImmersiveViewport => {
+                let entering = self
+                    .ui_manager
+                    .as_ref()
+                    .is_some_and(|ui| !ui.is_immersive());
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.set_immersive(entering);
+                }
+                if entering {
+                    self.simulation_clock.state = SimulationState::Playing;
+                    self.play_session_active = true;
+                    self.gizmo_drag = None;
+                    self.terrain_stroke = None;
+                    if let Some(r) = &mut self.renderer {
+                        r.set_editor_overlays_enabled(false);
+                    }
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.update_simulation_controls(1);
+                        ui.set_play_overlays_hidden(true);
+                    }
+                    info!("Immersive viewport");
+                } else {
+                    info!("Immersive viewport exited");
+                }
+            }
+
             EditorEvent::ImportModel => {
                 self.import_model();
+                self.scene_dirty = true;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast("Import finished");
+                }
+            }
+
+            EditorEvent::ToggleWaterUnderwater => {
+                if let Some(entity) = self.selected_entity {
+                    if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                        water.underwater_enabled = !water.underwater_enabled;
+                        self.scene_dirty = true;
+                    }
+                }
+            }
+
+            EditorEvent::SetInspectorColor { field, rgba, live } => {
+                self.apply_inspector_color(field, rgba, live, false);
+            }
+
+            EditorEvent::CancelInspectorColor { field, rgba } => {
+                self.apply_inspector_color(field, rgba, true, true);
+            }
+
+            EditorEvent::CloseWindow => {
+                self.ui_wants_exit = true;
             }
 
             // Phase 29. The toggle drives collection as well as visibility: a
@@ -3118,6 +3449,19 @@ impl<G: GameApp> Engine<G> {
                 };
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                     pp.tonemapper = pp.tonemapper.next();
+                    info!("Tonemapper: {}", pp.tonemapper.label());
+                }
+            }
+            EditorEvent::SetTonemapper(idx) => {
+                let Some(entity) = self.selected_entity else {
+                    return;
+                };
+                if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
+                    pp.tonemapper = match idx {
+                        1 => crate::Tonemapper::Aces,
+                        2 => crate::Tonemapper::Reinhard,
+                        _ => crate::Tonemapper::AgX,
+                    };
                     info!("Tonemapper: {}", pp.tonemapper.label());
                 }
             }

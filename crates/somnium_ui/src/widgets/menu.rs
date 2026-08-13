@@ -55,6 +55,10 @@ impl Control for Menu {
         ctx.push_rect_filled(widget.screen_bounds(), bg);
     }
 
+    fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {
+        crate::node::CursorKind::Pointer
+    }
+
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
