@@ -5,6 +5,7 @@
 //! ```text
 //! cargo run --release -p somnium_asset --example pack_terrain -- 2k
 //! cargo run --release -p somnium_asset --example pack_terrain -- 2k --force
+//! cargo run -p somnium_asset --example pack_terrain -- --validate-only
 //! ```
 //!
 //! Existing `*_albedo.png` + `*_surface.png` pairs are skipped unless `--force`
@@ -68,18 +69,25 @@ fn layer_ids(manifest: &Value) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
+fn is_flag(arg: &str) -> bool {
+    arg == "--force" || arg == "--validate-only"
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let res = args
         .iter()
         .skip(1)
-        .find(|a| *a != "--force")
+        .find(|a| !is_flag(a))
         .cloned()
         .unwrap_or_else(|| "4k".to_string());
     let force = args.iter().any(|a| a == "--force");
+    let validate_only = args.iter().any(|a| a == "--validate-only");
     let source = PathBuf::from("assets/terrain/_source");
     let out_dir = PathBuf::from("assets/terrain");
-    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    if !validate_only {
+        fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    }
 
     let text = fs::read_to_string(MANIFEST).map_err(|e| format!("{MANIFEST}: {e}"))?;
     let manifest: Value = serde_json::from_str(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
@@ -95,9 +103,34 @@ fn main() -> Result<(), String> {
     }
 
     let mut packed = Vec::new();
+    let mut missing = Vec::new();
     for material in &materials {
         let albedo_path = out_dir.join(format!("{material}_albedo.png"));
         let surface_path = out_dir.join(format!("{material}_surface.png"));
+        if validate_only {
+            match (albedo_path.exists(), surface_path.exists()) {
+                (true, true) => {
+                    let (w, h) = image::image_dimensions(&albedo_path).unwrap_or((0, 0));
+                    println!("ok {material} ({w}x{h})");
+                    packed.push(serde_json::json!({
+                        "id": material,
+                        "skipped": true,
+                        "width": w,
+                        "height": h,
+                        "albedo": albedo_path.display().to_string(),
+                        "surface": surface_path.display().to_string(),
+                    }));
+                }
+                (a, s) => {
+                    missing.push(format!(
+                        "{material}: albedo={} surface={}",
+                        if a { "present" } else { "missing" },
+                        if s { "present" } else { "missing" }
+                    ));
+                }
+            }
+            continue;
+        }
         if !force && albedo_path.exists() && surface_path.exists() {
             let (w, h) = image::image_dimensions(&albedo_path).unwrap_or((0, 0));
             println!("skip {material} (already packed, {w}x{h})");
@@ -180,6 +213,32 @@ fn main() -> Result<(), String> {
             "xy_normal_length_max": n_max,
             "xy_clamped_texels": n_clamped,
         }));
+    }
+
+    if validate_only {
+        let palette = manifest
+            .get("layer_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(32);
+        let runtime_rgba8_mib = 16.0 * 2.0 * 2048.0 * 2048.0 * 4.0 * (4.0 / 3.0)
+            / (1024.0 * 1024.0)
+            + 16.0 * 2.0 * 1024.0 * 1024.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0);
+        let dropped_mib = 32.0 * 2.0 * 1024.0 * 1024.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0);
+        println!(
+            "validate-only: {} photographed layers, palette {palette}, {} missing",
+            packed.len(),
+            missing.len()
+        );
+        println!(
+            "projected RGBA8 residency: hero2k+extra1k = {runtime_rgba8_mib:.0} MiB (over 700); runtime drop-to-1k = {dropped_mib:.0} MiB"
+        );
+        if !missing.is_empty() {
+            return Err(format!(
+                "pack_terrain --validate-only failed:\n  {}",
+                missing.join("\n  ")
+            ));
+        }
+        return Ok(());
     }
 
     let size = packed

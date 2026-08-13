@@ -20,6 +20,17 @@
 //! The second run logs the mean absolute luminance difference over terrain
 //! pixels and over everything else, separately.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set after a capture has been written. `SOMNIUM_CAPTURE_QUIT=1` polls this
+/// so a headless evidence run can exit instead of sitting on a window.
+static CAPTURE_FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// True once [`FrameCapture::resolve`] has written or compared a frame.
+pub fn finished() -> bool {
+    CAPTURE_FINISHED.load(Ordering::Relaxed)
+}
+
 /// Frame the capture fires on unless `SOMNIUM_CAPTURE_FRAME` says otherwise.
 ///
 /// Late enough that TAA has converged, auto-exposure has settled and the ReSTIR
@@ -512,6 +523,7 @@ impl FrameCapture {
 
         self.hdr_staging = None;
         self.vis_staging = None;
+        CAPTURE_FINISHED.store(true, Ordering::Relaxed);
     }
 }
 

@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–Zeta in engine**, **XV-J next**; Phase 26 (Iris) and Phase VV (Halcyon) planned  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading and BC7 packs are recorded exceptions); Phase 26 (Iris) and Phase VV (Halcyon) planned  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
@@ -23,9 +23,6 @@
 > Canonical write-up: `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Planned next (independent tracks):
-> - **Phase XV-J** — verification, GPU evidence, adapter freeze. Plan:
->   `dev records/phase_XV.md`. Start-here for XV history:
->   `dev records/post_IV_context_handoff.md`.
 > - **Phase 26 — Iris** — inspector colour pickers (swatch + popup), modelled on
 >   Unreal's `SColorBlock` / `SColorPicker`, covering lights, water
 >   deep/shallow/edge, absorption/scattering, particles, and materials. Plan:
@@ -1257,7 +1254,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
-| XV | ✅ A–Zeta in engine | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** (GPU evidence, adapter freeze) is next. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
+| XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 packs absent. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
 | 26 | ⬜ Planned | **Phase 26 — Iris: inspector colour pickers.** Lights still expose tint as three anonymous `Col R/G/B` floats; water deep/shallow/edge, absorption, scattering, particle colours, and material base colour are not in the inspector at all. Iris adds a reusable swatch + popup picker modelled on Unreal's `SColorBlock` / `SColorPicker` / `FColorPickerArgs` (interactive preview, Cancel restores, linear storage with sRGB display), then adopts it across lights, water, particles, and materials. Plan: `dev records/phase_26.md`. |
 | VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
@@ -3549,14 +3546,17 @@ the mathematics and every deviation from the reference, is in
 Evidence is in `dev records/phase IV/IV-K/`. The authored body that ships is
 `WaterComponent::great_lakes`, captured in `ivk_authored_water_body.png`.
 
-**Phase XV — Appalachia (XV-A through XV-Zeta in engine 2026-08-13; XV-J next).**
+**Phase XV — Appalachia (XV-A through XV-J complete 2026-08-13).**
 Thirty-two global materials so the ground can match IV-K water quality. Live
 contract (32 layers, sidecar v4, 1664-byte GPU material, unique colour from
 splat, biome v3, aerial hex/POM LOD, frozen Great Lakes water):
-`dev records/phase XV/XV-Zeta_plan.md`. Plan and J checklist:
+`dev records/phase XV/XV-Zeta_plan.md`. Verification record:
+`dev records/phase XV/evidence/XV-J_compile_gate.md`. Plan:
 `dev records/phase_XV.md`. Start-here history:
 `dev records/post_IV_context_handoff.md`. §20 below is still the Phase 14
-heightmap record — do not treat it as the XV API.
+heightmap record — do not treat it as the XV API. Explicit exceptions: 1.10 ms
+shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
+and BC7 packs (adapter supports BC; packs not encoded).
 
 **Phase 26 — Iris (planned 2026-08-13).** Inspector colour pickers. Lights still
 edit tint as three floats; water deep/shallow/edge and absorption/scattering are

@@ -114,7 +114,11 @@ impl RenderContext {
         info!(
             backend = ?info.backend,
             device = %info.name,
+            vendor = info.vendor,
+            device_id = info.device,
             device_type = ?info.device_type,
+            driver = %info.driver,
+            driver_info = %info.driver_info,
             "Selected GPU adapter"
         );
 

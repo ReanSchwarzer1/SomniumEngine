@@ -12,7 +12,7 @@ Recipe version **4**. Biome preset version **3**.
 | Water local translation | (512, 16.1, 512) — shipping Great Lakes water |
 | Default camera | position `(0, 150.75, 460.8)`, yaw −90°, pitch −22° |
 | Aerial shading LOD | hex + POM off when camera is > 80 m above the heightfield (`gpu_material_for_camera`) |
-| Runtime texture res | `SOMNIUM_TERRAIN_RES` default 2048; layers 16–31 load at 1024 |
+| Runtime texture res | `SOMNIUM_TERRAIN_RES` default 2048 requested; 16–31 load at 1024. Projected 2048+1024 RGBA8 = 853 MiB; runtime drops 0–15 to 1024 (341 MiB) unless `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1` |
 | Engine tiling | 0.25 / m (4 m repeat) for layers 0–7; 8–31 use `1 / physical_width_m` |
 | Macro | splat-weighted unique colour 512², Lerp 0.55; `great_lakes/macro_color.png` not auto-loaded |
 | Paint | Terrain Paint vs Foliage Paint mutually exclusive; palette click arms paint |
@@ -21,8 +21,8 @@ Recipe version **4**. Biome preset version **3**.
 ## Capture set
 
 Evidence files belong under `dev records/phase XV/evidence/` as
-`phase_XV-A_<purpose>.png` after tonemapping. Live GPU captures are still
-pending an engine run; do not invent timings or images.
+`phase_XV-J_<purpose>.png` after tonemapping. XV-J record:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).
 
 | Purpose | Camera | Lighting | What must be readable |
 |---------|--------|----------|------------------------|

@@ -435,12 +435,16 @@ mod tests {
         let mut texel = [0u8; super::super::textures::TERRAIN_LAYER_COUNT as usize];
         texel[16] = 255;
         let splat = vec![texel; 4];
-        let mut means = [[0.5, 0.5, 0.5, 1.0]; super::super::textures::TERRAIN_LAYER_COUNT as usize];
+        let mut means =
+            [[0.5, 0.5, 0.5, 1.0]; super::super::textures::TERRAIN_LAYER_COUNT as usize];
         means[16] = [0.05, 0.4, 0.06, 1.0];
         let map = from_splat(&splat, 2, 2, &means);
         assert_eq!(map.size, MACRO_SIZE);
         let p = &map.texels[0..4];
-        assert!(p[1] > p[0] + 40, "lawn unique colour should be green, got {p:?}");
+        assert!(
+            p[1] > p[0] + 40,
+            "lawn unique colour should be green, got {p:?}"
+        );
         assert_eq!(p[3], 255);
     }
 }

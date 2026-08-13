@@ -519,6 +519,12 @@ impl TerrainData {
     /// *slower* (Phase XV shading, 2026-08-13).
     const AERIAL_DETAIL_METRES: f32 = 80.0;
 
+    /// True when the camera is far enough above the heightfield that hex and
+    /// POM should turn off for the whole frame.
+    pub(crate) fn aerial_detail_off(camera_y: f32, ground_y: f32) -> bool {
+        camera_y - ground_y > Self::AERIAL_DETAIL_METRES
+    }
+
     /// The GPU-side material for this terrain, rebuilt each frame.
     ///
     /// Cheap enough to rebuild rather than track dirty: the brush cursor moves
@@ -583,7 +589,7 @@ impl TerrainData {
     pub fn gpu_material_for_camera(&self, local_camera: glam::Vec3) -> GpuTerrainMaterial {
         let mut material = self.gpu_material();
         let ground = self.world_height_at(local_camera.x, local_camera.z);
-        if local_camera.y - ground > Self::AERIAL_DETAIL_METRES {
+        if Self::aerial_detail_off(local_camera.y, ground) {
             material.hex_tiling = 0;
             material.parallax_steps = 0;
             material.parallax_shadow_steps = 0;
@@ -1162,28 +1168,8 @@ impl TerrainData {
         self.heightmap
             .copy_from_slice(bytemuck::cast_slice(&body[..h_bytes]));
         let splat_src = &body[h_bytes..];
-        if version == 4 {
-            self.splatmap
-                .data
-                .copy_from_slice(bytemuck::cast_slice(splat_src));
-        } else if version == 3 {
-            // v3 → v4: copy layers 0–15, zero 16–31. Do not run four-nonzero.
-            for (dst, src) in self
-                .splatmap
-                .data
-                .iter_mut()
-                .zip(splat_src.chunks_exact(16))
-            {
-                dst[..16].copy_from_slice(src);
-                dst[16..].fill(0);
-            }
-        } else {
-            // v2 → v4: copy layers 0–7, zero 8–31.
-            for (dst, src) in self.splatmap.data.iter_mut().zip(splat_src.chunks_exact(8)) {
-                dst[..8].copy_from_slice(src);
-                dst[8..].fill(0);
-            }
-        }
+        self.splatmap.data =
+            crate::terrain::splat::migrate_sidecar_splat(version, splat_src, texel_count)?;
         self.macro_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
@@ -1314,5 +1300,17 @@ mod tests {
             16.0,
             &[water]
         ));
+    }
+
+    #[test]
+    fn walking_keeps_hex_and_pom_on() {
+        assert!(!TerrainData::aerial_detail_off(2.0, 0.0));
+        assert!(!TerrainData::aerial_detail_off(80.0, 0.0));
+    }
+
+    #[test]
+    fn overview_camera_turns_hex_and_pom_off() {
+        assert!(TerrainData::aerial_detail_off(150.75, 0.0));
+        assert!(TerrainData::aerial_detail_off(80.01, 0.0));
     }
 }

@@ -1,11 +1,11 @@
 # Somnium Engine — Post–Phase IV Context Handoff
 
 > **Purpose:** start-here history for Phase XV after Phase IV closed.  
-> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-Zeta are **in engine**. Next is **XV-J**.  
+> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-J are **complete**. 1.10 ms shading and BC7 packs are recorded exceptions.  
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
 > **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–Zeta in engine** (live look signed off); **XV-J** (GPU evidence) next; Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms / BC7 exceptions recorded); Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
 
 **Current live contract** (supersedes “research-complete / not implemented”
 below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
@@ -27,7 +27,7 @@ The next session should read these files **in order**:
 2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Iris planned; §1.6 XV A–Zeta).
 3. [`phase_IV.md`](phase_IV.md) — completed Great Lakes water/terrain record, especially **§14 IV-K**.
 4. **This file** — post-IV contracts and XV history. Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
-5. [`phase_XV.md`](phase_XV.md) — full plan (XV-A–J). XV-J is the next authorized subphase.
+5. [`phase_XV.md`](phase_XV.md) — full plan (XV-A–J). XV-J is complete.
 6. [`assets/LICENSE.md`](../assets/LICENSE.md), [`assets/terrain/great_lakes/README.md`](../assets/terrain/great_lakes/README.md), and existing terrain material provenance under `assets/terrain/` / `assets/LICENSE.md`.
 
 Optional depth (do not skip (1)–(5) for these):
@@ -60,15 +60,15 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 
 | Phase | Codename | Status | Plan |
 |---|---|---|---|
-| **XV** | Appalachia | **A–Zeta in engine; XV-J next** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) |
+| **XV** | Appalachia | **A–J complete** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
 | **26** | Iris | Planned colour pickers | [`phase_26.md`](phase_26.md) |
 | **VV** | Halcyon | Planned RT water reflections | [`phase_VV.md`](phase_VV.md) |
 
-**Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; GPU evidence is still XV-J.
+**Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; XV-J GPU PNGs are in `phase XV/evidence/`.
 
 ### Session estimate
 
-XV-A–Zeta are done. **XV-J** is the remaining verification session.
+XV-A–J are done. Next planned tracks are **Phase 26 (Iris)** and **Phase VV (Halcyon)**.
 
 ---
 
@@ -201,9 +201,9 @@ and hashes: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
 | XV-H | Physical scale, gradients, wetness response, hex/macro | 2 | **IN ENGINE** 2026-08-13 |
 | XV-I | Sixteen-material UI + diagnostics (incl. wetness / projection) | 1–2 | **IN ENGINE** 2026-08-13 (palette now 32) |
 | XV-Zeta | 32 layers, unique colour, paint UX, aerial LOD, biome v3 | 1 | **IN ENGINE** 2026-08-13 |
-| XV-J | Verification, attribution, handoff | 1 | **NEXT** |
+| XV-J | Verification, attribution, handoff | 1 | **COMPLETE** 2026-08-13 (1.10 ms / BC7 exceptions) |
 
-**A–Zeta are in engine.** Next authorized session is **XV-J** (GPU evidence, adapter freeze). Do not start XV-J's captures with invented PNGs.
+**A–J are done.** GPU corpus and wgpu freeze: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 ### 6.5 Second research pass consequences (2026-08-13)
 
@@ -260,10 +260,11 @@ From [`phase_XV.md`](phase_XV.md) §10 — historical Phase 25D numbers are comp
 - `dev records/phase IV/IV-I-J/` — runtime + shoreline LOD
 - `dev records/phase IV/IV-K/` — `ivk_before_shading.png`, `ivk_after_shading.png`, `ivk_authored_water_body.png`
 
-### Phase XV (code in engine; GPU PNGs still XV-J)
+### Phase XV (A–J complete)
 
 - Path: `dev records/phase XV/evidence/phase_XV-<subphase>_<purpose>.png`
 - Captures **after tonemapping** only.
+- XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 - Live contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 
 Historical test counts in `phase_IV.md` are evidence of a past worktree, not a guarantee. Re-run `cargo fmt`, `cargo check`, and relevant tests before claiming XV-A ready.
@@ -281,7 +282,11 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 
 ---
 
-## 10. Next-session start checklist (Phase XV)
+## 10. Next-session start checklist (Phase 26 / VV)
+
+XV-A–J are done. Next authorized work is Iris colour pickers or Halcyon
+reflections unless the user reopens terrain (BC7 / second aerial PSO).
+See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 1. Confirm branch `dev`, note HEAD vs `2dec6bd`, and commit or stash any dirty XV research docs so the session has a clean baseline.
 2. Read section 1 files in order; skim IV-K authored table (§4.3) so water/boat are not broken by terrain work.
@@ -307,7 +312,7 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 Implementation and tests are truth; docs follow. This handoff is a snapshot at HEAD `2dec6bd` plus the 2026-08-13 XV research expansion.
 
 - Phase IV claims are **implemented** (with K-1 deferred, K-6 abandoned, K-7 skipped — stated, not implied).
-- Phase XV claims are **researched decisions and acceptance targets** until code lands.
+- Phase XV **A–J are complete**; 1.10 ms shading and BC7 packs are recorded exceptions (2026-08-13).
 - If a later session changes architecture, candidates, licenses, budgets, or milestone order, update [`phase_XV.md`](phase_XV.md) **and this handoff** (or a dated successor) rather than letting them diverge.
 
 ---

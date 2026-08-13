@@ -118,14 +118,16 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
-### 1.6 Terrain materials — Phase XV Appalachia (A–Zeta in engine)
+### 1.6 Terrain materials — Phase XV Appalachia (A–J complete)
 
 **Status:** XV-A–I 2026-08-13; **XV-Zeta** 2026-08-13 (including aerial LOD and
-biome v3; live look signed off the same day). Provenance:
+biome v3; live look signed off the same day). **XV-J complete** 2026-08-13
+([`dev records/phase XV/evidence/XV-J_compile_gate.md`](dev%20records/phase%20XV/evidence/XV-J_compile_gate.md)).
+Provenance:
 [`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md),
 [`dev records/phase XV/XV-Zeta_plan.md`](dev%20records/phase%20XV/XV-Zeta_plan.md).
-Controlling reference: `dev records/phase_XV.md`. Live GPU evidence PNGs and
-adapter freeze remain pending XV-J.
+Controlling reference: `dev records/phase_XV.md`. Adapter freeze: NVIDIA
+GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74.
 
 | Reference | Pattern studied | Somnium implementation |
 |---|---|---|
@@ -142,9 +144,12 @@ adapter freeze remain pending XV-J.
 **Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
 CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
 references. Histogram-preserving blend and a painted wetness channel are not in
-this drop. XV-J verification is still open. Extra bank (16–31) loads at 1024
-until a BC7 encoder exists. `GpuTerrainMaterial` is **1664** bytes. Snow cap is
-`relief * 0.48`. `WaterComponent::great_lakes` is frozen.
+this drop. XV-J is complete (`phase_XV-J_*.png` + wgpu freeze). Extra bank
+(16–31) loads at 1024 until a BC7 encoder exists; requested 2048+1024 RGBA8 is
+853 MiB so runtime drops both banks to 1024 (341 MiB) unless
+`SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1`. `GpuTerrainMaterial` is **1664** bytes. Snow cap is
+`relief * 0.48`. `WaterComponent::great_lakes` is frozen. Release overview
+shading 3.951 ms (1.10 ms budget not met).
 
 ---
 

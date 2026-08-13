@@ -1335,8 +1335,7 @@ impl UiManager {
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::ToggleTerrainHex);
+                    self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {

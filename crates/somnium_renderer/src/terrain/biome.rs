@@ -43,11 +43,8 @@ fn biome_fbm(x: f32, z: f32, seed: u32) -> f32 {
     let mut freq = 1.0;
     let mut norm = 0.0;
     for octave in 0..4u32 {
-        sum += super::heightmap::value_noise(
-            x * freq,
-            z * freq,
-            seed.wrapping_add(octave * 7919),
-        ) * amp;
+        sum += super::heightmap::value_noise(x * freq, z * freq, seed.wrapping_add(octave * 7919))
+            * amp;
         norm += amp;
         amp *= 0.5;
         freq *= 2.07;

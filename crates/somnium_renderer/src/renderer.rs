@@ -2664,6 +2664,22 @@ impl SomniumRenderer {
                     .get(instance as usize)
                     .is_some_and(|d| terrain_ids.contains(&d.material_id))
             });
+            if self.profiler.enabled() {
+                for line in self.profiler.report() {
+                    tracing::info!("XV-J-PROFILE {line}");
+                }
+            }
+            if let Some(t) = self.terrains.first() {
+                tracing::info!(
+                    "XV-J-RESIDENCY compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} aerial_lod_m=80",
+                    t.layer_textures.compressed,
+                    t.layer_textures.from_assets,
+                    t.layer_textures.resolution,
+                    t.layer_textures.extra_resolution,
+                    t.wetness,
+                    t.hex_tiling,
+                );
+            }
         }
         output.present();
 

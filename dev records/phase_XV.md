@@ -4,7 +4,9 @@
 > Sixteen terrain materials. It had to be Appalachia.
 
 > **Codename:** Appalachia, after the setting of Bethesda Game Studios' *Fallout 76*  
-> **Status:** XV-A through XV-Zeta **IN ENGINE** (2026-08-13). **XV-J** (verification, GPU evidence) is next.  
+> **Status:** XV-A through XV-J **COMPLETE** (2026-08-13). GPU evidence:
+> [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+> Shading 1.10 ms and BC7 packs remain explicit exceptions.  
 > **Plan date:** 2026-08-12  
 > **Research expanded:** 2026-08-13 (second pass — papers, talks, open-source terrain systems, wetness)  
 > **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded.  
@@ -407,9 +409,10 @@ Procedural results must be bakeable into the same four splatmaps. Manual paint i
 
 All subphases **XV-A through XV-Zeta are implemented in engine** as of 2026-08-13
 (including biome v3, landscape v4, and aerial hex/POM LOD). Canonical live
-numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J is the
-evidence pass.** Completing a subphase's *acceptance evidence* still requires
-captures, not only compiling code.
+numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J is
+complete** (compile gate + live GPU PNGs + wgpu adapter freeze + release
+profiler). Exceptions: 1.10 ms shading budget, BC7 packs absent. Record:
+[`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 ### XV-A — Baseline and provenance gate
 
@@ -430,7 +433,7 @@ captures, not only compiling code.
 - No new texture binary has entered the repository without its manifest entry. **Met** — 2K sources fetched 2026-08-13 into `assets/terrain/_source/` (gitignored); SHA-256 in `_source/FETCH_REPORT.json`. Packed PNGs for 8–15 written beside shipping 4K 0–7.
 - File-level codebase map recorded. **Met** — [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
-**Not met (needs XV-J):** evidence PNGs, live GPU/tap/memory freeze. Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v3 and sixteen-layer shaders are in the engine.
+**Not met (follow-up, not XV-J):** 1.10 ms shading, BC7 packs. XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md). Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v4 and thirty-two-layer shaders are in the engine.
 
 ### XV-B — Deterministic asset pipeline
 
@@ -573,21 +576,24 @@ shading PSO and BC7. See [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md
 
 ### XV-J — Verification, attribution, and handoff
 
-**Status: NEXT — Zeta is closed in engine; J is the evidence pass.**
+**Status: COMPLETE — 2026-08-13** (compile gate + GPU corpus). Exceptions: §10.1
+1.10 ms shading, BC7 packs.
 
-**Work**
+Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
-- Run formatting, build, unit/integration tests, shader validation, migration fixtures, and performance captures.
-- Test day/night, wet/dry shoreline, distant landscape, eye-level, extreme cliff, four-way junction, and old-scene cases.
-- Record adapter identity, shading-pass timings (overview vs walking), tap counts, and residency. Aerial LOD: hex/POM off when the camera is > 80 m above ground.
-- Store evidence only under `dev records/phase XV/evidence/` as `phase_XV-J_<purpose>.png`.
-- Fold live numbers already in the Zeta plan into `context.md` as a completion record (do not rewrite Phase 14 §20 as if it were XV).
+**Done**
+
+- `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, Naga `shaders_validate`, sidecar v2/v3/v4, CIEDE2000 strongest-four fixture, `pack_terrain --validate-only` (30 photographed, 0 missing).
+- Live wgpu freeze: NVIDIA GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74, BC/RT/timestamps yes.
+- Release 1280×720 profiler at frame 240: overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Frame ~10.8 ms overview.
+- Residency: projected 853 MiB @2K+1K; runtime **1024+1024 ~341 MiB**.
+- Tonemapped `phase_XV-J_*.png` corpus (overview day/night, eye, shore dry/wet/night, cliff, snow ridge, forest, taps/discarded/selected).
 
 **Exit criteria**
 
-- Every section 11 acceptance criterion passes or has an explicit, approved exception.
-- Attribution covers assets, papers, engine patterns, modifications, and access dates.
-- This document changes from planned milestones to an evidence-backed completion record.
+- Compile/Naga/sidecar/pack: **met**.
+- Section 11: met or recorded as an approved exception (1.10 ms, BC7).
+- GPU PNG corpus: **met**. Phase XV implementation is closed; the 1.10 ms / BC7 items are follow-up, not a new subphase.
 
 ## 9. Expected implementation touch points
 
@@ -615,9 +621,9 @@ Before editing, the implementing session must re-open the current files and chec
 - Landscape average: at most 12 material-map taps.
 - Eye-level average: at most 18 material-map taps.
 - Median terrain shader target: at most 1.10 ms in the exact Phase 25 reference adapter, resolution, and camera corpus.
+- **XV-J measured 2026-08-13 (release, 1280×720, RTX 5080 Laptop, Vulkan):** overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Not 1.10 ms. Debug ~20 ms from the same day was unoptimized. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second PSO + BC7, not a per-pixel branch.
 - No more than a 20–25% median regression from the captured pre-Phase-XV baseline without an approved image-quality justification.
 - Report control, macro, projected-material, and POM taps separately.
-- **Live 2026-08-13 (not a section-11 pass):** overview-camera shading ~20 ms is the terrain material path, not Post FX. Per-pixel sample-count LOD made walking 20→27 ms and was reverted. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second PSO + BC7, not XV-J.
 
 ### 10.2 Memory and disk
 
@@ -746,6 +752,7 @@ cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
 cargo run -p somnium_asset --example pack_terrain -- --validate-only
+# (flag added 2026-08-13; checks packed PNGs, does not rewrite)
 ```
 
 In addition, run the repository's WGSL/Naga validation tests, sidecar v2-to-v3 golden fixtures, deterministic pack/hash tests, sparse-selection offline comparison, adapter capability tests, and the GPU timing/tap-count capture suite. No completion claim may rely on a single screenshot.
@@ -845,9 +852,10 @@ The next **implementation** session should begin with
 `context.md`, `ATTRIBUTION.md`, this plan, and
 [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
-XV-A through XV-Zeta are in the engine (including biome v3 / landscape v4 and
-aerial hex/POM LOD). Next authorized subphase is **XV-J** (verification,
-attribution close-out, GPU evidence). Do not retile shipping 0–7 to 1:1
+XV-A through XV-J are done (including biome v3 / landscape v4, aerial hex/POM
+LOD, and the GPU evidence corpus). Remaining follow-up is BC7 packs and a
+second aerial shading PSO toward the 1.10 ms budget — not a new XV subphase.
+Do not retile shipping 0–7 to 1:1
 physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31 pack at 2K and load at
 1024. Layers 16 and 24 are procedural lush/wildgrass (`grass_path_*` failed the
 ochre gate). BC7 encoder is still absent. `WaterComponent::great_lakes` stays

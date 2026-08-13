@@ -1,9 +1,11 @@
 # XV-Zeta — 32-layer landscape identity (plan)
 
 **Status:** IN ENGINE — 2026-08-13, including post-E follow-up (aerial shading
-LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J is next**
-(GPU evidence, adapter freeze, `context.md` close-out as a completion record).  
-**Sits between:** XV-I (done) and XV-J (verification).  
+LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J complete**
+the same day (compile gate + GPU PNGs + wgpu freeze + release profiler).
+1.10 ms shading and BC7 packs remain explicit exceptions:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).  
+**Sits between:** XV-I (done) and XV-J (done).  
 **Parent:** [`phase_XV.md`](../phase_XV.md).
 
 ## Live contract (do not silently retune)
@@ -14,7 +16,7 @@ LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J is next**
 | Splat | 8 RGBA maps; ≤4 non-zero stored channels; sidecar **v4** |
 | `GpuTerrainMaterial` | **1664** bytes; WGSL `array<vec4<T>, 8>` |
 | Layers 16, 24 | Procedural lush lawn / wildgrass (`grass_path_*` failed ochre ΔE) |
-| Extra bank load | 16–31 at **1024** until BC7; 0–15 at `SOMNIUM_TERRAIN_RES` (2048) |
+| Extra bank load | 16–31 at **1024** until BC7; 0–15 *request* `SOMNIUM_TERRAIN_RES` (2048). Projected 2048+1024 RGBA8 is **853 MiB**; runtime drops 0–15 to 1024 (**341 MiB**) unless `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1` |
 | Unique colour | `macro_map::from_splat` 512²; Great Lakes `macro_color.png` **not** auto-loaded; default Lerp **0.55** |
 | Biome | `BIOME_PRESET_VERSION = 3`; warped 4-octave FBM; overlapping forest/meadow |
 | Landscape recipe | `DEFAULT_LANDSCAPE_VERSION = 4`; snow cap `relief * 0.48` (~50.4 m) |
@@ -202,8 +204,8 @@ asks. Painted wetness channel still later.
 | **Zeta-D** | Audit + fetch + pack layers 16–31 (skip overwrite of 0–15). Fail closed on license/hash/maps. | 30 photographed layers; 16 and 24 stay procedural (`grass_path_*` failed ΔE). | **IN ENGINE** 2026-08-13 |
 | **Zeta-E** | 32-weight biome; Create → Terrain / startup only. Bump `DEFAULT_LANDSCAPE_VERSION`. | Same seed → bit-identical weights. Landscape kit matrix rows for new hues. | **IN ENGINE** 2026-08-13; **v3 biome / landscape v4** same day |
 
-Then **XV-J**. Zeta-A–E and the §11 follow-up are in engine. GPU evidence still
-belongs to J.
+Then **XV-J** (complete 2026-08-13). GPU evidence:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).
 
 ## 9. Inspiration (pattern study, no code lift)
 
@@ -222,12 +224,14 @@ belongs to J.
 - Quixel / AI / non-CC0.
 - Replacing the Great Lakes heightfield or water (`WaterComponent::great_lakes` stays frozen).
 - Keeping an eight-layer “old look” as default (already removed).
-- XV-J captures, adapter freeze, `context.md` close-out.
+- Remaining follow-up (not a new XV subphase): BC7 packs, second aerial shading PSO toward 1.10 ms.
 
 ## 11. Follow-up (2026-08-13, after Zeta-E)
 
 Live sign-off the same day: seams and snow look right; aerial LOD restored
-walking cost. GPU captures and adapter freeze remain **XV-J**.
+walking cost. **XV-J** recorded wgpu adapter (RTX 5080 Laptop, Vulkan, driver
+610.74), release overview shading 3.951 ms, walk 5.532 ms, residency 1024+1024
+~341 MiB, and the `phase_XV-J_*.png` corpus.
 
 ### 11.1 Shading pass — diagnosis and aerial LOD
 
