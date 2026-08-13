@@ -1,10 +1,12 @@
 //! Ray-traced water reflections (Phase VV — Halcyon).
 //!
 //! Half-resolution compute: one GGX/mirror ray per pixel from the water
-//! G-buffer, hit shading through the shared `rt_hit.wgsl` resolve, temporal
+//! G-buffer, optional refracted ray (VV+1, default off) into array layer 1,
+//! hit shading through the shared `rt_hit.wgsl` resolve, temporal
 //! accumulation, then the water shading pass bilateral-upsamples the result.
-//! Fully skipped when the device did not grant `EXPERIMENTAL_RAY_QUERY` or
-//! when `SOMNIUM_RT_REFLECT=0`.
+//! Fully skipped when the device did not grant `EXPERIMENTAL_RAY_QUERY`.
+//! Reflections also skip when `SOMNIUM_RT_REFLECT=0`; refraction when
+//! `SOMNIUM_RT_REFRACT=0` or the Post FX toggle is off.
 
 const REFLECT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -20,7 +22,9 @@ struct ReflectParams {
     rt_strength: f32,
     roughness_skip: f32,
     enabled: f32,
-    _pad: [f32; 2],
+    /// VV+1: trace a refracted ray into layer 1. Default off.
+    refract_enabled: f32,
+    _pad: f32,
 }
 
 #[cfg(test)]
@@ -44,6 +48,8 @@ pub struct WaterReflectionPass {
     dummy: wgpu::TextureView,
     supported: bool,
     pub enabled: bool,
+    /// VV+1 ray-traced refraction. Default off; Post FX toggle.
+    pub refract_enabled: bool,
     history_valid: bool,
     frame: u32,
     /// Foam / unresolved water above this roughness skips the ray (VV-E).
@@ -77,6 +83,7 @@ impl WaterReflectionPass {
             dummy,
             supported,
             enabled: supported && std::env::var("SOMNIUM_RT_REFLECT").as_deref() != Ok("0"),
+            refract_enabled: false,
             history_valid: false,
             frame: 0,
             roughness_skip: 0.72,
@@ -139,14 +146,14 @@ impl WaterReflectionPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
-                tex_entry(8, true),
+                array_tex_entry(8, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: REFLECT_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                     },
                     count: None,
                 },
@@ -245,8 +252,12 @@ impl WaterReflectionPass {
         width: u32,
         height: u32,
     ) -> bool {
-        let kill = std::env::var("SOMNIUM_RT_REFLECT").as_deref() == Ok("0");
-        let active = self.enabled && self.supported && !overflowed && strength > 0.001 && !kill;
+        let kill_reflect = std::env::var("SOMNIUM_RT_REFLECT").as_deref() == Ok("0");
+        let kill_refract = std::env::var("SOMNIUM_RT_REFRACT").as_deref() == Ok("0");
+        let reflect_on =
+            self.enabled && self.supported && !overflowed && strength > 0.001 && !kill_reflect;
+        let refract_on = self.refract_enabled && self.supported && !overflowed && !kill_refract;
+        let active = reflect_on || refract_on;
         if !active {
             self.history_valid = false;
             self.frame = self.frame.wrapping_add(1);
@@ -286,8 +297,9 @@ impl WaterReflectionPass {
                 history_valid: f32::from(u8::from(self.history_valid && active)),
                 rt_strength: strength.clamp(0.0, 1.0),
                 roughness_skip: self.roughness_skip,
-                enabled: f32::from(u8::from(active)),
-                _pad: [0.0; 2],
+                enabled: f32::from(u8::from(reflect_on)),
+                refract_enabled: f32::from(u8::from(refract_on)),
+                _pad: 0.0,
             }),
         );
 
@@ -387,6 +399,19 @@ fn tex_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn array_tex_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn half_target(
     device: &wgpu::Device,
     width: u32,
@@ -398,7 +423,7 @@ fn half_target(
         size: wgpu::Extent3d {
             width,
             height,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: 2,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -410,7 +435,11 @@ fn half_target(
             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let view = texture.create_view(&Default::default());
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(2),
+        ..Default::default()
+    });
     (texture, view)
 }
 
@@ -420,7 +449,7 @@ fn dummy_texture(device: &wgpu::Device) -> wgpu::TextureView {
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: 2,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -429,5 +458,9 @@ fn dummy_texture(device: &wgpu::Device) -> wgpu::TextureView {
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    texture.create_view(&Default::default())
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(2),
+        ..Default::default()
+    })
 }

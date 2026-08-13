@@ -973,6 +973,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
                     rt_reflect: pp.rt_reflect_enabled,
+                    rt_refract: pp.rt_refract_enabled,
                     pcss: pp.pcss_enabled,
                     contact_shadows: pp.contact_shadows_enabled,
                     cas: pp.cas_enabled,
@@ -1800,6 +1801,8 @@ impl<G: GameApp> Engine<G> {
             r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
             r.water_reflection_pass.enabled =
                 pp.rt_reflect_enabled && r.water_reflection_pass.supported();
+            r.water_reflection_pass.refract_enabled =
+                pp.rt_refract_enabled && r.water_reflection_pass.supported();
             r.cas_pass.enabled = pp.cas_enabled;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
@@ -3553,6 +3556,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::RtReflect => {
                             pp.rt_reflect_enabled = !pp.rt_reflect_enabled;
                             pp.rt_reflect_enabled
+                        }
+                        PostFxToggle::RtRefract => {
+                            pp.rt_refract_enabled = !pp.rt_refract_enabled;
+                            pp.rt_refract_enabled
                         }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;

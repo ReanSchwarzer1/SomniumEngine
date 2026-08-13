@@ -251,6 +251,7 @@ mod tests {
         assert_eq!(help_titles().len(), 8);
         assert_eq!(help_page(4), HELP_ABOUT);
         assert!(HELP_WATER.contains("RT Reflect"));
+        assert!(HELP_WATER.contains("RT Refraction"));
         let blocks = parse_help_markdown("# Title\n\nHello **world**.\n- item\n");
         assert_eq!(
             blocks,

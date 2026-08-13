@@ -46,7 +46,7 @@ Optional (do not skip (1)–(6) for these):
 
 **What shipped:** water G-buffer prepass, half-res GGX/mirror compute, `rt_hit.wgsl` (GI wraps `rt_trace`), cascade-shadow hit lighting (not a second ray), temporal mix, bilateral upsample, SSR/RT/env blend. Inspector: **RT Reflect**, **Reflect Debug**. Post FX: **RT Reflections**. Help: `docs/editor/water.md`.
 
-**Still open on Halcyon:** live SSR miss-rate and before/after captures into `dev records/phase VV/`; profiler timings vs [`phase_VV.md`](phase_VV.md) §11. Ray-traced *refraction* is VV+1 and is not authorized by this handoff.
+**Still open on Halcyon:** live SSR miss-rate and before/after captures into `dev records/phase VV/`; profiler timings vs [`phase_VV.md`](phase_VV.md) §11. VV+1 refraction is in tree, **default off** (Post FX **RT Refraction**).
 
 **Session estimate:** a follow-up Halcyon session should capture evidence, not rewrite the pass. VV-B already committed the architecture.
 
@@ -126,7 +126,7 @@ Terrain is in the TLAS (25B). Water is **not**. Transparent geometry is **not**.
 
 **Is (shipped):** replace SSR→env-cube as the *only* water reflection path with a blend of screen-space tracing (near field), hardware ray tracing (off-screen / behind camera / below horizon), and the environment cube (miss). Degrade to *exactly* today’s look without `EXPERIMENTAL_RAY_QUERY` or with `SOMNIUM_RT_REFLECT=0`.
 
-**Is not:** path tracing, ray-traced refraction (VV+1), caustics, water-in-water, ReSTIR replacement, a software RT fallback (that is still 24P), a water retune, a terrain session, a Metaphor rebuild.
+**Is not:** path tracing, caustics, water-in-water, ReSTIR replacement, a software RT fallback (that is still 24P), a water retune, a terrain session, a Metaphor rebuild. Ray-traced refraction **did** ship as VV+1, default off.
 
 Stages (all in tree; each passed `cargo test --workspace`):
 
@@ -157,7 +157,7 @@ Fallback matrix and budgets: [`phase_VV.md`](phase_VV.md) §7 and §11. Kill swi
 
 ### 4.2 Still not in the tree
 
-- Ray-traced refraction, caustics, water-in-water (water not in TLAS).
+- Caustics, water-in-water (water not in TLAS). VV+1 refraction is in tree, default off.
 - Specular ReSTIR / a dedicated denoiser beyond temporal mix + upsample.
 - Fragment-stage ray query (compute only).
 - Software ray-tracing fallback (24P).
@@ -185,7 +185,7 @@ Fallback matrix and budgets: [`phase_VV.md`](phase_VV.md) §7 and §11. Kill swi
 1. Confirm branch `dev`. Read **this file**, then [`phase_VV.md`](phase_VV.md) §4.4, §6 shipped notes, §11, §13.
 2. Do **not** re-implement VV-A–H.
 3. Remaining authorized Halcyon work: live captures into `dev records/phase VV/` (after tonemap; do not invent PNGs) and filling §11 from the profiler.
-4. VV+1 refraction, water-in-TLAS, or 24P only if the user asks.
+4. Do not enable RT refraction in Great Lakes defaults. Water-in-TLAS or 24P only if the user asks.
 5. Frozen: `WaterComponent::great_lakes` (especially `wave_speed` **0.85**). Displacement cascade BGL visibilities stay vertex-only (fragment sampled-texture limit).
 6. `cargo fmt`, `cargo test --workspace` after any code change.
 

@@ -229,6 +229,8 @@ pub enum PostFxToggle {
     ContactShadows,
     /// Ray-traced water reflections (Phase VV — Halcyon).
     RtReflect,
+    /// Ray-traced water refraction (Phase VV+1). Default off.
+    RtRefract,
 }
 
 /// High-level editor commands produced by the native UI layer.

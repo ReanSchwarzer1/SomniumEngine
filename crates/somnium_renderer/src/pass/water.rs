@@ -82,7 +82,7 @@ fn create_dummy_reflection_view(device: &wgpu::Device) -> wgpu::TextureView {
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: 2,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -91,7 +91,11 @@ fn create_dummy_reflection_view(device: &wgpu::Device) -> wgpu::TextureView {
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    texture.create_view(&Default::default())
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(2),
+        ..Default::default()
+    })
 }
 
 /// Build the shared water-material textures once for the renderer. Coverage,
@@ -364,7 +368,7 @@ impl WaterPass {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,

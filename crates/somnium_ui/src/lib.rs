@@ -208,6 +208,8 @@ struct InspectorHandles {
     post_restir_gi_toggle: NodeHandle,
     post_rt_reflect_toggle: NodeHandle,
     post_rt_reflect_label: NodeHandle,
+    post_rt_refract_toggle: NodeHandle,
+    post_rt_refract_label: NodeHandle,
     post_cas_toggle: NodeHandle,
     post_mb_toggle: NodeHandle,
     post_mb_label: NodeHandle,
@@ -268,6 +270,8 @@ pub struct PostInspectorState {
     pub restir_gi: bool,
     /// Phase VV: ray-traced water reflections.
     pub rt_reflect: bool,
+    /// Phase VV+1: ray-traced water refraction. Default off.
+    pub rt_refract: bool,
     /// Percentage-closer soft shadows. Default on.
     pub pcss: bool,
     /// Screen-space contact shadows. Default on.
@@ -1910,6 +1914,7 @@ impl UiManager {
                     (restir_toggle, v.restir),
                     (restir_gi_toggle, v.restir_gi),
                     (h.post_rt_reflect_toggle, v.rt_reflect),
+                    (h.post_rt_refract_toggle, v.rt_refract),
                     (pcss_toggle, v.pcss),
                     (contact_toggle, v.contact_shadows),
                     (cas_toggle, v.cas),
@@ -2586,6 +2591,10 @@ impl UiManager {
                         self.inspector_handles.post_rt_reflect_toggle,
                         PostFxToggle::RtReflect,
                     ),
+                    (
+                        self.inspector_handles.post_rt_refract_toggle,
+                        PostFxToggle::RtRefract,
+                    ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
                         self.inspector_handles.post_contact_toggle,
@@ -3012,6 +3021,10 @@ impl UiManager {
                     (
                         self.inspector_handles.post_rt_reflect_toggle,
                         PostFxToggle::RtReflect,
+                    ),
+                    (
+                        self.inspector_handles.post_rt_refract_toggle,
+                        PostFxToggle::RtRefract,
                     ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
@@ -4536,6 +4549,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
     let (post_rt_reflect_toggle, post_rt_reflect_label) =
         make_toggle(ui, "RT Reflections", font_id, post_section);
+    let (post_rt_refract_toggle, post_rt_refract_label) =
+        make_toggle(ui, "RT Refraction", font_id, post_section);
     // Phase 24L. Directly under its toggle, matching every other effect that
     // pairs a switch with an amount.
     let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
@@ -4890,6 +4905,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_restir_gi_toggle,
         post_rt_reflect_toggle,
         post_rt_reflect_label,
+        post_rt_refract_toggle,
+        post_rt_refract_label,
         post_restir_gi_label,
         post_pcss_toggle,
         post_pcss_label,

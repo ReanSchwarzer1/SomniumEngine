@@ -61,9 +61,10 @@ of no return; everything before it is reversible in an afternoon.
 ## 3. Non-goals
 
 - Full path tracing, or replacing the visibility-buffer renderer.
-- Ray-traced *refraction* through the water surface. It shares machinery with
-  reflection and is a natural Phase VV+1, but it multiplies the ray budget and
-  interacts with the volume-scattering model settled in IV-K.
+- Ray-traced *refraction* through the water surface. **Shipped as VV+1**,
+  default off (Post FX **RT Refraction**). Shares the Halcyon compute pass
+  (array layer 1). Screen-space refraction remains the miss / off path.
+  Still does not put water in the TLAS.
 - Caustics.
 - Reflecting water in water. This requires water in the BLAS/TLAS, which is a
   meaningful cost for a surface that is re-tessellated and displaced every
@@ -318,7 +319,7 @@ reflected object and the object itself agree in colour.
 - Bilateral upsample to full resolution using the G-buffer depth and normal.
 
 **Shipped:** history mix with water velocity + depth/coverage disocclusion;
-2×2 bilateral upsample in the water fragment (`upsample_reflection`). No
+2×2 bilateral upsample in the water fragment (`upsample_rt`). No
 full-res reflection target (VRAM stays on two half-res RGBA16Float buffers).
 
 **Exit:** no visible boiling on rough water while the camera is in motion.
@@ -426,7 +427,8 @@ then this file, and should **not** re-implement A–H. Remaining Halcyon work:
 
 - Live SSR miss-rate and before/after captures into `dev records/phase VV/`.
 - Fill §11 timings from the profiler (Water reflection scope).
-- VV+1 (ray-traced refraction) only if the user asks.
+- VV+1 refraction **shipped default off** (Post FX **RT Refraction**;
+  `SOMNIUM_RT_REFRACT=0` forces off). Do not enable it in Great Lakes defaults.
 
 Frozen: `WaterComponent::great_lakes`, XV terrain contract, `context.md` §20.
 Do not retune `wave_speed`. Do not put water in the TLAS. Do not remove

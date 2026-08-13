@@ -72,7 +72,7 @@ struct Instance {
 @group(0) @binding(6) var env_sampler: sampler;
 @group(0) @binding(7) var scene_color: texture_2d<f32>;
 @group(0) @binding(8) var<uniform> frame: WaterFrameData;
-@group(0) @binding(9) var reflection_tex: texture_2d<f32>;
+@group(0) @binding(9) var reflection_tex: texture_2d_array<f32>;
 @group(0) @binding(10) var reflection_sampler: sampler;
 
 @group(1) @binding(0) var<uniform> material: WaterMaterial;
@@ -607,7 +607,7 @@ struct PrepassOutput {
     @location(2) roughness: f32,
 }
 
-fn upsample_reflection(uv: vec2<f32>, coverage: f32) -> vec4<f32> {
+fn upsample_rt(uv: vec2<f32>, coverage: f32, layer: i32) -> vec4<f32> {
     let dims = vec2<f32>(textureDimensions(reflection_tex));
     if dims.x < 1.5 {
         return vec4<f32>(0.0);
@@ -619,7 +619,7 @@ fn upsample_reflection(uv: vec2<f32>, coverage: f32) -> vec4<f32> {
     var weight = 0.0;
     for (var y = 0; y <= 1; y = y + 1) {
         for (var x = 0; x <= 1; x = x + 1) {
-            let tap = textureLoad(reflection_tex, base + vec2<i32>(x, y), 0);
+            let tap = textureLoad(reflection_tex, base + vec2<i32>(x, y), layer, 0);
             let bilinear = select(frac.x, 1.0 - frac.x, x == 0) * select(frac.y, 1.0 - frac.y, y == 0);
             let w = bilinear * max(tap.a, 0.05) * coverage;
             acc += tap * w;
@@ -729,7 +729,9 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
     let candidate_valid = candidate_depth < 0.9999
         && view_depth(candidate_world) > water_view_depth + 0.03;
     let refr_uv = select(screen_uv, candidate_uv, candidate_valid);
-    let refracted = textureSampleLevel(scene_color, sampler_linear, refr_uv, 0.0).rgb;
+    var refracted = textureSampleLevel(scene_color, sampler_linear, refr_uv, 0.0).rgb;
+    let rt_refr = upsample_rt(screen_uv, coverage, 1);
+    refracted = mix(refracted, rt_refr.rgb, rt_refr.a);
 
     let backdrop_distance = select(authored_depth, distance(input.world_position, base_world), base_has_backdrop);
     let path_length = clamp(min(backdrop_distance, authored_depth / max(abs(dot(n, v)), 0.18)), 0.0, 60.0);
@@ -862,7 +864,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
         reflection_roughness * ENV_MAX_MIP).rgb * light.ibl_intensity;
     let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
     let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
-    let rt = upsample_reflection(screen_uv, coverage);
+    let rt = upsample_rt(screen_uv, coverage, 0);
     let rt_strength = clamp(material.volume_params.z, 0.0, 1.0);
     // SSR owns the near field where it is confident. The traced ray fills the
     // rest; the environment cube is the miss. `rt.a` is hit confidence.

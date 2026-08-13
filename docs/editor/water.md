@@ -13,11 +13,14 @@ a ray-traced hit. Where the ray misses too, it uses the sky cube.
 - **RT Reflect** — how much the traced hit contributes (0–1). Great Lakes default is 1.
 - **Reflect Debug** — `0` off, `1` SSR hit (green) / miss (red), `2` colours the mix source (SSR blue, RT yellow, environment magenta).
 
-Select the **Post Processing** entity and tick **RT Reflections** for the
-scene-wide traced path. It sits with **RT Direct Light** and **RT Indirect (GI)**.
+Select the **Post Processing** entity:
+
+- **RT Reflections** — scene-wide traced reflection path. On by default when the GPU supports ray query.
+- **RT Refraction** — traced ray through the surface for the bed colour. **Off by default.** Screen-space refraction stays the fallback on a miss.
 
 `SOMNIUM_RT_REFLECT=0` forces the previous SSR + sky-cube look, even if the
-checkbox is on. Hardware without ray tracing does the same.
+checkbox is on. `SOMNIUM_RT_REFRACT=0` forces refraction off. Hardware without
+ray tracing does the same.
 
 Water and transparent meshes are not in the ray-tracing scene, so you will not
 see water reflecting water. That is expected.

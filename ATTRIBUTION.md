@@ -190,7 +190,9 @@ shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
 
 ### 1.7 Ray-traced water reflections (Phase VV — Halcyon)
 
-**Status:** VV-A–H in tree (2026-08-13). Kill switch: `SOMNIUM_RT_REFLECT=0`.
+**Status:** VV-A–H in tree (2026-08-13). VV+1 refraction in tree, **default off**
+(Post FX **RT Refraction**). Kill switch: `SOMNIUM_RT_REFLECT=0` (reflections),
+`SOMNIUM_RT_REFRACT=0` (refraction).
 Start-here: [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
 Plan: [`dev records/phase_VV.md`](dev%20records/phase_VV.md).
 
@@ -207,7 +209,7 @@ The codename is thematic. No third-party source was copied. Files cited as used:
 | Bevy Solari `specular_gi.wgsl` / `raytracing_scene_bindings.wgsl` | `trace_ray` / hit-resolve split | Architecture reference only |
 | Wicked Engine `wiOcean` | Ocean pass placement | Already cited for Phase IV; not used for RT reflections |
 
-**Files:** `pass/water_reflection.rs`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl`, water prepass/shade split in `pass/water.rs` + `shaders/water.wgsl`.
+**Files:** `pass/water_reflection.rs`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl`, water prepass/shade split in `pass/water.rs` + `shaders/water.wgsl`. Array layer 1 is VV+1 refraction (Snell `refract()`, IOR 1.333, default off).
 
 **Boundary:** GodotOceanWaves informed IV-K water shading, not this reflection
 architecture. Hardware without ray query must look identical to today.

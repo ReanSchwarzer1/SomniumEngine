@@ -592,6 +592,12 @@ pub struct PostProcessComponent {
     /// Off, or `SOMNIUM_RT_REFLECT=0`, restores the previous SSR + environment
     /// cube look. Hardware without ray query skips the pass regardless.
     pub rt_reflect_enabled: bool,
+    /// Ray-traced water refraction (Phase VV+1).
+    ///
+    /// Default **off**. Traces a Snell ray through the surface and replaces the
+    /// screen-space bed sample on a hit. `SOMNIUM_RT_REFRACT=0` forces it off
+    /// even if this toggle is on. Hardware without ray query skips it.
+    pub rt_refract_enabled: bool,
     /// Contrast adaptive sharpening (Phase 24AC).
     ///
     /// Recovers the high frequencies TAA averages away, by an amount derived
@@ -706,6 +712,7 @@ impl Default for PostProcessComponent {
             // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
             restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
             rt_reflect_enabled: std::env::var("SOMNIUM_RT_REFLECT").as_deref() != Ok("0"),
+            rt_refract_enabled: false,
             cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,

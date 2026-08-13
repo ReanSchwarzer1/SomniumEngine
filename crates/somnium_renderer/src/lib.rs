@@ -10,7 +10,7 @@
 //! - **High Level Material System (HLMS):** Inspired by Ogre-Next.
 //! - **Cascaded Shadow Maps (Phase 11):** PSS partitioning + sphere-fit texel snapping.
 //! - **Ray-traced water reflections (Phase VV Halcyon):** `pass/water_reflection.rs` +
-//!   `shaders/rt_hit.wgsl`. See ATTRIBUTION.md §1.7.
+//!   `shaders/rt_hit.wgsl`. Layer 1 is VV+1 refraction (default off). See ATTRIBUTION.md §1.7.
 
 pub mod bindless;
 pub mod capture;

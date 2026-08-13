@@ -19,4 +19,4 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 
 Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings over the scene (including Water prepass / reflection / shade). Camera speed is the slider next to the m/s readout.
 
-Water reflections: see Help → **Water**. Short version — Details on a water body has **SSR**, **RT Reflect**, and **Reflect Debug**; the Post Processing entity has **RT Reflections**. `SOMNIUM_RT_REFLECT=0` restores SSR + sky cube.
+Water reflections: see Help → **Water**. Short version — Details on a water body has **SSR**, **RT Reflect**, and **Reflect Debug**; the Post Processing entity has **RT Reflections** and **RT Refraction** (off by default). `SOMNIUM_RT_REFLECT=0` restores SSR + sky cube.

@@ -20,7 +20,7 @@ struct ReflectParams {
     rt_strength: f32,
     roughness_skip: f32,
     enabled: f32,
-    _pad0: f32,
+    refract_enabled: f32,
     _pad1: f32,
 }
 
@@ -32,12 +32,13 @@ struct ReflectParams {
 @group(1) @binding(5) var env_sampler: sampler;
 @group(1) @binding(6) var shadow_atlas: texture_depth_2d;
 @group(1) @binding(7) var shadow_sampler: sampler_comparison;
-@group(1) @binding(8) var history_tex: texture_2d<f32>;
-@group(1) @binding(9) var out_tex: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(8) var history_tex: texture_2d_array<f32>;
+@group(1) @binding(9) var out_tex: texture_storage_2d_array<rgba16float, write>;
 @group(1) @binding(10) var<uniform> params: ReflectParams;
 @group(1) @binding(11) var default_sampler: sampler;
 
 const ENV_MAX_MIP: f32 = 5.0;
+const IOR_WATER: f32 = 1.333;
 
 fn reflect_rand(seed: ptr<function, u32>) -> f32 {
     *seed = *seed * 747796405u + 2891336453u;
@@ -142,6 +143,36 @@ fn shade_hit(hit: RtHit, wo: vec3<f32>) -> vec3<f32> {
     return sun + ibl + hit.emissive;
 }
 
+fn accumulate(
+    uv: vec2<f32>,
+    load_coord: vec2<i32>,
+    full_dims: vec2<i32>,
+    view_depth: f32,
+    roughness: f32,
+    layer: i32,
+    current: vec4<f32>,
+) -> vec4<f32> {
+    if params.history_valid < 0.5 {
+        return current;
+    }
+    let velocity = textureLoad(velocity_tex, load_coord, 0).xy;
+    let prev_uv = uv + velocity;
+    if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0)) {
+        return current;
+    }
+    let prev = textureSampleLevel(history_tex, default_sampler, prev_uv, layer, 0.0);
+    let prev_coord = vec2<i32>(prev_uv * vec2<f32>(full_dims));
+    let prev_g = textureLoad(
+        water_surface,
+        clamp(prev_coord, vec2<i32>(0), full_dims - vec2<i32>(1)),
+        0,
+    );
+    let depth_ok = abs(prev_g.b - view_depth) < max(0.15 * view_depth, 0.35);
+    let cover_ok = prev_g.a > 0.01;
+    let blend = select(0.0, mix(0.12, 0.28, roughness), depth_ok && cover_ok);
+    return mix(current, prev, blend);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let half_dims = textureDimensions(out_tex);
@@ -149,23 +180,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let half_coord = vec2<i32>(gid.xy);
-    let full_dims = textureDimensions(water_surface);
+    let full_dims = vec2<i32>(textureDimensions(water_surface));
     let full_coord = vec2<i32>(
         i32(gid.x * 2u) + 1,
         i32(gid.y * 2u) + 1,
     );
-    let load_coord = min(full_coord, vec2<i32>(full_dims) - vec2<i32>(1));
+    let load_coord = min(full_coord, full_dims - vec2<i32>(1));
     let uv = (vec2<f32>(load_coord) + 0.5) / vec2<f32>(full_dims);
 
-    if params.enabled < 0.5 {
-        textureStore(out_tex, half_coord, vec4<f32>(0.0));
+    if params.enabled < 0.5 && params.refract_enabled < 0.5 {
+        textureStore(out_tex, half_coord, 0, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 1, vec4<f32>(0.0));
         return;
     }
 
     let g = textureLoad(water_surface, load_coord, 0);
     let coverage = g.a;
     if coverage < 0.01 {
-        textureStore(out_tex, half_coord, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 0, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 1, vec4<f32>(0.0));
         return;
     }
 
@@ -175,57 +208,62 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world = world_from_uv_view_depth(uv, view_depth);
     let wo = normalize(params.camera_pos - world);
 
-    // Foam and distant unresolved water: the environment cube is indistinguishable
-    // and the ray budget is better spent on pixels that still look like a mirror.
-    if roughness >= params.roughness_skip {
-        let mirror = reflect(-wo, n);
-        let env = textureSampleLevel(env_cube, env_sampler, mirror, roughness * ENV_MAX_MIP).rgb
-            * light.ibl_intensity;
-        textureStore(out_tex, half_coord, vec4<f32>(env, 0.0));
-        return;
-    }
+    var reflect_result = vec4<f32>(0.0);
+    if params.enabled >= 0.5 {
+        if roughness >= params.roughness_skip {
+            let mirror = reflect(-wo, n);
+            let env = textureSampleLevel(env_cube, env_sampler, mirror, roughness * ENV_MAX_MIP).rgb
+                * light.ibl_intensity;
+            reflect_result = vec4<f32>(env, 0.0);
+        } else {
+            var seed = gid.x * 1973u + gid.y * 9277u + params.frame * 26699u;
+            var dir: vec3<f32>;
+            if roughness < 0.08 {
+                dir = reflect(-wo, n);
+            } else {
+                let xi = vec2<f32>(reflect_rand(&seed), reflect_rand(&seed));
+                let h = sample_ggx_h(xi, n, roughness);
+                dir = reflect(-wo, h);
+                if dot(dir, n) <= 0.0 {
+                    dir = reflect(-wo, n);
+                }
+            }
 
-    var seed = gid.x * 1973u + gid.y * 9277u + params.frame * 26699u;
-    var dir: vec3<f32>;
-    if roughness < 0.08 {
-        dir = reflect(-wo, n);
-    } else {
-        let xi = vec2<f32>(reflect_rand(&seed), reflect_rand(&seed));
-        let h = sample_ggx_h(xi, n, roughness);
-        dir = reflect(-wo, h);
-        if dot(dir, n) <= 0.0 {
-            dir = reflect(-wo, n);
+            let origin = world + n * 0.05;
+            let hit = rt_trace(origin, dir, 0.05, 4000.0);
+            if hit.hit {
+                reflect_result = vec4<f32>(shade_hit(hit, -dir), 1.0);
+            } else {
+                reflect_result = vec4<f32>(
+                    textureSampleLevel(env_cube, env_sampler, dir, roughness * ENV_MAX_MIP).rgb
+                        * light.ibl_intensity,
+                    0.0,
+                );
+            }
+            reflect_result = accumulate(
+                uv, load_coord, full_dims, view_depth, roughness, 0, reflect_result,
+            );
         }
     }
+    textureStore(out_tex, half_coord, 0, reflect_result);
 
-    let origin = world + n * 0.05;
-    let hit = rt_trace(origin, dir, 0.05, 4000.0);
-
-    var radiance = vec3<f32>(0.0);
-    var confidence = 0.0;
-    if hit.hit {
-        radiance = shade_hit(hit, -dir);
-        confidence = 1.0;
-    } else {
-        radiance = textureSampleLevel(env_cube, env_sampler, dir, roughness * ENV_MAX_MIP).rgb
-            * light.ibl_intensity;
-        confidence = 0.0;
-    }
-
-    var result = vec4<f32>(radiance, confidence);
-    if params.history_valid > 0.5 {
-        let velocity = textureLoad(velocity_tex, load_coord, 0).xy;
-        let prev_uv = uv + velocity;
-        if all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0)) {
-            let prev = textureSampleLevel(history_tex, default_sampler, prev_uv, 0.0);
-            let prev_coord = vec2<i32>(prev_uv * vec2<f32>(full_dims));
-            let prev_g = textureLoad(water_surface, clamp(prev_coord, vec2<i32>(0), vec2<i32>(full_dims) - vec2<i32>(1)), 0);
-            let depth_ok = abs(prev_g.b - view_depth) < max(0.15 * view_depth, 0.35);
-            let cover_ok = prev_g.a > 0.01;
-            let blend = select(0.0, mix(0.12, 0.28, roughness), depth_ok && cover_ok);
-            result = mix(result, prev, blend);
+    var refract_result = vec4<f32>(0.0);
+    if params.refract_enabled >= 0.5 && roughness < params.roughness_skip {
+        // Air→water from above (eta < 1); water→air from below (Snell window).
+        let from_below = params.camera_pos.y < world.y;
+        let eta = select(1.0 / IOR_WATER, IOR_WATER, from_below);
+        var rdir = refract(-wo, n, eta);
+        if dot(rdir, rdir) > 1e-8 {
+            rdir = normalize(rdir);
+            let rorigin = world - n * 0.05;
+            let rhit = rt_trace(rorigin, rdir, 0.05, 4000.0);
+            if rhit.hit {
+                refract_result = vec4<f32>(shade_hit(rhit, -rdir), 1.0);
+            }
+            refract_result = accumulate(
+                uv, load_coord, full_dims, view_depth, roughness, 1, refract_result,
+            );
         }
     }
-
-    textureStore(out_tex, half_coord, result * vec4<f32>(1.0, 1.0, 1.0, 1.0));
+    textureStore(out_tex, half_coord, 1, refract_result);
 }
