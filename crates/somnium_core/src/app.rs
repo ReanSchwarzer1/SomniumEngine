@@ -555,12 +555,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         }
                         WKC::Comma if self.terrain_edit_active => {
                             self.terrain_brush.paint_layer =
-                                self.terrain_brush.paint_layer.checked_sub(1).unwrap_or(3);
+                                self.terrain_brush.paint_layer.checked_sub(1).unwrap_or(
+                                    somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT
+                                        as usize
+                                        - 1,
+                                );
                             info!("Paint layer: {}", self.terrain_brush.paint_layer);
                         }
                         WKC::Period if self.terrain_edit_active => {
-                            self.terrain_brush.paint_layer =
-                                (self.terrain_brush.paint_layer + 1) % 4;
+                            self.terrain_brush.paint_layer = (self.terrain_brush.paint_layer + 1)
+                                % somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize;
                             info!("Paint layer: {}", self.terrain_brush.paint_layer);
                         }
                         WKC::F7 => {
@@ -2430,9 +2434,7 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterFoamThreshold => {
                                 water.foam_threshold = value.clamp(0.05, 0.95)
                             }
-                            IF::WaterSpectrumBlend => {
-                                water.spectrum_blend = value.clamp(0.0, 1.0)
-                            }
+                            IF::WaterSpectrumBlend => water.spectrum_blend = value.clamp(0.0, 1.0),
                             IF::WaterEdgeScale => water.edge_scale = value.max(0.05),
                             IF::WaterAnisotropy => water.anisotropy = value.clamp(-0.8, 0.8),
                             IF::WaterCausticStrength => {
@@ -2571,7 +2573,9 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainRelief
                 ) {
                     if field == IF::TerrainPaintLayer {
-                        self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(3);
+                        self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(
+                            somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize - 1,
+                        );
                         return;
                     }
                     // Phase 25H: a terrain-wide multiplier, not a per-layer

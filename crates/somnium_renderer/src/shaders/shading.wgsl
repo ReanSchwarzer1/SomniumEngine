@@ -840,6 +840,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // things, and GTAO cannot see detail below a pixel.
         surface.occlusion = surface.occlusion * terrain.occlusion;
         terrain_taps = terrain.taps;
+        terrain_discarded = terrain.discarded;
+        terrain_selected_rgb = terrain.selected_rgb;
+        terrain_weight_rgb = terrain.weight_rgb;
         terrain_parallax_shadow_factor = terrain.parallax_shadow;
     }
 
@@ -894,10 +897,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
     }
 
-    // 12 = terrain layer taps as a fraction of the 48-tap worst case
-    // (Phase 25D). Written straight to the HDR target before exposure, so the
-    // capture harness's mean terrain luminance times 48 *is* the mean taps per
-    // pixel — which is how the detail budget gets a number instead of a claim.
+    // 12 = terrain layer taps as a fraction of the 36-tap worst case
+    // (Phase XV-D). Written straight to the HDR target before exposure, so the
+    // capture harness's mean terrain luminance times TERRAIN_MAX_TAPS *is* the
+    // mean taps per pixel — which is how the detail budget gets a number
+    // instead of a claim.
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
     }
@@ -930,6 +934,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if light._pad2_z > 16.5 && light._pad2_z < 17.5 {
         let contact = contact_shadow(hit_point, shadow_normal, normalize(light.direction), in.clip_pos.xy);
         return vec4<f32>(vec3<f32>(contact), 1.0);
+    }
+    // 18 = splat weight discarded by strongest-four (XV-D).
+    if light._pad2_z > 17.5 && light._pad2_z < 18.5 {
+        return vec4<f32>(vec3<f32>(terrain_discarded * 4.0), 1.0);
+    }
+    // 19 = first three selected layer indices, 0..1 over layers 0–15.
+    if light._pad2_z > 18.5 && light._pad2_z < 19.5 {
+        return vec4<f32>(terrain_selected_rgb, 1.0);
+    }
+    // 20 = raw strongest-four weights of the first three selected layers.
+    if light._pad2_z > 19.5 && light._pad2_z < 20.5 {
+        return vec4<f32>(terrain_weight_rgb, 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.

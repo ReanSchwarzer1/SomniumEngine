@@ -619,7 +619,10 @@ mod tests {
         // Repeating tiles that share a factor would visibly line up.
         for window in lengths.windows(2) {
             let ratio = window[0] / window[1];
-            assert!((ratio - ratio.round()).abs() > 0.1, "tiles {window:?} align");
+            assert!(
+                (ratio - ratio.round()).abs() > 0.1,
+                "tiles {window:?} align"
+            );
         }
         // The finest cascade must not move geometry; a 16 m tile displaced on
         // a metre-scale mesh aliases badly.

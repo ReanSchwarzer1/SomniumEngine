@@ -69,6 +69,12 @@ pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RA
 pub const PROFILER_FEATURES: wgpu::Features =
     wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
+/// Phase XV-E: optional BCn texture compression (BC7 for terrain packs).
+///
+/// Detect, do not demand — a GPU without BC still starts on the RGBA8 path.
+/// Never request this bit if the adapter lacks it.
+pub const BC_COMPRESSION_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC;
+
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
     ///
@@ -162,6 +168,20 @@ impl RenderContext {
         }
         let required_features = if timestamps {
             required_features | PROFILER_FEATURES
+        } else {
+            required_features
+        };
+
+        // Phase XV-E: same pattern — detect, do not demand. RGBA8 packs remain
+        // the fallback; BC7 is never kept resident alongside them.
+        let bc = available_features.contains(BC_COMPRESSION_FEATURES);
+        if bc {
+            info!("BC texture compression available (terrain BC7 packs eligible)");
+        } else {
+            info!("BC texture compression unavailable — terrain stays on RGBA8");
+        }
+        let required_features = if bc {
+            required_features | BC_COMPRESSION_FEATURES
         } else {
             required_features
         };
@@ -270,6 +290,11 @@ impl RenderContext {
     /// Whether the GPU-driven indirect draw path (Phase 15) can be used.
     pub fn supports_gpu_driven(&self) -> bool {
         self.features.contains(GPU_DRIVEN_FEATURES)
+    }
+
+    /// Whether BC7 terrain packs may be uploaded (Phase XV-E).
+    pub fn supports_bc_compression(&self) -> bool {
+        self.features.contains(BC_COMPRESSION_FEATURES)
     }
 
     /// Resize the surface.

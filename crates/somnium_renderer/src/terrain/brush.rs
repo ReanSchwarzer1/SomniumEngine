@@ -194,7 +194,7 @@ pub fn apply_paint(
     let (sw, sh) = (terrain.splatmap.width, terrain.splatmap.height);
     // Texels per metre.
     let (mx, mz) = (sw as f32 / wx, sh as f32 / wz);
-    let layer = brush.paint_layer.min(3);
+    let layer = brush.paint_layer.min(TERRAIN_LAYER_COUNT as usize - 1);
 
     let x0 = (((local_x - brush.radius) * mx).floor().max(0.0)) as u32;
     let z0 = (((local_z - brush.radius) * mz).floor().max(0.0)) as u32;
@@ -228,6 +228,7 @@ pub fn apply_paint(
             for (out, wi) in texel.iter_mut().zip(w) {
                 *out = ((wi * 255 + sum / 2) / sum).clamp(0, 255) as u8;
             }
+            super::splat::enforce_four_nonzero(texel);
         }
     }
     if !touched {
@@ -280,8 +281,18 @@ pub fn auto_splat(terrain: &mut TerrainData, snow_height: f32) {
             let grass = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * (1.0 - n);
             let meadow = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * n;
 
-            // Order must match LAYER_NAMES / LAYER_MATERIALS.
-            let weights = [grass, forest, rock, snow, meadow, mud, sand, gravel];
+            // Order must match LAYER_NAMES / LAYER_MATERIALS. Layers 8–15 stay
+            // zero here so Create → Terrain keeps the Phase 25/IV look; XV-G
+            // owns the sixteen-layer biome preset.
+            let mut weights = [0.0f32; TERRAIN_LAYER_COUNT as usize];
+            weights[0] = grass;
+            weights[1] = forest;
+            weights[2] = rock;
+            weights[3] = snow;
+            weights[4] = meadow;
+            weights[5] = mud;
+            weights[6] = sand;
+            weights[7] = gravel;
             let sum: f32 = weights.iter().sum::<f32>().max(0.001);
             terrain.splatmap.data[(zi * sw + xi) as usize] =
                 std::array::from_fn(|i| (weights[i] / sum * 255.0) as u8);

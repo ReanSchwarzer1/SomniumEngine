@@ -237,3 +237,42 @@ fn hex_sample_normal(
     let w = hex_weights(g.w, vec3<f32>(n1.z, n2.z, n3.z));
     return w.x * n1 + w.y * n2 + w.z * n3;
 }
+
+/// Hex-tiled packed surface map (normal XY, roughness, AO).
+///
+/// The colour hex path cannot be reused here: RG is a tangent-space normal
+/// that must be counter-rotated per tap, B is roughness, A is AO. Treating
+/// the pack as RGB colour (or as an RGB XYZ normal) shears lighting at every
+/// tile boundary.
+struct HexPackedSurface {
+    normal_ts: vec3<f32>,
+    roughness: f32,
+    occlusion: f32,
+}
+
+fn hex_sample_packed_surface(
+    map: i32,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> HexPackedSurface {
+    let g = hex_grid(uv);
+    let t1 = hex_tap(g.v1, uv, ddx, ddy);
+    let t2 = hex_tap(g.v2, uv, ddx, ddy);
+    let t3 = hex_tap(g.v3, uv, ddx, ddy);
+    let s1 = textureSampleGrad(textures[map], default_sampler, t1.uv, t1.ddx, t1.ddy);
+    let s2 = textureSampleGrad(textures[map], default_sampler, t2.uv, t2.ddx, t2.ddy);
+    let s3 = textureSampleGrad(textures[map], default_sampler, t3.uv, t3.ddx, t3.ddy);
+    let n1xy = hex_unrotate(s1.rg * 2.0 - 1.0, t1.rot);
+    let n2xy = hex_unrotate(s2.rg * 2.0 - 1.0, t2.rot);
+    let n3xy = hex_unrotate(s3.rg * 2.0 - 1.0, t3.rot);
+    let n1 = vec3<f32>(n1xy, sqrt(max(1.0 - dot(n1xy, n1xy), 0.0)));
+    let n2 = vec3<f32>(n2xy, sqrt(max(1.0 - dot(n2xy, n2xy), 0.0)));
+    let n3 = vec3<f32>(n3xy, sqrt(max(1.0 - dot(n3xy, n3xy), 0.0)));
+    let w = hex_weights(g.w, vec3<f32>(n1.z, n2.z, n3.z));
+    var out: HexPackedSurface;
+    out.normal_ts = normalize(w.x * n1 + w.y * n2 + w.z * n3);
+    out.roughness = w.x * s1.b + w.y * s2.b + w.z * s3.b;
+    out.occlusion = w.x * s1.a + w.y * s2.a + w.z * s3.a;
+    return out;
+}

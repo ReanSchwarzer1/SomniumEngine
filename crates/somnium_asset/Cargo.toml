@@ -10,3 +10,10 @@ exr       = { workspace = true }
 bytemuck  = { workspace = true }
 glam      = { workspace = true }
 tracing   = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+ureq = "2.12"
+md-5 = "0.10"
+sha2 = "0.10"

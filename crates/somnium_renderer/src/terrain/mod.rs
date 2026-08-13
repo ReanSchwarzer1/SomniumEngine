@@ -25,6 +25,8 @@ pub mod foliage_paint;
 pub mod heightmap;
 pub mod macro_map;
 pub mod mesh;
+pub mod mips;
+pub mod splat;
 pub mod textures;
 
 use std::collections::HashMap;
@@ -157,82 +159,68 @@ pub struct TerrainLayer {
 }
 
 /// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
-/// `TerrainMaterial` in `terrain_material.wgsl` (256 bytes).
-///
-/// Phase 25A-2 moved this out of a per-terrain uniform and into a storage-buffer
-/// array indexed by `Material::terrain_index`, because terrain now shades in the
-/// same pass as everything else and there is no per-terrain bind group left to
-/// hang a uniform on. The texture fields are bindless indices into the global
-/// texture array rather than views: the splatmap and the four layers' albedo,
-/// normal and roughness maps are registered there at terrain creation.
+/// `TerrainMaterial` in `terrain_material.wgsl` (800 bytes, Phase XV).
 ///
 /// **Every `vec4` member sits at a 16-byte offset**, which is what keeps Rust's
-/// `repr(C)` packing and WGSL's alignment rules agreeing — the same trap that
-/// silently mis-decoded `GpuMaterial` when `emissive` was a `vec3`.
+/// `repr(C)` packing and WGSL's alignment rules agreeing.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTerrainMaterial {
-    /// UV repeats per metre, one per layer.                    offset 0  (32)
-    pub layer_tiling: [f32; 8],
+    /// UV repeats per metre, one per layer.                    offset 0  (64)
+    pub layer_tiling: [f32; 16],
     /// xy = brush world XZ, z = radius, w = mode
-    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 32
+    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 64
     pub brush: [f32; 4],
-    /// Bindless index of each layer's albedo+height map.       offset 48 (32)
-    pub albedo_maps: [i32; 8],
-    /// Bindless index of each layer's packed surface map
-    /// (normal XY, roughness, occlusion).                      offset 80 (32)
-    pub surface_maps: [i32; 8],
-    /// World XZ of terrain-local (0, 0).                       offset 112
+    /// Bindless index of each layer's albedo+height map.       offset 80 (64)
+    pub albedo_maps: [i32; 16],
+    /// Bindless index of each layer's packed surface map.      offset 144 (64)
+    pub surface_maps: [i32; 16],
+    /// World XZ of terrain-local (0, 0).                       offset 208
     pub terrain_origin: [f32; 2],
-    /// 1 / world size, for the splat lookup.                   offset 120
+    /// 1 / world size, for the splat lookup.                   offset 216
     pub inv_world_size: [f32; 2],
-    /// Bindless index of the layer 0-3 weights.                offset 128
+    /// Bindless index of the layer 0-3 weights.                offset 224
     pub splat_map: i32,
-    /// Bindless index of the layer 4-7 weights (Phase 25L).    offset 132
+    /// Layers 4-7.                                             offset 228
     pub splat_map_hi: i32,
-    /// Layer index used for triplanar cliff projection (rock = 2).
+    /// Layers 8-11.                                            offset 232
+    pub splat_map_2: i32,
+    /// Layers 12-15.                                           offset 236
+    pub splat_map_3: i32,
+    /// Layer index used for biplanar cliff projection.         offset 240
     pub cliff_layer: u32,
-    /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
+    /// Non-zero applies stochastic hex-tiling.                 offset 244
     pub hex_tiling: u32,
-    /// Phase 25E, per layer. How much of the layer's height map is added to
-    /// its splat weight.                                       offset 144 (32)
-    pub layer_height_scale: [f32; 8],
-    /// Width of the layer's transition band.                   offset 176 (32)
-    pub layer_blend_width: [f32; 8],
-    /// Reciprocal of the layer's minimum weight, which is the form the shader
-    /// multiplies by — see `blend::weight_clamp`.              offset 208 (32)
-    pub layer_weight_clamp: [f32; 8],
-    /// Non-zero runs the height-weighted blend; zero normalises the splat
-    /// weights and nothing else, which is the A/B.             offset 240
+    /// Non-zero runs the height-weighted blend.                offset 248
     pub height_blend: u32,
-    /// Phase 25D. Bindless index of the macro colour map, -1 for none.
-    ///                                                        offset 244
+    /// Bindless index of the macro colour map, -1 for none.    offset 252
     pub macro_map: i32,
-    /// `macro_map::MacroBlendMode`.                            offset 248
+    /// Per-layer height blend scale.                           offset 256 (64)
+    pub layer_height_scale: [f32; 16],
+    /// Width of the layer's transition band.                   offset 320 (64)
+    pub layer_blend_width: [f32; 16],
+    /// Reciprocal of the layer's minimum weight.               offset 384 (64)
+    pub layer_weight_clamp: [f32; 16],
+    /// Relief depth per layer, in metres.                      offset 448 (64)
+    pub layer_parallax: [f32; 16],
+    /// `macro_map::MacroBlendMode`.                            offset 512
     pub macro_mode: u32,
-    /// Blend factor; 0 leaves the detail untouched.            offset 252
+    /// Blend factor; 0 leaves the detail untouched.            offset 516
     pub macro_strength: f32,
-    /// Metres at which the layer budget starts falling.        offset 256
+    /// Metres at which the layer budget starts falling.        offset 520
     pub detail_fade_start: f32,
-    /// Metres at which only the dominant layers survive.       offset 260
+    /// Metres at which only the dominant layers survive.       offset 524
     pub detail_fade_end: f32,
-    /// Pads to 272. WGSL would insert this itself and Rust would not, which is
-    /// the disagreement that mis-decodes the whole struct.
-    pub _pad: [u32; 2],
-    /// Phase 24L: mean linear albedo per layer.               offset 272 (128)
-    ///
-    /// What an indirect ray picks up when it bounces off the ground. See
-    /// `TerrainLayerTextures::mean_albedo` for why it is a mean rather than the
-    /// real composite.
-    pub layer_albedo: [[f32; 4]; 8],
-    /// Phase 25H: relief depth per layer, in metres.        offset 400 (32)
-    pub layer_parallax: [f32; 8],
-    /// Steps the parallax march takes at its closest.       offset 432
+    /// Mean linear albedo per layer.                           offset 528 (256)
+    pub layer_albedo: [[f32; 4]; 16],
+    /// Steps the parallax march takes at its closest.          offset 784
     pub parallax_steps: u32,
-    /// Steps of the self-shadow march toward the sun. 0 disables it.
-    ///                                                      offset 436
+    /// Steps of the self-shadow march toward the sun.          offset 788
     pub parallax_shadow_steps: u32,
-    pub _pad4: [u32; 2],
+    /// Biplanar/triplanar axis sharpness (XV-F).               offset 792
+    pub projection_sharpness: f32,
+    /// 0 = biplanar (default), 1 = triplanar debug.            offset 796
+    pub projection_mode: u32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -240,6 +228,8 @@ pub struct GpuTerrainMaterial {
 pub struct TerrainTextureIds {
     pub splat_map: i32,
     pub splat_map_hi: i32,
+    pub splat_map_2: i32,
+    pub splat_map_3: i32,
     /// Phase 25D: the whole-terrain macro colour map.
     pub macro_map: i32,
     pub albedo: [i32; TERRAIN_LAYER_COUNT as usize],
@@ -251,6 +241,8 @@ impl Default for TerrainTextureIds {
         Self {
             splat_map: -1,
             splat_map_hi: -1,
+            splat_map_2: -1,
+            splat_map_3: -1,
             macro_map: -1,
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
@@ -335,6 +327,10 @@ pub struct TerrainData {
     pub parallax_steps: u32,
     /// Steps of the march toward the sun that gives the relief self-shadowing.
     pub parallax_shadow_steps: u32,
+    /// Biplanar/triplanar axis sharpness (XV-F). `SOMNIUM_TERRAIN_PROJECTION_SHARPNESS`.
+    pub projection_sharpness: f32,
+    /// 0 = biplanar (default), 1 = triplanar debug. `SOMNIUM_TERRAIN_TRIPLANAR=1`.
+    pub projection_mode: u32,
 
     /// Model matrix submitted for the current frame.
     pub model: glam::Mat4,
@@ -362,7 +358,12 @@ impl TerrainData {
     ///
     /// Chunks come back with no pool space; the renderer calls
     /// [`TerrainData::reserve_pool_spans`] once it can lend the geometry pool.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, desc: TerrainDescriptor) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        desc: TerrainDescriptor,
+        bc_supported: bool,
+    ) -> Self {
         assert!(
             desc.chunk_cells.is_power_of_two() && desc.chunk_cells >= (1 << MAX_TERRAIN_LOD),
             "chunk_cells must be a power of two ≥ {}",
@@ -406,7 +407,7 @@ impl TerrainData {
             desc.grid_size[0] * desc.chunk_cells,
             desc.grid_size[1] * desc.chunk_cells,
         );
-        let layer_textures = TerrainLayerTextures::load_or_generate(device, queue);
+        let layer_textures = TerrainLayerTextures::load_or_generate(device, queue, bc_supported);
 
         // Generated flat here and regenerated once relief lands (see
         // `macro_dirty`). Creating it now rather than on first use is what lets
@@ -470,6 +471,14 @@ impl TerrainData {
             },
             parallax_steps: 24,
             parallax_shadow_steps: 8,
+            projection_sharpness: std::env::var("SOMNIUM_TERRAIN_PROJECTION_SHARPNESS")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(8.0)
+                .max(1.0),
+            projection_mode: u32::from(
+                std::env::var("SOMNIUM_TERRAIN_TRIPLANAR").as_deref() == Ok("1"),
+            ),
             model: glam::Mat4::IDENTITY,
             brush_cursor: [0.0; 4],
             painted_foliage: Vec::new(),
@@ -506,8 +515,12 @@ impl TerrainData {
             inv_world_size: [1.0 / wx, 1.0 / wz],
             splat_map: self.texture_ids.splat_map,
             splat_map_hi: self.texture_ids.splat_map_hi,
-            cliff_layer: 2,
+            splat_map_2: self.texture_ids.splat_map_2,
+            splat_map_3: self.texture_ids.splat_map_3,
+            cliff_layer: 14,
             hex_tiling: u32::from(self.hex_tiling),
+            height_blend: u32::from(self.height_blend),
+            macro_map: self.texture_ids.macro_map,
             layer_height_scale: std::array::from_fn(|i| {
                 self.layers.get(i).map_or(0.0, |l| l.blend.height_scale)
             }),
@@ -519,24 +532,22 @@ impl TerrainData {
                     .get(i)
                     .map_or(10.0, |l| blend::weight_clamp(l.blend.min_weight))
             }),
-            height_blend: u32::from(self.height_blend),
-            macro_map: self.texture_ids.macro_map,
+            layer_parallax: std::array::from_fn(|i| {
+                self.layers.get(i).map_or(0.0, |l| l.blend.parallax_depth) * self.parallax_scale
+            }),
             macro_mode: self.macro_mode as u32,
             macro_strength: self.macro_strength,
             detail_fade_start: self.detail_fade_start,
             detail_fade_end: self.detail_fade_end.max(self.detail_fade_start + 1.0),
-            _pad: [0; 2],
             layer_albedo: self.layer_textures.mean_albedo,
-            layer_parallax: std::array::from_fn(|i| {
-                self.layers.get(i).map_or(0.0, |l| l.blend.parallax_depth) * self.parallax_scale
-            }),
             parallax_steps: if self.parallax_scale > 0.0 {
                 self.parallax_steps
             } else {
                 0
             },
             parallax_shadow_steps: self.parallax_shadow_steps,
-            _pad4: [0; 2],
+            projection_sharpness: self.projection_sharpness,
+            projection_mode: self.projection_mode,
         }
     }
 
@@ -1066,10 +1077,8 @@ impl TerrainData {
     pub fn save_binary(&self, path: &str) -> std::io::Result<()> {
         let mut out: Vec<u8> = Vec::with_capacity(self.heightmap.len() * 4 + 24);
         out.extend(Self::SIDECAR_MAGIC.to_le_bytes());
-        // Version 2: Phase 25L widened a splat texel from 4 weights to
-        // TERRAIN_LAYER_COUNT. A v1 sidecar's splat block is a different size,
-        // so it is refused rather than read as if it matched.
-        out.extend(2u32.to_le_bytes()); // version
+        // Version 3: Phase XV widened a splat texel from 8 weights to 16.
+        out.extend(3u32.to_le_bytes());
         out.extend(self.desc.total_vertices_x().to_le_bytes());
         out.extend(self.desc.total_vertices_z().to_le_bytes());
         out.extend(self.splatmap.width.to_le_bytes());
@@ -1095,10 +1104,9 @@ impl TerrainData {
             return Err("not a terrain sidecar file".into());
         }
         let version = u32_at(4)?;
-        if version != 2 {
+        if version != 2 && version != 3 {
             return Err(format!(
-                "terrain sidecar is version {version}; this build writes 2                  (Phase 25L widened splat texels from 4 layers to {})",
-                TERRAIN_LAYER_COUNT,
+                "terrain sidecar is version {version}; this build reads 2 (migrate) or 3 (sixteen layers)"
             ));
         }
         let (tx, tz) = (u32_at(8)?, u32_at(12)?);
@@ -1111,15 +1119,31 @@ impl TerrainData {
             return Err("terrain sidecar dimensions do not match descriptor".into());
         }
         let h_bytes = (tx * tz) as usize * 4;
-        let s_bytes = (sw * sh) as usize * TERRAIN_LAYER_COUNT as usize;
+        let texel_count = (sw * sh) as usize;
+        let src_channels: usize = if version == 2 {
+            8
+        } else {
+            TERRAIN_LAYER_COUNT as usize
+        };
+        let s_bytes = texel_count * src_channels;
         let body = bytes
             .get(24..24 + h_bytes + s_bytes)
             .ok_or("truncated terrain sidecar")?;
         self.heightmap
             .copy_from_slice(bytemuck::cast_slice(&body[..h_bytes]));
-        self.splatmap
-            .data
-            .copy_from_slice(bytemuck::cast_slice(&body[h_bytes..]));
+        let splat_src = &body[h_bytes..];
+        if version == 3 {
+            self.splatmap
+                .data
+                .copy_from_slice(bytemuck::cast_slice(splat_src));
+        } else {
+            // v2 → v3: copy layers 0–7 byte-for-byte, zero 8–15. Do not run
+            // four-nonzero decay — old scenes must keep their 0–7 appearance.
+            for (dst, src) in self.splatmap.data.iter_mut().zip(splat_src.chunks_exact(8)) {
+                dst[..8].copy_from_slice(src);
+                dst[8..].fill(0);
+            }
+        }
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }

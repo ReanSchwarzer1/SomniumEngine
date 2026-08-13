@@ -118,25 +118,25 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
-### 1.6 Terrain materials — Phase XV Appalachia (planned research only)
+### 1.6 Terrain materials — Phase XV Appalachia (A–F shipped in engine)
 
-**Status:** XV-A provenance research complete 2026-08-13
-([`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md)).
-No sixteen-layer runtime, textures, or shaders yet. Controlling reference:
-`dev records/phase_XV.md`.
+**Status:** XV-A–F implementation 2026-08-13. Provenance:
+[`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md).
+Controlling reference: `dev records/phase_XV.md`. Live GPU evidence PNGs and
+adapter freeze remain pending a capture run.
 
-| Reference | Pattern to study | Somnium target when implementing |
+| Reference | Pattern studied | Somnium implementation |
 |---|---|---|
-| O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local; VT at world scale | Sixteen global / strongest-four local; VT deferred |
-| Mikkelsen JCGT 2020 surface gradients + hex tiling | Correct layered/projected normal composition | Surface-gradient blend + existing hex path |
-| Godot 4.7.1 mip roughness / full-channel triplanar | Specular AA + complete projection | Independent Rust mip fixture; full-PBR biplanar cliffs |
-| Terrain3D wetness paint (MIT) | Wetness → roughness authoring | Moisture affinity + global wetness v1; paint later |
-| Hnat et al. porous wetting 2006 | Darken + gloss when wet | Landscape-kit dry/damp/wet validation |
-| Poly Haven / ambientCG CC0 | Photogrammetry materials with clear redistribution | Manifest-driven fetch; hashes; voluntary credit |
+| O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local | Sixteen global / strongest-four local; VT still deferred |
+| Mikkelsen JCGT 2020 surface gradients + hex tiling | Layered/projected normal composition | Surface-gradient blend in `evaluate_terrain_material`; hex packed-surface counter-rotation |
+| Godot 4.7.1 mip roughness / full-channel projection | Specular AA + complete projection | Independent Toksvig fixture in `terrain/mips.rs`; full-PBR biplanar cliffs (POM off on that path) |
+| Bevy `bevy_triplanar_splatting` biplanar.wgsl | Two dominant axes | `terrain_projected_pbr` default biplanar, triplanar debug via `SOMNIUM_TERRAIN_TRIPLANAR` |
+| Poly Haven / ambientCG CC0 | Photogrammetry with clear redistribution | `assets/terrain/materials.json`; `fetch_terrain` fail-closed MD5; voluntary credit in `assets/LICENSE.md` |
 
-**Boundary:** pattern and citation only until XV is authorized. No third-party
-terrain plugin code is copied. Asset downloads require the Phase XV manifest
-gate.
+**Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
+CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
+references. XV-G biome preset, XV-H wetness/physical UV, and XV-I inspector
+thumbnails are not in this drop.
 
 ---
 

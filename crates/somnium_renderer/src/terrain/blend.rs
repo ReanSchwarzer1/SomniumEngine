@@ -134,6 +134,62 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
         min_weight: 0.08,
         parallax_depth: 0.050,
     },
+    // 8 aerial_sand — fine dry beach; almost no interlocking.
+    LayerBlend {
+        height_scale: 0.35,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.012,
+    },
+    // 9 coast_sand_01 — damp shore, slightly more relief than dry sand.
+    LayerBlend {
+        height_scale: 0.40,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.015,
+    },
+    // 10 dry_mud_field_001 — compacted earth.
+    LayerBlend {
+        height_scale: 0.45,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.018,
+    },
+    // 11 cracked_red_ground — clay plates, hard edges.
+    LayerBlend {
+        height_scale: 0.70,
+        blend_width: 0.25,
+        min_weight: 0.08,
+        parallax_depth: 0.030,
+    },
+    // 12 sparse_grass — soil showing through.
+    LayerBlend {
+        height_scale: 0.50,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.020,
+    },
+    // 13 mossy_rock — deep moss pockets.
+    LayerBlend {
+        height_scale: 0.85,
+        blend_width: 0.20,
+        min_weight: 0.08,
+        parallax_depth: 0.050,
+    },
+    // 14 rock_face_03 — dedicated cliff; hard interlocking.
+    LayerBlend {
+        height_scale: 1.0,
+        blend_width: 0.15,
+        min_weight: 0.08,
+        parallax_depth: 0.060,
+    },
+    // 15 ganges_river_pebbles — talus settling into cracks.
+    LayerBlend {
+        height_scale: 0.90,
+        blend_width: 0.15,
+        min_weight: 0.08,
+        parallax_depth: 0.045,
+    },
 ];
 
 /// Reciprocal of `min_weight`, which is the form the shader multiplies by.

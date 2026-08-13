@@ -1426,7 +1426,12 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        let mut terrain = crate::terrain::TerrainData::new(&ctx.device, &ctx.queue, desc);
+        let mut terrain = crate::terrain::TerrainData::new(
+            &ctx.device,
+            &ctx.queue,
+            desc,
+            ctx.supports_bc_compression(),
+        );
         terrain.reserve_pool_spans(&mut self.geometry);
 
         // The layer maps are `texture_2d_array`s and the bindless array is
@@ -1444,6 +1449,8 @@ impl SomniumRenderer {
         let mut ids = crate::terrain::TerrainTextureIds::default();
         ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
         ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
+        ids.splat_map_2 = self.add_texture(ctx, terrain.splatmap.view_2.clone()) as i32;
+        ids.splat_map_3 = self.add_texture(ctx, terrain.splatmap.view_3.clone()) as i32;
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
         for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
             let i = layer as usize;

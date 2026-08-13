@@ -60,3 +60,4 @@ sel.err
 # Phase 25K: Poly Haven source maps for the terrain materials. Re-derivable with
 # tools/fetch_terrain_textures.sh; only the channel-packed result is committed.
 assets/terrain/_source/
+assets/terrain/bc7/

@@ -236,7 +236,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_448_byte_shader_layout() {
+    fn the_terrain_material_is_the_800_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
@@ -249,35 +249,43 @@ mod material_flag_tests {
         // Phase 25E took it to 256 with three more per-layer arrays plus the
         // height-blend flag; the trailing `_pad` is there because WGSL rounds a
         // struct up to its alignment and Rust does not. Phase 25D took it to
-        // 272 with the macro tier and the detail-fade range.
+        // 272 with the macro tier and the detail-fade range. Phase XV took it
+        // to 800 with sixteen layers and four splatmaps; scalars stay packed
+        // as `array<vec4<T>, 4>`, never `array<f32, 16>`.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 448);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 800);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
         let base = &m as *const _ as usize;
         let offset = |p: *const u8| p as usize - base;
         assert_eq!(offset(m.layer_tiling.as_ptr() as *const u8), 0);
-        assert_eq!(offset(m.brush.as_ptr() as *const u8), 32);
-        assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 48);
-        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 80);
-        assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 112);
-        assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 120);
-        assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 128);
-        assert_eq!(offset(&m.splat_map_hi as *const i32 as *const u8), 132);
-        assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 136);
-        assert_eq!(offset(&m.hex_tiling as *const u32 as *const u8), 140);
-        assert_eq!(offset(m.layer_height_scale.as_ptr() as *const u8), 144);
-        assert_eq!(offset(m.layer_blend_width.as_ptr() as *const u8), 176);
-        assert_eq!(offset(m.layer_weight_clamp.as_ptr() as *const u8), 208);
-        assert_eq!(offset(&m.height_blend as *const u32 as *const u8), 240);
-        assert_eq!(offset(&m.macro_map as *const i32 as *const u8), 244);
-        assert_eq!(offset(&m.macro_mode as *const u32 as *const u8), 248);
-        assert_eq!(offset(&m.macro_strength as *const f32 as *const u8), 252);
-        assert_eq!(offset(&m.detail_fade_start as *const f32 as *const u8), 256);
-        assert_eq!(offset(&m.detail_fade_end as *const f32 as *const u8), 260);
-        assert_eq!(offset(m.layer_albedo.as_ptr() as *const u8), 272);
-        assert_eq!(offset(m.layer_parallax.as_ptr() as *const u8), 400);
-        assert_eq!(offset(&m.parallax_steps as *const u32 as *const u8), 432);
+        assert_eq!(offset(m.brush.as_ptr() as *const u8), 64);
+        assert_eq!(offset(m.albedo_maps.as_ptr() as *const u8), 80);
+        assert_eq!(offset(m.surface_maps.as_ptr() as *const u8), 144);
+        assert_eq!(offset(m.terrain_origin.as_ptr() as *const u8), 208);
+        assert_eq!(offset(m.inv_world_size.as_ptr() as *const u8), 216);
+        assert_eq!(offset(&m.splat_map as *const i32 as *const u8), 224);
+        assert_eq!(offset(&m.splat_map_hi as *const i32 as *const u8), 228);
+        assert_eq!(offset(&m.splat_map_2 as *const i32 as *const u8), 232);
+        assert_eq!(offset(&m.splat_map_3 as *const i32 as *const u8), 236);
+        assert_eq!(offset(&m.cliff_layer as *const u32 as *const u8), 240);
+        assert_eq!(offset(&m.hex_tiling as *const u32 as *const u8), 244);
+        assert_eq!(offset(&m.height_blend as *const u32 as *const u8), 248);
+        assert_eq!(offset(&m.macro_map as *const i32 as *const u8), 252);
+        assert_eq!(offset(m.layer_height_scale.as_ptr() as *const u8), 256);
+        assert_eq!(offset(m.layer_blend_width.as_ptr() as *const u8), 320);
+        assert_eq!(offset(m.layer_weight_clamp.as_ptr() as *const u8), 384);
+        assert_eq!(offset(m.layer_parallax.as_ptr() as *const u8), 448);
+        assert_eq!(offset(&m.macro_mode as *const u32 as *const u8), 512);
+        assert_eq!(offset(&m.macro_strength as *const f32 as *const u8), 516);
+        assert_eq!(offset(&m.detail_fade_start as *const f32 as *const u8), 520);
+        assert_eq!(offset(&m.detail_fade_end as *const f32 as *const u8), 524);
+        assert_eq!(offset(m.layer_albedo.as_ptr() as *const u8), 528);
+        assert_eq!(offset(&m.parallax_steps as *const u32 as *const u8), 784);
+        assert_eq!(
+            offset(&m.projection_sharpness as *const f32 as *const u8),
+            792
+        );
     }
 }

@@ -139,18 +139,20 @@ struct GiHit {
 fn gi_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
     let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
-    let w_lo = textureSampleLevel(textures[tm.splat_map], default_sampler, uv, 0.0);
-    let w_hi = textureSampleLevel(textures[tm.splat_map_hi], default_sampler, uv, 0.0);
-    let total = max(
-        w_lo.x + w_lo.y + w_lo.z + w_lo.w + w_hi.x + w_hi.y + w_hi.z + w_hi.w,
-        0.0001,
-    );
+    let w0 = textureSampleLevel(textures[tm.splat_map], default_sampler, uv, 0.0);
+    let w1 = textureSampleLevel(textures[tm.splat_map_hi], default_sampler, uv, 0.0);
+    let w2 = textureSampleLevel(textures[tm.splat_map_2], default_sampler, uv, 0.0);
+    let w3 = textureSampleLevel(textures[tm.splat_map_3], default_sampler, uv, 0.0);
+    let weight = terrain_unpack_splats(w0, w1, w2, w3);
+    let selected = terrain_strongest_four(weight);
     var c = vec3<f32>(0.0);
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        c += tm.layer_albedo[i].rgb * w_lo[i];
-        c += tm.layer_albedo[i + 4u].rgb * w_hi[i];
+    var total = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        c += tm.layer_albedo[i].rgb * weight[i];
+        total += weight[i];
     }
-    return c / total;
+    return c / max(total, 0.0001);
 }
 
 /// Trace one ray and resolve what it hit into a shadeable surface.

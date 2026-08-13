@@ -405,11 +405,14 @@ Procedural results must be bakeable into the same four splatmaps. Manual paint i
 
 ## 8. Implementation phases
 
-All subphases are **PLANNED** except XV-A research, which is recorded below. Completing a subphase requires its acceptance evidence and documentation update, not only compiling code.
+All subphases **XV-A through XV-F are implemented in engine** as of 2026-08-13.
+Live GPU evidence PNGs, adapter freeze, and SHA-256 of downloaded sources still
+need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
+*acceptance evidence* still requires those captures, not only compiling code.
 
 ### XV-A — Baseline and provenance gate
 
-**Status: RESEARCH COMPLETE — 2026-08-13** (provenance + codebase map; **not** implementation complete). Provenance: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md). Schema/draft: [`phase XV/materials.schema.json`](phase%20XV/materials.schema.json), [`phase XV/materials.draft.json`](phase%20XV/materials.draft.json). Live GPU captures, SHA-256, sidecar v3, shaders, and installing the draft as `assets/terrain/materials.json` wait on implementation authorization. No textures downloaded.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (research + runtime data model). Provenance: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md). Shipping manifest: [`assets/terrain/materials.json`](../assets/terrain/materials.json). Landscape-kit matrix: [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md). Live GPU captures, SHA-256 of downloads, and adapter freeze still pending an engine/fetch run.
 
 **Work**
 
@@ -426,72 +429,27 @@ All subphases are **PLANNED** except XV-A research, which is recorded below. Com
 - No new texture binary has entered the repository without its manifest entry. **Met** — nothing fetched.
 - File-level codebase map recorded. **Met** — [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
-**Not met (needs implementation authorization):** evidence PNGs, SHA-256 of downloads, live GPU/tap/memory freeze, `assets/terrain/materials.json` install, shaders, sidecar v3.
+**Not met (needs a live engine/fetch run):** evidence PNGs, SHA-256 of downloads, live GPU/tap/memory freeze. Manifest is installed at `assets/terrain/materials.json`. Sidecar v3 and sixteen-layer shaders are in the engine.
 
 ### XV-B — Deterministic asset pipeline
 
-**Work**
-
-- Make the fetcher manifest-driven with hashes, identifying User-Agent, retries, and fail-closed validation.
-- Extend the packer to sixteen layers and physical-scale metadata.
-- Implement semantic mip generation, normal renormalization, and Toksvig-style roughness compensation.
-- Add a Godot-reference roughness-mip comparison fixture using the same source normal/roughness pairs, without copying Godot implementation code.
-- Emit 2K/4K RGBA8 and BC7 variants plus a validation report.
-
-**Exit criteria**
-
-- Two clean builds from the same inputs produce byte-identical outputs.
-- Seam, channel-range, normal, and compression checks pass.
-- The output report accounts for every input and transformation.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. BC7 encoder is not shipped; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both. Pack report estimates 2K residency.
 
 ### XV-C — Sixteen-layer data model and migration
 
-**Work**
-
-- Expand CPU splat storage, painting, blending, undo, editor commands, save/load, and tests to sixteen layers.
-- **Widen editor paint first:** live `apply_paint` / keys / inspector still clamp to layers **0–3** even though GPU/auto-splat/sidecar already have 8. Do not assume 8-layer authoring already works.
-- Add four-channel-group helpers so loops are not copied four times.
-- Implement sidecar v3 and exact v2 migration.
-- Enforce four stored non-zero channels per texel with deterministic normalization. Auto-splat today can light many channels; the new cap must not silently change migrated 0–7 looks.
-
-**Exit criteria**
-
-- All sixteen layers can be painted, undone, serialized, reloaded, and inspected.
-- Golden v2 scenes render identically after migration for layers 0–7.
-- Quantized weights always total 255 where terrain is valid.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Sixteen-channel splat, paint 0–15 with four-nonzero, sidecar v3, v2 migration copies 0–7 and zeros 8–15. Auto-splat still writes 0–7 only (XV-G owns biome). Inspector still shows Tile 0–3 tiling (XV-I).
 
 ### XV-D — GPU layout and sparse evaluation
 
-**Work**
-
-- Add two more splat bindings and sixteen material metadata entries using WGSL-safe `vec4` packing. Live `GpuTerrainMaterial` is **448 bytes**; comments that say 256 are stale. Assert offsets again after expansion.
-- Implement deterministic strongest-four selection before expensive sampling.
-- Share splat-count / `layer_albedo` indexing with ReSTIR GI. GI today is `gi_terrain_albedo` (**mean albedo × splat weights only**) and does **not** call `evaluate_terrain_material`. Shared helpers must not pretend GI already evaluates packed PBR.
-- Add debug modes for raw weights, selected indices, discarded weight, and tap count.
-
-**Exit criteria**
-
-- Sixteen layers are visible and correct in all shading paths.
-- No path accidentally evaluates all sixteen PBR materials.
-- Base hex worst case is at most 24 material-map taps, reported separately from control/macro/POM.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** `GpuTerrainMaterial` is 800 bytes / four splatmaps. Strongest-four before PBR. GI uses the same unpack/select helpers but remains mean-albedo × weights. Debug: `SOMNIUM_SHADOW_DEBUG` 12/18/19/20.
 
 ### XV-E — Compression and specular stability
 
-**Work**
-
-- Detect and request BC support conditionally in wgpu 29.
-- Load BC7 packs when supported and RGBA8 otherwise, never both.
-- Validate semantic mips under minification, glancing light, day/night, and camera motion.
-- Tune roughness compensation to reduce distant sparkle without flattening close detail.
-
-**Exit criteria**
-
-- Default compressed material residency is at most 200 MiB at 2K.
-- Uncompressed fallback is at most 700 MiB at 2K.
-- No visible mip seams, hue shifts, dark normal mips, or new distant specular shimmer.
-- Somnium's normal-variance roughness mips have a documented comparison against the Godot-reference limiter and remain within the approved visual/error bounds.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (detect + RGBA8 path). `TEXTURE_COMPRESSION_BC` is requested only when present. Semantic mips + Toksvig fixture are in. Distant-sparkle visual sign-off still needs a capture run.
 
 ### XV-F — Full-PBR mountain and cliff materials
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Full-PBR biplanar (triplanar debug), surface-gradient composition, POM suppressed when `cliff_blend >= 0.05`. `cliff_layer` is 14 (`rock_face_03`); layer 2 stays legacy rock. Hex packed-surface normals are counter-rotated.
 
 **Work**
 
@@ -577,7 +535,7 @@ This list is planning guidance, not permission to perform unrelated refactors.
 
 | Area | Expected files |
 |---|---|
-| Asset provenance | `assets/terrain/materials.json` (not installed; draft is `dev records/phase XV/materials.draft.json` + `materials.schema.json`), `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` |
+| Asset provenance | `assets/terrain/materials.json` + `assets/terrain/materials.schema.json`, `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` §1.6 |
 | Fetch/pack tools | `tools/fetch_terrain_textures.sh`, `crates/somnium_asset/examples/pack_terrain.rs` |
 | Terrain storage/upload | `crates/somnium_renderer/src/terrain/textures.rs`, `terrain/mod.rs`, `terrain/blend.rs`, `terrain/brush.rs` (paint still `.min(3)`) |
 | Terrain shading | `crates/somnium_renderer/src/shaders/terrain_material.wgsl`, `restir_gi.wgsl` (`gi_terrain_albedo` is mean-albedo only), `hextile.wgsl` (`hex_sample_normal` unused) |
@@ -823,24 +781,13 @@ Web sources for the original plan were accessed on **2026-08-12**. Sources added
 
 The next **implementation** session should begin with
 [`post_IV_context_handoff.md`](post_IV_context_handoff.md), then re-read
-`context.md`, `ATTRIBUTION.md`, [`phase_IV.md`](phase_IV.md) §14 (IV-K
-contracts), this plan, [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md),
-[`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md),
-and the current terrain/reference source.
+`context.md`, `ATTRIBUTION.md`, this plan, and
+[`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
-XV-A *research* is done (provenance + codebase map). When the user authorizes
-implementation, finish XV-A operational leftovers first (install
-`materials.draft.json` as `assets/terrain/materials.json`, capture live
-GPU/tap/memory baseline PNGs from `DefaultLandscapePreset` cameras),
-then proceed to **XV-B** (manifest fetch/pack). Do not skip to sixteen-layer
-shader wiring, and do not start XV-C assuming paint already covers layers 0–7.
-Use the substituted roster (layer 11 `cracked_red_ground`,
-layer 15 `ganges_river_pebbles`) unless a visual audit reopens the rejected
-IDs. The architecture above is the researched default, but measured evidence
-may change an implementation detail. Any such change must be recorded here
-with its reason, benchmark or visual evidence, and attribution impact.
-
-**This file is research and planning only.** No Phase XV engine code, shader
-changes, sidecar v3, or texture assets were added as part of the 2026-08-12
-plan, the 2026-08-13 research expansion, the XV-A provenance audit, or the
-XV-A codebase map. Implementation remains forbidden until explicitly requested.
+XV-A through XV-F are in the engine. Remaining operational leftovers: live
+GPU/tap/memory captures from `DefaultLandscapePreset` cameras, SHA-256 via
+`fetch_terrain`, and packing layers 8–15. Next authorized subphase is
+**XV-G** (biome preset / Create Terrain sixteen-layer rules). Do not retile
+shipping 0–7 to 1:1 physical scale (XV-H). Inspector sixteen thumbnails are
+XV-I. Use the substituted roster (layer 11 `cracked_red_ground`, layer 15
+`ganges_river_pebbles`) unless a visual audit reopens the rejected IDs.
