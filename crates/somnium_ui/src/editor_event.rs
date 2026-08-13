@@ -137,6 +137,8 @@ pub enum InspectorField {
     WaterAmplitude,
     WaterRoughness,
     WaterSsrStrength,
+    WaterRtReflect,
+    WaterReflectDebug,
     WaterWaveLengthA,
     WaterWaveLengthB,
     WaterWaveSpeed,
@@ -225,6 +227,8 @@ pub enum PostFxToggle {
     Pcss,
     /// Screen-space contact shadows. Default on.
     ContactShadows,
+    /// Ray-traced water reflections (Phase VV — Halcyon).
+    RtReflect,
 }
 
 /// High-level editor commands produced by the native UI layer.

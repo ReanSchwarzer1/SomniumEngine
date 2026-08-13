@@ -13,6 +13,8 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
 const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
+const RT_HIT: &str = include_str!("../src/shaders/rt_hit.wgsl");
+const WATER_REFLECTION: &str = include_str!("../src/shaders/water_reflection.wgsl");
 const SPD: &str = include_str!("../src/shaders/spd.wgsl");
 const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
 const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
@@ -147,7 +149,7 @@ fn the_restir_gi_module_validates() {
         // themselves are order-independent, which is what lets the pool it
         // depends on be concatenated after it.
         &format!(
-            "{RESTIR_GI}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
+            "{RESTIR_GI}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
         ),
     );
 }
@@ -184,4 +186,17 @@ fn the_phase_iv_water_modules_validate() {
     check("water", WATER);
     check("water_spectrum", WATER_SPECTRUM);
     check("underwater", UNDERWATER);
+}
+
+/// Phase VV. Same concatenation `WaterReflectionPass::new` builds: the
+/// reflection compute shader first so `enable wgpu_ray_query;` precedes every
+/// declaration, then shared hit resolution and the pool it shades through.
+#[test]
+fn the_water_reflection_module_validates() {
+    check(
+        "water_reflection",
+        &format!(
+            "{WATER_REFLECTION}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
+        ),
+    );
 }

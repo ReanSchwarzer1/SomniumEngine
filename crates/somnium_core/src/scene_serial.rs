@@ -130,6 +130,8 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                     "roughness": water.roughness,
                     "anisotropy": water.anisotropy,
                     "ssr_strength": water.ssr_strength,
+                    "rt_reflect_strength": water.rt_reflect_strength,
+                    "reflect_debug": water.reflect_debug,
                     "spectrum_blend": water.spectrum_blend,
                     "wind_speed": water.wind_speed,
                     "foam_decay": water.foam_decay,

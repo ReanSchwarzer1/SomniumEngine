@@ -16,3 +16,5 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 ## Foliage
 
 **F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground.
+
+Water is a separate child entity. Reflection knobs live on that Water, not on Terrain — Help → **Water**.

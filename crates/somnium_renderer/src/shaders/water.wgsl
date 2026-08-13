@@ -72,6 +72,8 @@ struct Instance {
 @group(0) @binding(6) var env_sampler: sampler;
 @group(0) @binding(7) var scene_color: texture_2d<f32>;
 @group(0) @binding(8) var<uniform> frame: WaterFrameData;
+@group(0) @binding(9) var reflection_tex: texture_2d<f32>;
+@group(0) @binding(10) var reflection_sampler: sampler;
 
 @group(1) @binding(0) var<uniform> material: WaterMaterial;
 @group(1) @binding(1) var body_mask: texture_2d<f32>;
@@ -595,15 +597,43 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return output;
 }
 
-struct FragmentOutput {
+struct ShadeOutput {
     @location(0) color: vec4<f32>,
-    // Encoded XZ normal, linear view depth, coverage.
-    @location(1) surface: vec4<f32>,
-    @location(2) velocity: vec2<f32>,
+}
+
+struct PrepassOutput {
+    @location(0) surface: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+    @location(2) roughness: f32,
+}
+
+fn upsample_reflection(uv: vec2<f32>, coverage: f32) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(reflection_tex));
+    if dims.x < 1.5 {
+        return vec4<f32>(0.0);
+    }
+    let pixel = uv * dims - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(pixel));
+    let frac = fract(pixel);
+    var acc = vec4<f32>(0.0);
+    var weight = 0.0;
+    for (var y = 0; y <= 1; y = y + 1) {
+        for (var x = 0; x <= 1; x = x + 1) {
+            let tap = textureLoad(reflection_tex, base + vec2<i32>(x, y), 0);
+            let bilinear = select(frac.x, 1.0 - frac.x, x == 0) * select(frac.y, 1.0 - frac.y, y == 0);
+            let w = bilinear * max(tap.a, 0.05) * coverage;
+            acc += tap * w;
+            weight += w;
+        }
+    }
+    if weight < 1e-5 {
+        return vec4<f32>(0.0);
+    }
+    return acc / weight;
 }
 
 @fragment
-fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> FragmentOutput {
+fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> ShadeOutput {
     // Reconstruct a continuous zero contour from the signed shoreline field.
     // A binary filtered mask still exposes its square texel grid at oblique
     // shorelines; the bilinear SDF contour is stable in world space and gets
@@ -832,7 +862,26 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         reflection_roughness * ENV_MAX_MIP).rgb * light.ibl_intensity;
     let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
     let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
-    let reflected = mix(environment, ssr.rgb, ssr_weight);
+    let rt = upsample_reflection(screen_uv, coverage);
+    let rt_strength = clamp(material.volume_params.z, 0.0, 1.0);
+    // SSR owns the near field where it is confident. The traced ray fills the
+    // rest; the environment cube is the miss. `rt.a` is hit confidence.
+    let traced = mix(environment, rt.rgb, rt.a * rt_strength);
+    var reflected = mix(traced, ssr.rgb, ssr_weight);
+
+    let debug_mode = material.volume_params.w;
+    if debug_mode > 0.5 && debug_mode < 1.5 {
+        // VV-A: SSR hit (green), miss (red), brightness is confidence.
+        let hit = vec3<f32>(0.08, 0.85, 0.18) * ssr.a;
+        let miss = vec3<f32>(0.85, 0.12, 0.10) * (1.0 - ssr.a);
+        reflected = hit + miss;
+    } else if debug_mode > 1.5 {
+        // Source: SSR (blue), RT hit (yellow), environment (magenta).
+        let ssr_c = vec3<f32>(0.15, 0.35, 0.95) * ssr_weight;
+        let rt_c = vec3<f32>(0.95, 0.82, 0.12) * (1.0 - ssr_weight) * rt.a * rt_strength;
+        let env_c = vec3<f32>(0.85, 0.15, 0.75) * (1.0 - ssr_weight) * (1.0 - rt.a * rt_strength);
+        reflected = ssr_c + rt_c + env_c;
+    }
 
     // How much of the surface response is reflection rather than everything
     // underneath it. This is the split that decides whether the sea looks like
@@ -875,9 +924,130 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fr
         + reflected * reflectance
         + direct;
 
-    return FragmentOutput(
+    if debug_mode > 0.5 {
+        return ShadeOutput(vec4<f32>(min(reflected, vec3<f32>(60000.0)), coverage));
+    }
+
+    return ShadeOutput(
         vec4<f32>(min(final_color, vec3<f32>(60000.0)), coverage),
+    );
+}
+
+@fragment
+fn fs_prepass(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> PrepassOutput {
+    let sdf_cells = sdf_at(input.uv);
+    let cell_metres = (material.bounds.z - material.bounds.x)
+        / f32(max(textureDimensions(shore_sdf).x, 1u));
+    let signed_shore_distance = sdf_cells * cell_metres;
+    let coverage_width = max(fwidth(signed_shore_distance), cell_metres * 0.35);
+    let under_terrain_guard = 1.5;
+    let coverage = smoothstep(
+        -under_terrain_guard - coverage_width,
+        -under_terrain_guard + coverage_width,
+        signed_shore_distance,
+    );
+    if coverage <= 0.001 {
+        discard;
+    }
+    let authored_depth = max(depth_at(input.uv), 0.025);
+    let shore = smoothstep(0.25, 2.0, authored_depth);
+    let water_coord = local_coord(input.uv);
+    let wave = evaluate_waves(water_coord, frame.current_time, shore);
+    let metres_per_pixel = max(length(dpdx(water_coord)), length(dpdy(water_coord)));
+    let spectrum = spectral_gradient(water_coord);
+    let wake = evaluate_wake(water_coord);
+    let water_view_depth = view_depth(input.world_position);
+    let shortest_wave = max(min(material.wave_params.x, material.wave_params.y) * 0.70, 0.5);
+    let slope_resolve = 1.0 - smoothstep(shortest_wave * 0.035, shortest_wave * 0.18,
+        metres_per_pixel);
+    let distance_resolve = 1.0 - smoothstep(120.0, 420.0, water_view_depth);
+    let slope_strength = mix(0.05, 1.0, exp(-water_view_depth * 0.011));
+    let spectral_slope = spectrum.xy * slope_strength;
+    let spectrum_normal = normalize(vec3<f32>(-spectral_slope.x, 1.0, -spectral_slope.y));
+    let wake_normal = normalize(vec3<f32>(-wake.slope.x, 1.0, -wake.slope.y));
+    let spectral_weight = clamp(material.simulation_params.x, 0.0, 1.0);
+    let combined_wave_normal = normalize(mix(
+        normalize(mix(wave.normal, spectrum_normal, spectral_weight)),
+        wake_normal,
+        clamp(material.wake_params.y * 0.55, 0.0, 0.75),
+    ));
+    let resolved_wave_normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), combined_wave_normal,
+        min(slope_resolve, distance_resolve)));
+    let texture_time = frame.current_time;
+    let detail_uv_a = rotate2(water_coord, 0.31) * 0.008
+        + vec2<f32>(0.004, 0.003) * texture_time;
+    let detail_uv_b = rotate2(water_coord, -0.67) * 0.021
+        + vec2<f32>(-0.008, 0.010) * texture_time;
+    let detail_uv_c = rotate2(water_coord, 1.13) * 0.057
+        + vec2<f32>(0.015, -0.011) * texture_time;
+    let normal_a = textureSample(tex_normal, sampler_linear, detail_uv_a).xyz * 2.0 - 1.0;
+    let normal_b = textureSample(tex_normal, sampler_linear, detail_uv_b).xyz * 2.0 - 1.0;
+    let normal_c = textureSample(tex_normal, sampler_linear, detail_uv_c).xyz * 2.0 - 1.0;
+    let detail_normal = normalize(normal_a * 0.52 + normal_b * 0.31 + normal_c * 0.17);
+    let tangent = normalize(vec3<f32>(resolved_wave_normal.y, -resolved_wave_normal.x, 0.0));
+    let bitangent = normalize(cross(resolved_wave_normal, tangent));
+    let mapped = normalize(mat3x3<f32>(tangent, bitangent, resolved_wave_normal) * detail_normal);
+    let detail_strength = 0.24 * (1.0 - smoothstep(75.0, 360.0, water_view_depth));
+    var n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
+    let v = normalize(view.camera_pos - input.world_position);
+    if dot(n, v) < 0.0 { n = -n; }
+    let ndotv = max(dot(n, v), 1e-4);
+    let foam_width = max(material.surface_params.y * 8.0, 6.0);
+    let foam_noise = clamp(
+        textureSample(tex_orm, sampler_linear, detail_uv_b * 0.63).r * 0.65
+        + textureSample(tex_normal, sampler_linear, detail_uv_a * 0.47).x * 0.35,
+        0.0,
+        1.0,
+    );
+    let shore_distance = max(sdf_cells, 0.0) * cell_metres;
+    let breaker_distance = 1.1 + 0.75 * sin(frame.current_time * 0.72
+        + dot(water_coord, vec2<f32>(0.071, 0.043)));
+    let breaker = 1.0 - smoothstep(0.45, 2.0, abs(shore_distance - breaker_distance));
+    let shore_band = 1.0 - smoothstep(0.0, foam_width, shore_distance);
+    let coord = vec2<i32>(input.clip_pos.xy);
+    let base_depth = textureLoad(depth_texture, coord, 0);
+    let base_has_backdrop = base_depth < 0.9999;
+    let screen_size = vec2<f32>(textureDimensions(depth_texture));
+    let screen_uv = input.clip_pos.xy / screen_size;
+    let base_world = reconstruct_world(screen_uv, min(base_depth, 0.9999));
+    let backdrop_distance = select(authored_depth, distance(input.world_position, base_world), base_has_backdrop);
+    let depth_contact = select(
+        0.0,
+        1.0 - smoothstep(0.04, 1.35, backdrop_distance),
+        base_has_backdrop,
+    );
+    let shore_foam = max(
+        shore_band * clamp(0.28 + breaker * 0.82 + foam_noise * 0.38, 0.0, 1.0),
+        depth_contact * (0.62 + foam_noise * 0.28),
+    );
+    let crest_foam = smoothstep(0.0, 1.0, spectrum.a * 0.75)
+        * exp(-water_view_depth * 0.0075)
+        * smoothstep(0.5, 2.0, authored_depth);
+    let foam_amount = clamp(max(max(shore_foam, crest_foam), wake.foam), 0.0, 1.0);
+    let roughness_map = 0.5 * (
+        textureSample(tex_orm, sampler_linear, detail_uv_a).g
+        + textureSample(tex_orm, sampler_linear, detail_uv_b).g * 0.65
+        + textureSample(tex_orm, sampler_linear, detail_uv_c).g * 0.35) / 1.5;
+    let unresolved_energy = 1.0 - min(slope_resolve, distance_resolve);
+    let distance_roughness = unresolved_energy * 0.28;
+    let base_roughness = clamp(material.absorption_roughness.w, 0.04, 1.0);
+    var fresnel_scalar = ocean_fresnel(ndotv, base_roughness);
+    let viewed_from_below = view.camera_pos.y < input.world_position.y;
+    if !front_facing && viewed_from_below {
+        let eta = 1.333;
+        let sin_transmitted_sq = eta * eta * (1.0 - ndotv * ndotv);
+        fresnel_scalar = mix(fresnel_scalar, 1.0,
+            smoothstep(0.96, 1.02, sin_transmitted_sq));
+    }
+    let reflection_roughness = clamp(
+        (1.0 - fresnel_scalar) * foam_amount + 0.4
+            + roughness_map * 0.08 + distance_roughness,
+        0.04,
+        1.0,
+    );
+    return PrepassOutput(
         vec4<f32>(n.xz * 0.5 + 0.5, min(water_view_depth, 60000.0), coverage),
         clamp(input.screen_velocity, vec2<f32>(-1.0), vec2<f32>(1.0)),
+        reflection_roughness,
     );
 }

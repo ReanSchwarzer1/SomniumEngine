@@ -972,6 +972,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
+                    rt_reflect: pp.rt_reflect_enabled,
                     pcss: pp.pcss_enabled,
                     contact_shadows: pp.contact_shadows_enabled,
                     cas: pp.cas_enabled,
@@ -1074,6 +1075,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         water.amplitude,
                         water.roughness,
                         water.ssr_strength,
+                        water.rt_reflect_strength,
+                        water.reflect_debug,
                         water.wave_length_a,
                         water.wave_length_b,
                         water.wave_speed,
@@ -1795,6 +1798,8 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
             r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
+            r.water_reflection_pass.enabled =
+                pp.rt_reflect_enabled && r.water_reflection_pass.supported();
             r.cas_pass.enabled = pp.cas_enabled;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
@@ -2651,6 +2656,8 @@ impl<G: GameApp> Engine<G> {
                         | IF::WaterAmplitude
                         | IF::WaterRoughness
                         | IF::WaterSsrStrength
+                        | IF::WaterRtReflect
+                        | IF::WaterReflectDebug
                         | IF::WaterWaveLengthA
                         | IF::WaterWaveLengthB
                         | IF::WaterWaveSpeed
@@ -2677,6 +2684,10 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterAmplitude => water.amplitude = value.max(0.0),
                             IF::WaterRoughness => water.roughness = value.clamp(0.02, 1.0),
                             IF::WaterSsrStrength => water.ssr_strength = value.clamp(0.0, 1.0),
+                            IF::WaterRtReflect => water.rt_reflect_strength = value.clamp(0.0, 1.0),
+                            IF::WaterReflectDebug => {
+                                water.reflect_debug = value.clamp(0.0, 2.0).round()
+                            }
                             IF::WaterWaveLengthA => water.wave_length_a = value.max(0.5),
                             IF::WaterWaveLengthB => water.wave_length_b = value.max(0.5),
                             IF::WaterWaveSpeed => water.wave_speed = value.max(0.0),
@@ -3538,6 +3549,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::RestirGi => {
                             pp.restir_gi_enabled = !pp.restir_gi_enabled;
                             pp.restir_gi_enabled
+                        }
+                        PostFxToggle::RtReflect => {
+                            pp.rt_reflect_enabled = !pp.rt_reflect_enabled;
+                            pp.rt_reflect_enabled
                         }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;

@@ -1818,8 +1818,8 @@ impl GameApp for HelloGame {
                             volume_params: [
                                 water.caustic_strength,
                                 f32::from(u8::from(water.underwater_enabled)),
-                                0.0,
-                                0.0,
+                                water.rt_reflect_strength,
+                                water.reflect_debug,
                             ],
                             wake_origin_direction,
                             wake_params: if water.water_id

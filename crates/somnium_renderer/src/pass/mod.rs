@@ -28,4 +28,5 @@ pub mod velocity;
 pub mod visibility;
 pub mod volumetric;
 pub mod water;
+pub mod water_reflection;
 pub mod water_spectrum;

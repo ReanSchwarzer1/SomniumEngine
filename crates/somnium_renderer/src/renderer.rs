@@ -129,6 +129,8 @@ pub struct SomniumRenderer {
     pub restir_pass: crate::pass::restir::RestirPass,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
+    /// Phase VV: ray-traced water reflections (Halcyon).
+    pub water_reflection_pass: crate::pass::water_reflection::WaterReflectionPass,
     /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
     pub cas_pass: crate::pass::cas::CasPass,
     /// Phase 24AD: screen-space motion, for motion blur and future object motion.
@@ -516,6 +518,13 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
+        let water_reflection_pass = crate::pass::water_reflection::WaterReflectionPass::new(
+            &ctx.device,
+            &global_pool.layout,
+            raytrace_pass.supported(),
+            ctx.config.width,
+            ctx.config.height,
+        );
         let water_textures_bind_group =
             Some(crate::pass::water::create_default_texture_bind_group(
                 &ctx.device,
@@ -570,6 +579,7 @@ impl SomniumRenderer {
             rt_debug_pass,
             restir_pass,
             restir_gi_pass,
+            water_reflection_pass,
             velocity_pass,
             motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
                 &ctx.device,
@@ -1261,6 +1271,8 @@ impl SomniumRenderer {
             self.velocity_pass
                 .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
             self.water_pass.resize(&ctx.device, width, height);
+            self.water_reflection_pass
+                .resize(&ctx.device, width, height);
             self.underwater_pass.invalidate();
             self.taa_pass.rebuild(
                 &ctx.device,
@@ -2247,8 +2259,63 @@ impl SomniumRenderer {
                 self.postprocess_pass.hdr_texture.size(),
             );
 
-            self.profiler.begin(&mut encoder, "Water");
-            self.water_pass.record(
+            self.profiler.begin(&mut encoder, "Water prepass");
+            self.water_pass.record_prepass(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.vis_pass.depth_view,
+                &self.global_pool.view_proj_buffer,
+                &self.vis_pass.depth_view,
+                &self.global_pool.light_buffer,
+                &self.shadow_resources.atlas_depth_view,
+                &self.shadow_resources.comparison_sampler,
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                &self.postprocess_pass.scene_copy_view,
+                self.velocity_pass.view(),
+                self.view_proj_unjittered,
+                self.time,
+                &self.geometry.vertex_buffer,
+                &self.geometry.index_buffer,
+                self.water_textures_bind_group.as_ref(),
+                &self.water_bodies,
+                &self.water_queue,
+            );
+            self.profiler.end(&mut encoder);
+
+            self.profiler.begin(&mut encoder, "Water reflection");
+            let rt_strength = self.water_queue[0].2.volume_params[2];
+            let tlas_overflowed = self.raytrace_pass.overflowed();
+            let traced = if let Some(tlas) = self.raytrace_pass.tlas() {
+                self.water_reflection_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.global_pool.bind_group,
+                    tlas,
+                    self.water_pass.surface_view(),
+                    self.water_pass.roughness_view(),
+                    self.velocity_pass.view(),
+                    &self.ibl_pass.cube_view,
+                    &self.ibl_pass.sampler,
+                    &self.shadow_resources.atlas_depth_view,
+                    &self.shadow_resources.comparison_sampler,
+                    self.view_matrix,
+                    self.view_proj,
+                    self.camera_pos,
+                    rt_strength,
+                    tlas_overflowed,
+                    ctx.config.width,
+                    ctx.config.height,
+                )
+            } else {
+                false
+            };
+            self.profiler.end(&mut encoder);
+
+            self.profiler.begin(&mut encoder, "Water shade");
+            self.water_pass.record_shade(
                 &ctx.device,
                 &ctx.queue,
                 &mut encoder,
@@ -2262,9 +2329,11 @@ impl SomniumRenderer {
                 &self.ibl_pass.cube_view,
                 &self.ibl_pass.sampler,
                 &self.postprocess_pass.scene_copy_view,
-                self.velocity_pass.view(),
-                self.view_proj_unjittered,
-                self.time,
+                if traced {
+                    self.water_reflection_pass.current_view()
+                } else {
+                    self.water_reflection_pass.dummy_view()
+                },
                 &self.geometry.vertex_buffer,
                 &self.geometry.index_buffer,
                 self.water_textures_bind_group.as_ref(),

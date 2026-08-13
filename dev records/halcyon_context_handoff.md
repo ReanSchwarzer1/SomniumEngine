@@ -1,10 +1,10 @@
 # Somnium Engine — Halcyon (Phase VV) Context Handoff
 
-> **Purpose:** start-here for a Phase VV implementation session.  
-> **Snapshot date:** 2026-08-13 evening  
+> **Purpose:** start-here after Phase VV-A–H. Remaining Halcyon work is evidence
+> captures and §11 timings, not a re-implementation of A–H.  
+> **Snapshot date:** 2026-08-13 evening (updated after VV-A–H)  
 > **Branch:** `dev`  
-> **HEAD at handoff:** `b5d1e57` (`more fixes ro ui`) plus the same-evening ComboBox overlay / immersive-play / drawer-tile work already in the tree  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms shading exception; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** as living chrome (26-J not started); Phase VV (Halcyon) **planned — no engine code yet**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms shading exception; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** as living chrome (26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (live SSR miss-rate capture and GPU budget numbers still open)
 
 This document supersedes [`post_IV_context_handoff.md`](post_IV_context_handoff.md) as the **start-here** file. Keep the post-IV handoff for IV/XV history; keep [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) for IV A–J / asset-license narrative. Do not treat either as the current entry point.
 
@@ -18,18 +18,18 @@ This document supersedes [`post_IV_context_handoff.md`](post_IV_context_handoff.
 
 ## 1. Read this first
 
-A Halcyon session should read these **in order**:
+A later session should read these **in order**:
 
-1. **This file** — current engine state, frozen contracts, what Metaphor just shipped, how to start VV-A.
-2. [`phase_VV.md`](phase_VV.md) — the controlling plan (architecture, stages VV-A–H, budgets, non-goals). **Begin at VV-A. Do not begin at VV-C.**
+1. **This file** — current engine state, frozen contracts, what VV shipped, what is still open.
+2. [`phase_VV.md`](phase_VV.md) — plan plus the 2026-08-13 implementation record. **Do not re-implement VV-A–H.**
 3. [`context.md`](../context.md) — living architecture. §6 / §14 water + ray tracing; §8 editor chrome; roadmap rows IV / XV / 26 / VV. **Do not rewrite §20** (Phase 14 heightmap history).
-4. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference boundaries. Cite Halcyon sources in §1.7 **as they are used**; do not copy shader source.
-5. [`phase_IV.md`](phase_IV.md) **§14 IV-K** — the water shading Halcyon has to reproduce through a traced ray.
-6. Verify [`phase_VV.md`](phase_VV.md) **§4 against the worktree** before writing code. That audit is dated 2026-08-13; line numbers drift.
+4. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference boundaries. Halcyon citations are in §1.7.
+5. [`phase_IV.md`](phase_IV.md) **§14 IV-K** — the water shading traced hits have to match.
+6. Help: [`docs/editor/water.md`](../docs/editor/water.md) for the inspector knobs.
 
 Optional (do not skip (1)–(6) for these):
 
-- [`phase_26.md`](phase_26.md) — chrome contract if VV-A needs a debug toggle or Help line. Living chrome, not a rebuild.
+- [`phase_26.md`](phase_26.md) — chrome contract. Living chrome, not a rebuild. 26-J still queued unless requested.
 - [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history and the 32-layer terrain freeze.
 - [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) — live terrain numbers.
 
@@ -42,11 +42,13 @@ Optional (do not skip (1)–(6) for these):
 | **IV Great Lakes water** | Closed 2026-08-13 | [`phase_IV.md`](phase_IV.md) §14. Finite wet-cell body, 3×1024² FFT, Jacobian foam, Atlas-style lighting. Clipmap body / HDRI / GPU spray **not** delivered. |
 | **XV Appalachia terrain** | A–J complete 2026-08-13 | [`phase_XV.md`](phase_XV.md) · live [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
 | **26 Metaphor editor** | 26-A–I shipped; **phase open** | [`phase_26.md`](phase_26.md). Nocturne shell, docked Content Drawer, Iris, Help, immersive play, ComboBox overlay. 26-J / 26-H SDF / 26-D2 still queued. |
-| **VV Halcyon** | **Not started** | [`phase_VV.md`](phase_VV.md). Water still reflects via `trace_ssr` (28-step march) + env cube. |
+| **VV Halcyon** | **VV-A–H in tree** (2026-08-13) | [`phase_VV.md`](phase_VV.md). SSR + half-res RT + env cube on confidence. Kill switch `SOMNIUM_RT_REFLECT=0`. Evidence PNGs / §11 timings still open. |
 
-**Largest remaining water fidelity gap:** off-screen / behind-camera / below-horizon reflections. The engine already builds a per-frame TLAS and traces it from ReSTIR DI and GI; those paths resolve a *diffuse* signal. Halcyon is the first *specular* ray path.
+**What shipped:** water G-buffer prepass, half-res GGX/mirror compute, `rt_hit.wgsl` (GI wraps `rt_trace`), cascade-shadow hit lighting (not a second ray), temporal mix, bilateral upsample, SSR/RT/env blend. Inspector: **RT Reflect**, **Reflect Debug**. Post FX: **RT Reflections**. Help: `docs/editor/water.md`.
 
-**Session estimate:** one Halcyon session should finish **VV-A** (instrumentation, SSR debug viz, TLAS overflow log) and leave the engine shippable. VV-B is the architectural commit; do not skip A to “get to rays.”
+**Still open on Halcyon:** live SSR miss-rate and before/after captures into `dev records/phase VV/`; profiler timings vs [`phase_VV.md`](phase_VV.md) §11. Ray-traced *refraction* is VV+1 and is not authorized by this handoff.
+
+**Session estimate:** a follow-up Halcyon session should capture evidence, not rewrite the pass. VV-B already committed the architecture.
 
 ---
 
@@ -70,7 +72,7 @@ Default landscape is the Motion Forge Pictures Great Lakes height derivative plu
 | `max_depth` | 18.6 m | Optical path, not bathymetry |
 | `wave_speed` | **0.85** | Buoyancy samples Gerstner only; FFT is visual |
 | `spectrum_blend` | 0.64 | Visual FFT crossfade |
-| `ssr_strength` | 1.0 | Today’s reflection mix; Halcyon blends on confidence later |
+| `ssr_strength` | 1.0 | Near-field SSR mix; RT amount is `rt_reflect_strength` (also 1.0) |
 
 Gislinge Viking Boat ships with `BuoyantVessel`. Environment sim runs in Editing and Playing; Pause freezes; Play hides editor overlays. Immersive play (Metaphor, same evening) hides chrome and goes borderless fullscreen; **Esc** exits.
 
@@ -104,7 +106,7 @@ Terrain is in the TLAS (25B). Water is **not**. Transparent geometry is **not**.
 
 **Still queued (do not start in a Halcyon session unless the user redirects):** 26-J reflection inspector, 26-H SDF/shaping, 26-D2 drag-drop spawn, async PNG thumbs.
 
-**Halcyon may add living chrome** when a stage needs it (VV-A SSR hit/miss debug view, a post-fx or View-menu toggle, one Help line). That is Metaphor staying open, not a phase fold-in. Do not rebuild widgets, restyle Nocturne, or grow the icon atlas except a new `IconId` at the **end** of the enum.
+**Halcyon living chrome (shipped):** Details **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**; Help `docs/editor/water.md`. Do not rebuild widgets, restyle Nocturne, or grow the icon atlas except a new `IconId` at the **end** of the enum.
 
 ### 3.5 Chronology (high level)
 
@@ -116,29 +118,30 @@ Terrain is in the TLAS (25B). Water is **not**. Transparent geometry is **not**.
 | 2026-08-13 | Phase XV A–J + BC7 (`43c3daa`, `8083328`) |
 | 2026-08-13 | Phase 26 plan then 26-A–I (`719086c` … `ce16c31`) |
 | 2026-08-13 evening | UI polish (`973b9a6`, `b5d1e57`) + immersive play, drawer tiles, ComboBox overlay, toolbar wiring |
+| 2026-08-13 late | Phase VV-A–H (Halcyon) in tree; fragment sampled-texture limit fix (displacement vertex-only) |
 
 ---
 
 ## 4. What Halcyon is (and is not)
 
-**Is:** replace SSR→env-cube as the *primary* water reflection path with hardware ray tracing, keep SSR as the near-field fast path, blend on confidence, degrade to *exactly* today’s look without `EXPERIMENTAL_RAY_QUERY`.
+**Is (shipped):** replace SSR→env-cube as the *only* water reflection path with a blend of screen-space tracing (near field), hardware ray tracing (off-screen / behind camera / below horizon), and the environment cube (miss). Degrade to *exactly* today’s look without `EXPERIMENTAL_RAY_QUERY` or with `SOMNIUM_RT_REFLECT=0`.
 
 **Is not:** path tracing, ray-traced refraction (VV+1), caustics, water-in-water, ReSTIR replacement, a software RT fallback (that is still 24P), a water retune, a terrain session, a Metaphor rebuild.
 
-Stages (do not skip; each must `cargo test --workspace` and leave the engine shippable):
+Stages (all in tree; each passed `cargo test --workspace`):
 
-| ID | Work | Visual change? |
+| ID | Work | Status |
 |---|---|---|
-| **VV-A** | GPU timer on water reflection; SSR hit/miss/confidence debug viz; TLAS cap overflow logs once/frame | Debug viz only |
-| **VV-B** | Split `WaterPass` into G-buffer prepass + shading; shading still samples old `trace_ssr` | Byte-identical (reassociation) |
-| **VV-C** | Half-res compute reflection, mirror ray, albedo-only hits | First new look (flat-shaded reflected geo) |
-| **VV-D** | Extract `rt_hit.wgsl` from `gi_trace()`; sun + IBL at the hit; prove GI unchanged | Lit reflections |
-| **VV-E** | GGX / roughness-aware; skip rough foam | Cost, not a new trick |
-| **VV-F** | Reproject + accumulate + bilateral upsample | Stability |
-| **VV-G** | Blend with SSR on confidence | Final mix |
-| **VV-H** | Evidence under `dev records/phase VV/`, budgets, docs | — |
+| **VV-A** | GPU timer; SSR hit/miss debug viz; TLAS overflow log | Shipped (miss-rate number still open) |
+| **VV-B** | G-buffer prepass + shading split | Shipped |
+| **VV-C** | Half-res compute reflection | Shipped (lit, not left albedo-only) |
+| **VV-D** | `rt_hit.wgsl`; sun + IBL; cascade shadow not a 2nd ray | Shipped |
+| **VV-E** | GGX / skip foam (`roughness_skip` 0.72) | Shipped |
+| **VV-F** | Reproject + accumulate + 2×2 upsample | Shipped |
+| **VV-G** | Blend with SSR on confidence | Shipped |
+| **VV-H** | Docs / ATTRIBUTION / Help / tests | Shipped except live evidence PNGs |
 
-Fallback matrix and budgets: [`phase_VV.md`](phase_VV.md) §7 and §11. Kill switch: `SOMNIUM_RT_REFLECT=0` must restore today’s behaviour.
+Fallback matrix and budgets: [`phase_VV.md`](phase_VV.md) §7 and §11. Kill switch: `SOMNIUM_RT_REFLECT=0`.
 
 ### 4.1 Infrastructure that already exists
 
@@ -147,16 +150,18 @@ Fallback matrix and budgets: [`phase_VV.md`](phase_VV.md) §7 and §11. Kill swi
 | BLAS per mesh and terrain chunk | `pass/raytrace.rs`, `renderer.rs` |
 | TLAS rebuilt per frame from `draw_queue` | `renderer.rs` |
 | `EXPERIMENTAL_RAY_QUERY` gate | `context.rs` |
-| Inline ray query | `restir_di.wgsl`, `restir_gi.wgsl`, `rt_debug.wgsl` |
-| Hit → albedo (`gi_trace`) | `restir_gi.wgsl` |
-| Water velocity + coverage MRT | `water.wgsl` |
-| TAA uses water velocity | `taa.wgsl` |
+| Shared hit resolve | `shaders/rt_hit.wgsl` (`rt_trace`); GI wraps it |
+| Water reflection compute | `pass/water_reflection.rs`, `shaders/water_reflection.wgsl` |
+| Water G-buffer + shade | `water.wgsl` `fs_prepass` / `fs_main` |
+| Water velocity + coverage | prepass MRT; TAA still uses coverage > 0.5 |
 
-### 4.2 Infrastructure that does not exist
+### 4.2 Still not in the tree
 
-No ray-traced reflection/refraction. No water or transparents in the TLAS. No shared “shade a ray hit” module (`gi_trace` returns albedo/normal; `gi_direct_at` is Lambert sun). No specular denoiser. No water G-buffer. No fragment-stage ray query in use (layout permits it, untested). **TLAS cap 1024 instances, silent drop** — raise or make observable before VV-C.
-
-Water already copies HDR to `scene_color` for refraction/SSR and runs **after** opaque shading, so the TLAS is valid when water records. Do not reorder the frame for VV-A/B.
+- Ray-traced refraction, caustics, water-in-water (water not in TLAS).
+- Specular ReSTIR / a dedicated denoiser beyond temporal mix + upsample.
+- Fragment-stage ray query (compute only).
+- Software ray-tracing fallback (24P).
+- Live evidence PNGs under `dev records/phase VV/`.
 
 ---
 
@@ -175,18 +180,16 @@ Water already copies HDR to `scene_color` for refraction/SSR and runs **after** 
 
 ---
 
-## 6. Next-session start checklist (Halcyon)
+## 6. Next-session start checklist
 
-1. Confirm branch `dev`. Read **this file**, then [`phase_VV.md`](phase_VV.md) §1–8 and §13.
-2. `cargo check --workspace` **before** edits (known-good baseline).
-3. User must have **authorized implementation**. This handoff is not itself a water retune.
-4. Re-verify [`phase_VV.md`](phase_VV.md) §4 against `water.wgsl`, `water.rs`, `raytrace.rs`, `restir_gi.wgsl`, `renderer.rs` (TLAS build vs water record order).
-5. **Begin at VV-A.** Timer + SSR debug viz + TLAS overflow log. Record the SSR miss rate for the default landscape in `phase_VV.md` when you have it.
-6. If VV-A needs a View-menu or F-key debug overlay, add the smallest Metaphor binding (`EditorEvent` + Help/shortcuts line). Do not restyle chrome.
-7. `cargo fmt`, `cargo test --workspace`. Keep the engine shippable every stage.
-8. Update `phase_VV.md` status, this file’s HEAD note, `context.md` roadmap row VV, and `ATTRIBUTION.md` §1.7 when code lands.
+1. Confirm branch `dev`. Read **this file**, then [`phase_VV.md`](phase_VV.md) §4.4, §6 shipped notes, §11, §13.
+2. Do **not** re-implement VV-A–H.
+3. Remaining authorized Halcyon work: live captures into `dev records/phase VV/` (after tonemap; do not invent PNGs) and filling §11 from the profiler.
+4. VV+1 refraction, water-in-TLAS, or 24P only if the user asks.
+5. Frozen: `WaterComponent::great_lakes` (especially `wave_speed` **0.85**). Displacement cascade BGL visibilities stay vertex-only (fragment sampled-texture limit).
+6. `cargo fmt`, `cargo test --workspace` after any code change.
 
-**If the user redirects to Metaphor:** follow [`phase_26.md`](phase_26.md) §13.2 / §20. Do not fold Halcyon water into a UI session.
+**If the user redirects to Metaphor:** follow [`phase_26.md`](phase_26.md) §13.2 / §20. Do not fold water reflections into a UI rebuild.
 
 **If the user redirects to terrain:** live contract is [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). XV is closed; 25C/G/J/N/P remain parked.
 
@@ -196,11 +199,14 @@ Water already copies HDR to `scene_color` for refraction/SSR and runs **after** 
 
 | Area | Path |
 |---|---|
-| Halcyon plan | `dev records/phase_VV.md` |
-| Water pass / shader | `crates/somnium_renderer/src/pass/water.rs`, `crates/somnium_renderer/shaders/water.wgsl` (`trace_ssr`) |
-| Water component / Great Lakes | `WaterComponent::great_lakes` (core); inspector bindings in `somnium_ui` |
-| TLAS / BLAS | `crates/somnium_renderer/src/pass/raytrace.rs` |
-| ReSTIR GI hit | `crates/somnium_renderer/shaders/restir_gi.wgsl` (`gi_trace`) |
+| Halcyon plan + shipped notes | `dev records/phase_VV.md` |
+| Water pass / shader | `crates/somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (`fs_prepass` / `fs_main`, `trace_ssr`) |
+| Water reflection compute | `crates/somnium_renderer/src/pass/water_reflection.rs`, `shaders/water_reflection.wgsl` |
+| Shared hit resolve | `crates/somnium_renderer/src/shaders/rt_hit.wgsl` |
+| Water component / Great Lakes | `WaterComponent::great_lakes` (core); inspector in `somnium_ui` |
+| Help | `docs/editor/water.md` |
+| TLAS / BLAS | `crates/somnium_renderer/src/pass/raytrace.rs` (`MAX_TLAS_INSTANCES` 8192) |
+| ReSTIR GI | `restir_gi.wgsl` (`gi_trace` → `rt_trace`) |
 | Feature gate | `crates/somnium_renderer/src/context.rs` (`EXPERIMENTAL_RAY_QUERY`) |
 | Skip chrome when immersive | `crates/somnium_renderer/src/renderer.rs` (`ui.is_immersive()`) |
 | Editor seam | `crates/somnium_ui/src/editor_event.rs` ↔ `crates/somnium_core/src/app.rs` |
@@ -211,4 +217,4 @@ Water already copies HDR to `scene_color` for refraction/SSR and runs **after** 
 
 ## 8. Help / shortcuts already documenting immersive play
 
-`docs/editor/viewport.md`, `docs/editor/shortcuts.md` (Esc), `docs/editor/welcome.md` already mention the immersive Play-adjacent button. A VV-A debug view should add one line there if it is user-facing; a `SOMNIUM_*` env flag can stay docs-only in `phase_VV.md`.
+`docs/editor/viewport.md`, `docs/editor/shortcuts.md` (Esc), `docs/editor/welcome.md`, `docs/editor/outliner.md`, and **`docs/editor/water.md`** document reflections. `SOMNIUM_RT_REFLECT=0` is also in `phase_VV.md` §7.

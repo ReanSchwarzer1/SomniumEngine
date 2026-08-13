@@ -23,9 +23,11 @@
 > baseline. New renderer, terrain, lighting, animation, and gameplay features
 > will keep needing inspector sections, menus, drawers, and Help pages. Treat
 > Metaphor as living chrome, not a finished product.
-> **Next GPU track is Phase VV (Halcyon)** — start-here
-> [`halcyon_context_handoff.md`](halcyon_context_handoff.md). Do not fold water
-> reflections into a Metaphor rebuild.
+> **Next GPU track is not a re-implementation of Halcyon.** Phase VV-A–H is
+> in the tree — start-here
+> [`halcyon_context_handoff.md`](halcyon_context_handoff.md). Remaining
+> Halcyon work is evidence captures. Do not fold water reflections into a
+> Metaphor rebuild.
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85 docs / 1.88 effective, wgpu 29, winit 0.30
@@ -53,8 +55,9 @@ This file is the chrome contract for Metaphor. 26-A–I plus the 2026-08-13
 UX polish (including immersive play and ComboBox overlay) are in the tree.
 A later **UI** session should **extend** this chrome — not restart at 26-A.
 A **Halcyon** session starts at
-[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and only touches
-chrome if a stage needs a debug toggle.
+[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and must **not**
+re-implement VV-A–H. Chrome only if a later feature needs a new inspector
+field.
 
 **Read in this order before writing code:**
 
@@ -925,7 +928,7 @@ the pages next to the engine so Help cannot rot:
 | Terrain | README F6 / 1–6 / `[` `]` / `-` `=`; XV-I palette; paint vs foliage |
 | Foliage | 17F tools; F8; kind combo |
 | Lights & Post FX | Inspector field list; F5 shading; Kelvin note |
-| Water & vessel | Existing inspector scalars; “defaults are frozen” one-liner |
+| Water | `docs/editor/water.md` (SSR / RT Reflect / Reflect Debug; Post FX RT Reflections) |
 | Play mode | Play / Pause / Stop; overlays hide |
 | Shortcuts | Full table from README + `app.rs` (Ctrl+Z/Y/S/N/D, Delete, F5/F6/F8, F9/F10, brackets) |
 | Profiler & log | Phase 29 overlay; output log drawer |
@@ -976,7 +979,7 @@ is real.
 | Custom title bar (engine mark, “Somnium Engine”, min/max/close) | Native OS chrome is gone on purpose; keep engine widgets if the bar grows |
 | Click-away closes menus/Help/palette/colour/unsaved **and ComboBox lists** | Docked drawer does **not** close on click-away |
 | Named Sculpt tools with selected/hover/press fills | New tools (foliage modes, voxel brushes, etc.) must ship as labelled buttons, not two-letter codes |
-| F1 Help: wrapped pages + TOC (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain) | Add a Help page (or section) whenever a feature adds authoring UI |
+| F1 Help: wrapped pages + TOC (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain, **Water**) | Add a Help page (or section) whenever a feature adds authoring UI |
 | Visible scrollbars on Outliner, Details, Help, Drawer | Any new tall pane should use `ScrollViewer`; thumb uses `MIN_THUMB.min(track_h)` so a 0-px track cannot panic |
 | Immersive play (toolbar after Play; `IconId::ImmersivePlay` last in the enum; Esc exits; restore maximized) | Do not insert new `IconId` variants except at the end of the enum |
 | ComboBox header in-place; list is a root `Popup` + `ComboDropdown` (opaque, File-menu z-order) | Do not go back to expand-in-place lists inside a vertical inspector stack |
@@ -1184,7 +1187,8 @@ A Metaphor **implementation** session should:
 redirects. Terrain/lighting/animation work that *needs* new inspector fields
 is expected to add those fields — that is Metaphor staying open, not a
 forbidden fold-in. A Halcyon session starts at
-[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and begins at VV-A.
+[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and must not
+re-implement VV-A–H.
 
 ---
 

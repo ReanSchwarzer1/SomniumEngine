@@ -6,11 +6,11 @@
 > **Branch at audit:** `dev`  
 > **25M-2 boundary commit:** `4e56482`  
 > **Audited HEAD:** `846dea7` (`Phase XV BGS and Godot ref update`) — docs after this snapshot include the 2026-08-13 Phase XV research expansion in `phase_XV.md` and the post-IV handoff  
-> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13). Phase XV is complete (see [`post_IV_context_handoff.md`](post_IV_context_handoff.md)). Phase 26 (Metaphor) **26-A–I shipped, phase remains open** — see [`phase_26.md`](phase_26.md). Phase VV (Halcyon) planned — start at [`halcyon_context_handoff.md`](halcyon_context_handoff.md). This file stays the Phase IV A–J / asset-license record; do not treat the snapshot HEAD as current engine status.
+> **Implementation status:** Phase IV complete (IV-A through IV-K, closed 2026-08-13). Phase XV is complete (see [`post_IV_context_handoff.md`](post_IV_context_handoff.md)). Phase 26 (Metaphor) **26-A–I shipped, phase remains open** — see [`phase_26.md`](phase_26.md). Phase VV (Halcyon) **VV-A–H in tree** — start at [`halcyon_context_handoff.md`](halcyon_context_handoff.md). This file stays the Phase IV A–J / asset-license record; do not treat the snapshot HEAD as current engine status.
 
 ## 1. Read this first
 
-> For **Phase XV history**, start with [`post_IV_context_handoff.md`](post_IV_context_handoff.md). For a **new Halcyon session**, start with [`halcyon_context_handoff.md`](halcyon_context_handoff.md).
+> For **Phase XV history**, start with [`post_IV_context_handoff.md`](post_IV_context_handoff.md). For **Halcyon (VV-A–H in tree; remaining work is evidence)**, start with [`halcyon_context_handoff.md`](halcyon_context_handoff.md).
 
 The next session that still needs the Phase IV A–J / post-25M-2 narrative should read:
 
@@ -18,7 +18,7 @@ The next session that still needs the Phase IV A–J / post-25M-2 narrative shou
 2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — exact reference/adaptation boundaries.
 3. [`phase_25m2_completion_report.md`](phase_25m2_completion_report.md) — boundary state before this handoff.
 4. [`phase_IV.md`](phase_IV.md) — completed Great Lakes terrain/water implementation and validation.
-5. [`phase_XV.md`](phase_XV.md) — researched sixteen-material terrain plan; implementation has not begun.
+5. [`phase_XV.md`](phase_XV.md) — researched sixteen-material terrain plan; **XV-A–J later completed** (see the post-IV handoff). This file does not track that work.
 6. [`assets/LICENSE.md`](../assets/LICENSE.md), [`assets/terrain/great_lakes/README.md`](../assets/terrain/great_lakes/README.md), and [`assets/models/gislinge_viking_boat/README.md`](../assets/models/gislinge_viking_boat/README.md) — shipped asset provenance.
 
 The originally requested root documents `m2.md` and `m25.md` were not present during the Phase XV audit. The combined Phase 25M2 completion report above is the available substitute. Do not silently claim those absent files were read.

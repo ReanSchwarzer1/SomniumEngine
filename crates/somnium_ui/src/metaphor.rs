@@ -10,6 +10,7 @@ pub const HELP_DRAWER: &str = include_str!("../../../docs/editor/content_drawer.
 pub const HELP_ABOUT: &str = include_str!("../../../docs/editor/about.md");
 pub const HELP_OUTLINER: &str = include_str!("../../../docs/editor/outliner.md");
 pub const HELP_TERRAIN: &str = include_str!("../../../docs/editor/terrain.md");
+pub const HELP_WATER: &str = include_str!("../../../docs/editor/water.md");
 
 pub fn help_page(id: u8) -> &'static str {
     match id {
@@ -19,6 +20,7 @@ pub fn help_page(id: u8) -> &'static str {
         4 => HELP_ABOUT,
         5 => HELP_OUTLINER,
         6 => HELP_TERRAIN,
+        7 => HELP_WATER,
         _ => HELP_WELCOME,
     }
 }
@@ -32,6 +34,7 @@ pub fn help_titles() -> &'static [&'static str] {
         "About",
         "Outliner",
         "Terrain",
+        "Water",
     ]
 }
 
@@ -245,8 +248,9 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 7);
+        assert_eq!(help_titles().len(), 8);
         assert_eq!(help_page(4), HELP_ABOUT);
+        assert!(HELP_WATER.contains("RT Reflect"));
         let blocks = parse_help_markdown("# Title\n\nHello **world**.\n- item\n");
         assert_eq!(
             blocks,

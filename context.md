@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-13 evening  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (immersive play, ComboBox overlay, drawer tiles; 26-J not started); Phase VV (Halcyon) **next GPU track — implementation not started**  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (immersive play, ComboBox overlay, drawer tiles; 26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (RT water reflections; live miss-rate capture still open)  
 > **Start-here:** `dev records/halcyon_context_handoff.md`  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
@@ -26,12 +26,11 @@
 > `SOMNIUM_TERRAIN_FORCE_RGBA8=1` for A/B. Canonical write-up:
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
-> Planned next (independent tracks):
-> - **Phase VV — Halcyon** — ray-traced water reflections. **Start-here:**
->   `dev records/halcyon_context_handoff.md`. Plan: `dev records/phase_VV.md`.
->   Begin at VV-A. Reflections are currently a 28-step screen-space march with
->   an environment-cube fallback, which is the largest remaining fidelity gap
->   for a low camera over open water.
+> Remaining work (independent tracks):
+> - **Phase VV — Halcyon** — VV-A–H in tree (ray-traced water reflections).
+>   **Start-here:** `dev records/halcyon_context_handoff.md`. Plan:
+>   `dev records/phase_VV.md`. Kill switch `SOMNIUM_RT_REFLECT=0`. Live SSR
+>   miss-rate capture still open. Do not re-implement A–H.
 > - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish (including
 >   immersive play, ComboBox overlay, 80 px drawer tiles) are in the tree.
 >   **The UI phase is not closed:** later engine work keeps needing inspector
@@ -613,7 +612,8 @@ FPS is written every frame via `UiManager::set_fps`.
 **Metaphor is not closed.** 26-A–I plus the 2026-08-13 UX polish are the
 baseline shell. Later features (animation, cooking, 25J terrain material UI,
 networking debug, …) must add inspector sections, menus, drawer types, and
-`docs/editor/*.md` pages rather than one-off panels. 26-J (reflection
+`docs/editor/*.md` pages rather than one-off panels. Help includes **Water**
+(`docs/editor/water.md`: SSR / RT Reflect / Reflect Debug). 26-J (reflection
 inspector) is still out unless requested.
 
 ```
@@ -631,7 +631,7 @@ outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 
 ```
 
 Overlays (root children): compact File/Edit/Create/View/Window/Help menus,
-F1 Help (`docs/editor/*.md`, wrapped + TOC), command palette (Ctrl+P),
+F1 Help (`docs/editor/*.md`, wrapped + TOC including **Water**), command palette (Ctrl+P),
 unsaved-changes modal, colour picker, toasts, **ComboBox dropdowns** (Type /
 Tonemap). Click-away closes those transients; it does **not** close the docked
 drawer. Evidence PNGs were not invented — capture from a live session into
@@ -798,6 +798,9 @@ Every frame, `about_to_wait()` runs in this exact sequence:
       ├── [Visibility Pass]   write R32Uint vis_buffer
       ├── [Shading Pass]      read vis_buffer + shadow_atlas → PBR+PCF → Rgba16Float HDR
       ├── [Grid Overlay]      fullscreen ray march → XZ plane grid → Rgba16Float HDR (if enabled)
+      ├── [Water prepass]     G-buffer (normal / roughness / coverage) → HDR MRT
+      ├── [Water reflection]  half-res RT compute (skipped if no ray query / SOMNIUM_RT_REFLECT=0)
+      ├── [Water shade]       SSR + RT + env cube on confidence → HDR
       ├── [PostProcess Pass]  ACES tone map + vignette → swapchain (Rgba16Float → sRGB)
       ├── [Gizmo Pass]        procedural arrow/ring/cube axes → swapchain (if entity selected)
       ├── [Light Gizmo Pass]  batched world-space LineList light bounds → swapchain (Phase 13E, if enabled)
@@ -991,6 +994,25 @@ Pipeline:
 ```
 
 Enabled only when `renderer.grid_enabled == true`. Toggle via `"toggle_grid"` IPC or `G` key.
+
+### Pass 3.6: Water — prepass, reflection, shade (Phase IV + VV Halcyon)
+
+Water is **not** in the visibility buffer. After opaque shading (and the HDR
+scene copy used for refraction/SSR), the pass splits:
+
+```
+Water prepass   water.wgsl::fs_prepass   G-buffer: normal, roughness, coverage, velocity
+Water reflection  water_reflection.wgsl  half-res compute: GGX/mirror ray query via rt_hit.wgsl
+Water shade     water.wgsl::fs_main      SSR (trace_ssr) + RT texture + env cube on confidence
+```
+
+Profiler scopes: `"Water prepass"`, `"Water reflection"`, `"Water shade"`.
+Kill switch `SOMNIUM_RT_REFLECT=0` (or no `EXPERIMENTAL_RAY_QUERY`) skips the
+compute pass and restores SSR + sky cube. Water and transparents stay out of
+the TLAS. FFT displacement cascades are vertex-only so the reflection sampled
+texture fits `max_sampled_textures_per_shader_stage` (16). Inspector: **SSR**,
+**RT Reflect**, **Reflect Debug**; Post FX **RT Reflections**. Help:
+`docs/editor/water.md`. Plan: `dev records/phase_VV.md`.
 
 ### Pass 4: PostProcess — HDR → swapchain (Phase 11.5K)
 
@@ -1263,7 +1285,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24L | ✅ Complete | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
 | 24AE | ✅ Complete | **Shadow caster culling.** The shadow pass issued every draw four times, once per cascade: 24.5 ms of a 42 ms frame, nearly all of it grass whose shadow is a sub-pixel speckle. Two independent cuts. Unreal's `r.Shadow.RadiusThreshold` (`ShadowSetup.cpp`) culls a caster when its **projected screen radius** falls below a threshold — a *size* test, not a distance cut, and measured from the camera rather than the light, so a tree keeps casting at 200 m where a tuft stops at 30. And an authored `FoliageComponent::foliage_shadow_distance` (**Sh Dst** in the Foliage inspector, default 40 m), because the size test only rescues you once the camera is far from the grass, which is not how anyone plays. **Measured** at eye level: casters 7 166 → 1 873, Shadows **23.769 → 6.158 ms**, frame 26.893 → 9.545 ms, with every other pass unchanged to the third decimal. See §17.9. |
 | 24M | ⬜ Planned | **World-space radiance cache for multi-bounce.** A hashed/clipmapped world cache that rays terminate into, so a single traced bounce still resolves to many bounces of energy across frames, and distant geometry costs a lookup instead of a long trace. Reference: `bevy_solari/src/realtime/world_cache_{query,update,compact}.wgsl`; UE's equivalent is `LumenRadianceCache.usf`. |
-| 24N | ⬜ Planned | **Ray-traced reflections with a denoiser.** Specular GI proper: screen-space trace first, ray traced where the screen has no answer, radiance cache beyond that, then spatial + temporal denoising — one bounce per pixel is far too noisy raw. Finally gives water something better than a single planar reflection. Reference: `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/`. |
+| 24N | ⬜ Planned | **Ray-traced reflections with a denoiser** (general specular GI, not water). Screen-space trace first, ray traced where the screen has no answer, radiance cache beyond that, then spatial + temporal denoising. **Water** already has this blend as **Phase VV Halcyon** (VV-A–H in tree: SSR + half-res RT + env cube). This row is still the scene-wide path. Reference: `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/`. |
 | 24O | ⬜ Planned | **Offline path tracer for validation.** A slow, unbiased, accumulate-over-many-frames reference renderer sharing the 24J scene bindings. Not shipped in the frame loop — its whole job is to be *ground truth*, so “does the real-time GI actually converge to the right answer” becomes a comparison rather than an opinion. Bevy ships exactly this alongside Solari and it is the single best idea taken from studying it. Reference: `bevy_solari/src/pathtracer/`. |
 | 24P | ⏸ Deferred | **Software fallback: mesh SDFs + global distance-field clipmap.** For GPUs without ray query. Bake a signed distance field per mesh at upload and composite into a camera-centred clipmap, then cone-trace it for GI and AO. This is Lumen's software path (`LumenMeshSDFCulling.usf`, `LumenSoftwareRayTracing.ush`) and is the more portable but substantially larger implementation. **Deliberately sequenced after the hardware path**, not before it — see §22.2. |
 | 24Q | ⏸ Deferred | **Baked light probes: irradiance volumes and reflection probes.** The cheapest fallback tier and still the right answer for static scenes on weak hardware: a grid of SH irradiance probes plus localised reflection cubemaps, blended per object. Reference: `bevy_pbr/src/light_probe/{irradiance_volume,environment_map}.rs`. |
@@ -1301,7 +1323,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
 | 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
-| VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** **Start-here:** `dev records/halcyon_context_handoff.md`. Begin at VV-A. Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
+| VV | 🔧 A–H in tree | **Phase VV — Halcyon: ray-traced water reflections.** **Start-here:** `dev records/halcyon_context_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 
 ---
 
@@ -2255,8 +2277,9 @@ rbfx's Urho-derived UI.
 > **Shipped (2026-08-13):** 26-A–I plus UX polish (immersive play, ComboBox
 > overlay, 80 px drawer tiles) are in the tree. **The UI phase is not over** —
 > later features still need chrome. 26-J is out unless requested; 26-H SDF
-> remains slipped. Next GPU track is Halcyon
-> (`dev records/halcyon_context_handoff.md`). Contract:
+> remains slipped. Phase VV (Halcyon) VV-A–H is in the tree
+> (`dev records/halcyon_context_handoff.md`); remaining Halcyon work is
+> evidence captures, not a UI rebuild. Contract:
 > [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
 > above is the original gap statement; do not treat it as the implementation
 > order, and do not restart at 26-A.
@@ -3483,7 +3506,9 @@ while preserving opaque depth reprojection elsewhere.
 Surface optics now use validated screen-space refraction, reconstructed
 Beer–Lambert path length, RGB absorption and single scattering, dielectric
 `F0 = 0.02037`, GGX sun/moon/environment lighting, bounded SSR with environment
-fallback, and SDF shoreline foam. Complete normal/ORM mip chains plus
+fallback, and SDF shoreline foam. **Phase VV (Halcyon, 2026-08-13)** later
+blends that SSR with half-res hardware ray tracing and the environment cube
+(`SOMNIUM_RT_REFLECT=0` restores this IV-D/E fallback). Complete normal/ORM mip chains plus
 pixel-footprint slope filtering prevent distant sparkle and Gerstner
 cross-hatching. Wave and optical authoring values persist through ECS scene
 serialization and their primary controls are available in the Water inspector.
@@ -3626,9 +3651,14 @@ features keep needing new UI/UX. 26-J (reflection inspector) not started.
 Contract: `dev records/phase_26.md`. Independent of Phase VV except living
 chrome for debug views.
 
-**Phase VV — Halcyon (planned, not started).** Start-here:
+**Phase VV — Halcyon (VV-A–H in tree, 2026-08-13).** Water G-buffer prepass,
+half-res reflection compute (`pass/water_reflection.rs`, `shaders/water_reflection.wgsl`),
+shared `rt_hit.wgsl` (GI wraps `rt_trace`), SSR/RT/env blend on confidence.
+TLAS cap 8192; water and transparents stay out of the TLAS. Inspector: water
+**RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. Help:
+`docs/editor/water.md`. Start-here:
 `dev records/halcyon_context_handoff.md`. Plan: `dev records/phase_VV.md`.
-Begin at VV-A.
+Kill switch: `SOMNIUM_RT_REFLECT=0`. Live SSR miss-rate capture still open.
 
 ## 18. Known Issues & Active Bugs
 

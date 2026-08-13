@@ -6,14 +6,17 @@
 
 > **Codename:** Halcyon, after the mythological bird said to still the winter sea
 > so it became a mirror
-> **Status:** PLANNED — IMPLEMENTATION NOT STARTED
+> **Status:** VV-A through VV-H implemented 2026-08-13. Live SSR miss-rate
+> captures still need a play session (`dev records/phase VV/`); do not invent
+> evidence PNGs.
 > **Start-here:** [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
 > **Depends on:** Phase IV-K (ocean fidelity, complete 2026-08-13) and Phase
 > 24K/24L (ReSTIR DI/GI). Metaphor 26-A–I chrome is in the tree; do not rebuild
-> it. A VV-A debug view may add a small inspector / View-menu binding.
+> it. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**.
+> Help: `docs/editor/water.md`.
 
 The codename is thematic. No third-party source code is copied by this phase;
 reference implementations named in section 12 inform an original Rust/WGSL
@@ -90,9 +93,9 @@ planning against infrastructure that does not exist.
 | TAA that understands water | `taa.wgsl` L289–291 | Uses water velocity where coverage > 0.5 |
 | Water writes velocity and coverage | `water.wgsl` L589–593, MRT targets 1 and 2 | Gated on `frame.history_valid` |
 
-### 4.2 What does not exist
+### 4.2 What does not exist (plan-date audit, 2026-08-13 morning)
 
-Do not plan around any of the following. None of it is present today.
+Do not treat this list as current. It is the pre-implementation audit. See §4.4.
 
 - Any ray-traced reflection or refraction path, for water or anything else.
 - Water geometry in the BLAS or TLAS. Water lives in `water_queue` and is never
@@ -108,25 +111,34 @@ Do not plan around any of the following. None of it is present today.
   is permitted at the API level, but it is untested here.
 - A software ray-tracing fallback.
 
+### 4.4 What shipped (2026-08-13 evening)
+
+- Water G-buffer prepass + shade split; half-res `WaterReflectionPass`.
+- Shared `rt_hit.wgsl`; ReSTIR GI `gi_trace` wraps `rt_trace`.
+- TLAS cap **8192**, overflow logged, RT skipped that frame.
+- SSR / RT / env-cube blend on confidence; GGX + foam skip; temporal mix.
+- Inspector and Post FX toggles; Help `docs/editor/water.md`.
+- Water and transparents still **not** in the TLAS. `trace_ssr` remains.
+- Fragment-stage ray query still unused. No software RT (24P).
+- FFT displacement cascade bindings are vertex-only so the reflection sampled
+  texture fits `max_sampled_textures_per_shader_stage` (16).
+
 ### 4.3 Constraints that shape the design
 
-**The TLAS holds at most 1024 instances** (`MAX_TLAS_INSTANCES`,
-`raytrace.rs` L60) and silently drops the remainder. A reflection that traces
-against a TLAS missing half the scene is worse than no reflection at all,
-because the miss is not uniform — it is whichever draws happened to sort late.
-This cap must be raised or made adaptive before VV-C, and the drop must become
-observable rather than silent.
+**The TLAS held 1024 instances at plan date** and silently dropped the remainder.
+A reflection that traces against a TLAS missing half the scene is worse than no
+reflection at all, because the miss is not uniform. VV-A/C raised the cap to
+**8192** (`adapter.max_tlas_instance_count.min(8192)`) and logs overflow once
+per frame; RT reflections are rejected that frame.
 
-**The water pass is forward-shaded**, computing its reflection inline in
-`fs_main`. There is no water G-buffer that a separate pass could consume, which
-is the central architectural problem: a compute reflection pass needs surface
-position, normal, and roughness, and today those exist only inside the fragment
-that also needs the answer.
+**The water pass was forward-shaded at plan date**, computing its reflection
+inline in `fs_main`. VV-B split it into a G-buffer prepass and a shading pass
+so the compute reflection pass can consume normal, roughness, and coverage.
 
-**The water pass already uses four bind groups** (`water.rs` L449–457) and the
-global resource pool ReSTIR GI relies on for hit shading occupies `@group(0)`
-with eleven-plus bindings. Reusing that pool from the water pass means either a
-fifth bind group carrying the pool or an extracted subset.
+**The water pass already uses four bind groups** (wgpu default max is 4). The
+reflection texture is group 0 bindings 9–10, not a fifth group. ReSTIR GI's
+global pool is bound by the *compute* reflection pass, not the water fragment
+shader.
 
 **Water runs after opaque shading**, and copies the HDR target to `scene_color`
 for refraction and SSR. The TLAS is therefore already built and valid by the
@@ -208,8 +220,10 @@ disocclusion clamp is the correct starting point.
 
 ## 6. Stages
 
-Each stage must build, pass `cargo test --workspace`, and leave the engine
-shippable. No stage may be skipped on the grounds that a later one subsumes it.
+Each stage had to build, pass `cargo test --workspace`, and leave the engine
+shippable. **VV-A through VV-H landed in one implementation session on
+2026-08-13.** Live SSR miss-rate PNGs and GPU timings against §11 are still
+open (do not invent them).
 
 ### VV-A — Instrumentation and honesty (no visual change)
 
@@ -222,8 +236,14 @@ Make the current state measurable before changing it.
 - Make the TLAS instance-cap overflow log once per frame instead of silently
   dropping draws.
 
+**Shipped:** profiler scopes `Water prepass` / `Water reflection` / `Water shade`;
+Details **Reflect Debug** 0/1/2; TLAS cap **8192**, overflow `tracing::warn!`
+once per overflowing frame and RT skipped that frame.
+
 **Exit:** the SSR miss rate for the default landscape and the ocean parity scene
-is recorded in this document.
+is recorded in this document. *Not captured this session — needs a live
+tonemapped frame into `dev records/phase VV/`. Reflect Debug = 1 colours SSR
+hits green and misses red; brightness is confidence. Do not invent the number.*
 
 ### VV-B — Water G-buffer and pass split
 
@@ -235,6 +255,12 @@ The architectural commitment.
   them back rather than recomputing.
 - The shading pass initially samples a reflection texture that the old
   `trace_ssr` fills, so this stage is a pure refactor with byte-identical output.
+
+**Shipped:** `fs_prepass` writes surface (`n.xz`, view depth, coverage), velocity,
+and R16Float roughness; `fs_main` shades HDR only. Reflection texture is group 0
+bindings 9–10 (not a fifth bind group — wgpu max is 4). Displacement cascades are
+**vertex-only** in the BGL so the extra sampled texture stays under the fragment
+limit of 16.
 
 **Exit:** a frame capture before and after this stage differs by no more than
 floating-point reassociation.
@@ -249,6 +275,11 @@ floating-point reassociation.
   ray path is visually unambiguous.
 - Raise or make adaptive the 1024 TLAS instance cap.
 
+**Shipped:** `WaterReflectionPass` half-res RGBA16Float ping-pong; skip when
+unsupported, `SOMNIUM_RT_REFLECT=0`, TLAS overflow, or RT Reflect amount ≈ 0.
+Lit hits landed with VV-D in the same session (albedo-only was not left as a
+shipping look).
+
 **Exit:** reflections of off-screen geometry appear, flat-shaded, and the pass
 is fully skipped when `EXPERIMENTAL_RAY_QUERY` is absent.
 
@@ -260,6 +291,11 @@ is fully skipped when `EXPERIMENTAL_RAY_QUERY` is absent.
 - Decide shadow ray versus cascade sample by measurement, and record the
   decision here.
 
+**VV-D decision:** sample the cascaded shadow map at the hit (`textureSampleCompareLevel`),
+not a second visibility ray. A shadow ray at half-res reflection resolution is
+more expensive than the cascade sample the raster path already trusts, and the
+blend in VV-G has to match that raster lighting. Recorded 2026-08-13.
+
 **Exit:** ray-traced reflections are lit consistently with the raster path; a
 reflected object and the object itself agree in colour.
 
@@ -270,6 +306,9 @@ reflected object and the object itself agree in colour.
 - Skip the ray entirely above a roughness threshold where the environment cube
   is indistinguishable, and use the ray budget saved on the pixels that need it.
 
+**Shipped:** `sample_ggx_h` (Karis); skip when roughness ≥ `roughness_skip`
+(default **0.72**, foam). Mirror ray when roughness < 0.08.
+
 **Exit:** foam-covered water costs no more than it does today.
 
 ### VV-F — Temporal accumulation and upsample
@@ -277,6 +316,10 @@ reflected object and the object itself agree in colour.
 - Reproject with water velocity; accumulate with disocclusion and variance
   clamping.
 - Bilateral upsample to full resolution using the G-buffer depth and normal.
+
+**Shipped:** history mix with water velocity + depth/coverage disocclusion;
+2×2 bilateral upsample in the water fragment (`upsample_reflection`). No
+full-res reflection target (VRAM stays on two half-res RGBA16Float buffers).
 
 **Exit:** no visible boiling on rough water while the camera is in motion.
 
@@ -286,11 +329,19 @@ reflected object and the object itself agree in colour.
 - Verify that the seam between the two is invisible in motion, which is the
   case that will expose any disagreement in exposure between the two paths.
 
+**Shipped:** `fs_main` mixes SSR (weighted by `ssr.a * ssr_strength`) over RT
+(`rt.a * rt_strength`) over the environment cube. `volume_params.z/w` pack
+RT amount and Reflect Debug.
+
 ### VV-H — Evidence, budgets, documentation
 
 - Capture before/after evidence into `dev records/phase VV/`.
 - Record measured costs against section 11.
 - Update `context.md`, `ATTRIBUTION.md`, and this file's status.
+
+**Shipped:** docs, ATTRIBUTION §1.7, Help `docs/editor/water.md`, inspector /
+Post FX toggles, `cargo test --workspace`. Evidence PNGs and §11 timings **not**
+captured (needs a live session).
 
 ## 7. Fallback matrix
 
@@ -321,8 +372,9 @@ early.
 water lapping against it. This is acceptable and expected; it is called out here
 so it is not later mistaken for a bug.
 
-**The 1024 instance cap** silently dropping geometry is a pre-existing
-correctness problem that reflections will make visible rather than cause.
+**The TLAS instance cap** was 1024 at plan date and silently dropped geometry.
+VV-A/C raised it to **8192** and logs overflow once per frame; RT reflections
+are rejected that frame. Water still is not in the TLAS.
 
 **ReSTIR GI regression** during the VV-D extraction. Mitigated by refactoring GI
 onto the shared hit resolution first and proving output equivalence before
@@ -347,39 +399,37 @@ building anything new on it.
 
 ## 11. Budgets
 
-To be filled with measurements during VV-A and VV-H. Targets:
+To be filled with measurements from a live capture. Targets:
 
-| Item | Target |
-|---|---|
-| Reflection pass, 1440p, ocean parity scene | ≤ 2.0 ms |
-| Additional VRAM | ≤ 32 MB |
-| Frame time regression with RT disabled | 0 ms |
+| Item | Target | Measured |
+|---|---|---|
+| Reflection pass, 1440p, ocean parity scene | ≤ 2.0 ms | *open* |
+| Additional VRAM | ≤ 32 MB | two half-res RGBA16Float targets (design ≤ 32 MB) |
+| Frame time regression with RT disabled | 0 ms | *open* (`SOMNIUM_RT_REFLECT=0`) |
 
 ## 12. References
 
-To be cited in `ATTRIBUTION.md` as each is actually used.
+Cited in `ATTRIBUTION.md` §1.7 as used:
 
 - Wright et al., **ReSTIR GI: Path Resampling for Real-Time Path Tracing**, NVIDIA 2021
 - Kajiya-style specular importance sampling as described in Karis, **Real Shading in Unreal Engine 4**, SIGGRAPH 2013
 - Stachowiak, **Stochastic Screen-Space Reflections**, SIGGRAPH 2015
 - NVIDIA, **Ray Tracing Gems**, chapters on reflection denoising
 - wgpu 29 ray query documentation: <https://docs.rs/wgpu/29.0.0/wgpu/struct.Features.html>
-- Existing in-repo prior art: `pass/restir_gi.rs`, `shaders/restir_gi.wgsl`
+- Existing in-repo prior art: `pass/restir_gi.rs`, `shaders/restir_gi.wgsl`, extracted `shaders/rt_hit.wgsl`
 
 ## 13. Handoff rule
 
-The next session starts at [`halcyon_context_handoff.md`](halcyon_context_handoff.md),
-then this file, then verifies section 4 against the worktree before writing
-code — that audit is dated 2026-08-13 and line numbers drift. Also re-read
-`context.md`, `ATTRIBUTION.md` §1.7, and `dev records/phase_IV.md` section 14.
-Phase IV-K closed on 2026-08-13, so the water pass is stable again, but the
-shading it settled on is what VV-D has to reproduce through a traced ray.
+Code for VV-A–H is in the tree (2026-08-13). The next session that *continues*
+Halcyon starts at [`halcyon_context_handoff.md`](halcyon_context_handoff.md),
+then this file, and should **not** re-implement A–H. Remaining Halcyon work:
 
-Metaphor chrome (26-A–I plus the 2026-08-13 evening polish) is the shipping
-editor. Do not restart it. Frozen: `WaterComponent::great_lakes`, XV terrain
-contract, `context.md` §20.
+- Live SSR miss-rate and before/after captures into `dev records/phase VV/`.
+- Fill §11 timings from the profiler (Water reflection scope).
+- VV+1 (ray-traced refraction) only if the user asks.
 
-Begin at VV-A. Do not begin at VV-C because it is the interesting one.
+Frozen: `WaterComponent::great_lakes`, XV terrain contract, `context.md` §20.
+Do not retune `wave_speed`. Do not put water in the TLAS. Do not remove
+`trace_ssr`. Kill switch `SOMNIUM_RT_REFLECT=0`.
 
-This file is a plan only. No Phase VV engine code was added as part of its
-creation.
+Metaphor chrome is the shipping editor. Help page: `docs/editor/water.md`.

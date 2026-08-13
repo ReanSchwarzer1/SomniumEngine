@@ -190,26 +190,27 @@ shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
 
 ### 1.7 Ray-traced water reflections (Phase VV — Halcyon)
 
-**Status:** planned, **no engine code yet.** Start-here:
-[`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
-Plan: [`dev records/phase_VV.md`](dev%20records/phase_VV.md). Begin at VV-A.
+**Status:** VV-A–H in tree (2026-08-13). Kill switch: `SOMNIUM_RT_REFLECT=0`.
+Start-here: [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
+Plan: [`dev records/phase_VV.md`](dev%20records/phase_VV.md).
 
-The codename is thematic. No third-party source is copied. Cite the named
-references **in this section as they are used** (do not pre-claim files that
-do not exist):
+The codename is thematic. No third-party source was copied. Files cited as used:
 
-| Reference | Pattern to study | Somnium target (when implemented) |
+| Reference | Pattern studied | Somnium (shipped) |
 |---|---|---|
-| Existing `gi_trace()` / `restir_gi.wgsl` | Hit resolution: instance → barycentrics → albedo | Extract shared `rt_hit.wgsl`; GI must stay bit-equivalent |
-| Wright et al., ReSTIR GI (NVIDIA 2021) | Already in-tree for diffuse; not the first tool for specular | Do not start with specular reservoirs |
-| Stachowiak, Stochastic SSR (SIGGRAPH 2015) | Screen-space march as near-field | Keep `trace_ssr`; blend on confidence (VV-G) |
-| Karis, Real Shading in UE4 (SIGGRAPH 2013) | GGX importance sampling | VV-E roughness-aware rays |
-| wgpu 29 `EXPERIMENTAL_RAY_QUERY` | Inline ray query in compute | Same gate as ReSTIR; fragment query untested here |
-| NVIDIA *Ray Tracing Gems* (reflection denoising chapters) | Temporal reuse / upsample | VV-F; not a copy of any listed filter |
+| Existing `gi_trace()` / `restir_gi.wgsl` | Hit resolution: instance → barycentrics → albedo | Extracted `rt_hit.wgsl`; GI wraps `rt_trace` |
+| Wright et al., ReSTIR GI (NVIDIA 2021) | Diffuse reservoirs already in-tree | Not used for specular; temporal mix + disocclusion instead (VV-F) |
+| Stachowiak, Stochastic SSR (SIGGRAPH 2015) | Screen-space march as near-field | `trace_ssr` kept; blend on confidence (VV-G) |
+| Karis, Real Shading in UE4 (SIGGRAPH 2013) | GGX importance sampling | `sample_ggx_h` in `water_reflection.wgsl` (VV-E) |
+| wgpu 29 `EXPERIMENTAL_RAY_QUERY` | Inline ray query in compute | Same gate as ReSTIR; skipped without the feature |
+| NVIDIA *Ray Tracing Gems* (reflection denoising chapters) | Temporal reuse / upsample | Water-velocity reprojection + 2×2 bilateral upsample; not a copy of any listed filter |
+| Bevy Solari `specular_gi.wgsl` / `raytracing_scene_bindings.wgsl` | `trace_ray` / hit-resolve split | Architecture reference only |
+| Wicked Engine `wiOcean` | Ocean pass placement | Already cited for Phase IV; not used for RT reflections |
+
+**Files:** `pass/water_reflection.rs`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl`, water prepass/shade split in `pass/water.rs` + `shaders/water.wgsl`.
 
 **Boundary:** GodotOceanWaves informed IV-K water shading, not this reflection
-architecture. Do not paste its SSR or any other engine's RT reflection shader.
-Hardware without ray query must look identical to today.
+architecture. Hardware without ray query must look identical to today.
 
 ---
 
@@ -1106,6 +1107,9 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/water_body.rs` | Renderer-owned water resources following Somnium's existing `TerrainData` handle pattern; ECS/render split cross-checked against bevy_water (Phase IV-C) |
 | `somnium_renderer/src/water_body.rs` (IV-D) | GPU Gems Ch. 1 Gerstner displacement/analytic derivatives plus bevy_water's CPU/GPU query-parity pattern; Somnium's finite wet-cell mesh, baked mask/depth/SDF sampling, registry API, and Rust implementation are original |
 | `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (IV-D/E) | Wicked Engine ocean resource/query ownership and pre-water composition ordering; GPU Gems water math; established Beer–Lambert, Henyey–Greenstein, Fresnel, and GGX models. WGSL bindings, finite-body MRT, validated refraction, SSR fallback, filtering, and integration are original |
+| `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (VV-B) | Prepass (`fs_prepass`) / shade (`fs_main`) split so compute reflections can consume normal, roughness, and coverage; FFT displacement cascades are VERTEX-only (fragment sampled-texture limit 16) |
+| `somnium_renderer/src/pass/water_reflection.rs`, `shaders/water_reflection.wgsl` (VV-C–G) | Half-res compute reflections: GGX/mirror rays, temporal mix, 2×2 upsample, SSR/RT/env blend. Architecture studied from existing `gi_trace`, Karis GGX, Stachowiak SSR; original WGSL. See §1.7 |
+| `somnium_renderer/src/shaders/rt_hit.wgsl` (VV-D) | Shared hit resolve extracted from `restir_gi.wgsl` `gi_trace`; GI wraps `rt_trace`. Hit lighting is `evaluate_brdf` sun + IBL with cascade shadow sample, not a second ray |
 | `somnium_renderer/src/pass/taa.rs`, `shaders/taa.wgsl` (IV-D) | Existing Somnium TAA retained for opaque pixels; water-only motion-vector selection and surface coverage target are original integration work |
 | `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
 | `somnium_renderer/src/pass/water_spectrum.rs`, `shaders/water_spectrum.wgsl` (IV-F) | Tessendorf wind-spectrum/deep-water-dispersion model plus Wicked Engine's persistent displacement/gradient/folding resource split; Somnium's deterministic spectrum generation, radix-2 wgpu scheduling, two finite-lake scales, WGSL, and temporal foam integration are original |
@@ -1206,7 +1210,7 @@ Modules that Phase 24 draws on:
 | 24K ReSTIR DI | `bevy_solari/src/realtime/{restir_di.wgsl,presample_light_tiles.wgsl}` |
 | 24L ReSTIR GI | `bevy_solari/src/realtime/restir_gi.wgsl` |
 | 24M world radiance cache | `bevy_solari/src/realtime/world_cache_*.wgsl` |
-| 24N specular GI / SSR | `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/` |
+| 24N specular GI / SSR | `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/` — **water** reflections shipped as Phase VV (§1.7); this row is still the scene-wide path |
 | 24O reference path tracer | `bevy_solari/src/pathtracer/` |
 | 24Q light probes | `bevy_pbr/src/light_probe/` |
 | 24R area lights (LTC) | `bevy_pbr/src/ltc/` |

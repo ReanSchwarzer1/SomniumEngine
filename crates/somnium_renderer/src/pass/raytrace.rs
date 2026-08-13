@@ -49,15 +49,17 @@ pub struct RaytracePass {
     supported: bool,
     /// Instances submitted this frame, rebuilt each time the scene changes.
     instance_count: u32,
+    max_instances: u32,
+    /// True when this frame's draw queue exceeded `max_instances`.
+    overflowed: bool,
 }
 
-/// Upper bound on instances in the top-level structure.
+/// Upper bound requested for the top-level structure.
 ///
-/// Matches the visibility buffer's own 1022-draw ceiling closely enough that a
-/// scene which fits the raster path also fits the ray-traced one; a mismatch
-/// would mean geometry that is drawn but cannot be hit, which is worse than a
-/// hard limit because it is invisible until something looks wrong.
-const MAX_TLAS_INSTANCES: u32 = 1024;
+/// The historical 1024 cap silently dropped late draws. Reflections make that
+/// visible, so the pass now asks for the adapter limit (clamped) and logs
+/// overflow once per frame rather than dropping without a trace.
+const MAX_TLAS_INSTANCES: u32 = 8192;
 
 impl RaytracePass {
     pub fn new(device: &wgpu::Device, supported: bool) -> Self {
@@ -70,12 +72,20 @@ impl RaytracePass {
                 bind_group: None,
                 supported: false,
                 instance_count: 0,
+                max_instances: 0,
+                overflowed: false,
             };
         }
 
+        let max_instances = device
+            .limits()
+            .max_tlas_instance_count
+            .min(MAX_TLAS_INSTANCES)
+            .max(1);
+
         let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
             label: Some("Scene TLAS"),
-            max_instances: MAX_TLAS_INSTANCES,
+            max_instances,
             flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
             update_mode: wgpu::AccelerationStructureUpdateMode::Build,
         });
@@ -100,6 +110,8 @@ impl RaytracePass {
             bind_group: None,
             supported: true,
             instance_count: 0,
+            max_instances,
+            overflowed: false,
         }
     }
 
@@ -260,14 +272,16 @@ impl RaytracePass {
         // whether the helmet survived into the TLAS depended on how many
         // terrain chunks sorted ahead of it.
         let mut count = 0u32;
+        let mut dropped = 0u32;
         for (instance_index, vertex_offset, model) in instances.iter() {
-            if count >= MAX_TLAS_INSTANCES {
-                break;
-            }
             let Some(mesh) = self.blas.get(vertex_offset) else {
                 continue;
             };
             if mesh.index_count == 0 {
+                continue;
+            }
+            if count >= self.max_instances {
+                dropped += 1;
                 continue;
             }
 
@@ -297,6 +311,15 @@ impl RaytracePass {
             tlas[slot] = None;
         }
         self.instance_count = count;
+        self.overflowed = dropped > 0;
+        if self.overflowed {
+            tracing::warn!(
+                dropped,
+                cap = self.max_instances,
+                kept = count,
+                "TLAS instance cap overflow; ray-traced reflections will be rejected this frame"
+            );
+        }
 
         encoder.build_acceleration_structures(entries.iter(), std::iter::once(&*tlas));
 
@@ -321,6 +344,10 @@ impl RaytracePass {
 
     pub fn instance_count(&self) -> u32 {
         self.instance_count
+    }
+
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
     }
 }
 

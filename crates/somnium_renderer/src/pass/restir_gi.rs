@@ -141,8 +141,9 @@ impl RestirGiPass {
         // concatenated after it. `tests/shaders_validate.rs` pins this exact
         // concatenation.
         let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../shaders/restir_gi.wgsl"),
+            include_str!("../shaders/rt_hit.wgsl"),
             include_str!("../shaders/global_pool.wgsl"),
             include_str!("../shaders/brdf.wgsl"),
             include_str!("../shaders/sampling.wgsl"),

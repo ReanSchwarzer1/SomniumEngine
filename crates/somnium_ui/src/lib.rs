@@ -137,6 +137,8 @@ struct InspectorHandles {
     water_amplitude: NodeHandle,
     water_roughness: NodeHandle,
     water_ssr: NodeHandle,
+    water_rt_reflect: NodeHandle,
+    water_reflect_debug: NodeHandle,
     water_wave_a: NodeHandle,
     water_wave_b: NodeHandle,
     water_speed: NodeHandle,
@@ -204,6 +206,8 @@ struct InspectorHandles {
     post_gtao_label: NodeHandle,
     post_restir_toggle: NodeHandle,
     post_restir_gi_toggle: NodeHandle,
+    post_rt_reflect_toggle: NodeHandle,
+    post_rt_reflect_label: NodeHandle,
     post_cas_toggle: NodeHandle,
     post_mb_toggle: NodeHandle,
     post_mb_label: NodeHandle,
@@ -262,6 +266,8 @@ pub struct PostInspectorState {
     pub restir: bool,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi: bool,
+    /// Phase VV: ray-traced water reflections.
+    pub rt_reflect: bool,
     /// Percentage-closer soft shadows. Default on.
     pub pcss: bool,
     /// Screen-space contact shadows. Default on.
@@ -1133,9 +1139,7 @@ impl UiManager {
     }
 
     fn combo_popup_for(&self, combo: NodeHandle) -> Option<NodeHandle> {
-        if combo == self.foliage_kind_combo
-            || combo == self.inspector_handles.foliage_kind_button
-        {
+        if combo == self.foliage_kind_combo || combo == self.inspector_handles.foliage_kind_button {
             Some(self.foliage_kind_popup)
         } else if combo == self.post_tonemap_combo
             || combo == self.inspector_handles.post_tonemap_button
@@ -1905,6 +1909,7 @@ impl UiManager {
                     (gtao_toggle, v.gtao),
                     (restir_toggle, v.restir),
                     (restir_gi_toggle, v.restir_gi),
+                    (h.post_rt_reflect_toggle, v.rt_reflect),
                     (pcss_toggle, v.pcss),
                     (contact_toggle, v.contact_shadows),
                     (cas_toggle, v.cas),
@@ -2042,10 +2047,8 @@ impl UiManager {
                     ));
                 }
                 for (i, &btn) in h.terrain_palette.iter().enumerate() {
-                    self.native_ui.send(ButtonMessage::set_selected(
-                        btn,
-                        i == paint,
-                    ));
+                    self.native_ui
+                        .send(ButtonMessage::set_selected(btn, i == paint));
                 }
                 let active_brush = if v.terrain_edit { Some(brush) } else { None };
                 for &(btn, lbl, tool) in &h.terrain_brush_items {
@@ -2072,7 +2075,7 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 17]>) {
+    pub fn update_water_inspector(&mut self, values: Option<[f32; 19]>) {
         let h = &self.inspector_handles;
         match values {
             Some(values) => {
@@ -2084,6 +2087,8 @@ impl UiManager {
                     h.water_amplitude,
                     h.water_roughness,
                     h.water_ssr,
+                    h.water_rt_reflect,
+                    h.water_reflect_debug,
                     h.water_wave_a,
                     h.water_wave_b,
                     h.water_speed,
@@ -2349,6 +2354,8 @@ impl UiManager {
             (h.water_amplitude, IF::WaterAmplitude),
             (h.water_roughness, IF::WaterRoughness),
             (h.water_ssr, IF::WaterSsrStrength),
+            (h.water_rt_reflect, IF::WaterRtReflect),
+            (h.water_reflect_debug, IF::WaterReflectDebug),
             (h.water_wave_a, IF::WaterWaveLengthA),
             (h.water_wave_b, IF::WaterWaveLengthB),
             (h.water_speed, IF::WaterWaveSpeed),
@@ -2574,6 +2581,10 @@ impl UiManager {
                     (
                         self.inspector_handles.post_restir_gi_toggle,
                         PostFxToggle::RestirGi,
+                    ),
+                    (
+                        self.inspector_handles.post_rt_reflect_toggle,
+                        PostFxToggle::RtReflect,
                     ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
@@ -2998,6 +3009,10 @@ impl UiManager {
                         self.inspector_handles.post_restir_gi_toggle,
                         PostFxToggle::RestirGi,
                     ),
+                    (
+                        self.inspector_handles.post_rt_reflect_toggle,
+                        PostFxToggle::RtReflect,
+                    ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
                         self.inspector_handles.post_contact_toggle,
@@ -3057,14 +3072,16 @@ impl UiManager {
                     if self.open_combo_popup.is_some() && self.open_combo_popup != popup {
                         let other = self.open_combo_popup;
                         if other == self.foliage_kind_popup {
-                            self.native_ui.send(ComboBoxMessage::close(self.foliage_kind_combo));
+                            self.native_ui
+                                .send(ComboBoxMessage::close(self.foliage_kind_combo));
                             self.native_ui.send(UiMessage::new(
                                 self.foliage_kind_popup,
                                 MessageDirection::ToWidget,
                                 PopupMessage::Close,
                             ));
                         } else if other == self.post_tonemap_popup {
-                            self.native_ui.send(ComboBoxMessage::close(self.post_tonemap_combo));
+                            self.native_ui
+                                .send(ComboBoxMessage::close(self.post_tonemap_combo));
                             self.native_ui.send(UiMessage::new(
                                 self.post_tonemap_popup,
                                 MessageDirection::ToWidget,
@@ -4517,6 +4534,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // other half of the same traced solution and they read as a pair.
     let (post_restir_gi_toggle, post_restir_gi_label) =
         make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
+    let (post_rt_reflect_toggle, post_rt_reflect_label) =
+        make_toggle(ui, "RT Reflections", font_id, post_section);
     // Phase 24L. Directly under its toggle, matching every other effect that
     // pairs a switch with an amount.
     let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
@@ -4676,6 +4695,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let water_amplitude = make_row_step(ui, "Waves", 34.0, font_id, water_section, 0.01);
     let water_roughness = make_row_step(ui, "Rough", 34.0, font_id, water_section, 0.01);
     let water_ssr = make_row_step(ui, "SSR", 34.0, font_id, water_section, 0.01);
+    let water_rt_reflect = make_row_step(ui, "RT Reflect", 34.0, font_id, water_section, 0.01);
+    let water_reflect_debug = make_row_step(ui, "Reflect Debug", 34.0, font_id, water_section, 1.0);
     let water_wave_a = make_row_step(ui, "Wave A", 34.0, font_id, water_section, 0.25);
     let water_wave_b = make_row_step(ui, "Wave B", 34.0, font_id, water_section, 0.25);
     let water_speed = make_row_step(ui, "Speed", 34.0, font_id, water_section, 0.05);
@@ -4787,6 +4808,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         water_amplitude,
         water_roughness,
         water_ssr,
+        water_rt_reflect,
+        water_reflect_debug,
         water_wave_a,
         water_wave_b,
         water_speed,
@@ -4865,6 +4888,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_bloom_toggle,
         post_bloom_label,
         post_restir_gi_toggle,
+        post_rt_reflect_toggle,
+        post_rt_reflect_label,
         post_restir_gi_label,
         post_pcss_toggle,
         post_pcss_label,

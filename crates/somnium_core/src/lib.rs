@@ -587,6 +587,11 @@ pub struct PostProcessComponent {
     /// solution; the specular lobe still comes from the cubemap. Off means the
     /// constant ambient term the engine has always had.
     pub restir_gi_enabled: bool,
+    /// Ray-traced water reflections (Phase VV — Halcyon).
+    ///
+    /// Off, or `SOMNIUM_RT_REFLECT=0`, restores the previous SSR + environment
+    /// cube look. Hardware without ray query skips the pass regardless.
+    pub rt_reflect_enabled: bool,
     /// Contrast adaptive sharpening (Phase 24AC).
     ///
     /// Recovers the high frequencies TAA averages away, by an amount derived
@@ -700,6 +705,7 @@ impl Default for PostProcessComponent {
             // a look — a kilometre of air between the camera and a hill is
             // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
             restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
+            rt_reflect_enabled: std::env::var("SOMNIUM_RT_REFLECT").as_deref() != Ok("0"),
             cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,
@@ -1207,6 +1213,10 @@ pub struct WaterComponent {
     pub anisotropy: f32,
     /// Screen-space reflection contribution before environment fallback.
     pub ssr_strength: f32,
+    /// Ray-traced reflection mix when Halcyon is running (Phase VV).
+    pub rt_reflect_strength: f32,
+    /// 0 off, 1 SSR hit/miss, 2 reflection-source colouring (Phase VV-A).
+    pub reflect_debug: f32,
     /// Blend from deterministic Gerstner (0) to the two-cascade spectral tier (1).
     pub spectrum_blend: f32,
     /// Authored wind speed in metres per second. Scales the spectral cascade
@@ -1254,6 +1264,8 @@ impl Default for WaterComponent {
             roughness: 0.65,
             anisotropy: 0.35,
             ssr_strength: 0.85,
+            rt_reflect_strength: 1.0,
+            reflect_debug: 0.0,
             spectrum_blend: 0.75,
             wind_speed: 8.0,
             foam_decay: 0.9,
@@ -1312,6 +1324,7 @@ impl WaterComponent {
             roughness: 0.02,
             anisotropy: 0.45,
             ssr_strength: 1.0,
+            rt_reflect_strength: 1.0,
             spectrum_blend: 0.64,
             // Wind = 10 leaves the cascade roster at its design speeds; 6.5 is
             // a calmer inland lake. Foam and Whitecap drive the spectral foam

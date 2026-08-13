@@ -6,7 +6,7 @@ with the phase identifier and describe the validated viewpoint or render stage.
 
 **Start-here handoffs**
 
-- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — **current start-here.** Phase VV (Halcyon) next GPU track. IV and XV closed; Metaphor 26-A–I shipped (phase remains open). Plan: [`phase_VV.md`](phase_VV.md).
+- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — **current start-here.** Phase VV (Halcyon) **VV-A–H in tree** (RT water reflections). Remaining Halcyon work is live evidence / §11 timings, not a re-implementation. IV and XV closed; Metaphor 26-A–I shipped (phase remains open). Plan: [`phase_VV.md`](phase_VV.md).
 - [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). Superseded as start-here by the Halcyon handoff.
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — historical post-25M-2 / Phase IV A–J narrative; superseded as the XV entry point by the post-IV handoff.
 
@@ -19,8 +19,9 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase IV/IV-K/` — ocean fidelity pass: the surface before and after the
   shading rewrite, and the authored water body that ships.
 - `phase 26/` — Metaphor editor-chrome evidence (capture live; see `phase_26.md`). The UI phase remains open.
-- `phase VV/` — ray-traced water reflection evidence (planned; see
-  `phase_VV.md`).
+- `phase VV/` — ray-traced water reflection evidence (captures still open;
+  do not invent PNGs). See [`phase VV/README.md`](phase%20VV/README.md) and
+  [`phase_VV.md`](phase_VV.md).
 - `phase XV/` — terrain evidence (XV-A–J **complete**).
   Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
   Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
