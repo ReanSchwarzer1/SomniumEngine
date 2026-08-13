@@ -7,7 +7,7 @@ use crate::{
 
 /// Current serialized authoring recipe. Increment when defaults change in a
 /// way that should not silently alter existing scenes.
-pub const DEFAULT_LANDSCAPE_VERSION: u32 = 1;
+pub const DEFAULT_LANDSCAPE_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy)]
 /// Versioned authoring values shared by startup and the editor factory.
@@ -44,7 +44,7 @@ impl DefaultLandscapePreset {
             version: DEFAULT_LANDSCAPE_VERSION,
             terrain,
             relief_metres: relief,
-            auto_splat_height: relief * 0.62,
+            auto_splat_height: relief * 0.48,
             terrain_translation: glam::Vec3::new(-width * 0.5, 0.0, -depth * 0.5),
             water_local_translation: glam::Vec3::new(
                 width * 0.5,

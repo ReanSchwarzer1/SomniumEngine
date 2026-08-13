@@ -6,7 +6,7 @@ with the phase identifier and describe the validated viewpoint or render stage.
 
 **Start-here handoffs**
 
-- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — **authoritative for starting Phase XV** after Phase IV closed.
+- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — start-here history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — historical post-25M-2 / Phase IV A–J narrative; superseded as the XV entry point by the post-IV handoff.
 
 **Evidence folders**
@@ -20,9 +20,13 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase 26/` — inspector colour-picker evidence (planned; see `phase_26.md`).
 - `phase VV/` — ray-traced water reflection evidence (planned; see
   `phase_VV.md`).
-- `phase XV/` — sixteen-material terrain evidence (research-only plan; see
-  `phase_XV.md`. Evidence path reserved as
-  `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`).
+- `phase XV/` — terrain evidence (XV-A–J **complete**).
+  Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
+  Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+  Live contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
+  Plan: [`phase_XV.md`](phase_XV.md).
+  XV-A provenance audit: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
+  Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
 Captures must be taken after tonemapping. The renderer's HDR target holds
 values far above one, so a PNG written from it directly is uniformly blown out

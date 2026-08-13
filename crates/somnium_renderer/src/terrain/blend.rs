@@ -90,10 +90,10 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
         min_weight: 0.10,
         parallax_depth: 0.035,
     },
-    // 2 aerial_rocks_04 — deep crevices, and the edge of a rock is an edge.
+    // 2 aerial_rocks_04 — crevices, but not a knife-edge against grass.
     LayerBlend {
-        height_scale: 1.0,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.42,
         min_weight: 0.08,
         parallax_depth: 0.060,
     },
@@ -129,10 +129,178 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
     // 7 gravel_floor — the case this phase exists for: gravel settling into
     //   the cracks of whatever it meets.
     LayerBlend {
-        height_scale: 0.9,
-        blend_width: 0.15,
+        height_scale: 0.62,
+        blend_width: 0.38,
         min_weight: 0.08,
         parallax_depth: 0.050,
+    },
+    // 8 aerial_sand — fine dry beach; almost no interlocking.
+    LayerBlend {
+        height_scale: 0.35,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.012,
+    },
+    // 9 coast_sand_01 — damp shore, slightly more relief than dry sand.
+    LayerBlend {
+        height_scale: 0.40,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.015,
+    },
+    // 10 dry_mud_field_001 — compacted earth.
+    LayerBlend {
+        height_scale: 0.45,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.018,
+    },
+    // 11 cracked_red_ground — clay plates, hard edges.
+    LayerBlend {
+        height_scale: 0.70,
+        blend_width: 0.25,
+        min_weight: 0.08,
+        parallax_depth: 0.030,
+    },
+    // 12 sparse_grass — soil showing through.
+    LayerBlend {
+        height_scale: 0.50,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.020,
+    },
+    // 13 mossy_rock — deep moss pockets.
+    LayerBlend {
+        height_scale: 0.58,
+        blend_width: 0.38,
+        min_weight: 0.08,
+        parallax_depth: 0.050,
+    },
+    // 14 rock_face_03 — dedicated cliff; hard interlocking.
+    LayerBlend {
+        height_scale: 0.70,
+        blend_width: 0.32,
+        min_weight: 0.08,
+        parallax_depth: 0.060,
+    },
+    // 15 ganges_river_pebbles — talus settling into cracks.
+    LayerBlend {
+        height_scale: 0.62,
+        blend_width: 0.38,
+        min_weight: 0.08,
+        parallax_depth: 0.045,
+    },
+    // 16 lush lawn
+    LayerBlend {
+        height_scale: 0.45,
+        blend_width: 0.50,
+        min_weight: 0.10,
+        parallax_depth: 0.018,
+    },
+    // 17 conifer duff
+    LayerBlend {
+        height_scale: 0.65,
+        blend_width: 0.35,
+        min_weight: 0.10,
+        parallax_depth: 0.030,
+    },
+    // 18 cool gray aerial rock
+    LayerBlend {
+        height_scale: 0.62,
+        blend_width: 0.40,
+        min_weight: 0.08,
+        parallax_depth: 0.055,
+    },
+    // 19 dark slate
+    LayerBlend {
+        height_scale: 0.70,
+        blend_width: 0.32,
+        min_weight: 0.08,
+        parallax_depth: 0.058,
+    },
+    // 20 moss carpet
+    LayerBlend {
+        height_scale: 0.55,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.022,
+    },
+    // 21 limestone
+    LayerBlend {
+        height_scale: 0.80,
+        blend_width: 0.22,
+        min_weight: 0.08,
+        parallax_depth: 0.040,
+    },
+    // 22 dark loam
+    LayerBlend {
+        height_scale: 0.35,
+        blend_width: 0.50,
+        min_weight: 0.10,
+        parallax_depth: 0.010,
+    },
+    // 23 pine litter
+    LayerBlend {
+        height_scale: 0.60,
+        blend_width: 0.35,
+        min_weight: 0.10,
+        parallax_depth: 0.028,
+    },
+    // 24 wildgrass
+    LayerBlend {
+        height_scale: 0.50,
+        blend_width: 0.48,
+        min_weight: 0.10,
+        parallax_depth: 0.020,
+    },
+    // 25 wetland
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.55,
+        min_weight: 0.10,
+        parallax_depth: 0.012,
+    },
+    // 26 gray granite talus
+    LayerBlend {
+        height_scale: 0.62,
+        blend_width: 0.38,
+        min_weight: 0.08,
+        parallax_depth: 0.050,
+    },
+    // 27 light dune
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.010,
+    },
+    // 28 lichen rock
+    LayerBlend {
+        height_scale: 0.58,
+        blend_width: 0.38,
+        min_weight: 0.08,
+        parallax_depth: 0.048,
+    },
+    // 29 autumn litter
+    LayerBlend {
+        height_scale: 0.55,
+        blend_width: 0.38,
+        min_weight: 0.10,
+        parallax_depth: 0.025,
+    },
+    // 30 packed path
+    LayerBlend {
+        height_scale: 0.25,
+        blend_width: 0.30,
+        min_weight: 0.10,
+        parallax_depth: 0.008,
+    },
+    // 31 hard snow
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.55,
+        min_weight: 0.15,
+        parallax_depth: 0.012,
     },
 ];
 

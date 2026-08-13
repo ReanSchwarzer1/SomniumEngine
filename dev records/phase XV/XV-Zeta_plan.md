@@ -1,0 +1,291 @@
+# XV-Zeta — 32-layer landscape identity (plan)
+
+**Status:** IN ENGINE — 2026-08-13, including post-E follow-up (aerial shading
+LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J complete**
+the same day (compile gate + GPU PNGs + wgpu freeze + release profiler).
+1.10 ms shading remains an explicit exception:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).
+BC7 encoder + local packs + visual A/B:
+[`evidence/XV-BC7_visual_check.md`](evidence/XV-BC7_visual_check.md).  
+**Sits between:** XV-I (done) and XV-J (done).  
+**Parent:** [`phase_XV.md`](../phase_XV.md).
+
+## Live contract (do not silently retune)
+
+| Item | Value |
+|---|---|
+| Global layers | 32 (`TERRAIN_LAYER_COUNT`); strongest-four local |
+| Splat | 8 RGBA maps; ≤4 non-zero stored channels; sidecar **v4** |
+| `GpuTerrainMaterial` | **1664** bytes; WGSL `array<vec4<T>, 8>` |
+| Layers 16, 24 | Procedural lush lawn / wildgrass (`grass_path_*` failed ochre ΔE) |
+| Extra bank load | 16–31 at **1024**. With BC7 packs complete, 0–15 load at 2048 (**~213 MiB**, `compressed=true`). RGBA8 without packs, or `SOMNIUM_TERRAIN_FORCE_RGBA8=1`, still projects 2048+1024 as **853 MiB** and drops both banks to 1024 (**341 MiB**) unless `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1` |
+| Unique colour | `macro_map::from_splat` 512²; Great Lakes `macro_color.png` **not** auto-loaded; default Lerp **0.55** |
+| Biome | `BIOME_PRESET_VERSION = 3`; warped 4-octave FBM; overlapping forest/meadow |
+| Landscape recipe | `DEFAULT_LANDSCAPE_VERSION = 4`; snow cap `relief * 0.48` (~50.4 m) |
+| Aerial LOD | `gpu_material_for_camera`: hex + POM off when camera is **> 80 m** above the heightfield (uniform). Walking is the full close path. |
+| Water | `WaterComponent::great_lakes` frozen (`wave_speed` 0.85, datum 16.1 m, optical `max_depth` 18.6 m) |
+| Paint UX | Terrain Paint vs Foliage Paint mutually exclusive; palette click arms `BrushMode::Paint` |
+
+Do **not** reintroduce a per-pixel `close` / `use_maps` / `layer_budget` sample
+branch. That compiled three paths into one shader and made walking 20→27 ms.
+
+Runtime inspection of the default Great Lakes landscape after XV-A–I: close-up
+photogrammetry is present; from the preset camera the land reads as one
+desaturated brown. Inspector palette clicks select a layer but do not paint.
+This plan is the response.
+
+
+## 1. What the live scene actually showed
+
+- Close-up: tiled PBR (sand/mud ripple, packed normals/height) is working.
+- Landscape view: ridges, water, and lighting vary; **hue does not**. Valleys
+  and peaks share one ochre. A thin pale shore fringe is the only material
+  identity that survives minification.
+- Inspector: Paint = 5 (Mud, `>` on the palette). Foliage **Paint Mode is on**.
+  Terrain has no paint-mode toggle. Wet = 0, Dbg = 0.
+
+## 2. Channel confirmation (already in the engine)
+
+Packed format is unchanged. The shader **does** consume the photogrammetry
+channels. It does **not** tessellate or displace vertices.
+
+| Source map | Packed | Shader use |
+|---|---|---|
+| Diffuse RGB | albedo RGB | PBR albedo; perceptual (`sqrt`) blend; GI mean albedo |
+| Displacement | albedo A | Height-blend between layers; dominant-layer POM + POM self-shadow. **Not** geometry displacement (XV non-goal). |
+| Normal DX XY | surface RG | Tangent normal, Z reconstructed; surface-gradient composition; hex counter-rotation on packed XY |
+| ARM G (rough) | surface B | Roughness; Toksvig/Godot-style mip fixture |
+| ARM R (AO) | surface A | Material AO, multiplied with GTAO |
+| ARM B (metal) | dropped | Terrain is dielectric |
+| Separate AO/Rough files | unused at runtime | Packer reads `arm` |
+
+If a material “only looks good as a flat albedo swatch,” that is a **kit / splat
+/ macro** failure, not a missing AO or height sample.
+
+## 3. Why inspector clicks do not paint
+
+Palette buttons only emit `SetTerrainPaintLayer`. Painting the splat requires
+all of:
+
+1. `terrain_edit_active` (F6, or tools 1–6),
+2. `BrushMode::Paint` (key **6**; default brush is **Raise**),
+3. drag on the viewport, not a click on the palette,
+4. foliage paint **off** — `ToggleFoliagePaint` sets `terrain_edit_active = false`.
+
+The captured UI has foliage Paint Mode checked, so viewport drags never reach
+`apply_paint`. Clicking `Mud` only changes which layer *would* paint if the
+terrain paint brush were armed.
+
+Zeta must make the Terrain palette the paint tool: click a name → select that
+layer, switch to `BrushMode::Paint`, turn terrain edit on, turn foliage paint
+off. Add a Terrain `[Paint Mode]` toggle mirroring foliage. Viewport drag then
+paints. Palette click itself does not stamp a texel (Fyrox/Unreal: palette
+selects, stroke applies).
+
+## 4. Why the landscape is brown
+
+Ranked, from live code + the 16-layer roster — not from a missing texture.
+
+1. **The kit is ochre.** Layers 0–15 are aerial grass-rock, forest duff, brown
+   mud, sand, dry earth, red clay, gravel, pebbles, mossy rock. Even “Grass”
+   (`aerial_grass_rock`) is mossy stone from 15 m, not lawn. At 400 m those
+   scans minify to one dirt colour. Adding more brown scans will not fix this.
+2. **Biome coverage is soil-heavy.** Inland `cover` splits grass / forest /
+   meadow (three similar browns). Mid-elevation also gets dry earth, sparse
+   grass, red clay, mud. Cool gray cliff (14) and snow (3) occupy steep/high
+   bands that the preset camera mostly sees edge-on.
+3. **Macro is not material identity.** Default overlay strength 0.45. On the
+   Great Lakes heightmap the engine tries `assets/terrain/great_lakes/macro_color.png`
+   (baked from the source **Diffuse Map** — a satellite-style brown continent).
+   If that file is missing, a **landform-derived** 512² map (altitude / slope /
+   hollow / noise, centred on 0.5) still does not inject green vs gray vs tan.
+   Overlay on already-brown detail keeps brown.
+4. **Detail fade.** Full strongest-four out to 60 m, then a fall to dominant
+   layers by 400 m. Distant pixels keep the winner’s **mean**, which for this
+   kit is tan.
+5. **Layers 0–7 still tile at 0.25 / m** (4 m repeat) so old scenes do not
+   retile. At landscape scale that is high-frequency noise that averages away.
+
+O3DE’s macro material, Frostbite’s unique colour layer, and Unreal Landscape
+colormaps exist so distant pixels show **which material won**, not which
+heightfield hollow they sit in. Somnium already stores `layer_albedo[32]` mean
+colours on the GPU; Zeta should drive the macro (or a splat-weighted unique
+colour) from those, not from the satellite diffuse.
+
+## 5. Thirty-two materials — architecture
+
+Keep **four locally active** (strongest-four, hex ≤24 taps, steep biplanar ≤36).
+Raise the **global** palette to 32.
+
+| Choice | Decision |
+|---|---|
+| Encoding | **Eight RGBA splatmaps** (direct weights). Do not switch to O3DE-style indexed IDs. |
+| Sparsity | Still at most four non-zero stored channels per texel; fifth decays. |
+| Sidecar | **v4.** v3 copies 0–15, zeros 16–31, no four-nonzero on migrate. |
+| WGSL | `array<vec4<T>, 8>` for per-layer scalars, never `array<f32, 32>`. Four more `i32` splat bindless indices. |
+| `GpuTerrainMaterial` | Expect ~1600 bytes (16-wide blocks double; `layer_albedo` 256→512). Layout tests must move with it. |
+| Paint / inspector | Palette 32 named buttons (two banks of 16 if the panel overflows). Keys `,`/`.` already wrap `TERRAIN_LAYER_COUNT`. |
+| Cliff | Stay on layer 14 unless a cooler gray wall scan earns the slot. |
+
+### Memory (this is the real gate)
+
+XVI budgets: BC7 2K ≤ 200 MiB, RGBA8 2K ≤ 700 MiB, never both resident.
+
+| Pack | 32 layers × 2 maps, mips included |
+|---|---|
+| RGBA8 2K | ~1365 MiB — **fails** 700 |
+| RGBA8 1K | ~341 MiB — fits 700, not 200 |
+| BC7 2K | ~341 MiB — **fails** 200 |
+| BC7 1K | ~85 MiB — fits both |
+
+Existing 0–7 are 4K on disk, runtime default 2K. Sixteen 2K RGBA8 pairs are
+already ~683 MiB — at the RGBA8 ceiling **before** adding 16 layers.
+
+**Zeta default (plan):** keep 0–15 at `SOMNIUM_TERRAIN_RES` (2048). Pack 16–31 at 2K
+sources but **load them at 1024** until a BC7 encoder exists.
+
+**Live (2026-08-13):** encoder ships (`encode_terrain_bc7`). With packs complete,
+0–15 load at 2048 and 16–31 at 1024 (**~213 MiB BC7**). RGBA8 without packs, or
+`SOMNIUM_TERRAIN_FORCE_RGBA8=1`, still drops both banks to 1024. Log projected
+residency before allocation. If mixed BC7 exceeds 220 MiB and overbudget is off,
+drop hero to 1024. RVT stays deferred.
+
+## 6. Layers 16–31 — hue roles, not more dirt
+
+Do **not** download until a first-party audit (same gate as XV-A): CC0, packer
+quartet (`diff`, `nor_dx`, `arm`, `disp`) at 2K, DirectX normals, physical size,
+no Quixel/AI. Substitutions go in `rejected_for_role`. Compatibility-locked
+0–7 stay.
+
+Intended **hue classes** (IDs are candidates; audit may substitute):
+
+| Idx | Role (must read at 400 m) | Candidate (audit) | Fallback |
+|---:|---|---|---|
+| 16 | Lush green ground (not aerial grass-rock) | Poly Haven lawn/meadow scan TBD | ambientCG `Grass001` / `Grass005` |
+| 17 | Dark conifer duff | `leaves_forest_ground` | ambientCG `Ground037` |
+| 18 | Cool gray aerial rock | `aerial_rocks_01` or `aerial_rocks_02` | ambientCG `Rock029` |
+| 19 | Dark wall / slate | `rock_face_01` / `02` if wall-tagged | ambientCG `Rock063` |
+| 20 | Green moss carpet | PH moss ground TBD (not `mossy_rock`) | ambientCG moss ground |
+| 21 | Pale limestone / chalk | PH audit | — |
+| 22 | Dark wet loam (cooler than `brown_mud`) | PH audit | — |
+| 23 | Pine-needle litter | PH audit | — |
+| 24 | Bright meadow / wildgrass | PH audit | `Grass005` |
+| 25 | Wetland / peat | PH audit | — |
+| 26 | Gray granite talus | PH audit | — |
+| 27 | Light dune (cooler than `aerial_sand`) | PH audit | — |
+| 28 | Lichen rock | PH audit | — |
+| 29 | Autumn leaf litter | `forest_floor` | — |
+| 30 | Packed pale path | `grassy_cobblestone` only if it stays path, not dirt | — |
+| 31 | Hard snow / wind crust (distinct from `snow_02`) | PH audit | — |
+
+Reject any candidate whose 256² downscale is still the same ochre as layers
+0–11. The acceptance test for a new ID is **hue ΔE against the current mean
+ground colour**, not a pretty 4K crop.
+
+## 7. Biome and macro (the diversity work)
+
+- Rebuild the Appalachia preset so **flat-to-rolling inland** is green (16/24)
+  and forest (1/17), not mud/earth/sand. Keep sand/mud in the waterline bands.
+  Put cool gray (18/19/26) on steep faces with cliff 14. Snow stays high.
+- **Splat-weighted unique colour** at 512²: for each macro texel, strongest-four
+  (or all non-zero) × `layer_albedo`, written as the macro RGB. Overlay or lerp
+  toward it with distance (detail fade already known). Optional: stop loading
+  `great_lakes/macro_color.png` as the default overlay, or multiply it at a much
+  lower strength so satellite brown cannot own the continent.
+- Expose Macro strength next to Wet in the inspector (already a GPU scalar).
+- Debug: 21 dominant albedo already exists; add a landscape-scale “macro RGB”
+  view if 21 is too close-up.
+
+Histogram-preserving blend and extra RNM maps stay out unless Zeta evidence
+asks. Painted wetness channel still later.
+
+## 8. Subphase slices (implement in this order)
+
+| Slice | Work | Exit | Status |
+|---|---|---|---|
+| **Zeta-A** | Terrain Paint Mode + palette arms paint; foliage paint cannot steal the stroke; current layer name visible | Click Mud, drag ground, mud appears. F6/6 still work. | **IN ENGINE** 2026-08-13 |
+| **Zeta-B** | Splat-derived unique colour / macro; Great Lakes satellite overlay no longer dominates; biome retune of 0–15 toward green/gray | Overview camera is not one brown. Shore/cliff/snow readable without zoom. | **IN ENGINE** 2026-08-13 |
+| **Zeta-C** | `TERRAIN_LAYER_COUNT = 32`, eight splatmaps, sidecar v4, 880→1664 layout tests, inspector second bank | Old v3 scenes keep 0–15; 16–31 zero until packed. | **IN ENGINE** 2026-08-13 |
+| **Zeta-D** | Audit + fetch + pack layers 16–31 (skip overwrite of 0–15). Fail closed on license/hash/maps. | 30 photographed layers; 16 and 24 stay procedural (`grass_path_*` failed ΔE). | **IN ENGINE** 2026-08-13 |
+| **Zeta-E** | 32-weight biome; Create → Terrain / startup only. Bump `DEFAULT_LANDSCAPE_VERSION`. | Same seed → bit-identical weights. Landscape kit matrix rows for new hues. | **IN ENGINE** 2026-08-13; **v3 biome / landscape v4** same day |
+
+Then **XV-J** (complete 2026-08-13). GPU evidence:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).
+
+## 9. Inspiration (pattern study, no code lift)
+
+| Source | Take |
+|---|---|
+| O3DE Terrain | Many global materials, few local; **macro material** is unique colour, not a second detail set. Local source stores top-two IDs; Somnium keeps direct weights. |
+| Frostbite / DICE | Low-frequency unique colour + tiled photogrammetry. Close terrain needs coherent scans; distant terrain needs the unique layer. |
+| Unreal Landscape | Weightmaps + optional colormap. Colormap is why a landscape reads as fields from the air. |
+| Terrain3D (Godot, MIT, not in `example_repo`) | Up to 32 texture sets; autoshade vs paint; debug views. |
+| Far Cry AVT / CoD super-terrain | World-scale VT checklist — **out of Zeta**. Gate remains profiler-backed. |
+| Poly Haven Verdant Trail | Cohesive green biome scans — use as a **role** reference when picking 16–31, not as a bundle import. |
+
+## 10. Non-goals
+
+- RVT, clipmaps, tessellation, true geometry displacement.
+- Quixel / AI / non-CC0.
+- Replacing the Great Lakes heightfield or water (`WaterComponent::great_lakes` stays frozen).
+- Keeping an eight-layer “old look” as default (already removed).
+- Remaining follow-up (not a new XV subphase): second aerial shading PSO toward 1.10 ms. BC7 packs: encoder ships; packs are local gitignored artifacts.
+
+## 11. Follow-up (2026-08-13, after Zeta-E)
+
+Live sign-off the same day: seams and snow look right; aerial LOD restored
+walking cost. **XV-J** recorded wgpu adapter (RTX 5080 Laptop, Vulkan, driver
+610.74), release overview shading 3.951 ms, walk 5.532 ms, residency 1024+1024
+~341 MiB, and the `phase_XV-J_*.png` corpus.
+
+### 11.1 Shading pass — diagnosis and aerial LOD
+
+Default overview camera is `(0, 150.75, 460.8)`. Ground under it is already
+~150 m away. Detail fade is 60→400 m, so fade ≈ 0.26 across most of that view
+and the **entire screen was still on the close-up material path**.
+
+**What 20 ms is not.** Inspector Post FX **Soft Shadows** / **Contact Shadows**
+(and GI / GTAO) sit *around* the terrain material. Hex lives on the **Terrain**
+panel. Disabling all of those left shading ~20 ms because every vis-buffer hit
+still runs `evaluate_terrain_material` (up to 4 layers × 2 maps × 3 hex taps,
+plus POM 24+8 mip-0 steps, plus cliff biplanar).
+
+**Tried and reverted:** per-pixel hit-distance LOD (`close = fade < 0.12`,
+`use_maps = fade < 0.45`, `layer_budget` 2 vs 4). Naga/DXC compiled hex,
+non-hex, and mean-albedo into one program. Warps paid the union; walking went
+**20 ms → 27 ms**.
+
+**What shipped:** `TerrainData::gpu_material_for_camera` /
+`AERIAL_DETAIL_METRES = 80`. Height above the heightfield (not world Y) zeros
+`hex_tiling` and `parallax_steps` as **storage-buffer uniforms** for the whole
+frame. Walking (a couple of metres above ground, including a 105 m ridge) keeps
+full hex, POM, four layers, cliff biplanar. Overview skips hex and POM
+uniformly.
+
+Also kept: when ReSTIR DI wrote sun visibility (`traced.a > 0.5`), do not run
+PCSS then discard it (that also threw away POM self-shadow). `shading_mode`
+bit 1 = PCSS, bit 2 = contact; defaults on. Inspector toggles default **on**.
+
+**Later (not XV-J):** a second shading PSO / permutation so aerial can drop to
+unique-colour / two-layer maps without compiling the close path into the same
+program. Do **not** reintroduce a per-pixel sample-count branch. BC7 is the
+residency lever (hero 2K at ~213 MiB); extra bank stays 1024. Shading 1.10 ms
+still wants a second aerial PSO, not a per-pixel branch.
+
+### 11.2 Biome v3 — seams and sparse layers
+
+Live captures: ruler-straight grass|rock contour; snow almost absent; several
+of 16–31 never appeared.
+
+| Cause | Fix |
+|---|---|
+| One octave of bilinear value noise (~100 m cells) makes isolines that read as a diagonal ruler | Domain-warped 4-octave FBM (`biome_fbm` + 90 m warp) |
+| Forest/meadow `smoothstep(0.50, 0.78, n2)` went 0/1 over huge regions | Overlapping shares (forest 0.20–0.75 of cover; meadow the rest) |
+| Rock `blend_width` 0.15 + `height_scale` 1.0 zeroed grass at the remaining 50/50 band | Rock/gravel/cliff/talus `blend_width` ~0.32–0.42, `height_scale` ~0.58–0.70 |
+| Snow only in a 9 m band at `relief * 0.62` (~65 m), mostly edge-on from the preset cam | Cap at `relief * 0.48` (~50 m), 24 m fade, plus mid-slope patches (`n3`) above the waterline |
+| Layer 30 was weight 0; limestone/autumn/moss rare | Scatter path, limestone, moss, extra rock inland (fantasy placement OK) |
+
+`BIOME_PRESET_VERSION = 3`, `DEFAULT_LANDSCAPE_VERSION = 4`. Restart or
+Create → Terrain rebakes splat + unique colour. Height-blend softening is live
+without a rebake. Waterline still prefers damp sand; cliffs still win on
+~70° faces (unit tests).

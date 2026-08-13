@@ -101,7 +101,7 @@ pub struct SomniumRenderer {
     /// When true, the shading pass tints pixels by cascade index (debug overlay).
     cascade_debug: bool,
 
-    /// Phase 13D: 0 = PBR, 1 = Cel-shading.
+    /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact.
     pub shading_mode: u32,
     /// Phase 13C: Accumulated local lights for the frame.
     local_lights: Vec<crate::cluster::GpuLocalLight>,
@@ -221,6 +221,8 @@ pub struct SomniumRenderer {
 
     /// Phase 25A-2: per-terrain splat/layer parameters read by `shading.wgsl`.
     terrain_materials: crate::material::pool::TerrainMaterialPool,
+    /// Inspector override for `SOMNIUM_SHADOW_DEBUG` (0 = use env).
+    pub shading_debug: f32,
     /// Deterministic HDR frame readback for A/B measurement. Inert unless
     /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
     capture: crate::capture::FrameCapture,
@@ -553,7 +555,7 @@ impl SomniumRenderer {
             light_color: default_color,
             moon_intensity: 0.010,
             cascade_debug: false,
-            shading_mode: 0,
+            shading_mode: 2 | 4,
             local_lights: Vec::new(),
             grid_pass,
             grid_enabled: false,
@@ -645,6 +647,7 @@ impl SomniumRenderer {
             underwater_body: None,
             camera_submersion: 0.0,
             terrain_materials,
+            shading_debug: 0.0,
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             terrain_material_ids: std::collections::HashSet::new(),
@@ -1426,7 +1429,12 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        let mut terrain = crate::terrain::TerrainData::new(&ctx.device, &ctx.queue, desc);
+        let mut terrain = crate::terrain::TerrainData::new(
+            &ctx.device,
+            &ctx.queue,
+            desc,
+            ctx.supports_bc_compression(),
+        );
         terrain.reserve_pool_spans(&mut self.geometry);
 
         // The layer maps are `texture_2d_array`s and the bindless array is
@@ -1442,10 +1450,12 @@ impl SomniumRenderer {
             })
         };
         let mut ids = crate::terrain::TerrainTextureIds::default();
-        ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
-        ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
+        ids.splat_maps = std::array::from_fn(|i| {
+            self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+        });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
-        for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
+        let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+        for layer in 0..hero {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
                 ctx,
@@ -1461,6 +1471,25 @@ impl SomniumRenderer {
                     &terrain.layer_textures.surface,
                     layer,
                     "Terrain Layer Surface",
+                ),
+            ) as i32;
+        }
+        for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
+            let i = (hero + layer) as usize;
+            ids.albedo[i] = self.add_texture(
+                ctx,
+                layer_view(
+                    &terrain.layer_textures.albedo_extra,
+                    layer,
+                    "Terrain Layer Albedo+Height Extra",
+                ),
+            ) as i32;
+            ids.surface[i] = self.add_texture(
+                ctx,
+                layer_view(
+                    &terrain.layer_textures.surface_extra,
+                    layer,
+                    "Terrain Layer Surface Extra",
                 ),
             ) as i32;
         }
@@ -1582,10 +1611,14 @@ impl SomniumRenderer {
         // stopped moving.
         let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
 
-        let shadow_debug = std::env::var("SOMNIUM_SHADOW_DEBUG")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.0);
+        let shadow_debug = if self.shading_debug != 0.0 {
+            self.shading_debug
+        } else {
+            std::env::var("SOMNIUM_SHADOW_DEBUG")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0)
+        };
         let gpu_light = GpuDirectionalLight {
             direction: self.light_direction.to_array(),
             _pad0: 0.0,
@@ -1672,7 +1705,7 @@ impl SomniumRenderer {
             self.terrain_materials.write(
                 &ctx.queue,
                 terrain.terrain_index,
-                &terrain.gpu_material(),
+                &terrain.gpu_material_for_camera(local_cam),
             );
 
             let material_id = terrain.material_id;
@@ -2631,6 +2664,22 @@ impl SomniumRenderer {
                     .get(instance as usize)
                     .is_some_and(|d| terrain_ids.contains(&d.material_id))
             });
+            if self.profiler.enabled() {
+                for line in self.profiler.report() {
+                    tracing::info!("XV-J-PROFILE {line}");
+                }
+            }
+            if let Some(t) = self.terrains.first() {
+                tracing::info!(
+                    "XV-J-RESIDENCY compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} aerial_lod_m=80",
+                    t.layer_textures.compressed,
+                    t.layer_textures.from_assets,
+                    t.layer_textures.resolution,
+                    t.layer_textures.extra_resolution,
+                    t.wetness,
+                    t.hex_tiling,
+                );
+            }
         }
         output.present();
 

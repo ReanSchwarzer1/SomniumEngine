@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://somnium.local/terrain/materials.schema.json",
+  "title": "Somnium terrain material manifest",
+  "description": "Source of truth for Phase XV terrain layers. Fail closed on hash, license, or channel mismatch.",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "access_date",
+    "user_agent",
+    "sidecar_version_when_shipping",
+    "layer_count",
+    "max_stored_nonzero_per_texel",
+    "packer_maps",
+    "layers"
+  ],
+  "properties": {
+    "manifest_version": { "type": "integer", "minimum": 1 },
+    "access_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "user_agent": { "type": "string", "minLength": 1 },
+    "sidecar_version_when_shipping": { "type": "integer", "const": 4 },
+    "layer_count": { "type": "integer", "const": 32 },
+    "max_stored_nonzero_per_texel": { "type": "integer", "const": 4 },
+    "license_policy": {
+      "type": "string",
+      "description": "Only CC0 1.0 Universal source materials may be fetched."
+    },
+    "packer_maps": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["diff", "nor_dx", "arm", "disp"] },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "polyhaven_files_key": {
+      "type": "object",
+      "description": "Poly Haven /files JSON key for each packer map.",
+      "properties": {
+        "diff": { "const": "Diffuse" },
+        "nor_dx": { "const": "nor_dx" },
+        "arm": { "const": "arm" },
+        "disp": { "const": "Displacement" }
+      }
+    },
+    "rejected_for_role": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rejectedAsset" }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/layer" }
+    }
+  },
+  "$defs": {
+    "rejectedAsset": {
+      "type": "object",
+      "required": ["planned_index", "id", "reason", "page_url", "substitute_id"],
+      "properties": {
+        "planned_index": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "id": { "type": "string" },
+        "reason": { "type": "string" },
+        "page_url": { "type": "string", "format": "uri" },
+        "substitute_id": { "type": ["string", "null"] },
+        "files_hash": { "type": "string" }
+      }
+    },
+    "fileRef": {
+      "type": "object",
+      "required": ["url", "bytes", "md5"],
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "md5": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Filled after a verified local download. Null until XV-B."
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "required": [
+        "index",
+        "id",
+        "display_name",
+        "compatibility_locked",
+        "source",
+        "page_url",
+        "license",
+        "license_url",
+        "authors",
+        "physical_width_m",
+        "colour_space",
+        "normal_convention",
+        "moisture_affinity",
+        "cliff_suitability",
+        "uv_scale_multiplier",
+        "files"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "id": { "type": "string" },
+        "display_name": { "type": "string" },
+        "role_tags": { "type": "array", "items": { "type": "string" } },
+        "biome_tags": { "type": "array", "items": { "type": "string" } },
+        "compatibility_locked": { "type": "boolean" },
+        "source": { "type": "string", "enum": ["polyhaven", "ambientcg"] },
+        "page_url": { "type": "string", "format": "uri" },
+        "license": { "const": "CC0-1.0" },
+        "license_url": { "type": "string", "format": "uri" },
+        "authors": { "type": "object", "additionalProperties": { "type": "string" } },
+        "files_hash": { "type": "string" },
+        "physical_width_m": { "type": "number", "exclusiveMinimum": 0 },
+        "physical_height_m": { "type": "number", "exclusiveMinimum": 0 },
+        "colour_space": { "const": "sRGB" },
+        "normal_convention": { "type": "string", "enum": ["DirectX", "OpenGL"] },
+        "moisture_affinity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cliff_suitability": { "type": "number", "minimum": 0, "maximum": 1 },
+        "uv_scale_multiplier": {
+          "type": "number",
+          "description": "Artistic multiplier on 1/physical_width_m. Shipping 0–7 currently tile at 4 m regardless of scan size."
+        },
+        "current_engine_tiling_per_m": { "type": "number" },
+        "blend": {
+          "type": "object",
+          "properties": {
+            "height_scale": { "type": "number" },
+            "blend_width": { "type": "number" },
+            "min_weight": { "type": "number" },
+            "parallax_depth_m": { "type": "number" }
+          }
+        },
+        "ambientcg_fallback": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "page_url": { "type": "string", "format": "uri" }
+          }
+        },
+        "notes": { "type": "string" },
+        "files": {
+          "type": "object",
+          "required": ["4k"],
+          "properties": {
+            "2k": { "$ref": "#/$defs/resolutionFiles" },
+            "4k": { "$ref": "#/$defs/resolutionFiles" }
+          }
+        }
+      }
+    },
+    "resolutionFiles": {
+      "type": "object",
+      "required": ["diff", "nor_dx", "arm", "disp"],
+      "properties": {
+        "diff": { "$ref": "#/$defs/fileRef" },
+        "nor_dx": { "$ref": "#/$defs/fileRef" },
+        "arm": { "$ref": "#/$defs/fileRef" },
+        "disp": { "$ref": "#/$defs/fileRef" }
+      }
+    }
+  }
+}

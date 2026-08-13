@@ -118,24 +118,44 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
-### 1.6 Terrain materials — Phase XV Appalachia (planned research only)
+### 1.6 Terrain materials — Phase XV Appalachia (A–J complete)
 
-**Status:** research-complete plan as of 2026-08-13. No sixteen-layer
-runtime, textures, or shaders yet. Controlling reference:
-`dev records/phase_XV.md`.
+**Status:** XV-A–I 2026-08-13; **XV-Zeta** 2026-08-13 (including aerial LOD and
+biome v3; live look signed off the same day). **XV-J complete** 2026-08-13
+([`dev records/phase XV/evidence/XV-J_compile_gate.md`](dev%20records/phase%20XV/evidence/XV-J_compile_gate.md)).
+BC7 encoder + visual A/B the same day
+([`dev records/phase XV/evidence/XV-BC7_visual_check.md`](dev%20records/phase%20XV/evidence/XV-BC7_visual_check.md)).
+Provenance:
+[`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md),
+[`dev records/phase XV/XV-Zeta_plan.md`](dev%20records/phase%20XV/XV-Zeta_plan.md).
+Controlling reference: `dev records/phase_XV.md`. Adapter freeze: NVIDIA
+GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74.
 
-| Reference | Pattern to study | Somnium target when implementing |
+| Reference | Pattern studied | Somnium implementation |
 |---|---|---|
-| O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local; VT at world scale | Sixteen global / strongest-four local; VT deferred |
-| Mikkelsen JCGT 2020 surface gradients + hex tiling | Correct layered/projected normal composition | Surface-gradient blend + existing hex path |
-| Godot 4.7.1 mip roughness / full-channel triplanar | Specular AA + complete projection | Independent Rust mip fixture; full-PBR biplanar cliffs |
-| Terrain3D wetness paint (MIT) | Wetness → roughness authoring | Moisture affinity + global wetness v1; paint later |
-| Hnat et al. porous wetting 2006 | Darken + gloss when wet | Landscape-kit dry/damp/wet validation |
-| Poly Haven / ambientCG CC0 | Photogrammetry materials with clear redistribution | Manifest-driven fetch; hashes; voluntary credit |
+| O3DE / Frostbite / Far Cry / CoD AVT talks | Many global materials, few local | **32** global / strongest-four local; eight RGBA splatmaps; VT still deferred |
+| O3DE / Frostbite unique colour | Distant identity is splat-weighted mean, not satellite overlay | `macro_map::from_splat` at 512², Lerp 0.55; Great Lakes `macro_color.png` is no longer auto-loaded |
+| Mikkelsen JCGT 2020 surface gradients + hex tiling | Layered/projected normal composition | Surface-gradient blend in `evaluate_terrain_material`; hex packed-surface counter-rotation |
+| Godot 4.7.1 mip roughness / full-channel projection | Specular AA + complete projection | Independent Toksvig fixture in `terrain/mips.rs`; full-PBR biplanar cliffs (POM off on that path) |
+| Bevy `bevy_triplanar_splatting` biplanar.wgsl | Two dominant axes | `terrain_projected_pbr` default biplanar, triplanar debug via `SOMNIUM_TERRAIN_TRIPLANAR` |
+| Terrain3D autoshade vs paint / wetness | Base rules + paint lock; porous wetting | `BiomePreset::appalachia` **v3** (warped FBM, overlapping cover, snow patches) + `splat_lock`; global wetness × per-layer moisture affinity |
+| Unreal Landscape / Fyrox terrain | Palette selects, stroke paints; mutually exclusive brushes | Inspector Terrain Paint vs Foliage Paint; palette click arms `BrushMode::Paint` |
+| GPU LOD / occupancy | Wave-uniform vs per-pixel sample-count branches | Aerial hex/POM via `gpu_material_for_camera` (uniform, 80 m above ground). Per-pixel `close`/`use_maps` compiled three paths and made walking slower — reverted |
+| Poly Haven / ambientCG CC0 | Photogrammetry with clear redistribution | `assets/terrain/materials.json`; `fetch_terrain` fail-closed MD5; layers 16 and 24 procedural (no CC0 lawn passed ΔE) |
+| Intel ISPC Texture Compressor via `intel_tex_2` 0.5 | Offline BC7 (alpha-aware; height/AO in A) | `somnium_renderer` example `encode_terrain_bc7`; runtime loads `assets/terrain/bc7/` when complete. Independent use; no compressor source copied |
 
-**Boundary:** pattern and citation only until XV is authorized. No third-party
-terrain plugin code is copied. Asset downloads require the Phase XV manifest
-gate.
+**Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
+CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
+references. Histogram-preserving blend and a painted wetness channel are not in
+this drop. XV-J is complete (`phase_XV-J_*.png` + wgpu freeze). Extra bank
+(16–31) loads at 1024; with BC7 packs, hero 0–15 stay 2048 (~213 MiB). RGBA8
+without packs still drops both banks to 1024 (341 MiB) unless
+`SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1`. Encoder: `encode_terrain_bc7` (ISPC via
+`intel_tex_2`). A/B: `SOMNIUM_TERRAIN_FORCE_RGBA8=1`. Record:
+[`dev records/phase XV/evidence/XV-BC7_visual_check.md`](dev%20records/phase%20XV/evidence/XV-BC7_visual_check.md).
+`GpuTerrainMaterial` is **1664** bytes. Snow cap is
+`relief * 0.48`. `WaterComponent::great_lakes` is frozen. Release overview
+shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
 
 ---
 

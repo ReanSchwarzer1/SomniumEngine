@@ -307,20 +307,20 @@ Current controls are two RGBA splatmaps and sidecar v2 `[u8; 8]`. The shader has
 
 ### 9.3 Proposed new materials
 
-The eight proposed additions are Poly Haven CC0 candidates. They are researched, not downloaded or committed:
+The eight proposed additions are Poly Haven CC0 candidates. They are researched, not downloaded or committed. XV-A first-party audit (2026-08-13; [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md)) substituted two IDs before download:
 
 | Index | Asset | Intended role | Source |
 |---:|---|---|---|
 | 8 | `aerial_sand` | Dry beach sand | <https://polyhaven.com/a/aerial_sand> |
 | 9 | `coast_sand_01` | Damp shoreline sand | <https://polyhaven.com/a/coast_sand_01> |
 | 10 | `dry_mud_field_001` | Dry earth/topsoil | <https://polyhaven.com/a/dry_mud_field_001> |
-| 11 | `terrain_red_01` | Red mineral soil | <https://polyhaven.com/a/terrain_red_01> |
+| 11 | `cracked_red_ground` | Red mineral clay | <https://polyhaven.com/a/cracked_red_ground> — substituted for `terrain_red_01` (crushed reddish gravel, overlapping layer 7 `gravel_floor`) |
 | 12 | `sparse_grass` | Sparse grass/exposed soil | <https://polyhaven.com/a/sparse_grass> |
 | 13 | `mossy_rock` | Wet/mossy mountain rock | <https://polyhaven.com/a/mossy_rock> |
 | 14 | `rock_face_03` | Rugged vertical cliff | <https://polyhaven.com/a/rock_face_03> |
-| 15 | `dry_riverbed_rock` | Talus/river stone | <https://polyhaven.com/a/dry_riverbed_rock> |
+| 15 | `ganges_river_pebbles` | Talus/river stone | <https://polyhaven.com/a/ganges_river_pebbles> — substituted for `dry_riverbed_rock` (rock face, overlapping dedicated cliff) |
 
-Candidate substitution is allowed only after a visual/channel audit and only with another unambiguously redistributable CC0 material. Update the manifest and attribution if any candidate changes.
+Candidate substitution is allowed only after a visual/channel audit and only with another unambiguously redistributable CC0 material. Update the manifest and attribution if any candidate changes. Failed IDs remain in the draft manifest `rejected_for_role` list.
 
 ### 9.4 Core architecture decision
 
@@ -343,7 +343,7 @@ Candidate substitution is allowed only after a visual/channel audit and only wit
 
 ### 9.5 Why top four
 
-O3DE supports many global surface materials but evaluates only a few locally; its documentation describes top-three blending and local source uses compact IDs. Somnium chooses top four initially to preserve four-way junctions while retaining a strict cost bound. It must be compared against both top three and an offline all-layer reference.
+O3DE supports many global surface materials but evaluates only a few locally. Official docs say top-three blending; **local source** (`TerrainRenderer/TerrainDetailMaterialManager.cpp`) stores **top-two IDs** + relative blend and gathers neighbours. Somnium keeps four **direct** splatmaps (not indexed IDs) to preserve four-way junctions. It must be compared against both top three and an offline all-layer reference.
 
 With two packed maps, three hex samples, and four selected layers, the base worst case is 24 material-map taps rather than the current 48. A steep projected path may reach 36. The plan also defines average-tap, timing, memory, and image-error gates.
 

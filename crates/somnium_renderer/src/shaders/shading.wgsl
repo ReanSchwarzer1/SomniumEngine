@@ -324,6 +324,13 @@ fn sample_shadow_cascade(
     let rotation = interleaved_gradient_noise(pixel, u32(light.shadow_map_size) % 64u)
         * 6.28318530;
 
+    // Bit 1 of shading_mode: PCSS. Off is a single comparison so shadows still
+    // exist without the 16+24 tap filter.
+    if (cluster_params.shading_mode & 2u) == 0u {
+        return textureSampleCompare(
+            shadow_atlas, shadow_sampler, atlas_coord, compare_depth);
+    }
+
     // Search radius scales with the sun's angular size: a larger source casts
     // wider penumbrae, so it has to look further for blockers.
     let search_radius = max(light.sun_angular_radius * 40.0, 2.0) * texel_size;
@@ -473,7 +480,10 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
     // Contact shadows only ever darken. The shadow map is authoritative for
     // everything at its own scale; this fills in below that scale.
-    shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
+    // Bit 2 of shading_mode: contact march. Default on.
+    if (cluster_params.shading_mode & 4u) != 0u {
+        shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
+    }
 
     // Blend over the last 10% of the cascade's range.
     //
@@ -840,12 +850,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // things, and GTAO cannot see detail below a pixel.
         surface.occlusion = surface.occlusion * terrain.occlusion;
         terrain_taps = terrain.taps;
+        terrain_discarded = terrain.discarded;
+        terrain_selected_rgb = terrain.selected_rgb;
+        terrain_weight_rgb = terrain.weight_rgb;
         terrain_parallax_shadow_factor = terrain.parallax_shadow;
     }
 
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
+    if material.terrain_index >= 0 {
+        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
+    }
 
     // ── Shadow factor ────────────────────────────────────────────────────────
     // View-space depth: positive Z distance from camera.
@@ -858,14 +874,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let traced = textureLoad(restir_vis, pixel_coords, 0);
     // Bias follows the actual triangle plane, not interpolated vertex data, a
     // normal map, or a foliage card's synthetic curvature.
-    var shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy);
-    // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
-    // into the shadow factor rather than added anywhere else, because that is
-    // exactly what it is — a second occluder between this point and the sun,
-    // one too small for the shadow map to have ever resolved.
-    shadow_factor = shadow_factor * terrain_parallax_shadow_factor;
+    //
+    // When ReSTIR DI wrote a result, that *is* the sun visibility — PCSS was
+    // previously still evaluated and then discarded, which also threw away
+    // POM self-shadow. Skip the filter and keep the relief term.
+    var shadow_factor: f32;
     if traced.a > 0.5 {
-        shadow_factor = traced.r;
+        shadow_factor = traced.r * terrain_parallax_shadow_factor;
+    } else {
+        shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy)
+            * terrain_parallax_shadow_factor;
     }
 
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
@@ -894,10 +912,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
     }
 
-    // 12 = terrain layer taps as a fraction of the 48-tap worst case
-    // (Phase 25D). Written straight to the HDR target before exposure, so the
-    // capture harness's mean terrain luminance times 48 *is* the mean taps per
-    // pixel — which is how the detail budget gets a number instead of a claim.
+    // 12 = terrain layer taps as a fraction of the 36-tap worst case
+    // (Phase XV-D). Written straight to the HDR target before exposure, so the
+    // capture harness's mean terrain luminance times TERRAIN_MAX_TAPS *is* the
+    // mean taps per pixel — which is how the detail budget gets a number
+    // instead of a claim.
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
     }
@@ -930,6 +949,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if light._pad2_z > 16.5 && light._pad2_z < 17.5 {
         let contact = contact_shadow(hit_point, shadow_normal, normalize(light.direction), in.clip_pos.xy);
         return vec4<f32>(vec3<f32>(contact), 1.0);
+    }
+    // 18 = splat weight discarded by strongest-four (XV-D).
+    if light._pad2_z > 17.5 && light._pad2_z < 18.5 {
+        return vec4<f32>(vec3<f32>(terrain_discarded * 4.0), 1.0);
+    }
+    // 19 = first three selected layer indices, 0..1 over layers 0–15.
+    if light._pad2_z > 18.5 && light._pad2_z < 19.5 {
+        return vec4<f32>(terrain_selected_rgb, 1.0);
+    }
+    // 20 = raw strongest-four weights of the first three selected layers.
+    if light._pad2_z > 19.5 && light._pad2_z < 20.5 {
+        return vec4<f32>(terrain_weight_rgb, 1.0);
+    }
+    // 21 = dominant selected-layer albedo (solo).
+    if light._pad2_z > 20.5 && light._pad2_z < 21.5 {
+        return vec4<f32>(terrain_dominant_albedo, 1.0);
+    }
+    // 22 = cliff projection blend.
+    if light._pad2_z > 21.5 && light._pad2_z < 22.5 {
+        return vec4<f32>(vec3<f32>(terrain_cliff_blend_dbg), 1.0);
+    }
+    // 23 = wetness factor (moisture affinity × global wetness).
+    if light._pad2_z > 22.5 && light._pad2_z < 23.5 {
+        return vec4<f32>(vec3<f32>(terrain_wetness_factor), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
@@ -983,7 +1026,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ── Shading ───────────────────────────────────────────────────────────────
     var result: vec3<f32>;
 
-    if cluster_params.shading_mode == 1u {
+    if (cluster_params.shading_mode & 1u) == 1u {
         // ── Cel-shading path ─────────────────────────────────────────────────
         let NdotL = max(dot(surface.normal, normalize(light.direction)), 0.0);
 

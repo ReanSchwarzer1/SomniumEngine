@@ -27,20 +27,62 @@ If you redistribute a build that includes `DamagedHelmet.glb`, credit must be gi
 original author as specified by the CC-BY-NC 4.0 license terms.  See the full license at
 <https://creativecommons.org/licenses/by-nc/4.0/>.
 
-## assets/terrain/ — terrain materials (Phase 25K)
+## assets/terrain/ — terrain materials (Phase 25K / XV)
 
-**Assets:** `aerial_grass_rock`, `leafy_grass`, `forrest_ground_01`, `brown_mud`,
-`aerial_rocks_04`, `snow_02`, `coast_sand_rocks_02`, `gravel_floor`
-**Author:** Rob Tuytel, Rico Cilliers and contributors
 **License:** CC0 1.0 Universal (public domain dedication)
 **Source:** [Poly Haven](https://polyhaven.com/textures) — <https://polyhaven.com/license>
+**Manifest:** [`terrain/materials.json`](terrain/materials.json)
 
-CC0 imposes no attribution requirement; the credit above is given anyway, and the
-licence is the reason this source was chosen over the larger commercial libraries.
+CC0 imposes no attribution requirement; the credit below is given anyway, and
+the licence is the reason this source was chosen over commercial libraries.
 
-`aerial_rocks_04` is deliberately the same texture the bgfx hex-tile example
-ships with, so Phase 25F can be judged against the material its own reference
-was tuned on.
+Sixteen shipping layers (indices 0–7 compatibility-locked from Phase 25K),
+plus XV-H 8–15, plus XV-Zeta photographed 17–23 and 25–31. Layers **16**
+(lush lawn) and **24** (wildgrass) stay procedural: Poly Haven `grass_path_2`
+/ `grass_path_3` failed the ochre ΔE gate.
+
+| # | id | display | authors |
+|---|----|---------|---------|
+| 0 | `aerial_grass_rock` | Grass | Rob Tuytel |
+| 1 | `forrest_ground_01` | Forest Floor | Rob Tuytel |
+| 2 | `aerial_rocks_04` | Rock (legacy cliff) | Rob Tuytel |
+| 3 | `snow_02` | Snow | Rob Tuytel |
+| 4 | `leafy_grass` | Meadow | Charlotte Baglioni |
+| 5 | `brown_mud` | Mud | Rob Tuytel |
+| 6 | `coast_sand_rocks_02` | Sand | Rob Tuytel |
+| 7 | `gravel_floor` | Gravel | Matterfield (photography), Jenelle van Heerden (processing) |
+| 8 | `aerial_sand` | Dry Beach Sand | Rob Tuytel |
+| 9 | `coast_sand_01` | Damp Shoreline Sand | Rob Tuytel |
+| 10 | `dry_mud_field_001` | Dry Earth | Rob Tuytel (photography), Rico Cilliers (processing) |
+| 11 | `cracked_red_ground` | Red Mineral Soil | Amal Kumar |
+| 12 | `sparse_grass` | Sparse Grass | Amal Kumar |
+| 13 | `mossy_rock` | Mossy Rock | Rob Tuytel |
+| 14 | `rock_face_03` | Cliff Face | Dario Barresi (photography), Rico Cilliers (processing) |
+| 15 | `ganges_river_pebbles` | Talus / River Stone | Amal Kumar |
+| 16 | *(procedural)* | Lush Lawn | Somnium (no CC0 lawn passed ΔE) |
+| 17 | `leaves_forest_ground` | Conifer Duff | Dimitrios Savva (photography), Dario Barresi (processing) |
+| 18 | `aerial_rocks_01` | Cool Gray Rock | Rob Tuytel |
+| 19 | `rock_wall_02` | Dark Slate | Rob Tuytel |
+| 20 | `forest_ground_05` | Moss Carpet | Charlotte Baglioni |
+| 21 | `rock_boulder_dry` | Limestone | Dimitrios Savva (photography), Rico Cilliers (processing) |
+| 22 | `dirt_floor` | Dark Loam | eye-candy.xyz |
+| 23 | `forest_leaves_02` | Pine Litter | Rob Tuytel |
+| 24 | *(procedural)* | Wildgrass | Somnium (no CC0 meadow passed ΔE) |
+| 25 | `forest_ground_06` | Wetland | Charlotte Baglioni |
+| 26 | `gray_rocks` | Gray Talus | Dimitrios Savva |
+| 27 | `aerial_beach_01` | Light Dune | Rob Tuytel |
+| 28 | `lichen_rock` | Lichen Rock | Rico Cilliers |
+| 29 | `forest_floor` | Autumn Litter | eye-candy.xyz |
+| 30 | `grassy_cobblestone` | Packed Path | Charlotte Baglioni (photography), Dario Barresi (processing) |
+| 31 | `snow_01` | Hard Snow | Rob Tuytel |
+
+`terrain_red_01` and `dry_riverbed_rock` were rejected for role overlap and are
+not shipping layers. Substitutes are `cracked_red_ground` and
+`ganges_river_pebbles`. See `dev records/phase XV/XV-A_research.md`.
+
+`aerial_rocks_04` remains the same texture the bgfx hex-tile example ships
+with, so Phase 25F can still be judged against its own reference. Layer 14 is
+the dedicated XV-F cliff face; layer 2 keeps its legacy meaning.
 
 ### How to obtain
 
@@ -48,12 +90,13 @@ The committed `*_albedo.png` / `*_surface.png` pairs are channel-packed and are
 what the engine loads. To regenerate them from source:
 
 ```
-./tools/fetch_terrain_textures.sh 4k     # downloads 32 maps (~300 MB) to _source/
-cargo run --release -p somnium_asset --example pack_terrain
+cargo run --release -p somnium_asset --example fetch_terrain -- 4k
+cargo run --release -p somnium_asset --example pack_terrain -- 4k
 ```
 
 Pass `2k` to both steps for a quarter of the size at terrain viewing distances.
-`_source/` is git-ignored — only the packed result is committed.
+`_source/` is git-ignored — only the packed result is committed. The fetcher
+fail-closes on MD5 mismatch and writes SHA-256 into `_source/FETCH_REPORT.json`.
 
 | packed texture   | R        | G        | B         | A      |
 |------------------|----------|----------|-----------|--------|
@@ -61,7 +104,8 @@ Pass `2k` to both steps for a quarter of the size at terrain viewing distances.
 | `*_surface.png`  | normal X | normal Y | roughness | AO     |
 
 Normal Z is reconstructed in the shader; metalness is dropped because terrain
-layers are dielectric.
+layers are dielectric. Runtime default is 2K (`SOMNIUM_TERRAIN_RES`); committed
+packs are 4K. Semantic mips are generated at load.
 
 ## assets/terrain/great_lakes/ — default landscape (Phase IV-B)
 

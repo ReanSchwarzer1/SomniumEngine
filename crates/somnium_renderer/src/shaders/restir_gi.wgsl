@@ -139,18 +139,24 @@ struct GiHit {
 fn gi_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
     let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
-    let w_lo = textureSampleLevel(textures[tm.splat_map], default_sampler, uv, 0.0);
-    let w_hi = textureSampleLevel(textures[tm.splat_map_hi], default_sampler, uv, 0.0);
-    let total = max(
-        w_lo.x + w_lo.y + w_lo.z + w_lo.w + w_hi.x + w_hi.y + w_hi.z + w_hi.w,
-        0.0001,
-    );
-    var c = vec3<f32>(0.0);
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        c += tm.layer_albedo[i].rgb * w_lo[i];
-        c += tm.layer_albedo[i + 4u].rgb * w_hi[i];
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
     }
-    return c / total;
+    let weight = terrain_unpack_splats(splat_s);
+    let selected = terrain_strongest_four(weight);
+    var c = vec3<f32>(0.0);
+    var total = 0.0;
+    var moisture = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        c += tm.layer_albedo[i].rgb * weight[i];
+        moisture += terrain_moisture(tm, i) * weight[i];
+        total += weight[i];
+    }
+    let wet = saturate(tm.wetness * moisture / max(total, 0.0001));
+    return (c / max(total, 0.0001)) * mix(1.0, tm.wetness_darken, wet);
 }
 
 /// Trace one ray and resolve what it hit into a shadeable surface.

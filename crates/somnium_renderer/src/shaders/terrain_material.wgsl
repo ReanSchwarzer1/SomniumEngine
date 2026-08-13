@@ -17,58 +17,42 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (256 bytes). Every vec4 sits on a
-// 16-byte offset; see the Rust struct for why that is load-bearing.
+// Mirrors `terrain::GpuTerrainMaterial` (1664 bytes, Phase XV-Zeta). Every vec4 sits
+// on a 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
-    // Phase 25L: eight layers. Arrays of vec4 rather than a flat array, so the
-    // WGSL layout matches Rust's `repr(C)` packing without per-element padding
-    // — WGSL gives a bare `array<f32, 8>` a 16-byte stride.
-    layer_tiling: array<vec4<f32>, 2>,
-    // xy = brush world XZ, z = radius, w = mode
-    // (0 off, 1 sculpt, 2 layer paint, 3 foliage).
+    layer_tiling: array<vec4<f32>, 8>,
     brush: vec4<f32>,
-    albedo_maps: array<vec4<i32>, 2>,
-    surface_maps: array<vec4<i32>, 2>,
+    albedo_maps: array<vec4<i32>, 8>,
+    surface_maps: array<vec4<i32>, 8>,
     terrain_origin: vec2<f32>,
     inv_world_size: vec2<f32>,
-    splat_map: i32,
-    splat_map_hi: i32,
+    splat_maps: array<vec4<i32>, 2>,
     cliff_layer: u32,
-    /// Phase 25F: non-zero applies stochastic hex-tiling to the layer maps.
     hex_tiling: u32,
-    /// Phase 25E per-layer blend parameters. Same vec4-pair packing as
-    /// `layer_tiling`, and for the same alignment reason.
-    layer_height_scale: array<vec4<f32>, 2>,
-    layer_blend_width: array<vec4<f32>, 2>,
-    layer_weight_clamp: array<vec4<f32>, 2>,
-    /// Non-zero runs the height-weighted blend; zero is the plain splat blend.
     height_blend: u32,
-    /// Phase 25D: the macro tier.
     macro_map: i32,
+    layer_height_scale: array<vec4<f32>, 8>,
+    layer_blend_width: array<vec4<f32>, 8>,
+    layer_weight_clamp: array<vec4<f32>, 8>,
+    layer_parallax: array<vec4<f32>, 8>,
     macro_mode: u32,
     macro_strength: f32,
-    /// Metres over which the per-pixel layer budget falls away.
     detail_fade_start: f32,
     detail_fade_end: f32,
-    // Three scalars, deliberately not a `vec3<u32>`: a vec3 aligns to 16, so it
-    // would land at offset 256 and give the struct a 272-byte stride against
-    // Rust's 256 — every terrain past index 0 would then decode from the wrong
-    // words. Same trap as the one the header warns about, one field further on.
-    _pad0: u32,
-    _pad1: u32,
-    /// Phase 24L: mean linear albedo per layer, for indirect bounces.
-    layer_albedo: array<vec4<f32>, 8>,
-    /// Phase 25H: relief depth per layer, in metres. Packed as vec4 pairs for
-    /// the same alignment reason as every other per-layer array here.
-    layer_parallax: array<vec4<f32>, 2>,
+    layer_albedo: array<vec4<f32>, 32>,
     parallax_steps: u32,
     parallax_shadow_steps: u32,
-    _pad4: u32,
-    _pad5: u32,
+    projection_sharpness: f32,
+    projection_mode: u32,
+    layer_moisture: array<vec4<f32>, 8>,
+    wetness: f32,
+    wetness_darken: f32,
+    wetness_gloss: f32,
+    wetness_f0: f32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
-const TERRAIN_LAYERS: u32 = 8u;
+const TERRAIN_LAYERS: u32 = 32u;
 
 /// Below this weight a layer cannot change the result, so it is not sampled.
 ///
@@ -109,6 +93,57 @@ fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
 
 fn terrain_parallax_depth(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_parallax[layer / 4u][layer % 4u];
+}
+
+fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
+    return tm.layer_moisture[layer / 4u][layer % 4u];
+}
+
+fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
+    var w = array<f32, 32>();
+    var total = 0.0;
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let v = s[g];
+        let base = g * 4u;
+        w[base + 0u] = v.x;
+        w[base + 1u] = v.y;
+        w[base + 2u] = v.z;
+        w[base + 3u] = v.w;
+        total += v.x + v.y + v.z + v.w;
+    }
+    total = max(total, 0.0001);
+    for (var i = 0u; i < 32u; i = i + 1u) {
+        w[i] = w[i] / total;
+    }
+    return w;
+}
+
+/// Deterministic strongest-four. Lower index wins ties.
+fn terrain_strongest_four(weight: array<f32, 32>) -> array<u32, 4> {
+    var used = array<bool, 32>();
+    var out = array<u32, 4>(0u, 0u, 0u, 0u);
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        var best = -1.0;
+        var idx = 0u;
+        for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+            if !used[i] && weight[i] > best {
+                best = weight[i];
+                idx = i;
+            }
+        }
+        used[idx] = true;
+        out[s] = idx;
+    }
+    return out;
+}
+
+fn ts_to_surfgrad(n_ts: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>) -> vec3<f32> {
+    let g = n_ts.xy / max(n_ts.z, 0.2);
+    return tangent * g.x + bitangent * g.y;
+}
+
+fn resolve_surfgrad(n_geo: vec3<f32>, g: vec3<f32>) -> vec3<f32> {
+    return normalize(n_geo - g);
 }
 
 // ── Parallax occlusion mapping (Phase 25H) ───────────────────────────────────
@@ -264,14 +299,20 @@ fn terrain_parallax_shadow(
 /// and threading it through the shared surface struct would put a debug counter
 /// in the path of every mesh in the scene.
 var<private> terrain_taps: u32 = 0u;
+var<private> terrain_discarded: f32 = 0.0;
+var<private> terrain_selected_rgb: vec3<f32> = vec3<f32>(0.0);
+var<private> terrain_weight_rgb: vec3<f32> = vec3<f32>(0.0);
+var<private> terrain_wetness_factor: f32 = 0.0;
+var<private> terrain_cliff_blend_dbg: f32 = 0.0;
+var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
+var<private> terrain_wet_f0: f32 = 0.0;
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
 
-/// The worst case a pixel can pay — eight layers, two maps each, three hex taps
-/// per map. Debug mode 12 scales by this so the heatmap reads as a fraction of
-/// the old fixed cost.
-const TERRAIN_MAX_TAPS: f32 = 48.0;
+/// The worst case a pixel can pay — four selected layers, two maps each, three
+/// hex taps, plus a biplanar cliff (4 extra). Debug mode 12 scales by this.
+const TERRAIN_MAX_TAPS: f32 = 36.0;
 
 /// What the terrain material contributes to the shared `Surface`.
 struct TerrainSurface {
@@ -285,6 +326,12 @@ struct TerrainSurface {
     /// debug mode 12 and for nothing else — it is what makes "detail cost
     /// scales with screen area" a measurement rather than a claim.
     taps: u32,
+    /// Splat weight dropped by strongest-four (XV-D debug mode 18).
+    discarded: f32,
+    /// First three selected layer indices / 15 (debug mode 19).
+    selected_rgb: vec3<f32>,
+    /// Raw strongest-four weights of the first three (debug mode 20).
+    weight_rgb: vec3<f32>,
     roughness: f32,
     normal: vec3<f32>,
     /// Phase 25K: real per-material ambient occlusion, packed alongside the
@@ -327,7 +374,13 @@ fn terrain_sample_layer(
     var surf: vec4<f32>;
     if hex {
         a = hex_sample(albedo_map, uv, ddx, ddy);
-        surf = hex_sample(surface_map, uv, ddx, ddy);
+        let hs = hex_sample_packed_surface(surface_map, uv, ddx, ddy);
+        s.albedo = a.rgb;
+        s.height = a.a;
+        s.roughness = hs.roughness;
+        s.occlusion = hs.occlusion;
+        s.normal_ts = hs.normal_ts;
+        return s;
     } else {
         a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
         surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
@@ -438,36 +491,103 @@ fn terrain_detail_fade(tm: TerrainMaterial, distance: f32) -> f32 {
     );
 }
 
-/// Triplanar sample of one layer's albedo: project along the three axes and
-/// blend by a sharpened normal weight. Used on cliffs, where a heightfield's
-/// top-down UV stretches into vertical streaks.
-fn terrain_triplanar_albedo(
+fn terrain_sample_projected_maps(
+    tm: TerrainMaterial,
+    layer: u32,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> TerrainLayerSample {
+    var s: TerrainLayerSample;
+    let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
+    let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
+    let a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
+    let surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
+    s.albedo = a.rgb;
+    s.height = a.a;
+    s.roughness = surf.b;
+    s.occlusion = surf.a;
+    let nxy = surf.rg * 2.0 - 1.0;
+    s.normal_ts = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
+    return s;
+}
+
+/// Full-PBR biplanar (default) or triplanar (debug) projection.
+/// Height is used for blending only — no POM on this path.
+fn terrain_projected_pbr(
     tm: TerrainMaterial,
     layer: u32,
     world_pos: vec3<f32>,
     n: vec3<f32>,
     tiling: f32,
-) -> vec3<f32> {
-    var w = pow(abs(n), vec3(4.0));
-    w = w / (w.x + w.y + w.z);
-    let map = textures[tm.albedo_maps[layer / 4u][layer % 4u]];
-    let cx = textureSample(map, default_sampler, world_pos.zy * tiling).rgb;
-    let cy = textureSample(map, default_sampler, world_pos.xz * tiling).rgb;
-    let cz = textureSample(map, default_sampler, world_pos.xy * tiling).rgb;
-    return cx * w.x + cy * w.y + cz * w.z;
+    world_ddx: vec2<f32>,
+    world_ddy: vec2<f32>,
+) -> TerrainLayerSample {
+    let p = world_pos * tiling;
+    let dpdx = vec3<f32>(world_ddx.x, 0.0, world_ddx.y) * tiling;
+    let dpdy = vec3<f32>(world_ddy.x, 0.0, world_ddy.y) * tiling;
+    let k = max(tm.projection_sharpness, 1.0);
+    var w = pow(abs(n), vec3(k));
+    // Drop the weakest axis for biplanar; keep all three for the debug path.
+    if tm.projection_mode == 0u {
+        if w.x <= w.y && w.x <= w.z {
+            w.x = 0.0;
+        } else if w.y <= w.z {
+            w.y = 0.0;
+        } else {
+            w.z = 0.0;
+        }
+    }
+    w = w / max(w.x + w.y + w.z, 1e-4);
+
+    var out: TerrainLayerSample;
+    out.albedo = vec3(0.0);
+    out.height = 0.0;
+    out.roughness = 0.0;
+    out.occlusion = 0.0;
+    out.normal_ts = vec3(0.0, 0.0, 1.0);
+    var n_world = vec3(0.0);
+
+    if w.x > 0.001 {
+        let s = terrain_sample_projected_maps(
+            tm, layer, p.zy, dpdx.zy, dpdy.zy);
+        out.albedo += s.albedo * w.x;
+        out.height += s.height * w.x;
+        out.roughness += s.roughness * w.x;
+        out.occlusion += s.occlusion * w.x;
+        let t = vec3(0.0, 1.0, 0.0);
+        let b = vec3(0.0, 0.0, 1.0) * sign(n.x);
+        n_world += normalize(t * s.normal_ts.x + b * s.normal_ts.y + vec3(sign(n.x), 0.0, 0.0) * s.normal_ts.z) * w.x;
+    }
+    if w.y > 0.001 {
+        let s = terrain_sample_projected_maps(
+            tm, layer, p.xz, dpdx.xz, dpdy.xz);
+        out.albedo += s.albedo * w.y;
+        out.height += s.height * w.y;
+        out.roughness += s.roughness * w.y;
+        out.occlusion += s.occlusion * w.y;
+        let t = vec3(1.0, 0.0, 0.0);
+        let b = vec3(0.0, 0.0, 1.0) * sign(n.y);
+        n_world += normalize(t * s.normal_ts.x + b * s.normal_ts.y + vec3(0.0, sign(n.y), 0.0) * s.normal_ts.z) * w.y;
+    }
+    if w.z > 0.001 {
+        let s = terrain_sample_projected_maps(
+            tm, layer, p.xy, dpdx.xy, dpdy.xy);
+        out.albedo += s.albedo * w.z;
+        out.height += s.height * w.z;
+        out.roughness += s.roughness * w.z;
+        out.occlusion += s.occlusion * w.z;
+        let t = vec3(1.0, 0.0, 0.0);
+        let b = vec3(0.0, 1.0, 0.0) * sign(n.z);
+        n_world += normalize(t * s.normal_ts.x + b * s.normal_ts.y + vec3(0.0, 0.0, sign(n.z)) * s.normal_ts.z) * w.z;
+    }
+    n_world = normalize(n_world);
+    // Store as a tangent-space perturbation against +Y so the caller can
+    // compose it with the heightfield TBN via surface gradients.
+    out.normal_ts = vec3(n_world.x, n_world.z, max(n_world.y, 0.2));
+    return out;
 }
 
-/// Evaluate the terrain surface at a world-space point.
-///
-/// `splat_uv` is the terrain-global [0,1] coordinate carried in the chunk
-/// vertices, which the shading pass interpolates like any other UV — one of the
-/// things that made moving terrain into the visibility buffer cheap.
-/// `world_ddx` / `world_ddy` are the screen-space derivatives of the world
-/// position, taken in the caller where control flow is uniform. The layer UVs
-/// are `local_xz * tiling`, so their derivatives are these scaled by the same
-/// rate — which the hex-tiled path needs explicitly, since each of its taps
-/// reads a different part of the texture and implicit derivatives would be
-/// computed across that discontinuity.
 fn evaluate_terrain_material(
     terrain_index: u32,
     world_pos: vec3<f32>,
@@ -478,61 +598,64 @@ fn evaluate_terrain_material(
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
 
-    // Eight weights from two RGBA splatmaps, normalised together.
-    let w_lo = textureSample(textures[tm.splat_map], default_sampler, splat_uv);
-    let w_hi = textureSample(textures[tm.splat_map_hi], default_sampler, splat_uv);
-    let total = max(
-        w_lo.x + w_lo.y + w_lo.z + w_lo.w + w_hi.x + w_hi.y + w_hi.z + w_hi.w,
-        0.0001,
-    );
-    var weight = array<f32, 8>(
-        w_lo.x / total, w_lo.y / total, w_lo.z / total, w_lo.w / total,
-        w_hi.x / total, w_hi.y / total, w_hi.z / total, w_hi.w / total,
-    );
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSample(textures[id], default_sampler, splat_uv);
+    }
+    var weight = terrain_unpack_splats(splat_s);
+    let selected = terrain_strongest_four(weight);
+    var kept = 0.0;
+    var gated = array<f32, 32>();
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        gated[i] = weight[i];
+        kept += weight[i];
+    }
+    let discarded = 1.0 - kept;
+    let selected_rgb = vec3<f32>(
+        f32(selected[0]), f32(selected[1]), f32(selected[2])) / 31.0;
+    let weight_rgb = vec3<f32>(
+        weight[selected[0]], weight[selected[1]], weight[selected[2]]);
+    kept = max(kept, 0.0001);
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        weight[i] = gated[i] / kept;
+    }
 
     let local_xz = world_pos.xz - tm.terrain_origin;
-
-    // Phase 25D: the per-pixel layer budget falls with distance. What comes
-    // off is *layers*, not taps per layer.
-    //
-    // Dropping hex-tiling past the fade was tried first, on the reasoning that
-    // three taps per map exist to hide a repetition already below a pixel at
-    // that range. It is wrong, and the A/B showed it as a hard lattice across
-    // the whole mid-ground: at distance a 4 m tile is a few pixels wide, so the
-    // repetition does not vanish — it beats against the pixel grid and becomes
-    // *more* visible than it is close up. Hex-tiling is what removes that, and
-    // it earns its taps furthest away. The layer gate was doing nearly all of
-    // the saving anyway.
     let view_distance = distance(world_pos, view.camera_pos);
     let fade = terrain_detail_fade(tm, view_distance);
     let epsilon = mix(LAYER_WEIGHT_EPSILON, FAR_LAYER_EPSILON, fade);
-    let hex = tm.hex_tiling != 0u;
+    // Hex stays on at walking distance. Past ~80% of the detail fade (about
+    // 330 m with the default 60–400 m window) a pixel already covers many
+    // tiles and the unique-colour macro owns the hue — three rotated taps
+    // buy nothing the eye can resolve.
+    //
+    // Do **not** branch sampling on a per-pixel close/far flag. That compiles
+    // hex, non-hex, and a mean-albedo path into one shader; warps then pay
+    // the union, and walking got *slower*. Aerial cut is a uniform: the CPU
+    // zeros `hex_tiling` / `parallax_steps` when the camera is high.
+    let hex = tm.hex_tiling != 0u && fade < 0.8;
 
-    // ── Parallax occlusion (Phase 25H) ───────────────────────────────────────
-    // The tangent frame is built here rather than at the bottom with the normal
-    // mapping, because the march needs it. Axis-aligned by construction: the
-    // terrain's UVs are world XZ, so the tangent is +X projected onto the
-    // surface.
     let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
     let bitangent = cross(geo_normal, tangent);
 
-    // Parallax is worthless past a few metres — the displacement falls below a
-    // pixel long before the texture does — and it is the most expensive thing
-    // in this shader. The step count rides 25D's existing distance fade to
-    // zero, so the two budgets are one budget.
+    let steepness = 1.0 - abs(geo_normal.y);
+    let cliff_blend = smoothstep(0.45, 0.7, steepness);
+    // Projected cliffs cannot POM — the march is UV-space and the projection
+    // is world-space. Godot makes the same exclusion.
+    let allow_pom = cliff_blend < 0.05;
+
     var parallax_shadow = 1.0;
     var march_xz = vec2<f32>(0.0);
     let parallax_steps = f32(tm.parallax_steps) * (1.0 - fade);
-    if parallax_steps >= 1.0 {
-        // One layer's height field, not a blend of eight. Marching a blended
-        // height would mean sampling every contributing layer at every step —
-        // eight times the cost of the most expensive loop in the frame — and
-        // at any given texel the splat is dominated by one material anyway.
-        // The offset is then shared by all layers, which is exactly right:
-        // they are all lying on the same piece of ground.
-        var dominant = 0u;
+    // Fewer than four remaining steps is a mip-0 march for relief the pixel
+    // cannot resolve. Near ground keeps the full 24-step count.
+    if allow_pom && parallax_steps >= 4.0 {
+        var dominant = selected[0];
         var best = -1.0;
-        for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        for (var s = 0u; s < 4u; s = s + 1u) {
+            let i = selected[s];
             if weight[i] > best {
                 best = weight[i];
                 dominant = i;
@@ -553,124 +676,129 @@ fn evaluate_terrain_material(
                 tm, dominant, local_xz + march_xz, tiling, light_ts,
                 tangent.xz, bitangent.xz, depth, tm.parallax_shadow_steps,
             );
-            // Fade the self-shadow out with the march, or it would pop off at
-            // the distance the step count reaches zero.
             parallax_shadow = mix(parallax_shadow, 1.0, fade);
         }
     }
-    // Every layer samples the displaced position. One offset, in metres, and
-    // each layer scales it by its own tiling exactly as it scales the position.
     let parallax_xz = local_xz + march_xz;
 
-    // Sample every layer that can still affect the pixel. Nothing below the
-    // gate may be read afterwards, because `samples[i]` for a skipped layer
-    // holds whatever the previous iteration left there.
-    var samples: array<TerrainLayerSample, 8>;
-    var adjusted: array<f32, 8>;
+    var samples: array<TerrainLayerSample, 4>;
+    var adjusted: array<f32, 4>;
     var taps = 0u;
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
         if weight[i] < epsilon {
-            adjusted[i] = 0.0;
+            adjusted[s] = 0.0;
             continue;
         }
         let tiling = terrain_layer_tiling(tm, i);
-        samples[i] = terrain_sample_layer(
+        samples[s] = terrain_sample_layer(
             tm, i, parallax_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         taps += select(2u, 6u, hex);
         if tm.height_blend != 0u {
-            adjusted[i] = terrain_append_height(tm, i, weight[i], samples[i].height);
+            adjusted[s] = terrain_append_height(tm, i, weight[i], samples[s].height);
         } else {
-            adjusted[i] = weight[i];
+            adjusted[s] = weight[i];
         }
     }
 
-    // Depth blend (Phase 25E, O3DE `GetDetailSurface`). Only materials within
-    // their own transition band of the winner contribute, and because the band
-    // is measured on weights that already carry each layer's relief, the
-    // boundary follows the rock's crevices rather than a contour of the
-    // splatmap. `min_depth` lets the widest-blending material in the set widen
-    // the band for everything it meets, which is what keeps snow soft against
-    // rock instead of the harder material dictating both edges.
     var max_w = 0.0;
     var min_depth = -1e30;
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
         if weight[i] < epsilon {
             continue;
         }
-        max_w = max(max_w, adjusted[i]);
-        min_depth = max(min_depth, adjusted[i] - terrain_blend_width(tm, i));
+        max_w = max(max_w, adjusted[s]);
+        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, i));
     }
 
-    var blend: array<f32, 8>;
+    var blend: array<f32, 4>;
     var blend_sum = 0.0;
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+    for (var s = 0u; s < 4u; s = s + 1u) {
         var b = 0.0;
+        let i = selected[s];
         if weight[i] >= epsilon {
             let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
-            b = max((adjusted[i] - local_min) / max(max_w - local_min, 1e-4), 0.0);
+            b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
         }
-        blend[i] = b;
+        blend[s] = b;
         blend_sum += b;
     }
     blend_sum = max(blend_sum, 0.0001);
 
     var albedo = vec3<f32>(0.0);
-    var normal_acc = vec3<f32>(0.0);
+    var surfgrad = vec3<f32>(0.0);
     var roughness = 0.0;
     var occlusion = 0.0;
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
-        let b = blend[i] / blend_sum;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let b = blend[s] / blend_sum;
         if b <= 0.0 {
             continue;
         }
-        // Phase 25E: albedo is averaged in an approximately perceptual space
-        // (O3DE does the same, `sqrt` in and squared out). A weighted mean of
-        // *linear* albedo between two materials of different luminance sits
-        // below both when read back through the display transform, so a seam
-        // that should be a texture boundary shows up as a dark band along it.
-        albedo += sqrt(samples[i].albedo) * b;
-        normal_acc += samples[i].normal_ts * b;
-        roughness += samples[i].roughness * b;
-        occlusion += samples[i].occlusion * b;
+        albedo += sqrt(samples[s].albedo) * b;
+        surfgrad += ts_to_surfgrad(samples[s].normal_ts, tangent, bitangent) * b;
+        roughness += samples[s].roughness * b;
+        occlusion += samples[s].occlusion * b;
     }
 
-    // Phase 25D: the macro tier goes in here, while the albedo is still in the
-    // perceptual space the layers were averaged in — which is also the space
-    // O3DE performs its overlay and linear-light modes in, and the reason a
-    // macro texel of 0.5 is the identity.
     let macro_c = terrain_macro_sample(tm, splat_uv);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
-
     albedo = albedo * albedo;
-    let normal_ts = normalize(normal_acc);
 
-    // Triplanar cliff projection on steep slopes (Phase 14C step 4).
-    let steepness = 1.0 - abs(geo_normal.y);
-    let cliff_blend = smoothstep(0.45, 0.7, steepness);
-    let cliff = terrain_triplanar_albedo(
-        tm,
-        tm.cliff_layer,
-        world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y),
-        geo_normal,
-        terrain_layer_tiling(tm, tm.cliff_layer),
-    );
-    albedo = mix(albedo, cliff, cliff_blend);
-    roughness = mix(roughness, 0.8, cliff_blend);
+    if cliff_blend > 0.0 {
+        let local_pos = world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y);
+        let cliff = terrain_projected_pbr(
+            tm,
+            tm.cliff_layer,
+            local_pos,
+            geo_normal,
+            terrain_layer_tiling(tm, tm.cliff_layer),
+            world_ddx,
+            world_ddy,
+        );
+        taps += select(4u, 6u, tm.projection_mode != 0u);
+        albedo = mix(albedo, cliff.albedo, cliff_blend);
+        roughness = mix(roughness, cliff.roughness, cliff_blend);
+        occlusion = mix(occlusion, cliff.occlusion, cliff_blend);
+        let cliff_grad = ts_to_surfgrad(normalize(cliff.normal_ts), tangent, bitangent);
+        surfgrad = mix(surfgrad, cliff_grad, cliff_blend);
+    }
 
-    // The tangent basis was built above for the parallax march. Derived rather
-    // than taken from the shading pass's UV-delta TBN, whose determinant
-    // collapses on a grid whose UVs are perfectly axis-aligned.
-    let tbn = mat3x3<f32>(tangent, bitangent, geo_normal);
+    var moisture = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let b = blend[s] / blend_sum;
+        if b > 0.0 {
+            moisture += terrain_moisture(tm, selected[s]) * b;
+        }
+    }
+    if cliff_blend > 0.0 {
+        moisture = mix(moisture, terrain_moisture(tm, tm.cliff_layer), cliff_blend);
+    }
+    let wet = saturate(tm.wetness * moisture);
+    albedo *= mix(1.0, tm.wetness_darken, wet);
+    roughness = mix(roughness, roughness * tm.wetness_gloss, wet);
+    terrain_wetness_factor = wet;
+    terrain_cliff_blend_dbg = cliff_blend;
+    var dom = vec3<f32>(0.0);
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        if blend[s] / blend_sum > 0.0 {
+            dom = samples[s].albedo;
+            break;
+        }
+    }
+    terrain_dominant_albedo = dom;
+    terrain_wet_f0 = tm.wetness_f0 * wet;
 
     var out: TerrainSurface;
     out.albedo = albedo;
     out.taps = taps;
+    out.discarded = discarded;
+    out.selected_rgb = selected_rgb;
+    out.weight_rgb = weight_rgb;
     out.parallax_shadow = parallax_shadow;
     out.roughness = max(roughness, 0.05);
     out.occlusion = occlusion;
-    // Generated normal maps use Z-up tangent space; remap to TBN (x→T, y→B).
-    out.normal = normalize(
-        tbn * normalize(vec3(normal_ts.x, normal_ts.y, max(normal_ts.z, 0.2))));
+    out.normal = resolve_surfgrad(geo_normal, surfgrad);
     return out;
 }
 

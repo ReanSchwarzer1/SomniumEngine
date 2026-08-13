@@ -194,7 +194,7 @@ pub fn apply_paint(
     let (sw, sh) = (terrain.splatmap.width, terrain.splatmap.height);
     // Texels per metre.
     let (mx, mz) = (sw as f32 / wx, sh as f32 / wz);
-    let layer = brush.paint_layer.min(3);
+    let layer = brush.paint_layer.min(TERRAIN_LAYER_COUNT as usize - 1);
 
     let x0 = (((local_x - brush.radius) * mx).floor().max(0.0)) as u32;
     let z0 = (((local_z - brush.radius) * mz).floor().max(0.0)) as u32;
@@ -228,6 +228,10 @@ pub fn apply_paint(
             for (out, wi) in texel.iter_mut().zip(w) {
                 *out = ((wi * 255 + sum / 2) / sum).clamp(0, 255) as u8;
             }
+            super::splat::enforce_four_nonzero(texel);
+            if let Some(lock) = terrain.splat_lock.get_mut((zi * sw + xi) as usize) {
+                *lock = 1;
+            }
         }
     }
     if !touched {
@@ -239,60 +243,13 @@ pub fn apply_paint(
     Some((x0, z0, x1, z1))
 }
 
-/// Procedural initial splat by slope and height (Phase 14E-3):
-/// grass on flat ground, rock on steep slopes, snow above `snow_height`,
-/// dirt as the slope transition band.
+/// Procedural initial splat. Delegates to the XV-G biome preset.
 pub fn auto_splat(terrain: &mut TerrainData, snow_height: f32) {
-    let desc = terrain.desc;
-    let [wx, wz] = desc.world_size();
-    let (sw, sh) = (terrain.splatmap.width, terrain.splatmap.height);
-
-    for zi in 0..sh {
-        for xi in 0..sw {
-            let px = (xi as f32 + 0.5) / sw as f32 * wx;
-            let pz = (zi as f32 + 0.5) / sh as f32 * wz;
-            let e = desc.cell_size;
-            let h = terrain.world_height_at(px, pz);
-            let hx = terrain.world_height_at(px + e, pz) - terrain.world_height_at(px - e, pz);
-            let hz = terrain.world_height_at(px, pz + e) - terrain.world_height_at(px, pz - e);
-            // Surface slope angle from the gradient magnitude.
-            let slope_deg = ((hx * hx + hz * hz).sqrt() / (2.0 * e)).atan().to_degrees();
-
-            // Phase 25L: eight materials assigned from altitude, slope and a
-            // low-frequency noise. The noise is what keeps the two grasses and
-            // the forest floor from laying down as horizontal altitude bands —
-            // a real hillside does not change species on a contour line.
-            let n = super::heightmap::value_noise(px * 0.01, pz * 0.01, 4242);
-            let n2 = super::heightmap::value_noise(px * 0.023, pz * 0.023, 991);
-
-            let rock = smoothstep(32.0, 52.0, slope_deg);
-            let gravel = smoothstep(16.0, 32.0, slope_deg) * (1.0 - rock);
-            let snow = smoothstep(snow_height - 3.0, snow_height + 3.0, h) * (1.0 - rock);
-            // Beaches and wet ground sit at the bottom of the range.
-            let low = 1.0 - smoothstep(1.0, 6.0, h);
-            let sand = low * (1.0 - gravel) * (1.0 - rock) * smoothstep(0.35, 0.65, n);
-            let mud = low * (1.0 - gravel) * (1.0 - rock) * (1.0 - smoothstep(0.35, 0.65, n));
-
-            // Whatever the special cases leave behind is ground cover, split
-            // between two grasses and forest floor by the noise.
-            let cover = (1.0 - rock - gravel - snow - sand - mud).max(0.0);
-            let forest = cover * smoothstep(0.55, 0.8, n2);
-            let grass = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * (1.0 - n);
-            let meadow = cover * (1.0 - smoothstep(0.55, 0.8, n2)) * n;
-
-            // Order must match LAYER_NAMES / LAYER_MATERIALS.
-            let weights = [grass, forest, rock, snow, meadow, mud, sand, gravel];
-            let sum: f32 = weights.iter().sum::<f32>().max(0.001);
-            terrain.splatmap.data[(zi * sw + xi) as usize] =
-                std::array::from_fn(|i| (weights[i] / sum * 255.0) as u8);
-        }
-    }
-    terrain.splatmap.mark_dirty(0, 0, sw - 1, sh - 1);
-}
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    super::biome::apply_biome(
+        terrain,
+        &super::biome::BiomePreset::appalachia(snow_height),
+        false,
+    );
 }
 
 /// Deterministic per-vertex hash noise in [0, 1] for the Noise brush.

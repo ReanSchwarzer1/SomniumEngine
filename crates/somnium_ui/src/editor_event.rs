@@ -117,16 +117,19 @@ pub enum InspectorField {
     PostAoRadius,
     PostAoIntensity,
     // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
-    /// Which splat layer the sculpt brush paints, 0..=3.
+    /// Which splat layer the paint brush writes, 0..=31.
     TerrainPaintLayer,
-    /// World-space tiling of each splat layer's texture.
+    /// World-space tiling of the currently selected paint layer.
     TerrainTile0,
-    TerrainTile1,
-    TerrainTile2,
-    TerrainTile3,
     /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
     /// parallax occlusion off.
     TerrainRelief,
+    /// Global wetness 0..1 (XV-H).
+    TerrainWetness,
+    /// Unique-colour / macro blend strength 0..1 (XV-Zeta).
+    TerrainMacroStrength,
+    /// Debug visualisation code (same numbers as `SOMNIUM_SHADOW_DEBUG`).
+    TerrainDebugView,
     // First-class lake body settings (Phase IV-C).
     WaterSurface,
     WaterMaxDepth,
@@ -198,6 +201,10 @@ pub enum PostFxToggle {
     /// Drive exposure from aperture/shutter/ISO instead of a raw EV100
     /// (Phase 24A). With this off the three camera rows do nothing.
     PhysicalCamera,
+    /// Percentage-closer soft shadows in the shading pass. Default on.
+    Pcss,
+    /// Screen-space contact shadows. Default on.
+    ContactShadows,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -231,6 +238,13 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
+    /// Palette click: set the paint layer (XV-I). The engine also arms
+    /// terrain paint and turns foliage paint off (XV-Zeta).
+    SetTerrainPaintLayer(u8),
+    /// Arm or disarm terrain layer paint from the inspector (XV-Zeta).
+    ToggleTerrainPaint,
+    /// Hex anti-tiling on the selected terrain. Default on.
+    ToggleTerrainHex,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
     /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).

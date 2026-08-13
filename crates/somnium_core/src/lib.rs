@@ -645,6 +645,15 @@ pub struct PostProcessComponent {
     /// quality feature, and the visibility-buffer pipeline has no MSAA, so
     /// edges are otherwise hard-aliased.
     pub fxaa_enabled: bool,
+    /// Percentage-closer soft shadows in the shading pass. Default on.
+    ///
+    /// When ray-traced direct lighting has a result for the pixel, PCSS is
+    /// skipped and the traced visibility is used instead — that is the higher
+    /// quality path, not a downgrade. Turning this off uses a single-tap
+    /// shadow map compare as a cheaper fallback.
+    pub pcss_enabled: bool,
+    /// Screen-space contact shadows. Default on.
+    pub contact_shadows_enabled: bool,
     /// Scene-wide strength of image-based (indirect) light (Phase 22C).
     ///
     /// Phase 25M-2: physically neutral by default. GTAO, material occlusion,
@@ -728,6 +737,8 @@ impl Default for PostProcessComponent {
             ca_enabled: false,
             ca_strength: 0.004,
             fxaa_enabled: true,
+            pcss_enabled: true,
+            contact_shadows_enabled: true,
         }
     }
 }

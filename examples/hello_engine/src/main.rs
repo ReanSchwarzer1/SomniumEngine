@@ -159,6 +159,146 @@ impl EditorCamera {
             Vec3::Y,
         )
     }
+
+    fn look_at(&mut self, target: Vec3) {
+        let d = target - self.position;
+        if d.length_squared() < 1e-8 {
+            return;
+        }
+        self.yaw = d.z.atan2(d.x).to_degrees();
+        let horiz = (d.x * d.x + d.z * d.z).sqrt();
+        self.pitch = d.y.atan2(horiz).to_degrees().clamp(-89.0, 89.0);
+    }
+}
+
+fn parse_vec3(s: &str) -> Option<Vec3> {
+    let mut parts = s.split(',');
+    Some(Vec3::new(
+        parts.next()?.trim().parse().ok()?,
+        parts.next()?.trim().parse().ok()?,
+        parts.next()?.trim().parse().ok()?,
+    ))
+}
+
+/// Place the editor camera for an XV-J kit capture (`SOMNIUM_KIT_VIEW`).
+fn apply_kit_view(
+    camera: &mut EditorCamera,
+    terrain: &somnium_renderer::terrain::TerrainData,
+    origin: Vec3,
+    view: &str,
+) {
+    use somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES;
+    let [wx, wz] = terrain.desc.world_size();
+    let water = DEFAULT_WATER_LEVEL_METRES;
+    let to_world = |lx: f32, ly: f32, lz: f32| origin + Vec3::new(lx, ly, lz);
+
+    let mut best = (f32::NEG_INFINITY, wx * 0.5, wz * 0.5, 0.0f32);
+    let step = 8u32.max(1);
+    let sw = terrain.splatmap.width;
+    let sh = terrain.splatmap.height;
+    for tz in (0..sh).step_by(step as usize) {
+        for tx in (0..sw).step_by(step as usize) {
+            let lx = (tx as f32 + 0.5) / sw as f32 * wx;
+            let lz = (tz as f32 + 0.5) / sh as f32 * wz;
+            let h = terrain.world_height_at(lx, lz);
+            let slope = terrain.ground_sample(lx, lz).slope_cos;
+            let idx = (tz * sw + tx) as usize;
+            let texel = terrain.splatmap.data.get(idx).copied().unwrap_or([0; 32]);
+            let w = |layer: usize| texel[layer] as f32;
+            let score = match view {
+                "walk" | "eye" => {
+                    if h <= water + 1.5 || slope < 0.85 {
+                        f32::NEG_INFINITY
+                    } else {
+                        1.0 - (h - (water + 8.0)).abs() * 0.02
+                    }
+                }
+                "shore" => {
+                    if h < water - 0.4 || h > water + 3.5 || slope < 0.7 {
+                        f32::NEG_INFINITY
+                    } else {
+                        w(8) + w(9) + w(6) - (h - water).abs() * 40.0
+                    }
+                }
+                "cliff" => {
+                    if h < water + 4.0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        (1.0 - slope) * 200.0 + w(14) + w(18) + w(19)
+                    }
+                }
+                "snow" => w(3) + w(31) + (h - 50.0).max(0.0),
+                "forest" => w(1) + w(17) + w(23),
+                "mud" => w(5) + w(10) + w(22),
+                "talus" => w(15) + w(26) + w(7),
+                "red_clay" => w(11),
+                "lush" => w(16) + w(24),
+                _ => f32::NEG_INFINITY,
+            };
+            if score > best.0 {
+                best = (score, lx, lz, h);
+            }
+        }
+    }
+    let (_, lx, lz, h) = best;
+    match view {
+        "walk" | "eye" => {
+            camera.position = to_world(lx, h + 1.7, lz);
+            camera.yaw = -90.0;
+            camera.pitch = -8.0;
+        }
+        "shore" => {
+            camera.position = to_world(lx, h.max(water) + 1.8, lz);
+            camera.look_at(Vec3::new(0.0, water + 0.4, 0.0));
+        }
+        "cliff" => {
+            let d = terrain.desc.cell_size;
+            let hx = terrain.world_height_at(lx + d, lz) - terrain.world_height_at(lx - d, lz);
+            let hz = terrain.world_height_at(lx, lz + d) - terrain.world_height_at(lx, lz - d);
+            let n = Vec3::new(-hx, 2.0 * d, -hz).normalize_or_zero();
+            let along = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+            camera.position = to_world(lx, h, lz) + along * 28.0 + Vec3::Y * 8.0;
+            camera.look_at(to_world(lx, h + 2.0, lz));
+        }
+        "snow" | "forest" | "mud" | "talus" | "red_clay" | "lush" => {
+            camera.position = to_world(lx, h + 4.0, lz - 12.0);
+            camera.look_at(to_world(lx, h, lz));
+        }
+        _ => {}
+    }
+    info!(view, score = best.0, height = h, "XV-J kit view placed");
+}
+
+fn apply_capture_camera_overrides(
+    camera: &mut EditorCamera,
+    terrain: Option<&somnium_renderer::terrain::TerrainData>,
+    origin: Vec3,
+) {
+    if let Ok(view) = std::env::var("SOMNIUM_KIT_VIEW") {
+        if let Some(terrain) = terrain {
+            apply_kit_view(camera, terrain, origin, view.trim());
+        }
+    }
+    if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
+        if let Some(terrain) = terrain {
+            apply_kit_view(camera, terrain, origin, "walk");
+        }
+    }
+    if let Ok(s) = std::env::var("SOMNIUM_CAMERA_POS") {
+        if let Some(p) = parse_vec3(&s) {
+            camera.position = p;
+        }
+    }
+    if let Ok(v) = std::env::var("SOMNIUM_CAMERA_YAW") {
+        if let Ok(yaw) = v.parse() {
+            camera.yaw = yaw;
+        }
+    }
+    if let Ok(v) = std::env::var("SOMNIUM_CAMERA_PITCH") {
+        if let Ok(pitch) = v.parse() {
+            camera.pitch = pitch;
+        }
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -673,8 +813,8 @@ impl GameApp for HelloGame {
         // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
         // now selects a variant rather than enabling it:
         //   unset / "flat" — the editor's own **Create > Terrain** geometry: the
-        //       default 16x16-chunk descriptor at y = 0, with a heightmap and
-        //       all eight materials auto-splatted by altitude and slope.
+        //       default 16x16-chunk descriptor at y = 0, with the sixteen-layer
+        //       Appalachia biome (the only default landscape).
         //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
         //       is what exercises the brush paths without editor input.
         //   "0" / "none"   — no terrain, for isolating everything else.
@@ -691,6 +831,8 @@ impl GameApp for HelloGame {
                         Ok(built) => {
                             let preset = built.preset;
                             let water_component = built.water.water;
+                            let terrain_id = built.terrain.terrain.as_ref().map(|t| t.terrain_id);
+                            let origin = preset.terrain_translation;
                             let terrain = built.terrain.respawn(&mut ctx.world);
                             let mut water_snapshot = built.water;
                             water_snapshot.parent = Some(Parent { entity: terrain });
@@ -753,6 +895,11 @@ impl GameApp for HelloGame {
                                 );
                             }
                             info!("Default landscape preset v{} active", preset.version);
+                            apply_capture_camera_overrides(
+                                &mut self.camera,
+                                terrain_id.and_then(|id| renderer.terrain(id)),
+                                origin,
+                            );
                         }
                         Err(error) => tracing::warn!("Default landscape creation failed: {error}"),
                     }
@@ -769,8 +916,8 @@ impl GameApp for HelloGame {
                     let terrain_id = renderer.create_terrain(render_ctx, desc);
                     let [wx, wz] = desc.world_size();
 
-                    // Phase 25L: real relief, so the eight materials have altitudes
-                    // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
+                    // Phase 25L: real relief, so the sixteen biome materials have
+                    // altitudes and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
                     // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
                     // terrain gets procedural FBM hills, which is still landscape
                     // rather than the flat plain every earlier test scene used.
@@ -784,8 +931,7 @@ impl GameApp for HelloGame {
                             // The same path Create > Terrain takes, so the demo
                             // scene and an editor-created terrain cannot diverge.
                             terrain.apply_default_relief(amplitude);
-                            // Assign all eight materials by altitude and slope.
-                            brush::auto_splat(terrain, amplitude * 0.62);
+                            brush::auto_splat(terrain, amplitude * 0.48);
 
                             // `SOMNIUM_FOLIAGE=1` scatters foliage without the
                             // editor (Phase 17E). Painting by hand was the only way
@@ -888,7 +1034,10 @@ impl GameApp for HelloGame {
                         for _ in 0..20 {
                             brush::apply_sculpt(terrain, &lower, wx * 0.7, wz * 0.7, 0.1);
                         }
-                        brush::auto_splat(terrain, 10.0);
+                        brush::auto_splat(
+                            terrain,
+                            somnium_renderer::terrain::DEFAULT_RELIEF_METRES * 0.48,
+                        );
                     }
 
                     let _terrain_entity = ctx.world.spawn((
@@ -1316,6 +1465,12 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        if std::env::var("SOMNIUM_CAPTURE_QUIT").as_deref() == Ok("1")
+            && somnium_renderer::capture::finished()
+        {
+            ctx.exit();
+            return;
+        }
         let (wake_origin_direction, wake_params) =
             self.boat.as_ref().map_or(([0.0; 4], [0.0; 4]), |boat| {
                 let position = ctx.physics.get_position(boat.body);

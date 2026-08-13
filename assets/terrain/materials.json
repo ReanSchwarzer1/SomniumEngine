@@ -1,0 +1,2691 @@
+{
+  "manifest_version": 1,
+  "access_date": "2026-08-13",
+  "user_agent": "SomniumEngine-terrain-fetch/XV",
+  "sidecar_version_when_shipping": 4,
+  "layer_count": 32,
+  "max_stored_nonzero_per_texel": 4,
+  "license_policy": "CC0-1.0 only. Fail closed on unknown license, hash mismatch, missing packer map, or resolution change.",
+  "packer_maps": [
+    "diff",
+    "nor_dx",
+    "arm",
+    "disp"
+  ],
+  "polyhaven_files_key": {
+    "diff": "Diffuse",
+    "nor_dx": "nor_dx",
+    "arm": "arm",
+    "disp": "Displacement"
+  },
+  "rejected_for_role": [
+    {
+      "planned_index": 11,
+      "id": "terrain_red_01",
+      "reason": "First-party category is crushed reddish gravel, overlapping layer 7, not red mineral soil.",
+      "page_url": "https://polyhaven.com/a/terrain_red_01",
+      "substitute_id": "cracked_red_ground",
+      "files_hash": "16bb30d34d23a75c1dea32f0d01cd89212160bc8"
+    },
+    {
+      "planned_index": 15,
+      "id": "dry_riverbed_rock",
+      "reason": "First-party category is Rough Rock Faces, overlapping layer 14, not loose talus/river stone.",
+      "page_url": "https://polyhaven.com/a/dry_riverbed_rock",
+      "substitute_id": "ganges_river_pebbles",
+      "files_hash": "aa87f826fc4326cd3e4ecd9d73e3644e18e86ed1"
+    },
+    {
+      "planned_index": 16,
+      "id": "grass_path_3",
+      "reason": "First-party category is a compacted dirt/gravel path with patchy grass, not lush lawn. Distant 256 downscale stays ochre. Layer 16 stays procedural saturated green until a CC0 lawn scan passes Delta-E.",
+      "page_url": "https://polyhaven.com/a/grass_path_3",
+      "substitute_id": null,
+      "files_hash": null
+    },
+    {
+      "planned_index": 24,
+      "id": "grass_path_2",
+      "reason": "Same path family as grass_path_3. Layer 24 stays procedural bright wildgrass.",
+      "page_url": "https://polyhaven.com/a/grass_path_2",
+      "substitute_id": null,
+      "files_hash": null
+    }
+  ],
+  "layers": [
+    {
+      "index": 0,
+      "id": "aerial_grass_rock",
+      "display_name": "Grass",
+      "role_tags": [
+        "grass",
+        "ground"
+      ],
+      "biome_tags": [
+        "meadow",
+        "forest-edge"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/aerial_grass_rock",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "d610669c24e20d7c2effc4c116c718176f5b044a",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.55,
+      "cliff_suitability": 0.35,
+      "uv_scale_multiplier": 0.266667,
+      "ambientcg_fallback": {
+        "id": "Grass005",
+        "page_url": "https://ambientcg.com/a/Grass005"
+      },
+      "notes": "Aerial grass-over-stone. Current engine tiling 4 m vs 15 m physical.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_diff_2k.jpg",
+            "bytes": 2624635,
+            "md5": "024018554c0002620127749d1f585f3d",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_nor_dx_2k.jpg",
+            "bytes": 3879028,
+            "md5": "55466b239d3781482d22fc3387b76b73",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_arm_2k.jpg",
+            "bytes": 945301,
+            "md5": "1491ee517b5cf713639f3add1b91c933",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_disp_2k.jpg",
+            "bytes": 530342,
+            "md5": "a02fe96ebd14dabd8fc7a829f4a77bac",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_grass_rock/aerial_grass_rock_diff_4k.jpg",
+            "bytes": 9067116,
+            "md5": "dc4dbd56d49f3278d1fcde8e58159a84",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_grass_rock/aerial_grass_rock_nor_dx_4k.jpg",
+            "bytes": 16759860,
+            "md5": "fbeb2c5bbe69d3a44df2c5591aead73b",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_grass_rock/aerial_grass_rock_arm_4k.jpg",
+            "bytes": 4053803,
+            "md5": "9240c4cbe69b8d8c8931ad533adf1f78",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_grass_rock/aerial_grass_rock_disp_4k.jpg",
+            "bytes": 1528355,
+            "md5": "8d8734171639458ebe4318dbe430caea",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.5,
+        "blend_width": 0.5,
+        "min_weight": 0.1,
+        "parallax_depth_m": 0.02
+      }
+    },
+    {
+      "index": 1,
+      "id": "forrest_ground_01",
+      "display_name": "Forest Floor",
+      "role_tags": [
+        "forest-floor",
+        "leaf-litter"
+      ],
+      "biome_tags": [
+        "forest"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/forrest_ground_01",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "ea3ef3539e362d9a9ffa409ecd467d08028569d5",
+      "physical_width_m": 2.0,
+      "physical_height_m": 2.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.7,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 2.0,
+      "ambientcg_fallback": {
+        "id": "Ground037",
+        "page_url": "https://ambientcg.com/a/Ground037"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_diff_2k.jpg",
+            "bytes": 3077552,
+            "md5": "18fa30c294be21805159ca6e73a5e5fa",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_nor_dx_2k.jpg",
+            "bytes": 5664401,
+            "md5": "e1b78b45dde854401d82cfc7d4dcf6e5",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_arm_2k.jpg",
+            "bytes": 1160819,
+            "md5": "bb5d791e2697b0b4b8703963c42a70d4",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_disp_2k.jpg",
+            "bytes": 1036491,
+            "md5": "50750c4535f53817d141412e819f7aea",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forrest_ground_01/forrest_ground_01_diff_4k.jpg",
+            "bytes": 10044373,
+            "md5": "79a4c855c08b3057578e13aa3c312002",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forrest_ground_01/forrest_ground_01_nor_dx_4k.jpg",
+            "bytes": 19077870,
+            "md5": "956afa250f7322f331da1d536bab664e",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forrest_ground_01/forrest_ground_01_arm_4k.jpg",
+            "bytes": 4166080,
+            "md5": "82169fcd5b1c7aac792e7e74186a4d47",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forrest_ground_01/forrest_ground_01_disp_4k.jpg",
+            "bytes": 2999702,
+            "md5": "ea692b13ab49cb59d9b678f9ced5404b",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.7,
+        "blend_width": 0.35,
+        "min_weight": 0.1,
+        "parallax_depth_m": 0.035
+      }
+    },
+    {
+      "index": 2,
+      "id": "aerial_rocks_04",
+      "display_name": "Rock",
+      "role_tags": [
+        "rock",
+        "legacy-cliff"
+      ],
+      "biome_tags": [
+        "mountain"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/aerial_rocks_04",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "dc43dffab8e915bc54ac64899dcfe8cec826f8b9",
+      "physical_width_m": 80.0,
+      "physical_height_m": 80.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.25,
+      "cliff_suitability": 0.6,
+      "uv_scale_multiplier": 0.05,
+      "ambientcg_fallback": {
+        "id": "Rock063",
+        "page_url": "https://ambientcg.com/a/Rock063"
+      },
+      "notes": "80 m aerial scan. Legacy cliff_layer. Do not retile to 1:1 physical without a scene migration.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_04/aerial_rocks_04_diff_2k.jpg",
+            "bytes": 3001368,
+            "md5": "9569319be1713474efad4ec1d7c0abe0",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_04/aerial_rocks_04_nor_dx_2k.jpg",
+            "bytes": 4296240,
+            "md5": "4a5fc01dd4b9fced5ebb00a07aa799ff",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_04/aerial_rocks_04_arm_2k.jpg",
+            "bytes": 934898,
+            "md5": "d508600dcd1887336650cec3248d92b0",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_04/aerial_rocks_04_disp_2k.jpg",
+            "bytes": 304540,
+            "md5": "37df4da7d7fdea83d101b3d42de2fc4f",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_04/aerial_rocks_04_diff_4k.jpg",
+            "bytes": 9420393,
+            "md5": "83e0115075a65ace571bca244944d4fd",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_04/aerial_rocks_04_nor_dx_4k.jpg",
+            "bytes": 13686436,
+            "md5": "44a1ea2be7349b58807caf6aaaf1acbe",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_04/aerial_rocks_04_arm_4k.jpg",
+            "bytes": 3431585,
+            "md5": "ddd3f71fbc61e21796787aaaf96ccf79",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_04/aerial_rocks_04_disp_4k.jpg",
+            "bytes": 893110,
+            "md5": "0038797035094974f13390ae88d846ed",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 1.0,
+        "blend_width": 0.15,
+        "min_weight": 0.08,
+        "parallax_depth_m": 0.06
+      }
+    },
+    {
+      "index": 3,
+      "id": "snow_02",
+      "display_name": "Snow",
+      "role_tags": [
+        "snow"
+      ],
+      "biome_tags": [
+        "alpine"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/snow_02",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "a4bb49360f8e164e74ee396b76ac33c96d6282b7",
+      "physical_width_m": 2.0,
+      "physical_height_m": 2.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.15,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 2.0,
+      "ambientcg_fallback": {
+        "id": "Snow015",
+        "page_url": "https://ambientcg.com/a/Snow015"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_diff_2k.jpg",
+            "bytes": 1314409,
+            "md5": "5541e5601951b071691238ddc70632c0",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_nor_dx_2k.jpg",
+            "bytes": 4858382,
+            "md5": "71ee69f028c6522f7f3e8f8d1e7a4c4d",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_arm_2k.jpg",
+            "bytes": 390341,
+            "md5": "888201f385b78e06ddd205a352c8ce7d",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_disp_2k.jpg",
+            "bytes": 432399,
+            "md5": "c7c8e7848b76819012cbac660a90a61c",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_02/snow_02_diff_4k.jpg",
+            "bytes": 4537020,
+            "md5": "6d516278de635715a36cf87ef7facdad",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_02/snow_02_nor_dx_4k.jpg",
+            "bytes": 17876486,
+            "md5": "c97c12404892fadd45f3a2f51aa996dd",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_02/snow_02_arm_4k.jpg",
+            "bytes": 1923587,
+            "md5": "f79527674f9ca9b6982f76912e9095d6",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_02/snow_02_disp_4k.jpg",
+            "bytes": 1346274,
+            "md5": "968b6e1bbb88ab7fccad37eb293225e0",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.35,
+        "blend_width": 0.6,
+        "min_weight": 0.15,
+        "parallax_depth_m": 0.015
+      }
+    },
+    {
+      "index": 4,
+      "id": "leafy_grass",
+      "display_name": "Meadow",
+      "role_tags": [
+        "meadow",
+        "grass"
+      ],
+      "biome_tags": [
+        "meadow"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/leafy_grass",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Charlotte Baglioni": "All"
+      },
+      "files_hash": "90fd49a21ddface404d32d9956c3a9f3ca8e0679",
+      "physical_width_m": 2.0,
+      "physical_height_m": 2.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.6,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 2.0,
+      "ambientcg_fallback": {
+        "id": "Grass005",
+        "page_url": "https://ambientcg.com/a/Grass005"
+      },
+      "notes": "Author is Charlotte Baglioni, not Rob Tuytel.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_diff_2k.jpg",
+            "bytes": 4766204,
+            "md5": "8014f4dace676a62ed71b3dd76119dae",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_nor_dx_2k.jpg",
+            "bytes": 6049495,
+            "md5": "82936efe4dd20543414cb55d47a9f53c",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_arm_2k.jpg",
+            "bytes": 4116600,
+            "md5": "64f2eb364e806301df19edc7a67d65bb",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_disp_2k.jpg",
+            "bytes": 2545281,
+            "md5": "9c0a5f6c375be590bda0c28e2c1dfa2a",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leafy_grass/leafy_grass_diff_4k.jpg",
+            "bytes": 18554565,
+            "md5": "d991caaf9c2e333a5a684faab488cbb9",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leafy_grass/leafy_grass_nor_dx_4k.jpg",
+            "bytes": 23229967,
+            "md5": "03f05f2c993f7738fd72169dc8bd1a8f",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leafy_grass/leafy_grass_arm_4k.jpg",
+            "bytes": 15718493,
+            "md5": "916b87840bd6f53fe78c99ce8370162b",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leafy_grass/leafy_grass_disp_4k.jpg",
+            "bytes": 7868980,
+            "md5": "26956b1c271c44c1f9a55fb7e9104d33",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.6,
+        "blend_width": 0.45,
+        "min_weight": 0.1,
+        "parallax_depth_m": 0.025
+      }
+    },
+    {
+      "index": 5,
+      "id": "brown_mud",
+      "display_name": "Mud",
+      "role_tags": [
+        "mud",
+        "soil"
+      ],
+      "biome_tags": [
+        "wetland",
+        "shore"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/brown_mud",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "0b3fc1acb1a5e7d01c2757f2a426240b48954988",
+      "physical_width_m": 1.3,
+      "physical_height_m": 1.3,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.95,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 3.076923,
+      "ambientcg_fallback": {
+        "id": "Ground106",
+        "page_url": "https://ambientcg.com/a/Ground106"
+      },
+      "notes": "API scale string is 1,3 meaning 1.3 m.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud/brown_mud_diff_2k.jpg",
+            "bytes": 2093509,
+            "md5": "d0c4ee4434b871483e28ad9caecdc54c",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud/brown_mud_nor_dx_2k.jpg",
+            "bytes": 3042502,
+            "md5": "54c045d53c6014631e6b0014cc55c899",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud/brown_mud_arm_2k.jpg",
+            "bytes": 853175,
+            "md5": "621cff0bbee0ec2f979a1237e3262020",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud/brown_mud_disp_2k.jpg",
+            "bytes": 656319,
+            "md5": "26b697b6d04429978ce27171f27fdc15",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/brown_mud/brown_mud_diff_4k.jpg",
+            "bytes": 8099872,
+            "md5": "2432f0d0dc17cced282be0af72072f61",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/brown_mud/brown_mud_nor_dx_4k.jpg",
+            "bytes": 8641613,
+            "md5": "b7598cc6e0491dcebc53c700807b18a2",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/brown_mud/brown_mud_arm_4k.jpg",
+            "bytes": 3287783,
+            "md5": "17773afedbf35e5412585d0381983ec8",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/brown_mud/brown_mud_disp_4k.jpg",
+            "bytes": 1961236,
+            "md5": "270d0ccc2c6000cfe129e985c7ace67a",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.3,
+        "blend_width": 0.55,
+        "min_weight": 0.1,
+        "parallax_depth_m": 0.008
+      }
+    },
+    {
+      "index": 6,
+      "id": "coast_sand_rocks_02",
+      "display_name": "Sand",
+      "role_tags": [
+        "pebbled-coast",
+        "sand-rock"
+      ],
+      "biome_tags": [
+        "coast"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/coast_sand_rocks_02",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "579892253d0d73a45eaee485135c35666bceb237",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.45,
+      "cliff_suitability": 0.25,
+      "uv_scale_multiplier": 0.266667,
+      "ambientcg_fallback": {
+        "id": "Ground054",
+        "page_url": "https://ambientcg.com/a/Ground054"
+      },
+      "notes": "Coastal rock, not fine sand. Fine sand is layers 8-9.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_rocks_02/coast_sand_rocks_02_diff_2k.jpg",
+            "bytes": 2905160,
+            "md5": "5c6d2fe8e40a733b078212cd6286bcb3",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_rocks_02/coast_sand_rocks_02_nor_dx_2k.jpg",
+            "bytes": 4801989,
+            "md5": "d675403e442aa7b5aea669b299f3d64b",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_rocks_02/coast_sand_rocks_02_arm_2k.jpg",
+            "bytes": 3324550,
+            "md5": "be8efe2a4d9fb0a0725fb815ce9c6ddf",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_rocks_02/coast_sand_rocks_02_disp_2k.jpg",
+            "bytes": 1044275,
+            "md5": "2b36922488b52a8248f464557a4a8c66",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_rocks_02/coast_sand_rocks_02_diff_4k.jpg",
+            "bytes": 8089445,
+            "md5": "0e6d68d81c80e269a56cb429919a7bb8",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_rocks_02/coast_sand_rocks_02_nor_dx_4k.jpg",
+            "bytes": 16979177,
+            "md5": "0b605eca036144e08bf419f375e9bd84",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_rocks_02/coast_sand_rocks_02_arm_4k.jpg",
+            "bytes": 11676519,
+            "md5": "fb195b2abb2ebff359be9ce4c68655ee",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_rocks_02/coast_sand_rocks_02_disp_4k.jpg",
+            "bytes": 3265956,
+            "md5": "968a6c9ed255e46556c29b84068692a9",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.5,
+        "blend_width": 0.35,
+        "min_weight": 0.1,
+        "parallax_depth_m": 0.02
+      }
+    },
+    {
+      "index": 7,
+      "id": "gravel_floor",
+      "display_name": "Gravel",
+      "role_tags": [
+        "gravel"
+      ],
+      "biome_tags": [
+        "mountain",
+        "path"
+      ],
+      "compatibility_locked": true,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/gravel_floor",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Matterfield": "Photography",
+        "Jenelle van Heerden": "Processing"
+      },
+      "files_hash": "88754f2598990c0849176de944b0745ed569b018",
+      "physical_width_m": 2.25,
+      "physical_height_m": 2.25,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.2,
+      "cliff_suitability": 0.1,
+      "uv_scale_multiplier": 1.777778,
+      "ambientcg_fallback": {
+        "id": "Ground054",
+        "page_url": "https://ambientcg.com/a/Ground054"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor/gravel_floor_diff_2k.jpg",
+            "bytes": 4986779,
+            "md5": "80dd759151f0c8943dce710fc6b638a9",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor/gravel_floor_nor_dx_2k.jpg",
+            "bytes": 6142916,
+            "md5": "512b9d2c8ea4be4e104c5ff2bbec5246",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor/gravel_floor_arm_2k.jpg",
+            "bytes": 4154631,
+            "md5": "93ec76b3a2ce1866320ebcc562d62e26",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor/gravel_floor_disp_2k.jpg",
+            "bytes": 2180600,
+            "md5": "92991f2a1961dfffea7e040f8c2682d5",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gravel_floor/gravel_floor_diff_4k.jpg",
+            "bytes": 18167189,
+            "md5": "499af91ecfc290a3976e16567ab52433",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gravel_floor/gravel_floor_nor_dx_4k.jpg",
+            "bytes": 22945101,
+            "md5": "3706273a4f5bd188366cd21f592f1b96",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gravel_floor/gravel_floor_arm_4k.jpg",
+            "bytes": 15417976,
+            "md5": "069880f15da5dd0af3c8450388eb1edb",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gravel_floor/gravel_floor_disp_4k.jpg",
+            "bytes": 6429568,
+            "md5": "4fde020e4b05d878dc4cb5e6d29c1e38",
+            "sha256": null
+          }
+        }
+      },
+      "current_engine_tiling_per_m": 0.25,
+      "blend": {
+        "height_scale": 0.9,
+        "blend_width": 0.15,
+        "min_weight": 0.08,
+        "parallax_depth_m": 0.05
+      }
+    },
+    {
+      "index": 8,
+      "id": "aerial_sand",
+      "display_name": "Dry Beach Sand",
+      "role_tags": [
+        "dry-sand",
+        "beach"
+      ],
+      "biome_tags": [
+        "coast"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/aerial_sand",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "565565540b90dade32a407cdd8315dd05684d05e",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.35,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 0.266667,
+      "ambientcg_fallback": {
+        "id": "Ground054",
+        "page_url": "https://ambientcg.com/a/Ground054"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_sand/aerial_sand_diff_2k.jpg",
+            "bytes": 1790070,
+            "md5": "5071857be3645fec2f85b49e4112199f",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_sand/aerial_sand_nor_dx_2k.jpg",
+            "bytes": 2639180,
+            "md5": "8d3ec33fca282b3290b13dfb8b931177",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_sand/aerial_sand_arm_2k.jpg",
+            "bytes": 718127,
+            "md5": "b80407b993254ca9997e1e16561df594",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_sand/aerial_sand_disp_2k.jpg",
+            "bytes": 603813,
+            "md5": "d62a5c140be9c45fa3e75f0abe825444",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_sand/aerial_sand_diff_4k.jpg",
+            "bytes": 5928126,
+            "md5": "421927b11af0314bb237cc584f89aaf0",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_sand/aerial_sand_nor_dx_4k.jpg",
+            "bytes": 11011203,
+            "md5": "f463e901ce63f16461bce9cc642f9217",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_sand/aerial_sand_arm_4k.jpg",
+            "bytes": 3081359,
+            "md5": "e061c2ef5d42ee368b0eaae348618fe2",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_sand/aerial_sand_disp_4k.jpg",
+            "bytes": 1740387,
+            "md5": "527cec9f1709b316b3f3d4c743f2eb9a",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 9,
+      "id": "coast_sand_01",
+      "display_name": "Damp Shoreline Sand",
+      "role_tags": [
+        "damp-sand",
+        "shore"
+      ],
+      "biome_tags": [
+        "coast"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/coast_sand_01",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "79f1efcc1f7dedcc546d529a09e1a09cfeb0b9b8",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.9,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 0.266667,
+      "ambientcg_fallback": {
+        "id": "Ground080",
+        "page_url": "https://ambientcg.com/a/Ground080"
+      },
+      "notes": "First-party tags include damp.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_01/coast_sand_01_diff_2k.jpg",
+            "bytes": 3552676,
+            "md5": "bde59bb3bcdd8d4e9d6fcadc19f038fa",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_01/coast_sand_01_nor_dx_2k.jpg",
+            "bytes": 4628392,
+            "md5": "3d1d29dbb0e7ddf90e6d2380bf905090",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_01/coast_sand_01_arm_2k.jpg",
+            "bytes": 2698547,
+            "md5": "06c766f0d541dacd85bb9c31a31b39e1",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/coast_sand_01/coast_sand_01_disp_2k.jpg",
+            "bytes": 1042031,
+            "md5": "a76050d099be09eed79e0c280d5b73f7",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_01/coast_sand_01_diff_4k.jpg",
+            "bytes": 10814554,
+            "md5": "c4fcd9ecc7ce8cb98a152c6cc4583674",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_01/coast_sand_01_nor_dx_4k.jpg",
+            "bytes": 17368162,
+            "md5": "85e86bc4dad4078c5f438ab9d5ec4836",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_01/coast_sand_01_arm_4k.jpg",
+            "bytes": 10261223,
+            "md5": "32358c92de8e262009c00854dfb9b2c1",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/coast_sand_01/coast_sand_01_disp_4k.jpg",
+            "bytes": 3365631,
+            "md5": "24c07ac144cfa17823f81c4e9c2da207",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 10,
+      "id": "dry_mud_field_001",
+      "display_name": "Dry Earth",
+      "role_tags": [
+        "dry-earth",
+        "topsoil"
+      ],
+      "biome_tags": [
+        "lowland"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/dry_mud_field_001",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "Photography",
+        "Rico Cilliers": "Processing"
+      },
+      "files_hash": "3426070187b42c5cc81326f8a1314cc78711ede4",
+      "physical_width_m": 3.0,
+      "physical_height_m": 3.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.4,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 1.333333,
+      "ambientcg_fallback": {
+        "id": "Ground106",
+        "page_url": "https://ambientcg.com/a/Ground106"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_mud_field_001/dry_mud_field_001_diff_2k.jpg",
+            "bytes": 1375586,
+            "md5": "e24815195475758e9a7f83c01d64031f",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_mud_field_001/dry_mud_field_001_nor_dx_2k.jpg",
+            "bytes": 2360347,
+            "md5": "b23a62fc136d97a6b0b5c3f6c57e9ce8",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_mud_field_001/dry_mud_field_001_arm_2k.jpg",
+            "bytes": 913301,
+            "md5": "c14467b19c8db6e2ad9cd9124997d7ca",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_mud_field_001/dry_mud_field_001_disp_2k.jpg",
+            "bytes": 400745,
+            "md5": "1131587ebb288e6167330eed46a56f35",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dry_mud_field_001/dry_mud_field_001_diff_4k.jpg",
+            "bytes": 5230501,
+            "md5": "028b08c8b0837b9a76b1f08d75c6b333",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dry_mud_field_001/dry_mud_field_001_nor_dx_4k.jpg",
+            "bytes": 8456375,
+            "md5": "be0445f4964139a71f5d97c5e1269de8",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dry_mud_field_001/dry_mud_field_001_arm_4k.jpg",
+            "bytes": 3634524,
+            "md5": "1f45ead727376eed0e2b1c01f504c393",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dry_mud_field_001/dry_mud_field_001_disp_4k.jpg",
+            "bytes": 1130106,
+            "md5": "f8b570aaae260bea531c99fb825dbaa1",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 11,
+      "id": "cracked_red_ground",
+      "display_name": "Red Mineral Soil",
+      "role_tags": [
+        "red-clay",
+        "mineral-soil"
+      ],
+      "biome_tags": [
+        "exposed-bank"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/cracked_red_ground",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Amal Kumar": "All"
+      },
+      "files_hash": "e26ccacd19dd06f9f75ce04602ded00370a96b61",
+      "physical_width_m": 2.0,
+      "physical_height_m": 2.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.5,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 2.0,
+      "ambientcg_fallback": {
+        "id": "Ground054",
+        "page_url": "https://ambientcg.com/a/Ground054"
+      },
+      "notes": "Substituted for terrain_red_01 (gravel, not soil).",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cracked_red_ground/cracked_red_ground_diff_2k.jpg",
+            "bytes": 2849587,
+            "md5": "b77c2d8940687b9a5723c4c6db767962",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cracked_red_ground/cracked_red_ground_nor_dx_2k.jpg",
+            "bytes": 4276148,
+            "md5": "110384a43ffb476a3b331c624bac99bf",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cracked_red_ground/cracked_red_ground_arm_2k.jpg",
+            "bytes": 2713517,
+            "md5": "f92f6bd700307bd771d9c3b4f3cc742e",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cracked_red_ground/cracked_red_ground_disp_2k.jpg",
+            "bytes": 1222962,
+            "md5": "f56999bead8c4276323349bba5d2ac5b",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/cracked_red_ground/cracked_red_ground_diff_4k.jpg",
+            "bytes": 10740544,
+            "md5": "1cf22d90a7cfff2bf9b31f94dd7545d8",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/cracked_red_ground/cracked_red_ground_nor_dx_4k.jpg",
+            "bytes": 16762595,
+            "md5": "8e5adc8effc93d839f223d12868febd8",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/cracked_red_ground/cracked_red_ground_arm_4k.jpg",
+            "bytes": 9954334,
+            "md5": "db3c41e3e118917709f2ce62de80fbfb",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/cracked_red_ground/cracked_red_ground_disp_4k.jpg",
+            "bytes": 3665118,
+            "md5": "990b6f47e83b94bb4b9017663e1bf760",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 12,
+      "id": "sparse_grass",
+      "display_name": "Sparse Grass",
+      "role_tags": [
+        "sparse-grass",
+        "exposed-soil"
+      ],
+      "biome_tags": [
+        "lowland",
+        "meadow"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/sparse_grass",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Amal Kumar": "All"
+      },
+      "files_hash": "1293431c7316b89282b883ff760be963802f9000",
+      "physical_width_m": 2.0,
+      "physical_height_m": 2.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.55,
+      "cliff_suitability": 0.0,
+      "uv_scale_multiplier": 2.0,
+      "ambientcg_fallback": {
+        "id": "Ground037",
+        "page_url": "https://ambientcg.com/a/Ground037"
+      },
+      "notes": "Has an extra Mask map. Inspect at pack time whether diffuse is already composited.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_diff_2k.jpg",
+            "bytes": 3733797,
+            "md5": "b181e9c61bae87c1bb9b14eecd767d65",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_nor_dx_2k.jpg",
+            "bytes": 5862886,
+            "md5": "61bd9f973de0f3322b42184302120873",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_arm_2k.jpg",
+            "bytes": 3835537,
+            "md5": "d30e667f7d576bc19fface66e98f7ce2",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_disp_2k.jpg",
+            "bytes": 2312240,
+            "md5": "eee6c221c24fa7825cea74df55be6a91",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/sparse_grass/sparse_grass_diff_4k.jpg",
+            "bytes": 13803613,
+            "md5": "569f9a6a0cf566c88d281bc81f832e97",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/sparse_grass/sparse_grass_nor_dx_4k.jpg",
+            "bytes": 21576691,
+            "md5": "9842c238788e4980fc5afbe85d3e7d92",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/sparse_grass/sparse_grass_arm_4k.jpg",
+            "bytes": 13943122,
+            "md5": "62cfc62eeb60107455488391ffea0092",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/sparse_grass/sparse_grass_disp_4k.jpg",
+            "bytes": 7042665,
+            "md5": "c0c2592a77ca879315e268ceb32aafad",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 13,
+      "id": "mossy_rock",
+      "display_name": "Mossy Rock",
+      "role_tags": [
+        "mossy-rock"
+      ],
+      "biome_tags": [
+        "mountain",
+        "forest"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/mossy_rock",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "75980c1e8b690dab1cad640407c18eac16307869",
+      "physical_width_m": 3.0,
+      "physical_height_m": 3.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.85,
+      "cliff_suitability": 0.55,
+      "uv_scale_multiplier": 1.333333,
+      "ambientcg_fallback": {
+        "id": "Rock063",
+        "page_url": "https://ambientcg.com/a/Rock063"
+      },
+      "notes": "",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/mossy_rock/mossy_rock_diff_2k.jpg",
+            "bytes": 4535360,
+            "md5": "8e55bbeeef1db0d2d0cae85515812c46",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/mossy_rock/mossy_rock_nor_dx_2k.jpg",
+            "bytes": 4030316,
+            "md5": "81add85cd2c93ee7dd4c33c522f0b5be",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/mossy_rock/mossy_rock_arm_2k.jpg",
+            "bytes": 3799947,
+            "md5": "7aa8634ba2202439a413113c9e617b83",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/mossy_rock/mossy_rock_disp_2k.jpg",
+            "bytes": 644550,
+            "md5": "d22857010ae3d07e42c5548126cf386c",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/mossy_rock/mossy_rock_diff_4k.jpg",
+            "bytes": 16932614,
+            "md5": "c9374b25a241c712aa86c2d24ec5329a",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/mossy_rock/mossy_rock_nor_dx_4k.jpg",
+            "bytes": 16657277,
+            "md5": "73f2ecd09943e7267c16f9065c76463c",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/mossy_rock/mossy_rock_arm_4k.jpg",
+            "bytes": 15011150,
+            "md5": "c3d437e4f6d81178dfdf931afc664c66",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/mossy_rock/mossy_rock_disp_4k.jpg",
+            "bytes": 1897650,
+            "md5": "7bb6b2458470e395286bb2c033c9cf9f",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 14,
+      "id": "rock_face_03",
+      "display_name": "Cliff Face",
+      "role_tags": [
+        "cliff",
+        "vertical-rock"
+      ],
+      "biome_tags": [
+        "mountain"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/rock_face_03",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Dario Barresi": "Photography",
+        "Rico Cilliers": "Processing"
+      },
+      "files_hash": "d48f9ea2b7ecd038fa76a01c54309b8aa1e80d1e",
+      "physical_width_m": 2.7,
+      "physical_height_m": 2.7,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.2,
+      "cliff_suitability": 1.0,
+      "uv_scale_multiplier": 1.481481,
+      "ambientcg_fallback": {
+        "id": "Rock063",
+        "page_url": "https://ambientcg.com/a/Rock063"
+      },
+      "notes": "surface_use wall. Dedicated cliff for XV-F. Layer 2 remains legacy cliff.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face_03/rock_face_03_diff_2k.jpg",
+            "bytes": 3814362,
+            "md5": "657add9e8a8dffaeed19bdfc58078b59",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face_03/rock_face_03_nor_dx_2k.jpg",
+            "bytes": 4462567,
+            "md5": "daca10c7ff9153b89c47893b9ddf0707",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face_03/rock_face_03_arm_2k.jpg",
+            "bytes": 3215097,
+            "md5": "f7999b2d14ebbea91e1a5adfb7beabc3",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face_03/rock_face_03_disp_2k.jpg",
+            "bytes": 798149,
+            "md5": "e7629af66fe9420fe3e73b937f3eba40",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_face_03/rock_face_03_diff_4k.jpg",
+            "bytes": 15319503,
+            "md5": "50105980b509029b9040f43b1f6ddc71",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_face_03/rock_face_03_nor_dx_4k.jpg",
+            "bytes": 16272118,
+            "md5": "014794928edd4662f7270253e9c6054e",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_face_03/rock_face_03_arm_4k.jpg",
+            "bytes": 12740820,
+            "md5": "9c0157d5fe76966bdd0dfce965e14ad2",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_face_03/rock_face_03_disp_4k.jpg",
+            "bytes": 2365155,
+            "md5": "00b989230994ee1b893cc30bf4859943",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 15,
+      "id": "ganges_river_pebbles",
+      "display_name": "Talus / River Stone",
+      "role_tags": [
+        "talus",
+        "river-pebbles"
+      ],
+      "biome_tags": [
+        "mountain",
+        "riverbed"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/ganges_river_pebbles",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Amal Kumar": "All"
+      },
+      "files_hash": "304428504a6db1d8ccb1e164f7bce3686086375f",
+      "physical_width_m": 2.16,
+      "physical_height_m": 2.16,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.4,
+      "cliff_suitability": 0.15,
+      "uv_scale_multiplier": 1.851852,
+      "ambientcg_fallback": {
+        "id": "Ground106",
+        "page_url": "https://ambientcg.com/a/Ground106"
+      },
+      "notes": "Substituted for dry_riverbed_rock (rock face, not loose stone).",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/ganges_river_pebbles/ganges_river_pebbles_diff_2k.jpg",
+            "bytes": 3264787,
+            "md5": "c7265256e7cb4ee18d189c48e5d66f06",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/ganges_river_pebbles/ganges_river_pebbles_nor_dx_2k.jpg",
+            "bytes": 4611948,
+            "md5": "282fce413952f299ad6f3e6dce191c2a",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/ganges_river_pebbles/ganges_river_pebbles_arm_2k.jpg",
+            "bytes": 2802994,
+            "md5": "f910ae30990a926dba3f098cecd46c5a",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/ganges_river_pebbles/ganges_river_pebbles_disp_2k.jpg",
+            "bytes": 1180201,
+            "md5": "83489c0b87318d42dab877e79327db86",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/ganges_river_pebbles/ganges_river_pebbles_diff_4k.jpg",
+            "bytes": 12394926,
+            "md5": "1d8b5ac8e9a6900fdb743a210ae1005d",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/ganges_river_pebbles/ganges_river_pebbles_nor_dx_4k.jpg",
+            "bytes": 18352293,
+            "md5": "d4a2a153ded92d5d4a010da2beb38780",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/ganges_river_pebbles/ganges_river_pebbles_arm_4k.jpg",
+            "bytes": 10188062,
+            "md5": "aaa237b28ea565694e4ea97c9dee1657",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/ganges_river_pebbles/ganges_river_pebbles_disp_4k.jpg",
+            "bytes": 3495414,
+            "md5": "346bfe5225d53df7e493db09738e726e",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 17,
+      "id": "leaves_forest_ground",
+      "display_name": "Conifer Duff",
+      "role_tags": [
+        "duff",
+        "forest"
+      ],
+      "biome_tags": [
+        "duff",
+        "forest"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/leaves_forest_ground",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Dario Barresi": "Processing",
+        "Dimitrios Savva": "Photography"
+      },
+      "files_hash": "97ad42596a73dd3dcf0f7dc6fdf9070a382a1f9c",
+      "physical_width_m": 12.599999904632568,
+      "physical_height_m": 12.599999904632568,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.75,
+      "cliff_suitability": 0.1,
+      "uv_scale_multiplier": 0.07936507996578125,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leaves_forest_ground/leaves_forest_ground_diff_2k.jpg",
+            "bytes": 4253470,
+            "md5": "9adf3721c2a5ce011e1184762e8c1a8d",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leaves_forest_ground/leaves_forest_ground_nor_dx_2k.jpg",
+            "bytes": 5264802,
+            "md5": "02c1725429b0da9933a887899800fa74",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leaves_forest_ground/leaves_forest_ground_arm_2k.jpg",
+            "bytes": 3601680,
+            "md5": "90bae07acc5c44fb63d0648e815b1869",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leaves_forest_ground/leaves_forest_ground_disp_2k.jpg",
+            "bytes": 1623180,
+            "md5": "e863443345153addf6dc45209e9ee49d",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leaves_forest_ground/leaves_forest_ground_diff_4k.jpg",
+            "bytes": 15519094,
+            "md5": "72607dc2c0b66eb762c42b8016c0c512",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leaves_forest_ground/leaves_forest_ground_nor_dx_4k.jpg",
+            "bytes": 20040131,
+            "md5": "47fa125037b7b9fd183b109869c5e6c5",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leaves_forest_ground/leaves_forest_ground_arm_4k.jpg",
+            "bytes": 13174561,
+            "md5": "612b3be195e747a8c1393fb97fd3442b",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/leaves_forest_ground/leaves_forest_ground_disp_4k.jpg",
+            "bytes": 4751097,
+            "md5": "86dea70f44b1d37df3885a833b33bca7",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 18,
+      "id": "aerial_rocks_01",
+      "display_name": "Cool Gray Rock",
+      "role_tags": [
+        "rock",
+        "aerial"
+      ],
+      "biome_tags": [
+        "rock",
+        "aerial"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/aerial_rocks_01",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "ea281839fd9f0d5d67f3cc675bddbac76ef26b27",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.2,
+      "cliff_suitability": 0.7,
+      "uv_scale_multiplier": 0.06666666666666667,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024. Physical size clamped to 15 m (PH aerial dimensions are not metres).",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_01/aerial_rocks_01_diff_2k.jpg",
+            "bytes": 2968327,
+            "md5": "d9e4811809f818bcf8322aa48cac13c3",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_01/aerial_rocks_01_nor_dx_2k.jpg",
+            "bytes": 5471404,
+            "md5": "52732c76f52258d435810de864e6a569",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_01/aerial_rocks_01_arm_2k.jpg",
+            "bytes": 877378,
+            "md5": "93a93fee5089463a6466ce16ec155703",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_01/aerial_rocks_01_disp_2k.jpg",
+            "bytes": 470212,
+            "md5": "b55456691ecc7f6b92c742257828f33d",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_01/aerial_rocks_01_diff_4k.jpg",
+            "bytes": 9805399,
+            "md5": "6d68fa15bf4ade5297aa8214b12dfb0b",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_01/aerial_rocks_01_nor_dx_4k.jpg",
+            "bytes": 18353205,
+            "md5": "8227f559769f15ae64c292977525d1e1",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_01/aerial_rocks_01_arm_4k.jpg",
+            "bytes": 3333667,
+            "md5": "d2cf2d7d42104bcf41aea8467e3cbdee",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_rocks_01/aerial_rocks_01_disp_4k.jpg",
+            "bytes": 1297882,
+            "md5": "f217dfc4686f16d9501eefa46d142e42",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 19,
+      "id": "rock_wall_02",
+      "display_name": "Dark Slate",
+      "role_tags": [
+        "cliff",
+        "wall"
+      ],
+      "biome_tags": [
+        "cliff",
+        "wall"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/rock_wall_02",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "9e5c525cc4a533978c98b83502bc961764738679",
+      "physical_width_m": 20.0,
+      "physical_height_m": 20.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.15,
+      "cliff_suitability": 0.95,
+      "uv_scale_multiplier": 0.05,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_wall_02/rock_wall_02_diff_2k.jpg",
+            "bytes": 1209071,
+            "md5": "b345c9b1c95e11418d4f989b46d2b4dc",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_wall_02/rock_wall_02_nor_dx_2k.jpg",
+            "bytes": 760923,
+            "md5": "127acceead672a881f4df0cdbe554136",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_wall_02/rock_wall_02_arm_2k.jpg",
+            "bytes": 848763,
+            "md5": "725dd6f8aaec29ec82358c677c791c97",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_wall_02/rock_wall_02_disp_2k.jpg",
+            "bytes": 216653,
+            "md5": "dc89f197763679576ea0a5e24fed34ee",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_wall_02/rock_wall_02_diff_4k.jpg",
+            "bytes": 4138849,
+            "md5": "bea20c605f7b373e3b52da5088dcba67",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_wall_02/rock_wall_02_nor_dx_4k.jpg",
+            "bytes": 2667812,
+            "md5": "33a2e3ef96ee19373187dd9ceafa9824",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_wall_02/rock_wall_02_arm_4k.jpg",
+            "bytes": 3177600,
+            "md5": "b59522973831a5eccea56cad93e46654",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_wall_02/rock_wall_02_disp_4k.jpg",
+            "bytes": 578268,
+            "md5": "5e9aa5849b673c597511000b8fd5cf35",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 20,
+      "id": "forest_ground_05",
+      "display_name": "Moss Carpet",
+      "role_tags": [
+        "moss",
+        "forest"
+      ],
+      "biome_tags": [
+        "moss",
+        "forest"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/forest_ground_05",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Charlotte Baglioni": "All"
+      },
+      "files_hash": "7f41f3c32906da4c5de717f58e78c467a2958e06",
+      "physical_width_m": 20.0,
+      "physical_height_m": 20.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.9,
+      "cliff_suitability": 0.2,
+      "uv_scale_multiplier": 0.05,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_05/forest_ground_05_diff_2k.jpg",
+            "bytes": 2760081,
+            "md5": "ecdf24a0fae46cf53010fdde41086a98",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_05/forest_ground_05_nor_dx_2k.jpg",
+            "bytes": 4812266,
+            "md5": "ca7cd0a67d5ef34b95109a0e225f6553",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_05/forest_ground_05_arm_2k.jpg",
+            "bytes": 3119333,
+            "md5": "e73bbfd7b4f8a157625c8bfdc88dcc75",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_05/forest_ground_05_disp_2k.jpg",
+            "bytes": 1296721,
+            "md5": "c31f972d9cdc702a72ab40156599bf5b",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_05/forest_ground_05_diff_4k.jpg",
+            "bytes": 11186950,
+            "md5": "bd961a92e6bb52f0d110ad15c43e199e",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_05/forest_ground_05_nor_dx_4k.jpg",
+            "bytes": 17730787,
+            "md5": "0214cc123f23d99338af74a4744900f4",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_05/forest_ground_05_arm_4k.jpg",
+            "bytes": 11304533,
+            "md5": "512dfdf09551ae134d6bef787b76ce18",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_05/forest_ground_05_disp_4k.jpg",
+            "bytes": 3753609,
+            "md5": "7d6315998bccb2d7c5142482120804cb",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 21,
+      "id": "rock_boulder_dry",
+      "display_name": "Limestone",
+      "role_tags": [
+        "rock",
+        "limestone"
+      ],
+      "biome_tags": [
+        "rock",
+        "limestone"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/rock_boulder_dry",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Dimitrios Savva": "Photography",
+        "Rico Cilliers": "Processing"
+      },
+      "files_hash": "d0ca2468d0a2b2453c93e504016641249b400e4d",
+      "physical_width_m": 17.999999523162842,
+      "physical_height_m": 17.999999523162842,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.3,
+      "cliff_suitability": 0.6,
+      "uv_scale_multiplier": 0.055555557027275215,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_boulder_dry/rock_boulder_dry_diff_2k.jpg",
+            "bytes": 3437626,
+            "md5": "fbc9cf377db427f54381f463c0639e1f",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_boulder_dry/rock_boulder_dry_nor_dx_2k.jpg",
+            "bytes": 3308534,
+            "md5": "42754245d4c684620f263449cc6561d2",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_boulder_dry/rock_boulder_dry_arm_2k.jpg",
+            "bytes": 3164814,
+            "md5": "acee3a43c7fc3bbe79c343cb3bb3b113",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_boulder_dry/rock_boulder_dry_disp_2k.jpg",
+            "bytes": 785931,
+            "md5": "bea116eb30df0faed0748c69d57b460d",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_boulder_dry/rock_boulder_dry_diff_4k.jpg",
+            "bytes": 14349759,
+            "md5": "7a678cbefc5d377b11fa9784e5493bde",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_boulder_dry/rock_boulder_dry_nor_dx_4k.jpg",
+            "bytes": 13616154,
+            "md5": "d5ff503acceab142eb2393119ec93553",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_boulder_dry/rock_boulder_dry_arm_4k.jpg",
+            "bytes": 13257130,
+            "md5": "c9318b10f3b3b45e793f73365b3fc42f",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/rock_boulder_dry/rock_boulder_dry_disp_4k.jpg",
+            "bytes": 2567374,
+            "md5": "1ff8279fd4742f5e0082bc68d5968761",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 22,
+      "id": "dirt_floor",
+      "display_name": "Dark Loam",
+      "role_tags": [
+        "soil",
+        "loam"
+      ],
+      "biome_tags": [
+        "soil",
+        "loam"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/dirt_floor",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "eye-candy.xyz": "All"
+      },
+      "files_hash": "5786a04233bc38e09aea24ac369f43f71a0aa728",
+      "physical_width_m": 20.699996948242188,
+      "physical_height_m": 20.699996948242188,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.85,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.048309185866083834,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dirt_floor/dirt_floor_diff_2k.jpg",
+            "bytes": 3944426,
+            "md5": "dace6e0d469e7b99f0794b941f06bab8",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dirt_floor/dirt_floor_nor_dx_2k.jpg",
+            "bytes": 4973546,
+            "md5": "4f758c871ede1ae26ccb77381c3169ff",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dirt_floor/dirt_floor_arm_2k.jpg",
+            "bytes": 2716388,
+            "md5": "bfb4e055af511e4df8db909926054f0a",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dirt_floor/dirt_floor_disp_2k.jpg",
+            "bytes": 1552069,
+            "md5": "52f507cdfeb132c6dc7753b276c27401",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dirt_floor/dirt_floor_diff_4k.jpg",
+            "bytes": 17460480,
+            "md5": "e50e230c2466a71fae6ade8c9461ef87",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dirt_floor/dirt_floor_nor_dx_4k.jpg",
+            "bytes": 18633328,
+            "md5": "b081f90cbd382d27d0108d613bd6ad95",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dirt_floor/dirt_floor_arm_4k.jpg",
+            "bytes": 11043115,
+            "md5": "c4f2a369f049bd616ce178525e298cb1",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/dirt_floor/dirt_floor_disp_4k.jpg",
+            "bytes": 4766297,
+            "md5": "182aeed142dc6975ed28fe5e6db89678",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 23,
+      "id": "forest_leaves_02",
+      "display_name": "Pine Litter",
+      "role_tags": [
+        "needles",
+        "forest"
+      ],
+      "biome_tags": [
+        "needles",
+        "forest"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/forest_leaves_02",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "53c53424ef06fc766266b15b9b26ce257d20d141",
+      "physical_width_m": 30.009725093841553,
+      "physical_height_m": 30.009725093841553,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.6,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.03332253117524275,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_leaves_02/forest_leaves_02_diffuse_2k.jpg",
+            "bytes": 1668009,
+            "md5": "b7837ba1c51fb0e11af36d6b4e225c20",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_leaves_02/forest_leaves_02_nor_dx_2k.jpg",
+            "bytes": 2319172,
+            "md5": "3e1bac9be12674ebbabb3319cba30f4a",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_leaves_02/forest_leaves_02_arm_2k.jpg",
+            "bytes": 1066850,
+            "md5": "4b476f0e4b633b2aef621afda5209baf",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_leaves_02/forest_leaves_02_disp_2k.jpg",
+            "bytes": 332158,
+            "md5": "13830bbe7693f4cf7f0e3c0958d3f211",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_leaves_02/forest_leaves_02_diffuse_4k.jpg",
+            "bytes": 5749081,
+            "md5": "35672d38fea49e67f87e9fe794255e5a",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_leaves_02/forest_leaves_02_nor_dx_4k.jpg",
+            "bytes": 8597315,
+            "md5": "dc6a3cba629a804d2d8ca72a5ea54fc0",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_leaves_02/forest_leaves_02_arm_4k.jpg",
+            "bytes": 3455499,
+            "md5": "6cb9296c40ced60e711d6a77a428be56",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_leaves_02/forest_leaves_02_disp_4k.jpg",
+            "bytes": 912447,
+            "md5": "5f3ddaabfe694fbc9606ef3a040ceeb0",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 25,
+      "id": "forest_ground_06",
+      "display_name": "Wetland",
+      "role_tags": [
+        "wetland",
+        "peat"
+      ],
+      "biome_tags": [
+        "wetland",
+        "peat"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/forest_ground_06",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Charlotte Baglioni": "All"
+      },
+      "files_hash": "2cf0a14d1dc8ade0de0014bfe858942982f490f9",
+      "physical_width_m": 21.099998950958252,
+      "physical_height_m": 21.099998950958252,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.95,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.047393367285195304,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_06/forest_ground_06_diff_2k.jpg",
+            "bytes": 3375916,
+            "md5": "6891c030533e7af2abd81cb9aecb1eb9",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_06/forest_ground_06_nor_dx_2k.jpg",
+            "bytes": 5781005,
+            "md5": "8f693e0ebabb41e1ce2bc1f58e233a9d",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_06/forest_ground_06_arm_2k.jpg",
+            "bytes": 4209470,
+            "md5": "592747c9d3170231d2e5c64b689dba6d",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_ground_06/forest_ground_06_disp_2k.jpg",
+            "bytes": 1846804,
+            "md5": "462a8c4a389fa4faea8f7272e505f282",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_06/forest_ground_06_diff_4k.jpg",
+            "bytes": 12740484,
+            "md5": "d985825ec4c157fc89f3c9582247ce61",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_06/forest_ground_06_nor_dx_4k.jpg",
+            "bytes": 21778541,
+            "md5": "308f620131b3609a6eaa257f6c65f7e1",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_06/forest_ground_06_arm_4k.jpg",
+            "bytes": 15270061,
+            "md5": "92d30d46bdcd991bff2a6ecc977c98ef",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_ground_06/forest_ground_06_disp_4k.jpg",
+            "bytes": 5476558,
+            "md5": "f524fb82a8b6b77393feeac043bb3617",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 26,
+      "id": "gray_rocks",
+      "display_name": "Gray Talus",
+      "role_tags": [
+        "talus",
+        "granite"
+      ],
+      "biome_tags": [
+        "talus",
+        "granite"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/gray_rocks",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Dimitrios Savva": "All"
+      },
+      "files_hash": "85e11fb6423b057327317b25bd4cc631d3d6d292",
+      "physical_width_m": 17.999995946884155,
+      "physical_height_m": 17.999995946884155,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.2,
+      "cliff_suitability": 0.5,
+      "uv_scale_multiplier": 0.05555556806517518,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_diff_2k.jpg",
+            "bytes": 4036501,
+            "md5": "7768e61933a701d9f4bb21341ff3fff8",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_nor_dx_2k.jpg",
+            "bytes": 5045957,
+            "md5": "54f26463ff1556fe1f2170c796143a66",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_arm_2k.jpg",
+            "bytes": 3304517,
+            "md5": "ce12f18839ccf1b18c0ecbf7de1a2d93",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_disp_2k.jpg",
+            "bytes": 1184565,
+            "md5": "23253637005d7514a8d06f676e491991",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gray_rocks/gray_rocks_diff_4k.jpg",
+            "bytes": 14920410,
+            "md5": "6e276019a0fe0488299e0be98179378c",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gray_rocks/gray_rocks_nor_dx_4k.jpg",
+            "bytes": 20457841,
+            "md5": "ead15ed7a3372eb2e12bd94955a283bd",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gray_rocks/gray_rocks_arm_4k.jpg",
+            "bytes": 12937647,
+            "md5": "7c91f73f3d905e78837a64e8d26f6efc",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/gray_rocks/gray_rocks_disp_4k.jpg",
+            "bytes": 3546893,
+            "md5": "3c1de1fa6a5d243afa4885390e6b1d7e",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 27,
+      "id": "aerial_beach_01",
+      "display_name": "Light Dune",
+      "role_tags": [
+        "sand",
+        "beach"
+      ],
+      "biome_tags": [
+        "sand",
+        "beach"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/aerial_beach_01",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "b25ab01641da8f9b025dabf1f057e0ab8d2124de",
+      "physical_width_m": 15.0,
+      "physical_height_m": 15.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.25,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.06666666666666667,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024. Physical size clamped to 15 m (PH aerial dimensions are not metres).",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_diff_2k.jpg",
+            "bytes": 457152,
+            "md5": "b06496ad69bc0587e03e9cbcf9a80d76",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_nor_dx_2k.jpg",
+            "bytes": 867539,
+            "md5": "7f96192dea9570c3fb0c7b30d3505769",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_arm_2k.jpg",
+            "bytes": 760953,
+            "md5": "c45cbda135f39549166a15596ce995e1",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_disp_2k.jpg",
+            "bytes": 514856,
+            "md5": "da5a3a45f2a0d8450ed0ad65b66d7f02",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_beach_01/aerial_beach_01_diff_4k.jpg",
+            "bytes": 1614021,
+            "md5": "cb57acaebe3a54d2b698987fb90cc249",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_beach_01/aerial_beach_01_nor_dx_4k.jpg",
+            "bytes": 2434098,
+            "md5": "75b9b4ccd74f88f941239fff6eb795fb",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_beach_01/aerial_beach_01_arm_4k.jpg",
+            "bytes": 3180900,
+            "md5": "727d5008cd7d6145a1ae6bb591220887",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/aerial_beach_01/aerial_beach_01_disp_4k.jpg",
+            "bytes": 1629662,
+            "md5": "8bdfb6be98d50a425b032f235e742a60",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 28,
+      "id": "lichen_rock",
+      "display_name": "Lichen Rock",
+      "role_tags": [
+        "lichen",
+        "rock"
+      ],
+      "biome_tags": [
+        "lichen",
+        "rock"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/lichen_rock",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rico Cilliers": "All"
+      },
+      "files_hash": "3f77b26ff52da2807965072c56cbf18b8fcf3af5",
+      "physical_width_m": 20.0,
+      "physical_height_m": 20.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.4,
+      "cliff_suitability": 0.55,
+      "uv_scale_multiplier": 0.05,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/lichen_rock/lichen_rock_diff_2k.jpg",
+            "bytes": 4010129,
+            "md5": "5625c90a7b55058b7d89e180376a7cda",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/lichen_rock/lichen_rock_nor_dx_2k.jpg",
+            "bytes": 4858346,
+            "md5": "973c1925585cff7dcf35205fd57f34c6",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/lichen_rock/lichen_rock_arm_2k.jpg",
+            "bytes": 2978561,
+            "md5": "ca53b5e011dfb7d0b8fed989b44d9b40",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/lichen_rock/lichen_rock_disp_2k.jpg",
+            "bytes": 961417,
+            "md5": "8feedb29e0fc7d10a29ed915bb571865",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/lichen_rock/lichen_rock_diff_4k.jpg",
+            "bytes": 14408710,
+            "md5": "75592225aac679f0b8e14abf25825b7c",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/lichen_rock/lichen_rock_nor_dx_4k.jpg",
+            "bytes": 17991996,
+            "md5": "666b41435a3e6dc22843102ac62ea974",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/lichen_rock/lichen_rock_arm_4k.jpg",
+            "bytes": 10349695,
+            "md5": "eb40da78884a52406eab893aa9de422c",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/lichen_rock/lichen_rock_disp_4k.jpg",
+            "bytes": 2811879,
+            "md5": "3685b69d04dc9f518cda0aa404d5db0f",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 29,
+      "id": "forest_floor",
+      "display_name": "Autumn Litter",
+      "role_tags": [
+        "leaves",
+        "autumn"
+      ],
+      "biome_tags": [
+        "leaves",
+        "autumn"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/forest_floor",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "eye-candy.xyz": "All"
+      },
+      "files_hash": "7723fe51fafe4f43d1242eff1dd06f34560ec921",
+      "physical_width_m": 21.399996280670166,
+      "physical_height_m": 21.399996280670166,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.7,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.046728980084135036,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_floor/forest_floor_diff_2k.jpg",
+            "bytes": 5452936,
+            "md5": "a93f845fca105e6cabc82853161ff7b6",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_floor/forest_floor_nor_dx_2k.jpg",
+            "bytes": 5361391,
+            "md5": "cf2ef881f8134698a9fd8683ec341ffe",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_floor/forest_floor_arm_2k.jpg",
+            "bytes": 3926636,
+            "md5": "00a1d0081bfa9a574d5973106c94c01e",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forest_floor/forest_floor_disp_2k.jpg",
+            "bytes": 1935809,
+            "md5": "2882f21e8b3f3aad8b89a1ec26014e25",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_floor/forest_floor_diff_4k.jpg",
+            "bytes": 22010589,
+            "md5": "1cf0f37203ea59cd3678d223b98e712a",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_floor/forest_floor_nor_dx_4k.jpg",
+            "bytes": 18424928,
+            "md5": "6120301d90bfeaf6c9ff5baacafa4017",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_floor/forest_floor_arm_4k.jpg",
+            "bytes": 15908242,
+            "md5": "d5defaccae6c57f66be43ab964531a8a",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/forest_floor/forest_floor_disp_4k.jpg",
+            "bytes": 5501198,
+            "md5": "0a706bfa9c007d441b011179d29faf1a",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 30,
+      "id": "grassy_cobblestone",
+      "display_name": "Packed Path",
+      "role_tags": [
+        "path",
+        "cobble"
+      ],
+      "biome_tags": [
+        "path",
+        "cobble"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/grassy_cobblestone",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Dario Barresi": "Processing ",
+        "Charlotte Baglioni": "Photography"
+      },
+      "files_hash": "6093a2264b43e4fe5a7b6ab741894ae3e7b9163c",
+      "physical_width_m": 20.0,
+      "physical_height_m": 20.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.15,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.05,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/grassy_cobblestone/grassy_cobblestone_diff_2k.jpg",
+            "bytes": 3004490,
+            "md5": "e4f8ec87a0b0b793277119f0fff77f22",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/grassy_cobblestone/grassy_cobblestone_nor_dx_2k.jpg",
+            "bytes": 3963718,
+            "md5": "bb2e1d19d9eff48daacbde8f3837bda4",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/grassy_cobblestone/grassy_cobblestone_arm_2k.jpg",
+            "bytes": 3042128,
+            "md5": "1a2ed863ba9ac083c9bb6f8eccc16357",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/grassy_cobblestone/grassy_cobblestone_disp_2k.jpg",
+            "bytes": 1321939,
+            "md5": "93fdafeeb1dd94b79ff09d30d997319c",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/grassy_cobblestone/grassy_cobblestone_diff_4k.jpg",
+            "bytes": 11613596,
+            "md5": "fe9f5b3aedd714224f774e4325e5803a",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/grassy_cobblestone/grassy_cobblestone_nor_dx_4k.jpg",
+            "bytes": 13949032,
+            "md5": "1eb53793d74b846a965d48cfa242465b",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/grassy_cobblestone/grassy_cobblestone_arm_4k.jpg",
+            "bytes": 11458437,
+            "md5": "704c81187f4bd6974b98225eb175adca",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/grassy_cobblestone/grassy_cobblestone_disp_4k.jpg",
+            "bytes": 3924877,
+            "md5": "7a7eaa8f45d4178db803292e1751f8bb",
+            "sha256": null
+          }
+        }
+      }
+    },
+    {
+      "index": 31,
+      "id": "snow_01",
+      "display_name": "Hard Snow",
+      "role_tags": [
+        "snow",
+        "crust"
+      ],
+      "biome_tags": [
+        "snow",
+        "crust"
+      ],
+      "compatibility_locked": false,
+      "source": "polyhaven",
+      "page_url": "https://polyhaven.com/a/snow_01",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "files_hash": "0f733845a3441bcd0204ff2f72449295c757becf",
+      "physical_width_m": 20.0,
+      "physical_height_m": 20.0,
+      "colour_space": "sRGB",
+      "normal_convention": "DirectX",
+      "moisture_affinity": 0.1,
+      "cliff_suitability": 0.05,
+      "uv_scale_multiplier": 0.05,
+      "notes": "XV-Zeta hue-diverse layer. 2K pack; runtime extra bank at 1024.",
+      "files": {
+        "2k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_01/snow_01_diff_2k.jpg",
+            "bytes": 1331975,
+            "md5": "2a3b4fb516f9bb0ab082460f0926832d",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_01/snow_01_nor_dx_2k.jpg",
+            "bytes": 5559103,
+            "md5": "438469142bb8d11474d295e05bedeed6",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_01/snow_01_arm_2k.jpg",
+            "bytes": 571675,
+            "md5": "2f4a4381ec90ac753d26ef45a11674d6",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_01/snow_01_disp_2k.jpg",
+            "bytes": 685773,
+            "md5": "098fd433b6b32a083ebaba9531533d42",
+            "sha256": null
+          }
+        },
+        "4k": {
+          "diff": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_01/snow_01_diff_4k.jpg",
+            "bytes": 4654820,
+            "md5": "b2641cfed75e6d739faec99a31bb0968",
+            "sha256": null
+          },
+          "nor_dx": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_01/snow_01_nor_dx_4k.jpg",
+            "bytes": 19789762,
+            "md5": "ad06e8d13575a610da53a2a8c4a68ad8",
+            "sha256": null
+          },
+          "arm": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_01/snow_01_arm_4k.jpg",
+            "bytes": 2539458,
+            "md5": "13ff15ea15f33e09fb89841203195cb7",
+            "sha256": null
+          },
+          "disp": {
+            "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/snow_01/snow_01_disp_4k.jpg",
+            "bytes": 2017352,
+            "md5": "626f118ff523c08f8593f721b7cae162",
+            "sha256": null
+          }
+        }
+      }
+    }
+  ],
+  "notes_zeta": "XV-Zeta: layers 16 and 24 stay procedural lush/wildgrass (no CC0 lawn scan passed the ochre Delta-E gate). Extra bank 16-31 loads at 1024."
+}
