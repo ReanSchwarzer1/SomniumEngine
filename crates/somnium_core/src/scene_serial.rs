@@ -64,12 +64,16 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                         LightType::Directional => "Directional",
                         LightType::Point       => "Point",
                         LightType::Spot        => "Spot",
+                        LightType::Rect        => "Rect",
                     },
                     "color":       lc.color.to_array(),
                     "intensity":   lc.intensity,
                     "range":       lc.range,
                     "inner_angle": lc.inner_angle,
                     "outer_angle": lc.outer_angle,
+                    "source_radius": lc.source_radius,
+                    "area_width": lc.area_width,
+                    "area_height": lc.area_height,
                 })
             });
 

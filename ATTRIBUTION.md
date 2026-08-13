@@ -207,6 +207,10 @@ The codename is thematic. No third-party source was copied. Files cited as used:
 | wgpu 29 `EXPERIMENTAL_RAY_QUERY` | Inline ray query in compute | Same gate as ReSTIR; skipped without the feature |
 | NVIDIA *Ray Tracing Gems* (reflection denoising chapters) | Temporal reuse / upsample | Water-velocity reprojection + 2×2 bilateral upsample; not a copy of any listed filter |
 | Bevy Solari `specular_gi.wgsl` / `raytracing_scene_bindings.wgsl` | `trace_ray` / hit-resolve split | Architecture reference only |
+| Bevy Solari world cache / path tracer | Clipmap splat + accumulate-over-frames | `lighting_extra.wgsl` is original WGSL; layout studied only |
+| Wicked Engine `surfaceHF.hlsli` | Analytic barycentric UV gradients | `vis_barycentric` in `shading.wgsl` is original |
+| CDLOD `CDLODTerrain.vsh` | Vertex morph toward coarser LOD | Packed morph in vis-buffer instance data; original WGSL |
+| Heitz et al., LTC (JCGT 2016) | Polygon irradiance for area lights | `ltc_quad_diffuse` in `shading.wgsl` is original |
 | Wicked Engine `wiOcean` | Ocean pass placement | Already cited for Phase IV; not used for RT reflections |
 
 **Files:** `pass/water_reflection.rs`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl`, water prepass/shade split in `pass/water.rs` + `shaders/water.wgsl`. Array layer 1 is VV+1 refraction (Snell `refract()`, IOR 1.333, default off).

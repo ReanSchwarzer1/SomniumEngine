@@ -143,6 +143,8 @@ pub enum LightType {
     Point,
     /// Local cone light with range falloff and inner/outer angles.
     Spot,
+    /// Rectangular area light (Phase 24R, LTC). Width/height are half-extents.
+    Rect,
 }
 
 /// ECS component that marks an entity as a light source.
@@ -211,6 +213,10 @@ pub struct LightComponent {
     pub outer_angle: f32,
     /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.010 lux.
     pub moon_intensity: f32,
+    /// Rect-light half-width in metres (Phase 24R). Ignored for other kinds.
+    pub area_width: f32,
+    /// Rect-light half-height in metres (Phase 24R). Ignored for other kinds.
+    pub area_height: f32,
 }
 
 impl LightComponent {
@@ -234,7 +240,7 @@ impl LightComponent {
     pub fn photometric_color(&self) -> glam::Vec3 {
         let scale = match self.light_type {
             LightType::Directional => self.intensity,
-            LightType::Point => light_units::point_candela(self.intensity),
+            LightType::Point | LightType::Rect => light_units::point_candela(self.intensity),
             LightType::Spot => light_units::spot_candela(self.intensity, self.outer_angle),
         };
         self.tint() * scale
@@ -252,6 +258,8 @@ impl LightComponent {
             inner_angle: 0.0,
             outer_angle: 0.0,
             moon_intensity: 0.010,
+            area_width: 0.0,
+            area_height: 0.0,
         }
     }
 
@@ -267,6 +275,8 @@ impl LightComponent {
             inner_angle: 0.0,
             outer_angle: 0.0,
             moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
         }
     }
 
@@ -282,6 +292,25 @@ impl LightComponent {
             inner_angle,
             outer_angle,
             moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white rectangular area light, in **lumens**.
+    pub fn rect(intensity: f32, range: f32, half_width: f32, half_height: f32) -> Self {
+        Self {
+            light_type: LightType::Rect,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: half_width.max(half_height),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: half_width,
+            area_height: half_height,
         }
     }
 }
@@ -420,6 +449,12 @@ pub struct FoliageComponent {
     ///
     /// `0` means "never stop", which is the A/B against the old behaviour.
     pub foliage_shadow_distance: f32,
+    /// Past this distance the heaviest mesh part is dropped (Phase 25P).
+    /// `0` keeps every part.
+    pub lod_distance: f32,
+    /// Past this distance a camera-facing quad replaces the mesh (Phase 25P).
+    /// `0` disables impostors.
+    pub impostor_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -444,6 +479,8 @@ impl Default for FoliageComponent {
             // individual blades within a few metres and as texture within a
             // few tens; past that they are noise that costs four cascades.
             foliage_shadow_distance: 40.0,
+            lod_distance: 45.0,
+            impostor_distance: 90.0,
             max_instances: 18_000,
         }
     }
@@ -671,6 +708,30 @@ pub struct PostProcessComponent {
     /// specular occlusion, and ReSTIR GI now provide the indirect-light
     /// visibility that the old pre-AO `0.35` workaround was waiting for.
     pub ibl_intensity: f32,
+    /// World-space radiance cache (Phase 24M). Default off; `SOMNIUM_WORLD_CACHE=1`.
+    pub world_cache: bool,
+    /// How hard the cache contributes to ambient.
+    pub cache_intensity: f32,
+    /// Cache voxel size in metres.
+    pub cache_cell_size: f32,
+    /// Scene-wide ray-traced specular (Phase 24N). Default off.
+    pub specular_gi: bool,
+    /// Roughness cutoff for the specular GI trace.
+    pub spec_roughness: f32,
+    /// Offline path tracer (Phase 24O). Replaces the image while on. Default off.
+    pub path_tracer: bool,
+    /// Bounces the path tracer takes. 1..=8.
+    pub path_bounces: u32,
+    /// Mesh-SDF cone trace (Phase 24P). Default off.
+    pub mesh_sdf: bool,
+    /// Probe/env fallback into the world cache (Phase 24Q). Default off.
+    pub probes: bool,
+    /// Probe contribution when GI has no sample.
+    pub probe_intensity: f32,
+    /// Analytic UV gradients in vis-buffer shading (Phase 25N). Default on.
+    pub analytic_grad: bool,
+    /// Light-shaft boost on the sun in-scatter (Phase 24U). 1 is unscaled air.
+    pub shaft_intensity: f32,
 }
 
 impl Default for PostProcessComponent {
@@ -752,6 +813,18 @@ impl Default for PostProcessComponent {
             fxaa_enabled: true,
             pcss_enabled: true,
             contact_shadows_enabled: true,
+            world_cache: std::env::var("SOMNIUM_WORLD_CACHE").as_deref() == Ok("1"),
+            cache_intensity: 1.0,
+            cache_cell_size: 2.0,
+            specular_gi: std::env::var("SOMNIUM_SPECULAR_GI").as_deref() == Ok("1"),
+            spec_roughness: 0.15,
+            path_tracer: std::env::var("SOMNIUM_PATH_TRACER").as_deref() == Ok("1"),
+            path_bounces: 3,
+            mesh_sdf: std::env::var("SOMNIUM_MESH_SDF").as_deref() == Ok("1"),
+            probes: std::env::var("SOMNIUM_PROBES").as_deref() == Ok("1"),
+            probe_intensity: 1.0,
+            analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
+            shaft_intensity: 1.5,
         }
     }
 }

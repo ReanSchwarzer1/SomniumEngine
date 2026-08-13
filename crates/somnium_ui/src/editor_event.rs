@@ -8,6 +8,7 @@ pub enum CreateKind {
     DirectionalLight,
     PointLight,
     SpotLight,
+    RectLight,
     Particle,
     Terrain,
     VoxelTerrain,
@@ -23,6 +24,7 @@ impl CreateKind {
             Self::DirectionalLight => "Directional Light",
             Self::PointLight => "Point Light",
             Self::SpotLight => "Spot Light",
+            Self::RectLight => "Area Light",
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
@@ -58,6 +60,9 @@ pub enum InspectorField {
     LightColorTemperature,
     /// Directional moonlight illuminance in lux (Phase 25M-2).
     LightMoonIntensity,
+    LightSourceRadius,
+    LightAreaWidth,
+    LightAreaHeight,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
@@ -104,6 +109,12 @@ pub enum InspectorField {
     /// Strength of the traced indirect diffuse (Phase 24L). Every other effect
     /// has an amount dial; this one was the odd toggle out.
     PostGiIntensity,
+    PostCacheIntensity,
+    PostCacheCell,
+    PostSpecRough,
+    PostPathBounces,
+    PostProbeIntensity,
+    PostShaftIntensity,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.
@@ -130,6 +141,8 @@ pub enum InspectorField {
     TerrainMacroStrength,
     /// Debug visualisation code (same numbers as `SOMNIUM_SHADOW_DEBUG`).
     TerrainDebugView,
+    /// CDLOD morph start as a 0..1 fraction of the LOD range (Phase 25C).
+    TerrainMorphStart,
     // First-class lake body settings (Phase IV-C).
     WaterSurface,
     WaterMaxDepth,
@@ -168,6 +181,9 @@ pub enum InspectorField {
     /// Metres from the camera past which foliage stops casting shadows
     /// (Phase 24AE). Nearer than the draw distance on purpose.
     FoliageShadowDistance,
+    FoliageCullDistance,
+    FoliageLodDistance,
+    FoliageImpostorDistance,
     WaterWaveDirAX,
     WaterWaveDirAZ,
     WaterWaveDirBX,
@@ -231,6 +247,18 @@ pub enum PostFxToggle {
     RtReflect,
     /// Ray-traced water refraction (Phase VV+1). Default off.
     RtRefract,
+    /// World-space radiance cache (Phase 24M). Default off.
+    WorldCache,
+    /// Scene-wide ray-traced specular (Phase 24N). Default off.
+    SpecularGi,
+    /// Offline path tracer (Phase 24O). Default off.
+    PathTracer,
+    /// Mesh-SDF cone trace (Phase 24P). Default off.
+    MeshSdf,
+    /// Probe/env fallback into the world cache (Phase 24Q). Default off.
+    Probes,
+    /// Analytic UV gradients (Phase 25N). Default on.
+    AnalyticGrad,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -277,6 +305,8 @@ pub enum EditorEvent {
     ToggleTerrainPaint,
     /// Hex anti-tiling on the selected terrain. Default on.
     ToggleTerrainHex,
+    /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default on.
+    ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
     /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).

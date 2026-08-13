@@ -58,7 +58,7 @@ pub struct GpuLocalLight {
     pub range: f32,
     /// Linear RGB × intensity (pre-multiplied).
     pub color: [f32; 3],
-    /// `0` = point, `1` = spot.
+    /// `0` = point, `1` = spot, `2` = rect (LTC).
     pub light_type: u32,
     /// Spot-light direction (world space); ignored for point lights.
     pub direction_ws: [f32; 3],
@@ -88,7 +88,7 @@ pub struct GpuClusterParams {
     pub tile_size: u32,
     pub near: f32,
     pub far: f32,
-    /// Packed shading flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows.
+    /// Packed shading flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows, bit 3 = analytic grads.
     pub shading_mode: u32,
     pub num_local_lights: u32,
 }

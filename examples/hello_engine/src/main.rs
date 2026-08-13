@@ -1547,11 +1547,12 @@ impl GameApp for HelloGame {
                                 );
                                 renderer.set_moon_intensity(light.moon_intensity);
                             }
-                            LightType::Point | LightType::Spot => {
-                                let l_type = if light.light_type == LightType::Point {
-                                    0
-                                } else {
-                                    1
+                            LightType::Point | LightType::Spot | LightType::Rect => {
+                                let l_type = match light.light_type {
+                                    LightType::Point => 0,
+                                    LightType::Spot => 1,
+                                    LightType::Rect => 2,
+                                    LightType::Directional => 0,
                                 };
                                 renderer.submit_local_light(
                                     somnium_renderer::cluster::GpuLocalLight {
@@ -1559,12 +1560,12 @@ impl GameApp for HelloGame {
                                         range: light.range,
                                         color: light.photometric_color().to_array(),
                                         light_type: l_type,
-                                        // Spot axis = travel direction. Unused for point lights.
+                                        // Spot/rect axis = travel direction. Unused for point lights.
                                         direction_ws: forward.to_array(),
                                         spot_cos_outer: light.outer_angle.cos(),
                                         spot_cos_inner: light.inner_angle.cos(),
                                         radius: light.source_radius,
-                                        _pad: [0.0; 2],
+                                        _pad: [light.area_width, light.area_height],
                                     },
                                 );
                             }

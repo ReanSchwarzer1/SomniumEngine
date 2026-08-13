@@ -11,6 +11,7 @@ pub const HELP_ABOUT: &str = include_str!("../../../docs/editor/about.md");
 pub const HELP_OUTLINER: &str = include_str!("../../../docs/editor/outliner.md");
 pub const HELP_TERRAIN: &str = include_str!("../../../docs/editor/terrain.md");
 pub const HELP_WATER: &str = include_str!("../../../docs/editor/water.md");
+pub const HELP_LIGHTING: &str = include_str!("../../../docs/editor/lighting.md");
 
 pub fn help_page(id: u8) -> &'static str {
     match id {
@@ -21,6 +22,7 @@ pub fn help_page(id: u8) -> &'static str {
         5 => HELP_OUTLINER,
         6 => HELP_TERRAIN,
         7 => HELP_WATER,
+        8 => HELP_LIGHTING,
         _ => HELP_WELCOME,
     }
 }
@@ -35,6 +37,7 @@ pub fn help_titles() -> &'static [&'static str] {
         "Outliner",
         "Terrain",
         "Water",
+        "Lighting",
     ]
 }
 
@@ -224,6 +227,7 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         DirectionalLight => IconId::DirectionalLight,
         PointLight => IconId::PointLight,
         SpotLight => IconId::SpotLight,
+        RectLight => IconId::PointLight,
         Particle => IconId::Particle,
         Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
@@ -248,7 +252,7 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 8);
+        assert_eq!(help_titles().len(), 9);
         assert_eq!(help_page(4), HELP_ABOUT);
         assert!(HELP_WATER.contains("RT Reflect"));
         assert!(HELP_WATER.contains("RT Refraction"));

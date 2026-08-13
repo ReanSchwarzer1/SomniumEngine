@@ -49,7 +49,7 @@ struct VolumetricParams {
     fog_height_falloff: f32,
     fog_base_height: f32,
     shafts_enabled: u32,
-    _pad: u32,
+    shaft_intensity: f32,
     /// Phase 24U temporal reprojection.
     prev_view_proj: [[f32; 4]; 4],
     history_valid: f32,
@@ -70,6 +70,8 @@ pub struct FogSettings {
     pub base_height: f32,
     /// Shadow-test each step, which is what draws light shafts.
     pub shafts: bool,
+    /// Multiplier on lit in-scatter when shafts are on. 1 is physical.
+    pub shaft_intensity: f32,
 }
 
 impl Default for FogSettings {
@@ -83,6 +85,7 @@ impl Default for FogSettings {
             height_falloff: 120.0,
             base_height: 0.0,
             shafts: true,
+            shaft_intensity: 1.5,
         }
     }
 }
@@ -375,7 +378,11 @@ impl VolumetricPass {
                 fog_height_falloff: self.fog.height_falloff.max(0.0),
                 fog_base_height: self.fog.base_height,
                 shafts_enabled: u32::from(self.fog.shafts),
-                _pad: 0,
+                shaft_intensity: if self.fog.shafts {
+                    self.fog.shaft_intensity.max(0.0)
+                } else {
+                    1.0
+                },
                 prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
                 history_valid: f32::from(u8::from(self.history_valid)),
                 // A low-discrepancy offset rather than a random one: over any

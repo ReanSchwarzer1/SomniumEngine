@@ -17,6 +17,7 @@ Select the **Post Processing** entity:
 
 - **RT Reflections** — scene-wide traced reflection path. On by default when the GPU supports ray query.
 - **RT Refraction** — traced ray through the surface for the bed colour. **Off by default.** Screen-space refraction stays the fallback on a miss.
+- **RT Specular** (Help → Lighting) is a separate scene-wide glossy path. It does not replace these water knobs.
 
 `SOMNIUM_RT_REFLECT=0` forces the previous SSR + sky-cube look, even if the
 checkbox is on. `SOMNIUM_RT_REFRACT=0` forces refraction off. Hardware without

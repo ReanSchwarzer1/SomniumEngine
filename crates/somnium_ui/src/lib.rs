@@ -99,6 +99,11 @@ struct InspectorHandles {
     /// Row container for directional-only moonlight intensity field (Phase 25M-2).
     light_moon_row: NodeHandle,
     light_moon_int: NodeHandle,
+    light_radius: NodeHandle,
+    light_width_row: NodeHandle,
+    light_width: NodeHandle,
+    light_height_row: NodeHandle,
+    light_height: NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section: NodeHandle,
@@ -121,6 +126,9 @@ struct InspectorHandles {
     terrain_paint_label: NodeHandle,
     terrain_hex_toggle: NodeHandle,
     terrain_hex_label: NodeHandle,
+    terrain_morph_toggle: NodeHandle,
+    terrain_morph_label: NodeHandle,
+    terrain_morph_start: NodeHandle,
     terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
     terrain_palette: [NodeHandle; 32],
@@ -193,6 +201,9 @@ struct InspectorHandles {
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
     foliage_shadow: NodeHandle,
+    foliage_cull: NodeHandle,
+    foliage_lod: NodeHandle,
+    foliage_impostor: NodeHandle,
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label: NodeHandle,
     post_ca_label: NodeHandle,
@@ -252,6 +263,24 @@ struct InspectorHandles {
     post_fog_density: NodeHandle,
     post_fog_height: NodeHandle,
     post_fog_asym: NodeHandle,
+    post_world_cache_toggle: NodeHandle,
+    post_world_cache_label: NodeHandle,
+    post_cache_intensity: NodeHandle,
+    post_cache_cell: NodeHandle,
+    post_specular_toggle: NodeHandle,
+    post_specular_label: NodeHandle,
+    post_spec_rough: NodeHandle,
+    post_path_toggle: NodeHandle,
+    post_path_label: NodeHandle,
+    post_path_bounces: NodeHandle,
+    post_sdf_toggle: NodeHandle,
+    post_sdf_label: NodeHandle,
+    post_probes_toggle: NodeHandle,
+    post_probes_label: NodeHandle,
+    post_probe_intensity: NodeHandle,
+    post_analytic_toggle: NodeHandle,
+    post_analytic_label: NodeHandle,
+    post_shaft_amt: NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -287,6 +316,18 @@ pub struct PostInspectorState {
     pub shafts: bool,
     /// Exposure comes from aperture/shutter/ISO rather than the EV row.
     pub physical_camera: bool,
+    pub world_cache: bool,
+    pub specular_gi: bool,
+    pub path_tracer: bool,
+    pub mesh_sdf: bool,
+    pub probes: bool,
+    pub analytic_grad: bool,
+    pub cache_intensity: f32,
+    pub cache_cell: f32,
+    pub spec_rough: f32,
+    pub path_bounces: f32,
+    pub probe_intensity: f32,
+    pub shaft_intensity: f32,
     /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
     /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
     /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
@@ -311,6 +352,8 @@ pub struct TerrainInspectorState {
     pub terrain_paint: bool,
     pub foliage_paint: bool,
     pub hex_tiling: bool,
+    pub lod_morph: bool,
+    pub morph_start: f32,
 }
 
 /// One line of the profiler overlay (Phase 29).
@@ -327,7 +370,7 @@ pub struct ProfilerRow {
 }
 
 /// Rows the overlay can show before it starts dropping them.
-pub const PROFILER_ROWS: usize = 20;
+pub const PROFILER_ROWS: usize = 40;
 
 /// Names shown in the foliage picker (Phase 17F).
 ///
@@ -354,7 +397,7 @@ const TERRAIN_LAYER_SHORT: [&str; 32] = [
 
 const TERRAIN_BRUSH_NAMES: [&str; 6] = ["Raise", "Lower", "Smooth", "Flatten", "Noise", "Paint"];
 
-pub type LightInspectorValues = [f32; 8];
+pub type LightInspectorValues = [f32; 11];
 
 // ── Layout build result ───────────────────────────────────────────────────────
 
@@ -1782,7 +1825,10 @@ impl UiManager {
     ///
     /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b, moon_intensity]`, paired
     /// with whether the light is directional.
-    pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool, f32)>) {
+    pub fn update_light_inspector(
+        &mut self,
+        values: Option<(LightInspectorValues, bool, f32, bool)>,
+    ) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section,
@@ -1801,7 +1847,12 @@ impl UiManager {
             h.light_moon_int,
         );
         match values {
-            Some(([i, r, ia, oa, cr, cg, cb, moon_i], directional, kelvin)) => {
+            Some((
+                [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
+                directional,
+                kelvin,
+                rect,
+            )) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
                     .send(NumericFieldMessage::set_value(intensity, i));
@@ -1825,10 +1876,20 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(light_temp, kelvin));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(moon_int, moon_i));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_radius, radius));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_width, width));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_height, height));
                 self.native_ui.set_visibility(range_row, !directional);
-                self.native_ui.set_visibility(inner_row, !directional);
-                self.native_ui.set_visibility(outer_row, !directional);
+                self.native_ui
+                    .set_visibility(inner_row, !directional && !rect);
+                self.native_ui
+                    .set_visibility(outer_row, !directional && !rect);
                 self.native_ui.set_visibility(moon_row, directional);
+                self.native_ui.set_visibility(h.light_width_row, rect);
+                self.native_ui.set_visibility(h.light_height_row, rect);
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -1924,6 +1985,12 @@ impl UiManager {
                     (vol_toggle, v.volumetrics),
                     (shafts_toggle, v.shafts),
                     (phys_toggle, v.physical_camera),
+                    (h.post_world_cache_toggle, v.world_cache),
+                    (h.post_specular_toggle, v.specular_gi),
+                    (h.post_path_toggle, v.path_tracer),
+                    (h.post_sdf_toggle, v.mesh_sdf),
+                    (h.post_probes_toggle, v.probes),
+                    (h.post_analytic_toggle, v.analytic_grad),
                 ] {
                     tick(&mut self.native_ui, handle, on);
                 }
@@ -1950,6 +2017,12 @@ impl UiManager {
                     (h.post_cas_strength, v.extras[19]),
                     (h.post_mb_shutter, v.extras[20]),
                     (h.post_gi_intensity, v.extras[21]),
+                    (h.post_cache_intensity, v.cache_intensity),
+                    (h.post_cache_cell, v.cache_cell),
+                    (h.post_spec_rough, v.spec_rough),
+                    (h.post_path_bounces, v.path_bounces),
+                    (h.post_probe_intensity, v.probe_intensity),
+                    (h.post_shaft_amt, v.shaft_intensity),
                 ] {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(field, value));
@@ -2023,6 +2096,10 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(macro_s, v.macro_strength));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(debug, v.debug_view));
+                self.native_ui.send(NumericFieldMessage::set_value(
+                    h.terrain_morph_start,
+                    v.morph_start,
+                ));
                 let paint =
                     (v.paint_layer.round().max(0.0) as usize).min(TERRAIN_LAYER_SHORT.len() - 1);
                 let brush = (v.brush as usize).min(TERRAIN_BRUSH_NAMES.len() - 1);
@@ -2044,6 +2121,10 @@ impl UiManager {
                 self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_hex_toggle,
                     v.hex_tiling,
+                ));
+                self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_morph_toggle,
+                    v.lod_morph,
                 ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
                     self.native_ui.send(TextMessage::set_text(
@@ -2230,7 +2311,7 @@ impl UiManager {
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
     /// plus the enable flag.
-    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 7], [bool; 4])>) {
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 10], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
         let fields = [
@@ -2241,6 +2322,9 @@ impl UiManager {
             h.foliage_smin,
             h.foliage_smax,
             h.foliage_shadow,
+            h.foliage_cull,
+            h.foliage_lod,
+            h.foliage_impostor,
         ];
         match values {
             Some((v, flags)) => {
@@ -2320,6 +2404,9 @@ impl UiManager {
             (h.light_col_b, IF::LightColorB),
             (h.light_temp_k, IF::LightColorTemperature),
             (h.light_moon_int, IF::LightMoonIntensity),
+            (h.light_radius, IF::LightSourceRadius),
+            (h.light_width, IF::LightAreaWidth),
+            (h.light_height, IF::LightAreaHeight),
             (h.post_exposure, IF::PostExposure),
             (h.post_exp_comp, IF::PostExposureCompensation),
             (h.post_bloom_amt, IF::PostBloomIntensity),
@@ -2344,6 +2431,12 @@ impl UiManager {
             (h.post_cas_strength, IF::PostCasStrength),
             (h.post_mb_shutter, IF::PostMotionBlurShutter),
             (h.post_gi_intensity, IF::PostGiIntensity),
+            (h.post_cache_intensity, IF::PostCacheIntensity),
+            (h.post_cache_cell, IF::PostCacheCell),
+            (h.post_spec_rough, IF::PostSpecRough),
+            (h.post_path_bounces, IF::PostPathBounces),
+            (h.post_probe_intensity, IF::PostProbeIntensity),
+            (h.post_shaft_amt, IF::PostShaftIntensity),
             (h.post_vig_str, IF::PostVignetteStrength),
             (h.post_ca_str, IF::PostCaStrength),
             (h.post_ibl, IF::PostIblIntensity),
@@ -2353,6 +2446,7 @@ impl UiManager {
             (h.terrain_wetness, IF::TerrainWetness),
             (h.terrain_macro, IF::TerrainMacroStrength),
             (h.terrain_debug, IF::TerrainDebugView),
+            (h.terrain_morph_start, IF::TerrainMorphStart),
             (h.water_surface, IF::WaterSurface),
             (h.water_depth, IF::WaterMaxDepth),
             (h.water_clarity, IF::WaterClarity),
@@ -2391,6 +2485,9 @@ impl UiManager {
             (h.foliage_smin, IF::FoliageScaleMin),
             (h.foliage_smax, IF::FoliageScaleMax),
             (h.foliage_shadow, IF::FoliageShadowDistance),
+            (h.foliage_cull, IF::FoliageCullDistance),
+            (h.foliage_lod, IF::FoliageLodDistance),
+            (h.foliage_impostor, IF::FoliageImpostorDistance),
         ];
 
         let color_map: &[(NodeHandle, crate::ColorField)] = &[
@@ -2625,6 +2722,30 @@ impl UiManager {
                         self.inspector_handles.post_phys_toggle,
                         PostFxToggle::PhysicalCamera,
                     ),
+                    (
+                        self.inspector_handles.post_world_cache_toggle,
+                        PostFxToggle::WorldCache,
+                    ),
+                    (
+                        self.inspector_handles.post_specular_toggle,
+                        PostFxToggle::SpecularGi,
+                    ),
+                    (
+                        self.inspector_handles.post_path_toggle,
+                        PostFxToggle::PathTracer,
+                    ),
+                    (
+                        self.inspector_handles.post_sdf_toggle,
+                        PostFxToggle::MeshSdf,
+                    ),
+                    (
+                        self.inspector_handles.post_probes_toggle,
+                        PostFxToggle::Probes,
+                    ),
+                    (
+                        self.inspector_handles.post_analytic_toggle,
+                        PostFxToggle::AnalyticGrad,
+                    ),
                 ] {
                     if msg.destination == handle {
                         self.editor_events
@@ -2690,6 +2811,11 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_morph_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainMorph);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
@@ -2987,6 +3113,11 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_morph_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainMorph);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleFoliageErase);
@@ -3055,6 +3186,30 @@ impl UiManager {
                     (
                         self.inspector_handles.post_phys_toggle,
                         PostFxToggle::PhysicalCamera,
+                    ),
+                    (
+                        self.inspector_handles.post_world_cache_toggle,
+                        PostFxToggle::WorldCache,
+                    ),
+                    (
+                        self.inspector_handles.post_specular_toggle,
+                        PostFxToggle::SpecularGi,
+                    ),
+                    (
+                        self.inspector_handles.post_path_toggle,
+                        PostFxToggle::PathTracer,
+                    ),
+                    (
+                        self.inspector_handles.post_sdf_toggle,
+                        PostFxToggle::MeshSdf,
+                    ),
+                    (
+                        self.inspector_handles.post_probes_toggle,
+                        PostFxToggle::Probes,
+                    ),
+                    (
+                        self.inspector_handles.post_analytic_toggle,
+                        PostFxToggle::AnalyticGrad,
                     ),
                 ] {
                     if msg.destination == handle {
@@ -4475,6 +4630,13 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
     let (light_moon_row, light_moon_int) =
         make_row_rw(ui, "Moon", 34.0, font_id, light_section, 0.005);
+    let light_radius = make_row_step(ui, "Radius", 34.0, font_id, light_section, 0.01);
+    let (light_width_row, light_width) =
+        make_row_rw(ui, "Half W", 34.0, font_id, light_section, 0.05);
+    let (light_height_row, light_height) =
+        make_row_rw(ui, "Half H", 34.0, font_id, light_section, 0.05);
+    ui.set_visibility(light_width_row, false);
+    ui.set_visibility(light_height_row, false);
     ui.set_visibility(light_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -4581,12 +4743,27 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_vol_toggle, post_vol_label) = make_toggle(ui, "Volumetrics", font_id, post_section);
     let (post_shafts_toggle, post_shafts_label) =
         make_toggle(ui, "Light Shafts", font_id, post_section);
+    let post_shaft_amt = make_row_step(ui, "Shaft Amt", 34.0, font_id, post_section, 0.05);
     // Fog density is tiny — a visible haze is ~1e-3 per metre — so the scrub
     // rate has to be far finer than the other rows or one pixel of drag takes
     // the scene from clear to opaque.
     let post_fog_density = make_row_step(ui, "Fog", 34.0, font_id, post_section, 0.00005);
     let post_fog_height = make_row_step(ui, "FogH", 34.0, font_id, post_section, 1.0);
     let post_fog_asym = make_row_step(ui, "FogG", 34.0, font_id, post_section, 0.01);
+    let (post_world_cache_toggle, post_world_cache_label) =
+        make_toggle(ui, "World Cache", font_id, post_section);
+    let post_cache_intensity = make_row_step(ui, "Cache Amt", 34.0, font_id, post_section, 0.02);
+    let post_cache_cell = make_row_step(ui, "Cell m", 34.0, font_id, post_section, 0.05);
+    let (post_specular_toggle, post_specular_label) =
+        make_toggle(ui, "RT Specular", font_id, post_section);
+    let post_spec_rough = make_row_step(ui, "Spec Rgh", 34.0, font_id, post_section, 0.01);
+    let (post_path_toggle, post_path_label) = make_toggle(ui, "Path Tracer", font_id, post_section);
+    let post_path_bounces = make_row_step(ui, "Bounces", 34.0, font_id, post_section, 1.0);
+    let (post_sdf_toggle, post_sdf_label) = make_toggle(ui, "Mesh SDF", font_id, post_section);
+    let (post_probes_toggle, post_probes_label) = make_toggle(ui, "Probes", font_id, post_section);
+    let post_probe_intensity = make_row_step(ui, "Probe Amt", 34.0, font_id, post_section, 0.02);
+    let (post_analytic_toggle, post_analytic_label) =
+        make_toggle(ui, "Analytic Mips", font_id, post_section);
     ui.set_visibility(post_section, false);
 
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
@@ -4629,6 +4806,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // how much of the shadow pass a grass field is allowed to cost, and the
     // profiler's `shadow casters` row is the readout for it.
     let foliage_shadow = make_row_step(ui, "Sh Dst", 34.0, font_id, foliage_section, 1.0);
+    let foliage_cull = make_row_step(ui, "Cull", 34.0, font_id, foliage_section, 1.0);
+    let foliage_lod = make_row_step(ui, "LOD", 34.0, font_id, foliage_section, 1.0);
+    let foliage_impostor = make_row_step(ui, "Impostor", 34.0, font_id, foliage_section, 1.0);
     ui.set_visibility(foliage_section, false);
 
     // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
@@ -4656,6 +4836,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
     let (terrain_hex_toggle, terrain_hex_label) =
         make_toggle(ui, "Hex Tiling", font_id, terrain_section);
+    let (terrain_morph_toggle, terrain_morph_label) =
+        make_toggle(ui, "LOD Morph", font_id, terrain_section);
+    let terrain_morph_start = make_row_step(ui, "Morph", 34.0, font_id, terrain_section, 0.02);
     let mut terrain_brush_items = Vec::with_capacity(6);
     for row in 0..2 {
         let row_panel =
@@ -4801,12 +4984,20 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_outer_row,
         light_moon_row,
         light_moon_int,
+        light_radius,
+        light_width_row,
+        light_width,
+        light_height_row,
+        light_height,
         terrain_section,
         terrain_mode_label,
         terrain_paint_toggle,
         terrain_paint_label,
         terrain_hex_toggle,
         terrain_hex_label,
+        terrain_morph_toggle,
+        terrain_morph_label,
+        terrain_morph_start,
         terrain_brush_items,
         terrain_layer,
         terrain_palette,
@@ -4878,6 +5069,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         foliage_smin,
         foliage_smax,
         foliage_shadow,
+        foliage_cull,
+        foliage_lod,
+        foliage_impostor,
         post_section,
         post_exposure,
         post_exp_comp,
@@ -4928,6 +5122,24 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_fog_density,
         post_fog_height,
         post_fog_asym,
+        post_world_cache_toggle,
+        post_world_cache_label,
+        post_cache_intensity,
+        post_cache_cell,
+        post_specular_toggle,
+        post_specular_label,
+        post_spec_rough,
+        post_path_toggle,
+        post_path_label,
+        post_path_bounces,
+        post_sdf_toggle,
+        post_sdf_label,
+        post_probes_toggle,
+        post_probes_label,
+        post_probe_intensity,
+        post_analytic_toggle,
+        post_analytic_label,
+        post_shaft_amt,
         post_phys_toggle,
         post_phys_label,
         post_aperture,
@@ -5502,6 +5714,7 @@ fn build_create_popup(
         CreateKind::DirectionalLight,
         CreateKind::PointLight,
         CreateKind::SpotLight,
+        CreateKind::RectLight,
         CreateKind::Particle,
         CreateKind::Terrain,
         CreateKind::VoxelTerrain,

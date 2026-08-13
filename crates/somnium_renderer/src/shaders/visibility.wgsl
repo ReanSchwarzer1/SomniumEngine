@@ -20,9 +20,11 @@ struct Instance {
 }
 
 struct View {
-    view_proj: mat4x4<f32>,
-    camera_pos: vec3<f32>,
-    _padding: f32,
+    view_proj:     mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    view:          mat4x4<f32>,
+    camera_pos:    vec3<f32>,
+    _padding:      f32,
 }
 
 struct Material {
@@ -101,9 +103,44 @@ fn vs_main(
     
     let instance = instances[inst_idx];
     let index = indices[instance.index_offset + v_idx];
-    let vertex = vertices[instance.vertex_offset + index];
-    
-    let pos = vec3<f32>(vertex.pos_x, vertex.pos_y, vertex.pos_z);
+    var vertex = vertices[instance.vertex_offset + index];
+
+    var pos = vec3<f32>(vertex.pos_x, vertex.pos_y, vertex.pos_z);
+    // Phase 25C: CDLOD vertex morph. Packed in instance._padding:
+    // lod 4, verts 9, on 1, lod_base 8, morph_start 10.
+    let packed = instance._padding;
+    if packed != 0u {
+        let lod = packed & 15u;
+        let verts = (packed >> 4u) & 511u;
+        let morph_on = (packed >> 13u) & 1u;
+        if morph_on == 1u && verts > 1u {
+            let lod_base = max(f32((packed >> 14u) & 255u), 1.0);
+            let morph_start_frac = f32((packed >> 22u) & 1023u) / 1023.0;
+            let world = (instance.model * vec4<f32>(pos, 1.0)).xyz;
+            let dist = length(world - view.camera_pos);
+            let range_start = lod_base * exp2(f32(lod));
+            let range_end = lod_base * exp2(f32(lod + 1u));
+            let morph_start = mix(range_start, range_end, morph_start_frac);
+            let morph_k = saturate((dist - morph_start) / max(range_end - morph_start, 1.0));
+            if morph_k > 0.0 {
+                let cell = vertices[instance.vertex_offset + 1u].pos_x
+                    - vertices[instance.vertex_offset].pos_x;
+                let next_cell = cell * f32(1u << (lod + 1u));
+                let snapped = floor(pos.xz / next_cell + 0.5) * next_cell;
+                let step = 1u << (lod + 1u);
+                let vx = index % verts;
+                let vz = index / verts;
+                let i_c = (vz / step) * step * verts + (vx / step) * step;
+                let coarse = vertices[instance.vertex_offset + i_c];
+                pos = vec3<f32>(
+                    mix(pos.x, snapped.x, morph_k),
+                    mix(pos.y, coarse.pos_y, morph_k),
+                    mix(pos.z, snapped.y, morph_k),
+                );
+            }
+        }
+    }
+
     out.uv = vec2<f32>(vertex.u, vertex.v);
     out.material_id = instance.material_id;
     out.clip_pos = view.view_proj * instance.model * vec4<f32>(pos, 1.0);

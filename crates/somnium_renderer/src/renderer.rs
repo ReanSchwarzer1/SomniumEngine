@@ -129,6 +129,8 @@ pub struct SomniumRenderer {
     pub restir_pass: crate::pass::restir::RestirPass,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
+    /// Phase 24M–Q: world cache, scene specular, path tracer, SDF, probes.
+    pub lighting_extra_pass: crate::pass::lighting_extra::LightingExtraPass,
     /// Phase VV: ray-traced water reflections (Halcyon).
     pub water_reflection_pass: crate::pass::water_reflection::WaterReflectionPass,
     /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
@@ -374,6 +376,13 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
+        let lighting_extra_pass = crate::pass::lighting_extra::LightingExtraPass::new(
+            &ctx.device,
+            &global_pool.layout,
+            raytrace_pass.supported(),
+            ctx.config.width,
+            ctx.config.height,
+        );
 
         let rt_debug_pass =
             crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
@@ -494,6 +503,8 @@ impl SomniumRenderer {
                 .expect("ReSTIR GI always allocates its radiance target"),
             &volumetric_pass.view,
             &volumetric_pass.sampler,
+            lighting_extra_pass.aux_view(),
+            lighting_extra_pass.volume_view(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -564,7 +575,7 @@ impl SomniumRenderer {
             light_color: default_color,
             moon_intensity: 0.010,
             cascade_debug: false,
-            shading_mode: 2 | 4,
+            shading_mode: 2 | 4 | 8,
             local_lights: Vec::new(),
             grid_pass,
             grid_enabled: false,
@@ -579,6 +590,7 @@ impl SomniumRenderer {
             rt_debug_pass,
             restir_pass,
             restir_gi_pass,
+            lighting_extra_pass,
             water_reflection_pass,
             velocity_pass,
             motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
@@ -1248,9 +1260,7 @@ impl SomniumRenderer {
             self.rt_debug_pass.invalidate();
             self.restir_pass.resize(&ctx.device, width, height);
             self.restir_gi_pass.resize(&ctx.device, width, height);
-            // After every pass that owns a resolution-dependent texture, never
-            // before: the shading bind group has to reference the views those
-            // resizes just created, not the ones they replaced.
+            self.lighting_extra_pass.resize(&ctx.device, width, height);
             self.shading_pass.resize(
                 &ctx.device,
                 &self.vis_pass.view,
@@ -1262,6 +1272,8 @@ impl SomniumRenderer {
                 self.restir_gi_pass
                     .radiance_view()
                     .expect("ReSTIR GI always allocates its radiance target"),
+                self.lighting_extra_pass.aux_view(),
+                self.lighting_extra_pass.volume_view(),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
             self.fxaa_pass
@@ -1759,16 +1771,31 @@ impl SomniumRenderer {
         self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
 
         // ── 3. Build and upload instance buffer ──────────────────────────────
+        self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
+            let terrain_packed = self.terrains.iter().find_map(|terrain| {
+                terrain.chunks.iter().find_map(|chunk| {
+                    if chunk.vertex_offset != cmd.vertex_offset {
+                        return None;
+                    }
+                    let verts = terrain.desc.chunk_cells + 1;
+                    let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
+                    let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
+                    let morph_on = u32::from(terrain.lod_morph);
+                    Some(
+                        (u32::from(chunk.lod) & 15)
+                            | ((verts & 511) << 4)
+                            | (morph_on << 13)
+                            | ((lod_base & 255) << 14)
+                            | ((start & 1023) << 22),
+                    )
+                })
+            });
             let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
-                self.terrains
-                    .iter()
-                    .flat_map(|terrain| terrain.chunks.iter())
-                    .find(|chunk| chunk.vertex_offset == cmd.vertex_offset)
-                    .map_or(0, |chunk| u32::from(chunk.lod) + 1)
+                terrain_packed.map(|p| (p & 15) + 1).unwrap_or(0)
             } else {
-                0
+                terrain_packed.unwrap_or(0)
             };
             self.instances
                 .add_instance(crate::instance::GpuInstanceData {
@@ -1803,6 +1830,7 @@ impl SomniumRenderer {
         }
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
         self.instances.upload(&ctx.queue);
+        self.profiler.cpu_end();
 
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
         // Argument `i` lines up with instance `i`, which the sort above keeps true.
@@ -1824,6 +1852,7 @@ impl SomniumRenderer {
             // cull sub-parts of things a few pixels across. Count how often
             // each mesh appears and fall back to one whole-mesh argument once
             // it is clearly being instanced.
+            self.profiler.cpu_begin("Cluster cull");
             self.instanced_counts.clear();
             for cmd in &self.draw_queue {
                 *self
@@ -1846,14 +1875,46 @@ impl SomniumRenderer {
                         .instanced_counts
                         .get(&cmd.vertex_offset)
                         .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
+                    if heavily_instanced && i > 0 {
+                        let prev = &self.draw_queue[i - 1];
+                        if self.is_double_sided(prev.material_id) == pass_two_sided
+                            && prev.vertex_offset == cmd.vertex_offset
+                            && prev.index_offset == cmd.index_offset
+                            && prev.material_id == cmd.material_id
+                            && prev.index_count == cmd.index_count
+                        {
+                            continue;
+                        }
+                    }
                     let meshlets = if self.meshlet_draws && !heavily_instanced {
                         self.geometry.mesh_meshlets(cmd.vertex_offset)
                     } else {
                         None
                     };
+                    let instance_count = if heavily_instanced {
+                        let mut n = 1u32;
+                        let mut j = i + 1;
+                        while j < self.draw_queue.len() {
+                            let next = &self.draw_queue[j];
+                            if self.is_double_sided(next.material_id) != pass_two_sided
+                                || next.vertex_offset != cmd.vertex_offset
+                                || next.index_offset != cmd.index_offset
+                                || next.material_id != cmd.material_id
+                                || next.index_count != cmd.index_count
+                            {
+                                break;
+                            }
+                            n += 1;
+                            j += 1;
+                        }
+                        n
+                    } else {
+                        1
+                    };
                     crate::indirect::push_cluster_args(
                         i as u32,
                         cmd.index_count,
+                        instance_count,
                         meshlets,
                         self.geometry.mesh_aabb(cmd.vertex_offset),
                         &mut self.cluster_args,
@@ -1883,6 +1944,7 @@ impl SomniumRenderer {
                 self.hiz_ready && !self.occlusion_off,
                 self.camera_pos,
             );
+            self.profiler.cpu_end();
         }
 
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
@@ -2092,6 +2154,44 @@ impl SomniumRenderer {
                 );
                 self.profiler.end(&mut encoder);
             }
+        }
+
+        {
+            self.profiler.cpu_begin("Lighting extra");
+            let mesh_aabbs: Vec<(glam::Vec3, glam::Vec3)> = self
+                .draw_queue
+                .iter()
+                .filter_map(|cmd| {
+                    let (min, max) = self.geometry.mesh_aabb(cmd.vertex_offset)?;
+                    let a = cmd.transform.transform_point3(glam::Vec3::from_array(min));
+                    let b = cmd.transform.transform_point3(glam::Vec3::from_array(max));
+                    Some((a.min(b), a.max(b)))
+                })
+                .collect();
+            self.profiler.begin(&mut encoder, "Lighting extra");
+            self.lighting_extra_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                self.raytrace_pass.tlas(),
+                &self.vis_pass.depth_view,
+                &self.vis_pass.view,
+                self.restir_gi_pass
+                    .radiance_view()
+                    .expect("ReSTIR GI always allocates its radiance target"),
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                self.view_proj,
+                self.camera_pos,
+                ctx.config.width,
+                ctx.config.height,
+                &mesh_aabbs,
+            );
+            self.profiler.end(&mut encoder);
+            self.profiler.cpu_end();
+            self.shading_pass
+                .set_lighting_extra(&ctx.queue, self.lighting_extra_pass.shading_params());
         }
 
         // Outside the ray-tracing guards on purpose: a pass that stopped running

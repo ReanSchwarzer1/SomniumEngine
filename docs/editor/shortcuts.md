@@ -2,7 +2,7 @@
 
 ## General
 
-- **F1** — this Help (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain, Water)
+- **F1** — this Help (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain, Water, Lighting)
 - **Esc** — close the top popup, Help, or command palette; exit immersive play
 - **Ctrl+P** or **Ctrl+Shift+P** — command palette
 - **Ctrl+S** — save scene · **Ctrl+N** — new scene

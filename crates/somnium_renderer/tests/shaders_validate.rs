@@ -13,6 +13,7 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
 const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
+const LIGHTING_EXTRA: &str = include_str!("../src/shaders/lighting_extra.wgsl");
 const RT_HIT: &str = include_str!("../src/shaders/rt_hit.wgsl");
 const WATER_REFLECTION: &str = include_str!("../src/shaders/water_reflection.wgsl");
 const SPD: &str = include_str!("../src/shaders/spd.wgsl");
@@ -197,6 +198,16 @@ fn the_water_reflection_module_validates() {
         "water_reflection",
         &format!(
             "{WATER_REFLECTION}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
+        ),
+    );
+}
+
+#[test]
+fn the_lighting_extra_module_validates() {
+    check(
+        "lighting_extra",
+        &format!(
+            "{LIGHTING_EXTRA}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
         ),
     );
 }

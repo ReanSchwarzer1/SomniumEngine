@@ -28,6 +28,13 @@
 // established. Alpha 0 is what an unsupported device and a switched-off pass
 // both produce, and it is what sends `evaluate_ibl` back to the cubemap.
 @group(1) @binding(12) var restir_gi: texture_2d<f32>;
+// Phase 24M/N/O/P/Q: world cache + scene specular / path tracer (2D) and the
+// clipmapped volume (cache rgb, SDF in alpha). Dummy 1×1 targets when off.
+@group(1) @binding(13) var lighting_aux: texture_2d<f32>;
+@group(1) @binding(14) var world_volume: texture_3d<f32>;
+@group(1) @binding(15) var<uniform> lighting_extra: vec4<f32>;
+// x = flags (bit0 cache, 1 specular, 2 path tracer, 3 sdf, 4 probes)
+// y = cache/probe intensity, z = cell size metres, w = volume half-extent cells
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -39,6 +46,20 @@ const ENV_MAX_MIP: f32 = 5.0;
 /// light in creases and occluded regions, so the old 0.35 scale-back fudge
 /// is no longer required.
 
+
+/// Perspective-correct barycentric at an NDC sample (Phase 25N).
+fn vis_barycentric(
+    ndc0: vec2<f32>, ndc1: vec2<f32>, ndc2: vec2<f32>,
+    c0w: f32, c1w: f32, c2w: f32,
+    sample_ndc: vec2<f32>,
+) -> vec3<f32> {
+    let det = (ndc1.y - ndc2.y) * (ndc0.x - ndc2.x) + (ndc2.x - ndc1.x) * (ndc0.y - ndc2.y);
+    let w0 = ((ndc1.y - ndc2.y) * (sample_ndc.x - ndc2.x) + (ndc2.x - ndc1.x) * (sample_ndc.y - ndc2.y)) / det;
+    let w1 = ((ndc2.y - ndc0.y) * (sample_ndc.x - ndc2.x) + (ndc0.x - ndc2.x) * (sample_ndc.y - ndc2.y)) / det;
+    let w2 = 1.0 - w0 - w1;
+    var bary = vec3<f32>(w0 / c0w, w1 / c1w, w2 / c2w);
+    return bary / (bary.x + bary.y + bary.z);
+}
 
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
 /// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
@@ -99,6 +120,53 @@ fn transmitted_light(
 /// fraction of the blade's final colour, and the sky is blue.
 fn specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
     return saturate(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
+}
+
+/// Lambert irradiance of a quad (Phase 24R). Linearly Transformed Cosines
+/// reduce to this closed form for the diffuse lobe; specular still uses the
+/// existing area BRDF with an equivalent angular radius.
+fn ltc_quad_diffuse(
+    pos: vec3<f32>,
+    n: vec3<f32>,
+    center: vec3<f32>,
+    light_n: vec3<f32>,
+    half_x: f32,
+    half_y: f32,
+) -> f32 {
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if abs(dot(light_n, up)) > 0.95 {
+        up = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t = normalize(cross(up, light_n));
+    let b = cross(light_n, t);
+    let v0 = center + t * half_x + b * half_y;
+    let v1 = center - t * half_x + b * half_y;
+    let v2 = center - t * half_x - b * half_y;
+    let v3 = center + t * half_x - b * half_y;
+    let p0 = normalize(v0 - pos);
+    let p1 = normalize(v1 - pos);
+    let p2 = normalize(v2 - pos);
+    let p3 = normalize(v3 - pos);
+    let pts = array<vec3<f32>, 4>(p0, p1, p2, p3);
+    var sum = 0.0;
+    for (var i = 0; i < 4; i++) {
+        let a = pts[i];
+        let c = pts[(i + 1) % 4];
+        let h = acos(clamp(dot(a, c), -1.0, 1.0));
+        let x = cross(a, c);
+        let xl = length(x);
+        if xl > 1e-6 {
+            sum += h * dot(x / xl, n);
+        }
+    }
+    return max(sum, 0.0) * 0.5 / 3.14159265;
+}
+
+fn world_volume_uvw(pos: vec3<f32>) -> vec3<f32> {
+    let cell = max(lighting_extra.z, 0.25);
+    let half_cells = max(lighting_extra.w, 1.0);
+    let origin = floor(view.camera_pos / cell) * cell;
+    return ((pos - origin) / cell + vec3<f32>(half_cells)) / (half_cells * 2.0);
 }
 
 /// Image-based ambient: diffuse irradiance + split-sum specular.
@@ -592,17 +660,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndc2 = c2.xy / c2.w;
 
     let target_ndc = (in.uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
-    let det        = (ndc1.y - ndc2.y) * (ndc0.x - ndc2.x) + (ndc2.x - ndc1.x) * (ndc0.y - ndc2.y);
-    let w0 = ((ndc1.y - ndc2.y) * (target_ndc.x - ndc2.x) + (ndc2.x - ndc1.x) * (target_ndc.y - ndc2.y)) / det;
-    let w1 = ((ndc2.y - ndc0.y) * (target_ndc.x - ndc2.x) + (ndc0.x - ndc2.x) * (target_ndc.y - ndc2.y)) / det;
-    let w2 = 1.0 - w0 - w1;
+    var bary = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc);
 
-    var bary = vec3<f32>(w0 / c0.w, w1 / c1.w, w2 / c2.w);
-    bary = bary / (bary.x + bary.y + bary.z);
+    let uv0 = vec2<f32>(v0.u, v0.v);
+    let uv1 = vec2<f32>(v1.u, v1.v);
+    let uv2 = vec2<f32>(v2.u, v2.v);
+    let uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
 
-    let uv = vec2<f32>(v0.u, v0.v) * bary.x
-           + vec2<f32>(v1.u, v1.v) * bary.y
-           + vec2<f32>(v2.u, v2.v) * bary.z;
+    // Phase 25N: analytic UV gradients. Implicit dpdx across a vis-buffer
+    // 2×2 quad straddles unrelated triangles, so foliage mips jump per pixel.
+    // Evaluate this triangle's barycentric at the neighbouring pixels instead.
+    let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
+    let bary_x = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
+    let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
+    var uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
+    var uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+    let analytic_grad = (cluster_params.shading_mode & 8u) != 0u;
+    if !analytic_grad {
+        uv_ddx = vec2<f32>(0.0);
+        uv_ddy = vec2<f32>(0.0);
+    }
 
     let normal_interp = normalize(
         vec3<f32>(v0.norm_x, v0.norm_y, v0.norm_z) * bary.x +
@@ -645,9 +722,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // TBN matrix (derived from edge vectors + UV deltas, no vertex tangents)
     let edge0 = p1 - p0;
     let edge1 = p2 - p0;
-    let uv0   = vec2<f32>(v0.u, v0.v);
-    let uv1   = vec2<f32>(v1.u, v1.v);
-    let uv2   = vec2<f32>(v2.u, v2.v);
     let duv0  = uv1 - uv0;
     let duv1  = uv2 - uv0;
 
@@ -711,14 +785,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.albedo    = material.base_color.rgb;
     surface.normal    = geo_normal;
     if material.albedo_map >= 0 {
-        surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+        if analytic_grad {
+            surface.albedo *= textureSampleGrad(
+                textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
+        } else {
+            surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+        }
     }
 
     surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
     surface.metallic  = material.metallic;
     if material.metallic_roughness_map >= 0 {
-        let mr = textureSample(textures[material.metallic_roughness_map], default_sampler, uv);
+        let mr = select(
+            textureSample(textures[material.metallic_roughness_map], default_sampler, uv),
+            textureSampleGrad(textures[material.metallic_roughness_map], default_sampler, uv, uv_ddx, uv_ddy),
+            analytic_grad,
+        );
         surface.roughness = max(mr.g, 0.05);
         surface.metallic  = mr.b;
     }
@@ -746,13 +829,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Foliage leans on this heavily — a grass tuft's interior sits in its own
     // shade, and without it every blade receives full open sky.
     if material.occlusion_map >= 0 {
-        surface.occlusion = textureSample(
-            textures[material.occlusion_map], default_sampler, uv).r;
+        if analytic_grad {
+            surface.occlusion = textureSampleGrad(
+                textures[material.occlusion_map], default_sampler, uv, uv_ddx, uv_ddy).r;
+        } else {
+            surface.occlusion = textureSample(
+                textures[material.occlusion_map], default_sampler, uv).r;
+        }
     }
 
     var normal_variance = 0.0;
     if material.normal_map >= 0 && tbn_valid {
-        let nm_sample  = textureSample(textures[material.normal_map], default_sampler, uv).rgb;
+        let nm_sample = select(
+            textureSample(textures[material.normal_map], default_sampler, uv).rgb,
+            textureSampleGrad(textures[material.normal_map], default_sampler, uv, uv_ddx, uv_ddy).rgb,
+            analytic_grad,
+        );
         let tangent_n  = nm_sample * 2.0 - vec3<f32>(1.0);
         surface.normal = normalize(tbn * tangent_n);
 
@@ -1129,7 +1221,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
-        let ambient = evaluate_ibl(surface, gi_texel);
+        var ambient = evaluate_ibl(surface, gi_texel);
+        let extra_flags = bitcast<u32>(lighting_extra.x);
+        let vol_uvw = world_volume_uvw(hit_point);
+        let vol_sample = textureSampleLevel(world_volume, volumetric_sampler, vol_uvw, 0.0);
+        if (extra_flags & 1u) != 0u || (extra_flags & 16u) != 0u {
+            let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
+            ambient += vol_sample.rgb * surface.albedo * kd * lighting_extra.y * surface.occlusion;
+        }
+        // SDF owns volume alpha; the world cache writes occupancy there, so
+        // the two cannot run as one field. Cache-on skips the cone-trace.
+        if (extra_flags & 8u) != 0u && (extra_flags & 1u) == 0u {
+            var sdf_ao = 1.0;
+            var march = 0.15;
+            for (var s = 0u; s < 6u; s++) {
+                let p = hit_point + geo_normal * march;
+                let d = textureSampleLevel(world_volume, volumetric_sampler, world_volume_uvw(p), 0.0).a;
+                sdf_ao = min(sdf_ao, saturate(d / max(march, 1e-3)));
+                march *= 1.7;
+            }
+            ambient *= sdf_ao;
+        }
+        if (extra_flags & 2u) != 0u {
+            let aux_uv = (vec2<f32>(pixel_coords) + 0.5) / vec2<f32>(textureDimensions(vis_buffer));
+            let spec_gi = textureSampleLevel(lighting_aux, default_sampler, aux_uv, 0.0);
+            let spec_w = spec_gi.a * saturate(1.0 - surface.roughness);
+            ambient = mix(ambient, spec_gi.rgb, spec_w);
+        }
 
         // Local lights (clustered)
         var local_light_contrib = vec3<f32>(0.0);
@@ -1152,6 +1270,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
                 let L = light_vec / dist;
                 var atten_val = smooth_distance_attenuation(dist, ll.range);
+                if ll.light_type == 2u {
+                    let half_x = max(ll._pad1, 0.05);
+                    let half_y = max(ll._pad2, 0.05);
+                    let ln = normalize(ll.direction_ws);
+                    let irr = ltc_quad_diffuse(
+                        hit_point, surface.normal, ll.position_ws, ln, half_x, half_y);
+                    let eq_r = sqrt(half_x * half_y / 3.14159265);
+                    let angular = atan(eq_r / max(dist, 1e-3));
+                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
+                        * ll.color * atten_val * irr * 3.14159265;
+                    continue;
+                }
                 if ll.light_type == 1u {
                     let cos_angle = dot(-L, normalize(ll.direction_ws));
                     atten_val *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, cos_angle);
@@ -1171,8 +1301,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // scene by definition — a screen is just as bright in a dark room.
         var emissive = vec3<f32>(material.emissive_r, material.emissive_g, material.emissive_b);
         if material.emissive_map >= 0 {
-            emissive *= textureSample(
-                textures[material.emissive_map], default_sampler, uv).rgb;
+            if analytic_grad {
+                emissive *= textureSampleGrad(
+                    textures[material.emissive_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
+            } else {
+                emissive *= textureSample(
+                    textures[material.emissive_map], default_sampler, uv).rgb;
+            }
         }
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
@@ -1192,7 +1327,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // brightness actually comes from.
         if light._pad2_z > 1.5 && light._pad2_z < 2.5 {
             result = direct_light;
-        } else if light._pad2_z > 2.5 {
+        } else if light._pad2_z > 2.5 && light._pad2_z < 3.5 {
             result = ambient;
         }
     }
@@ -1246,6 +1381,53 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let transmittance = mix(1.0, sample.a, fade);
 
         result = result * transmittance + inscatter;
+    }
+
+    // Phase 24AB: lighting debug views (24–31). 0–23 remain the existing
+    // material / terrain / shadow probes.
+    if light._pad2_z > 23.5 && light._pad2_z < 31.5 {
+        let luma = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if light._pad2_z < 24.5 {
+            let t = saturate(log2(luma + 1.0) / 10.0);
+            return vec4<f32>(t, 0.2 * (1.0 - t), 1.0 - t, 1.0) * 4.0;
+        }
+        if light._pad2_z < 25.5 {
+            let gi = textureLoad(restir_gi, pixel_coords, 0);
+            return vec4<f32>(gi.rgb * 4.0, 1.0);
+        }
+        if light._pad2_z < 26.5 {
+            let tile = vec2<u32>(in.clip_pos.xy) / vec2(cluster_params.tile_size);
+            let slice = compute_depth_slice(view_depth);
+            let idx = tile.x + tile.y * cluster_params.grid_width
+                + slice * cluster_params.grid_width * cluster_params.grid_height;
+            let n = f32(cluster_offsets[idx].count) / 8.0;
+            return vec4<f32>(n, 0.15, 1.0 - saturate(n), 1.0) * 4.0;
+        }
+        if light._pad2_z < 27.5 {
+            let vol_dbg = textureSampleLevel(
+                world_volume, volumetric_sampler, world_volume_uvw(hit_point), 0.0);
+            return vec4<f32>(vol_dbg.rgb * 4.0, 1.0);
+        }
+        if light._pad2_z < 28.5 {
+            return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0).rgb * 4.0, 1.0);
+        }
+        if light._pad2_z < 29.5 {
+            let vol_dbg = textureSampleLevel(
+                world_volume, volumetric_sampler, world_volume_uvw(hit_point), 0.0);
+            return vec4<f32>(vec3<f32>(vol_dbg.a * 0.1), 1.0);
+        }
+        if light._pad2_z < 30.5 {
+            let mip = length(uv_ddx) * 64.0;
+            return vec4<f32>(mip, mip * 0.4, 0.1, 1.0) * 4.0;
+        }
+        return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0).rgb, 1.0);
+    }
+
+    if (bitcast<u32>(lighting_extra.x) & 4u) != 0u {
+        let traced = textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0);
+        if traced.a > 0.01 {
+            result = traced.rgb;
+        }
     }
 
     // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a

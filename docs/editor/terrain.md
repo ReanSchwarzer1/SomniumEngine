@@ -15,6 +15,14 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 ## Foliage
 
-**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground.
+**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground. **Cull** / **LOD** / **Impostor** are metres: past LOD the heaviest mesh part drops, past Impostor a camera-facing quad replaces it.
+
+## LOD morph
+
+**LOD Morph** (default on) and **Morph** (0–1, start of the blend) remove the ridge pop between clipmap LODs. `SOMNIUM_LOD_MORPH=0` kills it.
+
+## Debug views
+
+Terrain **Dbg** 0–23 are material / shadow / splat probes. **24–31** are lighting: luminance, GI, cluster occupancy, world cache, specular aux, SDF, analytic mips, path-tracer aux.
 
 Water is a separate child entity. Reflection knobs live on that Water, not on Terrain — Help → **Water**.

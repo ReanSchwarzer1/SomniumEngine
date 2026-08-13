@@ -69,7 +69,9 @@ struct VolumetricParams {
     fog_base_height: f32,
     /// Non-zero shadow-tests each step, which is what draws light shafts.
     shafts_enabled: u32,
-    _pad: u32,
+    /// Boost on the lit (unshadowed) in-scatter. 1 is physical; higher makes
+    /// shafts readable in a thin medium.
+    shaft_intensity: f32,
     /// Phase 24U temporal reprojection.
     prev_view_proj: mat4x4<f32>,
     /// Zero on the first frame or after a resize, where the history describes
@@ -232,24 +234,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     multiscatter_lut, lut_sampler, sample_r, mu_sun);
             }
 
+            var sun_vis = 1.0;
+            if vol.shafts_enabled != 0u {
+                sun_vis = volume_sun_visibility(world_pos, t);
+            }
+            let shaft = max(vol.shaft_intensity, 0.0);
+
             var step_scatter = (scatter_rayleigh * rayleigh + scatter_mie * mie)
-                * sun_transmittance
+                * sun_transmittance * sun_vis * shaft
                 + (scatter_rayleigh + scatter_mie) * multiscatter;
 
             // ── Fog medium and shafts (24U) ─────────────────────────────────
             let fog = fog_density_at(world_pos.y);
             var extinction = extinction_air;
             if fog > 0.0 {
-                var sun_vis = 1.0;
-                if vol.shafts_enabled != 0u {
-                    // View-space depth is the distance along the ray for a
-                    // camera looking down -Z, which is what cascade selection
-                    // expects.
-                    sun_vis = volume_sun_visibility(world_pos, t);
-                }
                 // Fog scatters greyly: a water-droplet medium is not
                 // wavelength-selective the way Rayleigh is.
-                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance;
+                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance * shaft;
                 extinction += vec3<f32>(fog);
             }
 
