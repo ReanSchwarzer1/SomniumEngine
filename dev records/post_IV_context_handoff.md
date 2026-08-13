@@ -5,7 +5,7 @@
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
 > **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Metaphor) and Phase VV (Halcyon) **planned only**
 
 **Current live contract** (supersedes “research-complete / not implemented”
 below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
@@ -24,7 +24,7 @@ This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_hand
 The next session should read these files **in order**:
 
 1. [`context.md`](../context.md) — living architecture (XV-A–Zeta in engine; §20 is still Phase 14).
-2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Iris planned; §1.6 XV A–Zeta).
+2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Metaphor / colour picker planned; §1.6 XV A–Zeta).
 3. [`phase_IV.md`](phase_IV.md) — completed Great Lakes water/terrain record, especially **§14 IV-K**.
 4. **This file** — post-IV contracts and XV history. Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 5. [`phase_XV.md`](phase_XV.md) — full plan (XV-A–J). XV-J is complete.
@@ -33,7 +33,7 @@ The next session should read these files **in order**:
 Optional depth (do not skip (1)–(5) for these):
 
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — Phase IV A–J narrative and asset license conflict notes.
-- [`phase_26.md`](phase_26.md) / [`phase_VV.md`](phase_VV.md) — parallel tracks; **do not implement inside an XV session** unless the user redirects.
+- [`phase_26.md`](phase_26.md) (Metaphor) / [`phase_VV.md`](phase_VV.md) — parallel tracks; **do not implement inside an XV session** unless the user redirects.
 
 The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completion_report.md`](phase_25m2_completion_report.md) only if you need the 25M-2 boundary; it is not required to begin XV-A.
 
@@ -61,14 +61,14 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 | Phase | Codename | Status | Plan |
 |---|---|---|---|
 | **XV** | Appalachia | **A–J complete** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
-| **26** | Iris | Planned colour pickers | [`phase_26.md`](phase_26.md) |
+| **26** | Metaphor | Planned UI framework + editor rebuild (Iris colour pickers = 26-F) | [`phase_26.md`](phase_26.md) |
 | **VV** | Halcyon | Planned RT water reflections | [`phase_VV.md`](phase_VV.md) |
 
 **Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; XV-J GPU PNGs are in `phase XV/evidence/`.
 
 ### Session estimate
 
-XV-A–J are done. Next planned tracks are **Phase 26 (Iris)** and **Phase VV (Halcyon)**.
+XV-A–J are done. Next planned tracks are **Phase 26 (Metaphor)** and **Phase VV (Halcyon)**.
 
 ---
 
@@ -134,15 +134,15 @@ Full plan-vs-code list: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codeba
 
 ## 5. Parallel phases (do not fold into XV)
 
-### 5.1 Phase 26 — Iris
+### 5.1 Phase 26 — Metaphor
 
-Inspector colour swatch + popup (Unreal `SColorBlock` / `SColorPicker` pattern). Unblocks water deep/shallow/edge and absorption/scattering authoring among others. **Independent** of XV. Plan: [`phase_26.md`](phase_26.md).
+UI framework hardening, Unreal-like editor rebuild, Content Drawer (project `assets/` + Show Engine Content), icon atlas, inspector/outliner UX. Colour pickers are **26-F** (former Iris plan: Unreal `SColorBlock` / `SColorPicker`). **Independent** of XV. Start at 26-A, not at the Drawer. Plan: [`phase_26.md`](phase_26.md).
 
 ### 5.2 Phase VV — Halcyon
 
 Ray-traced specular water reflections replacing SSR→env-cube as the primary path. Depends on IV-K + existing TLAS/ReSTIR infra. **Independent** of XV; largest remaining *water* fidelity gap. Plan: [`phase_VV.md`](phase_VV.md).
 
-An XV session that starts changing water reflection architecture or colour-picker widgets without user direction is out of scope.
+An XV session that starts changing water reflection architecture or Metaphor UI widgets without user direction is out of scope.
 
 ---
 
@@ -283,29 +283,34 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 
 ---
 
-## 10. Next-session start checklist (Phase 26 / VV)
+## 10. Next-session start checklist (Phase 26 Metaphor / VV)
 
-XV-A–J are done. Next authorized work is Iris colour pickers or Halcyon
-reflections unless the user reopens terrain (second aerial PSO).
+XV-A–J are done. Next authorized work is **Metaphor** (UI) or Halcyon
+reflections unless the user reopens terrain.
 BC7: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
-1. Confirm branch `dev`, note HEAD vs `2dec6bd`, and commit or stash any dirty XV research docs so the session has a clean baseline.
-2. Read section 1 files in order; skim IV-K authored table (§4.3) so water/boat are not broken by terrain work.
-3. Confirm the engine still builds (`cargo check --workspace` at minimum) **before** changing splat layout or array sizes.
-4. User must have **authorized implementation**. If they only asked for research, stop after docs.
-5. XV-A **research is complete** (provenance + codebase map: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md), [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md)). When the user **authorizes implementation**, finish remaining XV-A ops then **XV-B**:
-   - install `dev records/phase XV/materials.draft.json` as `assets/terrain/materials.json`;
-   - capture live eight-layer GPU/tap/memory baseline from `DefaultLandscapePreset` cameras (not F7’s 10 m snow band); do not invent timings;
-   - landscape-kit evidence PNGs, including **Great Lakes shore under shipping water**;
-   - SHA-256 is filled only after verified downloads (XV-B);
-   - use the substituted roster (layer 11 `cracked_red_ground`, layer 15 `ganges_river_pebbles`).
-6. Preserve indices 0–7 and sidecar v2 appearance forever on migration. XV-C must widen paint/UI from layers **0–3**; do not assume 8-layer authoring already works.
-7. Do not download Quixel/Megascans; do not generate materials with AI.
-8. Do not implement RVT, indexed splat IDs, LEAN, multilayer POM, tessellation, foliage scatter, clipmaps, or CoD/AVT in XV-A (or later unless evidence + user reopen).
-9. Do not retune `WaterComponent::great_lakes` `wave_speed` away from 0.85 without an explicit buoyancy plan.
-10. Update `context.md` and `ATTRIBUTION.md` after each completed XV subphase, not in advance of working code.
-11. After XV-A exits, hand off to XV-B (fetch/pack) — do not jump to shader sixteen-layer wiring first.
+**If the session is Metaphor**, ignore the old XV numbered steps below and
+follow [`phase_26.md`](phase_26.md) §20 instead:
+
+1. Confirm branch `dev`. Read `phase_26.md` in full (§3, §4, §13, §14).
+2. Then `context.md` §8, `theme.rs`, `editor_event.rs`, `numeric_field.rs`.
+3. `cargo check --workspace` before edits.
+4. User must have **authorized implementation**. Research-only → stop after docs.
+5. **Start at 26-A** (anchored popups, icon atlas, splitter, bundled font).
+   Do not start at the Content Drawer or water colour.
+6. UI/UX only. Do not retune `WaterComponent::great_lakes`. Do not rewrite
+   `context.md` §20. Do not copy Unreal/Atlus art.
+7. Keep every §14 must-not-break behaviour. `EditorEvent` stays the seam.
+8. `cargo fmt` / tests green per sub-phase. Evidence under `dev records/phase 26/`.
+
+**If the session is still Halcyon (VV):** read [`phase_VV.md`](phase_VV.md);
+do not fold Metaphor widgets into it.
+
+Historical XV notes (phase complete): do not download Quixel/Megascans or
+generate materials with AI; do not retune `WaterComponent::great_lakes`
+`wave_speed` away from 0.85 without an explicit buoyancy plan. Full XV
+research record remains in [`phase_XV.md`](phase_XV.md).
 
 ---
 

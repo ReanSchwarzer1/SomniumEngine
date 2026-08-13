@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Iris) and Phase VV (Halcyon) planned  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) and Phase VV (Halcyon) planned  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
@@ -26,9 +26,9 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Planned next (independent tracks):
-> - **Phase 26 — Iris** — inspector colour pickers (swatch + popup), modelled on
->   Unreal's `SColorBlock` / `SColorPicker`, covering lights, water
->   deep/shallow/edge, absorption/scattering, particles, and materials. Plan:
+> - **Phase 26 — Metaphor** — UI framework + editor rebuild. Unreal-like
+>   *layout*, Somnium **Nocturne** paint (lunar indigo, Inter), Content Drawer,
+>   F1 Help overlay, icons, inspector UX. Colour pickers are 26-F. Plan:
 >   `dev records/phase_26.md`.
 > - **Phase VV — Halcyon** — ray-traced water reflections. Plan:
 >   `dev records/phase_VV.md`. Reflections are currently a 28-step screen-space
@@ -1258,7 +1258,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | ⬜ Planned | **Phase 26 — Iris: inspector colour pickers.** Lights still expose tint as three anonymous `Col R/G/B` floats; water deep/shallow/edge, absorption, scattering, particle colours, and material base colour are not in the inspector at all. Iris adds a reusable swatch + popup picker modelled on Unreal's `SColorBlock` / `SColorPicker` / `FColorPickerArgs` (interactive preview, Cancel restores, linear storage with sRGB display), then adopts it across lights, water, particles, and materials. Plan: `dev records/phase_26.md`. |
+| 26 | ⬜ Planned | **Phase 26 — Metaphor: UI framework + editor rebuild.** `somnium_ui` still only draws editor chrome (hand-positioned popups, cyclers, no content browser, no icons, no game UI). Metaphor hardens the retained toolkit, rebuilds the editor as an Unreal-like shell (dogfood), ships a Content Drawer (project `assets/` + Show Engine Content), icons for every type, then absorbs the former Iris colour pickers as 26-F. Runtime screen-space canvas is 26-G. Plan: `dev records/phase_26.md`. |
 | VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
 ---
@@ -2210,6 +2210,12 @@ popups and the cycler that replaced them in 17G. References: Flax
 `Engine/UI/UICanvas` and `GUI/`, Wicked `wiGUI` / `wiFont`, Stride `Stride.UI`,
 rbfx's Urho-derived UI.
 
+> **Plan (2026-08-13):** this is now **Phase 26 — Metaphor**. Full research,
+> sub-phases 26-A–I, Content Drawer, icon system, and the absorbed Iris colour
+> pickers: [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
+> above is the original gap statement; do not treat it as the implementation
+> order. Start at 26-A (framework), not at the Drawer.
+
 **Phase 27 — Skeletal animation.** GPU skinning with a joint palette, clip
 sampling, blend trees, a state machine, IK, root motion, and animation events.
 Esoterica is the reference to study hardest: its animation system is the most
@@ -2307,6 +2313,10 @@ Three changes, and five additions:
   is not cosmetic — every new component in Somnium currently needs inspector
   code written by hand, which is why the Foliage panel ended up with a cycler
   rather than a popup in 17G.
+  **Metaphor v1 (2026-08-13 plan) does not ship this.** 26-E still hand-builds
+  Details on Checkbox/Combo/PropertyRow so the chrome rewrite is not blocked on
+  a reflection system. Tracked as post-Metaphor / optional 26-J in
+  [`dev records/phase_26.md`](dev%20records/phase_26.md).
 - **Phase 27 (animation) gains motion matching** as a later sub-phase, from
   O3DE `MotionMatching`. EMotionFX joins Esoterica as the primary reference.
 - **Phase 30** is confirmed as Recast/Detour-based by three independent engines.
@@ -3562,10 +3572,9 @@ shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
 artifacts — `dev records/phase XV/evidence/XV-BC7_visual_check.md`).
 
-**Phase 26 — Iris (planned 2026-08-13).** Inspector colour pickers. Lights still
-edit tint as three floats; water deep/shallow/edge and absorption/scattering are
-not in the inspector at all. Plan: `dev records/phase_26.md`. Independent of
-Phase VV.
+**Phase 26 — Metaphor (planned 2026-08-13).** UI framework + Unreal-like editor
+rebuild, Content Drawer, icons; colour pickers are 26-F (former Iris). Plan:
+`dev records/phase_26.md`. Independent of Phase VV.
 
 ## 18. Known Issues & Active Bugs
 
