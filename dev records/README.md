@@ -23,6 +23,8 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase XV/` — sixteen-material terrain evidence (research-only plan; see
   `phase_XV.md`. Evidence path reserved as
   `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`).
+  XV-A provenance audit: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
+  Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
 Captures must be taken after tonemapping. The renderer's HDR target holds
 values far above one, so a PNG written from it directly is uniformly blown out

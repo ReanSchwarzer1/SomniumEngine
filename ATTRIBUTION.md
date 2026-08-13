@@ -120,8 +120,9 @@ Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
 ### 1.6 Terrain materials — Phase XV Appalachia (planned research only)
 
-**Status:** research-complete plan as of 2026-08-13. No sixteen-layer
-runtime, textures, or shaders yet. Controlling reference:
+**Status:** XV-A provenance research complete 2026-08-13
+([`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md)).
+No sixteen-layer runtime, textures, or shaders yet. Controlling reference:
 `dev records/phase_XV.md`.
 
 | Reference | Pattern to study | Somnium target when implementing |
