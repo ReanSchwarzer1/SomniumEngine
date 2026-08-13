@@ -237,10 +237,11 @@ fn world_volume_uvw(pos: vec3<f32>) -> vec3<f32> {
 
 fn sample_sh_probes(pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let uvw = clamp(world_volume_uvw(pos), vec3<f32>(0.0), vec3<f32>(1.0));
-    let g = uvw * 3.0;
-    let i0 = vec3<u32>(clamp(floor(g), vec3<f32>(0.0), vec3<f32>(3.0)));
+    // Probes sit at texel centres (gid + 0.5) / 4, so uvw 0.125 → index 0.
+    let g = clamp(uvw * 4.0 - 0.5, vec3<f32>(0.0), vec3<f32>(3.0));
+    let i0 = vec3<u32>(floor(g));
     let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(3u));
-    let f = fract(g);
+    let f = g - vec3<f32>(i0);
     let b000 = (i0.x + i0.y * 4u + i0.z * 16u) * 9u;
     let b100 = (i1.x + i0.y * 4u + i0.z * 16u) * 9u;
     let b010 = (i0.x + i1.y * 4u + i0.z * 16u) * 9u;
@@ -1298,7 +1299,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         // Direct sunlight + directional moonlight
-        let direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
+        var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor + moonlight;
 
         // Transmitted sunlight follows the same atmospheric fade as every
@@ -1325,15 +1326,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // SDF owns volume alpha; the world cache writes occupancy there, so
         // the two cannot run as one field. Cache-on skips the cone-trace.
         if (extra_flags & 8u) != 0u && (extra_flags & 1u) == 0u {
+            // March in cell units: a 0.15 m first step saturates against 2 m
+            // voxels and the cone never occludes. Start inside the first cell
+            // so a cube on the ground actually darkens the terrain around it.
+            let cell = max(lighting_extra.z, 0.25);
             var sdf_ao = 1.0;
-            var march = 0.15;
+            var march = cell * 0.4;
             for (var s = 0u; s < 6u; s++) {
                 let p = hit_point + geo_normal * march;
                 let d = textureSampleLevel(world_volume, volumetric_sampler, world_volume_uvw(p), 0.0).a;
-                sdf_ao = min(sdf_ao, saturate(d / max(march, 1e-3)));
-                march *= 1.7;
+                sdf_ao = min(sdf_ao, saturate(d / max(march * 0.5, 1e-3)));
+                march *= 1.55;
             }
             ambient *= sdf_ao;
+            direct_light *= mix(1.0, sdf_ao, 0.45);
         }
         if (extra_flags & 2u) != 0u {
             let aux_uv = (vec2<f32>(pixel_coords) + 0.5) / vec2<f32>(textureDimensions(vis_buffer));

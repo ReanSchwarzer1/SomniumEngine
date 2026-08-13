@@ -2168,6 +2168,7 @@ impl SomniumRenderer {
                         model: cmd.transform,
                         local_min: min,
                         local_max: max,
+                        vertex_offset: cmd.vertex_offset,
                         brick: self.geometry.mesh_sdf(cmd.vertex_offset),
                     })
                 })

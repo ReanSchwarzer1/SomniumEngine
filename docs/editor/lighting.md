@@ -18,11 +18,11 @@ It adds a 64³ clipmap splat of this frame's GI so shading can pick up extra bou
 
 ## Mesh SDF / probes (24P / 24Q)
 
-**Mesh SDF** cone-traces a 64³ clipmap. Static meshes bake a packed 16³ triangle SDF at upload (AABB fallback for voxels). Do not combine it with World Cache — they share the volume's alpha. **Probes** bakes a 4×4×4 SH L2 grid from the environment (and the world cache when that is on); **Probe Amt** scales the bake. Both default off (`SOMNIUM_MESH_SDF=1`, `SOMNIUM_PROBES=1`).
+**Mesh SDF** cone-traces a 64³ clipmap. Static meshes bake a packed 16³ triangle SDF at upload (AABB fallback for voxels). Do not combine it with World Cache — they share the volume's alpha. Create a cube (it spawns in front of the camera) and leave World Cache off; contact darkens the ground around the mesh. **Probes** bakes a 4×4×4 SH L2 grid from the environment (and the world cache when that is on); **Probe Amt** scales the bake. Scrub it on a shadowed face — sunlight drowns the mix. Both default off (`SOMNIUM_MESH_SDF=1`, `SOMNIUM_PROBES=1`).
 
 ## Area lights (24R)
 
-Create → **Area Light**, **Disc Light**, or **Tube Light**.
+Create → **Area Light**, **Disc Light**, or **Tube Light**. New lights spawn a few metres in front of the camera (discs/rects/spots face into the view; tubes run across it).
 
 - **Area Light** — **Half W** / **Half H** are metres from the centre of the rectangle; **Radius** still drives highlight size.
 - **Disc Light** — **Radius** is the disc radius; forward is the emitting-plane normal.

@@ -2780,13 +2780,31 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
+                let spawn_dist = if light.is_some() { 5.0 } else { 8.0 };
+                let (spawn_pos, look, right) =
+                    camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
+                let rotation = match kind {
+                    CreateKind::DiscLight | CreateKind::RectLight | CreateKind::SpotLight => {
+                        glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, look)
+                    }
+                    CreateKind::TubeLight => {
+                        glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, right)
+                    }
+                    _ => glam::Quat::IDENTITY,
+                };
+                let transform = Transform {
+                    translation: spawn_pos,
+                    rotation,
+                    scale: glam::Vec3::ONE,
+                };
+                let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
-                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
                     mesh,
                     mat,
-                    wt: Some(WorldTransform::identity()),
+                    wt: Some(world),
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
@@ -3904,6 +3922,34 @@ impl<G: GameApp> Engine<G> {
 }
 
 // ─── Gizmo picking / drag math ────────────────────────────────────────────────
+
+/// Place a newly created entity a few metres in front of the camera.
+///
+/// Origin is usually underground on the default landscape, so Create → Disc /
+/// Tube / Cube at (0,0,0) looks like the feature never spawned. `look` is the
+/// camera forward (the direction a disc/spot/rect should emit); `right` is the
+/// camera's horizontal axis (a tube's length so it reads as a line in view).
+fn camera_spawn_basis(
+    renderer: Option<&SomniumRenderer>,
+    distance: f32,
+) -> (glam::Vec3, glam::Vec3, glam::Vec3) {
+    let Some(r) = renderer else {
+        return (glam::Vec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::X);
+    };
+    let look_pt = r
+        .view_proj
+        .inverse()
+        .project_point3(glam::Vec3::new(0.0, 0.0, 0.35));
+    let mut look = (look_pt - r.camera_pos).normalize_or_zero();
+    if look == glam::Vec3::ZERO {
+        look = glam::Vec3::NEG_Z;
+    }
+    let mut right = look.cross(glam::Vec3::Y).normalize_or_zero();
+    if right == glam::Vec3::ZERO {
+        right = glam::Vec3::X;
+    }
+    (r.camera_pos + look * distance, look, right)
+}
 
 /// Unproject a screen position to a world-space point (at mid-depth).
 fn ndc_to_world(cx: f32, cy: f32, vw: f32, vh: f32, inv_vp: &glam::Mat4) -> glam::Vec3 {

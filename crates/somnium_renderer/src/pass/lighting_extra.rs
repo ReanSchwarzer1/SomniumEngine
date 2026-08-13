@@ -24,6 +24,7 @@ pub struct MeshSdfDraw {
     pub model: glam::Mat4,
     pub local_min: [f32; 3],
     pub local_max: [f32; 3],
+    pub vertex_offset: u32,
     pub brick: Option<std::sync::Arc<crate::geometry::MeshSdfBrick>>,
 }
 
@@ -63,6 +64,34 @@ mod tests {
     fn the_sh_probe_buffer_holds_a_4x4x4_l2_grid() {
         assert_eq!(super::SH_BUFFER_BYTES, 64u64 * 9 * 16);
         assert_eq!(super::SH_BUFFER_BYTES % 16, 0);
+    }
+
+    #[test]
+    fn unique_meshes_are_not_starved_by_instanced_foliage() {
+        let foliage = || super::MeshSdfDraw {
+            model: glam::Mat4::IDENTITY,
+            local_min: [-0.5; 3],
+            local_max: [0.5; 3],
+            vertex_offset: 10,
+            brick: None,
+        };
+        let cube = super::MeshSdfDraw {
+            model: glam::Mat4::from_translation(glam::Vec3::Y),
+            local_min: [-1.0; 3],
+            local_max: [1.0; 3],
+            vertex_offset: 20,
+            brick: None,
+        };
+        // Many copies of one mesh, then a unique cube. The cube must still land
+        // in the 256-draw budget or Mesh SDF never sees editor primitives.
+        let mut draws: Vec<_> = (0..400).map(|_| foliage()).collect();
+        draws.push(cube);
+        let selected = super::mesh_sdf_draw_budget(&draws, 256);
+        assert!(
+            selected.iter().any(|d| d.local_max[0] > 0.75),
+            "cube AABB should survive the foliage flood"
+        );
+        assert!(selected.len() <= 256);
     }
 }
 
@@ -497,7 +526,7 @@ impl LightingExtraPass {
         for v in &mut self.sdf_cpu {
             *v = [8.0 * cell, 8.0 * cell, 8.0 * cell, 8.0 * cell];
         }
-        for draw in draws.iter().take(256) {
+        for draw in mesh_sdf_draw_budget(draws, 256) {
             let local_min = glam::Vec3::from_array(draw.local_min);
             let local_max = glam::Vec3::from_array(draw.local_max);
             let brick_min = draw
@@ -589,6 +618,38 @@ impl LightingExtraPass {
             },
         );
     }
+}
+
+/// Prefer one instance of every mesh, then extra copies, so 8 000 grass
+/// draws cannot push an editor cube out of the 256-splat budget.
+fn mesh_sdf_draw_budget(draws: &[MeshSdfDraw], cap: usize) -> Vec<&MeshSdfDraw> {
+    let mut selected = Vec::with_capacity(cap.min(draws.len()));
+    let mut seen = std::collections::HashSet::new();
+    for draw in draws {
+        if !seen.insert(draw.vertex_offset) {
+            continue;
+        }
+        selected.push(draw);
+        if selected.len() >= cap {
+            return selected;
+        }
+    }
+    let mut extra: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for draw in draws {
+        let n = extra.entry(draw.vertex_offset).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            continue;
+        }
+        if *n > 8 {
+            continue;
+        }
+        selected.push(draw);
+        if selected.len() >= cap {
+            break;
+        }
+    }
+    selected
 }
 
 fn aabb_signed_distance(p: glam::Vec3, min: glam::Vec3, max: glam::Vec3) -> f32 {
