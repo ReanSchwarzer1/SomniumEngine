@@ -221,6 +221,8 @@ pub struct SomniumRenderer {
 
     /// Phase 25A-2: per-terrain splat/layer parameters read by `shading.wgsl`.
     terrain_materials: crate::material::pool::TerrainMaterialPool,
+    /// Inspector override for `SOMNIUM_SHADOW_DEBUG` (0 = use env).
+    pub shading_debug: f32,
     /// Deterministic HDR frame readback for A/B measurement. Inert unless
     /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
     capture: crate::capture::FrameCapture,
@@ -645,6 +647,7 @@ impl SomniumRenderer {
             underwater_body: None,
             camera_submersion: 0.0,
             terrain_materials,
+            shading_debug: 0.0,
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             terrain_material_ids: std::collections::HashSet::new(),
@@ -1589,10 +1592,14 @@ impl SomniumRenderer {
         // stopped moving.
         let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
 
-        let shadow_debug = std::env::var("SOMNIUM_SHADOW_DEBUG")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.0);
+        let shadow_debug = if self.shading_debug != 0.0 {
+            self.shading_debug
+        } else {
+            std::env::var("SOMNIUM_SHADOW_DEBUG")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0)
+        };
         let gpu_light = GpuDirectionalLight {
             direction: self.light_direction.to_array(),
             _pad0: 0.0,

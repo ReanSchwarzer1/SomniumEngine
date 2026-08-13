@@ -90,8 +90,12 @@ struct InspectorHandles {
     // Terrain + foliage sections (Phase 17C), hidden unless a terrain is picked.
     terrain_section: NodeHandle,
     terrain_layer: NodeHandle,
-    terrain_tile: [NodeHandle; 4],
+    terrain_palette: [NodeHandle; 16],
+    terrain_palette_labels: [NodeHandle; 16],
+    terrain_tile: NodeHandle,
     terrain_relief: NodeHandle,
+    terrain_wetness: NodeHandle,
+    terrain_debug: NodeHandle,
     water_section: NodeHandle,
     water_surface: NodeHandle,
     water_depth: NodeHandle,
@@ -249,6 +253,12 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Grass Bermuda",
     "Fir Sapling",
     "Island Tree",
+];
+
+/// Short paint-palette labels (Phase XV-I). Indices match the renderer roster.
+const TERRAIN_LAYER_SHORT: [&str; 16] = [
+    "Grass", "Forest", "Rock", "Snow", "Meadow", "Mud", "Coast", "Gravel", "DrySd", "DampSd",
+    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus",
 ];
 
 pub type LightInspectorValues = [f32; 8];
@@ -845,24 +855,36 @@ impl UiManager {
         }
     }
 
-    /// Show or hide the Terrain section and refresh it (Phase 17C).
+    /// Show or hide the Terrain section and refresh it (Phase 17C / XV-I).
     ///
-    /// `values` is `[paint_layer, tile0, tile1, tile2, tile3, relief]`.
-    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 6]>) {
+    /// `values` is `[paint_layer, current_tile, relief, wetness, debug_view]`.
+    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 5]>) {
         let h = &self.inspector_handles;
-        let (section, layer, tiles) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
+        let (section, layer, tile) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
         let relief = h.terrain_relief;
+        let wetness = h.terrain_wetness;
+        let debug = h.terrain_debug;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
                     .send(NumericFieldMessage::set_value(layer, v[0]));
-                for (i, t) in tiles.iter().enumerate() {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(*t, v[i + 1]));
-                }
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(relief, v[5]));
+                    .send(NumericFieldMessage::set_value(tile, v[1]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(relief, v[2]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(wetness, v[3]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(debug, v[4]));
+                let paint = (v[0].round().max(0.0) as usize).min(15);
+                for (i, label) in h.terrain_palette_labels.iter().enumerate() {
+                    let mark = if i == paint { ">" } else { " " };
+                    self.native_ui.send(TextMessage::set_text(
+                        *label,
+                        format!("{mark}{}", TERRAIN_LAYER_SHORT[i]),
+                    ));
+                }
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -1051,11 +1073,10 @@ impl UiManager {
             (h.post_ca_str, IF::PostCaStrength),
             (h.post_ibl, IF::PostIblIntensity),
             (h.terrain_layer, IF::TerrainPaintLayer),
-            (h.terrain_tile[0], IF::TerrainTile0),
-            (h.terrain_tile[1], IF::TerrainTile1),
-            (h.terrain_tile[2], IF::TerrainTile2),
-            (h.terrain_tile[3], IF::TerrainTile3),
+            (h.terrain_tile, IF::TerrainTile0),
             (h.terrain_relief, IF::TerrainRelief),
+            (h.terrain_wetness, IF::TerrainWetness),
+            (h.terrain_debug, IF::TerrainDebugView),
             (h.water_surface, IF::WaterSurface),
             (h.water_depth, IF::WaterMaxDepth),
             (h.water_clarity, IF::WaterClarity),
@@ -1098,6 +1119,16 @@ impl UiManager {
                 {
                     self.editor_events
                         .push_back(EditorEvent::SelectEntity(Some(eidx)));
+                    continue;
+                }
+                if let Some(layer) = self
+                    .inspector_handles
+                    .terrain_palette
+                    .iter()
+                    .position(|&h| h == msg.destination)
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SetTerrainPaintLayer(layer as u8));
                     continue;
                 }
                 // File > Import Model (Phase 19B)
@@ -2288,16 +2319,28 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // Whole steps: the paint layer is an index, and a fractional drag would be
     // meaningless.
     let terrain_layer = make_row_step(ui, "Paint", 34.0, font_id, terrain_section, 0.02);
-    let terrain_tile = [
-        make_row_step(ui, "Tile 0", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 1", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 2", 34.0, font_id, terrain_section, 0.05),
-        make_row_step(ui, "Tile 3", 34.0, font_id, terrain_section, 0.05),
-    ];
+    let mut terrain_palette = [NodeHandle::NONE; 16];
+    let mut terrain_palette_labels = [NodeHandle::NONE; 16];
+    for row in 0..4 {
+        let row_panel =
+            StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                .with_orientation(Orientation::Horizontal)
+                .build();
+        let row_h = ui.add_node(row_panel, terrain_section);
+        for col in 0..4 {
+            let i = row * 4 + col;
+            let (btn, lbl) = make_palette_button(ui, TERRAIN_LAYER_SHORT[i], font_id, row_h);
+            terrain_palette[i] = btn;
+            terrain_palette_labels[i] = lbl;
+        }
+    }
+    let terrain_tile = make_row_step(ui, "Tile", 34.0, font_id, terrain_section, 0.01);
     // Phase 25H: multiplies the relief depth every layer authors for itself, so
     // one dial covers the whole terrain without flattening the differences
     // between gravel and mud. 0 switches parallax off.
     let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
+    let terrain_wetness = make_row_step(ui, "Wet", 34.0, font_id, terrain_section, 0.02);
+    let terrain_debug = make_row_step(ui, "Dbg", 34.0, font_id, terrain_section, 1.0);
     ui.set_visibility(terrain_section, false);
 
     let water_panel =
@@ -2365,8 +2408,12 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_moon_int,
         terrain_section,
         terrain_layer,
+        terrain_palette,
+        terrain_palette_labels,
         terrain_tile,
         terrain_relief,
+        terrain_wetness,
+        terrain_debug,
         water_section,
         water_surface,
         water_depth,
@@ -2473,6 +2520,41 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_mb_label,
         post_mb_shutter,
     }
+}
+
+fn make_palette_button(
+    ui: &mut UserInterface,
+    text: &str,
+    font_id: u8,
+    parent: NodeHandle,
+) -> (NodeHandle, NodeHandle) {
+    let btn = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(20.0)
+            .with_width(52.0)
+            .with_margin(Thickness {
+                left: 2.0,
+                top: 1.0,
+                right: 2.0,
+                bottom: 1.0,
+            })
+            .with_background(theme::BG_DARK),
+    )
+    .build();
+    let btn_h = ui.add_node(btn, parent);
+    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 3.0,
+        top: 3.0,
+        right: 0.0,
+        bottom: 0.0,
+    }))
+    .with_text(&format!(" {text}"))
+    .with_font_size(10.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let lbl_h = ui.add_node(lbl, btn_h);
+    (btn_h, lbl_h)
 }
 
 /// Build a checkbox-style toggle row: a full-width button whose text label

@@ -849,6 +849,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
+    if material.terrain_index >= 0 {
+        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
+    }
 
     // ── Shadow factor ────────────────────────────────────────────────────────
     // View-space depth: positive Z distance from camera.
@@ -946,6 +949,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 20 = raw strongest-four weights of the first three selected layers.
     if light._pad2_z > 19.5 && light._pad2_z < 20.5 {
         return vec4<f32>(terrain_weight_rgb, 1.0);
+    }
+    // 21 = dominant selected-layer albedo (solo).
+    if light._pad2_z > 20.5 && light._pad2_z < 21.5 {
+        return vec4<f32>(terrain_dominant_albedo, 1.0);
+    }
+    // 22 = cliff projection blend.
+    if light._pad2_z > 21.5 && light._pad2_z < 22.5 {
+        return vec4<f32>(vec3<f32>(terrain_cliff_blend_dbg), 1.0);
+    }
+    // 23 = wetness factor (moisture affinity × global wetness).
+    if light._pad2_z > 22.5 && light._pad2_z < 23.5 {
+        return vec4<f32>(vec3<f32>(terrain_wetness_factor), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.

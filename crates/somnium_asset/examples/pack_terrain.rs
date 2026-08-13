@@ -3,8 +3,12 @@
 //! Run after `cargo run -p somnium_asset --example fetch_terrain`:
 //!
 //! ```text
-//! cargo run --release -p somnium_asset --example pack_terrain -- 4k
+//! cargo run --release -p somnium_asset --example pack_terrain -- 2k
+//! cargo run --release -p somnium_asset --example pack_terrain -- 2k --force
 //! ```
+//!
+//! Existing `*_albedo.png` + `*_surface.png` pairs are skipped unless `--force`
+//! is passed, so a 2K pack of layers 8–15 will not replace shipping 4K 0–7.
 //!
 //! Sixteen materials from `assets/terrain/materials.json` become **two**
 //! textures each:
@@ -54,7 +58,14 @@ fn layer_ids(manifest: &Value) -> Result<Vec<String>, String> {
 }
 
 fn main() -> Result<(), String> {
-    let res = std::env::args().nth(1).unwrap_or_else(|| "4k".to_string());
+    let args: Vec<String> = std::env::args().collect();
+    let res = args
+        .iter()
+        .skip(1)
+        .find(|a| *a != "--force")
+        .cloned()
+        .unwrap_or_else(|| "4k".to_string());
+    let force = args.iter().any(|a| a == "--force");
     let source = PathBuf::from("assets/terrain/_source");
     let out_dir = PathBuf::from("assets/terrain");
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -74,6 +85,21 @@ fn main() -> Result<(), String> {
 
     let mut packed = Vec::new();
     for material in &materials {
+        let albedo_path = out_dir.join(format!("{material}_albedo.png"));
+        let surface_path = out_dir.join(format!("{material}_surface.png"));
+        if !force && albedo_path.exists() && surface_path.exists() {
+            let (w, h) = image::image_dimensions(&albedo_path).unwrap_or((0, 0));
+            println!("skip {material} (already packed, {w}x{h})");
+            packed.push(serde_json::json!({
+                "id": material,
+                "skipped": true,
+                "width": w,
+                "height": h,
+                "albedo": albedo_path.display().to_string(),
+                "surface": surface_path.display().to_string(),
+            }));
+            continue;
+        }
         let diff = load(&source, material, "diff", &res)?;
         let nor = load(&source, material, "nor_dx", &res)?;
         let arm = load(&source, material, "arm", &res)?;
@@ -96,6 +122,7 @@ fn main() -> Result<(), String> {
         let mut surface = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(w, h);
         let mut n_min = 1.0f32;
         let mut n_max = 0.0f32;
+        let mut n_clamped = 0u32;
         for y in 0..h {
             for x in 0..w {
                 let d = diff.get_pixel(x, y).0;
@@ -103,22 +130,32 @@ fn main() -> Result<(), String> {
                 let a = arm.get_pixel(x, y).0;
                 let height = disp.get_pixel(x, y).0[0];
                 albedo.put_pixel(x, y, Rgba([d[0], d[1], d[2], height]));
-                surface.put_pixel(x, y, Rgba([n[0], n[1], a[1], a[0]]));
-                let nx = f32::from(n[0]) / 255.0 * 2.0 - 1.0;
-                let ny = f32::from(n[1]) / 255.0 * 2.0 - 1.0;
+                let mut nx = f32::from(n[0]) / 255.0 * 2.0 - 1.0;
+                let mut ny = f32::from(n[1]) / 255.0 * 2.0 - 1.0;
                 let len = (nx * nx + ny * ny).sqrt();
                 n_min = n_min.min(len);
                 n_max = n_max.max(len);
+                if len > 1.0 {
+                    nx /= len;
+                    ny /= len;
+                    n_clamped += 1;
+                }
+                let nx8 = ((nx * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+                let ny8 = ((ny * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+                surface.put_pixel(x, y, Rgba([nx8, ny8, a[1], a[0]]));
             }
         }
-        if n_max > 1.15 {
+        if n_max > 1.5 {
             return Err(format!(
-                "{material}: packed XY normal length reached {n_max:.3} (expected ≤ ~1)"
+                "{material}: packed XY normal length reached {n_max:.3} (source looks corrupt)"
             ));
         }
+        if n_clamped > 0 {
+            println!(
+                "warn {material}: {n_clamped} texels had XY length > 1 (max {n_max:.3}); clamped to unit disk"
+            );
+        }
 
-        let albedo_path = out_dir.join(format!("{material}_albedo.png"));
-        let surface_path = out_dir.join(format!("{material}_surface.png"));
         albedo.save(&albedo_path).map_err(|e| e.to_string())?;
         surface.save(&surface_path).map_err(|e| e.to_string())?;
         println!("packed {material} ({w}x{h})");
@@ -130,6 +167,7 @@ fn main() -> Result<(), String> {
             "surface": surface_path.display().to_string(),
             "xy_normal_length_min": n_min,
             "xy_normal_length_max": n_max,
+            "xy_clamped_texels": n_clamped,
         }));
     }
 

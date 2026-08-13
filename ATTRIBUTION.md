@@ -118,12 +118,12 @@ reference for `dev records/phase_26.md`.
 source is copied. Widget implementation will be original Rust on the existing
 Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
-### 1.6 Terrain materials — Phase XV Appalachia (A–F shipped in engine)
+### 1.6 Terrain materials — Phase XV Appalachia (A–I shipped in engine)
 
-**Status:** XV-A–F implementation 2026-08-13. Provenance:
+**Status:** XV-A–I implementation 2026-08-13. Provenance:
 [`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md).
 Controlling reference: `dev records/phase_XV.md`. Live GPU evidence PNGs and
-adapter freeze remain pending a capture run.
+adapter freeze remain pending XV-J.
 
 | Reference | Pattern studied | Somnium implementation |
 |---|---|---|
@@ -131,12 +131,13 @@ adapter freeze remain pending a capture run.
 | Mikkelsen JCGT 2020 surface gradients + hex tiling | Layered/projected normal composition | Surface-gradient blend in `evaluate_terrain_material`; hex packed-surface counter-rotation |
 | Godot 4.7.1 mip roughness / full-channel projection | Specular AA + complete projection | Independent Toksvig fixture in `terrain/mips.rs`; full-PBR biplanar cliffs (POM off on that path) |
 | Bevy `bevy_triplanar_splatting` biplanar.wgsl | Two dominant axes | `terrain_projected_pbr` default biplanar, triplanar debug via `SOMNIUM_TERRAIN_TRIPLANAR` |
+| Terrain3D autoshade vs paint / wetness | Base rules + paint lock; porous wetting | `BiomePreset::appalachia` + `splat_lock`; global wetness × per-layer moisture affinity |
 | Poly Haven / ambientCG CC0 | Photogrammetry with clear redistribution | `assets/terrain/materials.json`; `fetch_terrain` fail-closed MD5; voluntary credit in `assets/LICENSE.md` |
 
 **Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
 CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
-references. XV-G biome preset, XV-H wetness/physical UV, and XV-I inspector
-thumbnails are not in this drop.
+references. Histogram-preserving blend and a painted wetness channel are not in
+this drop. XV-J verification is still open.
 
 ---
 

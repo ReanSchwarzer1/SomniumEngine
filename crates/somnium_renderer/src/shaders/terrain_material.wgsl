@@ -17,7 +17,7 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (800 bytes, Phase XV). Every vec4 sits
+// Mirrors `terrain::GpuTerrainMaterial` (880 bytes, Phase XV-H). Every vec4 sits
 // on a 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
     layer_tiling: array<vec4<f32>, 4>,
@@ -47,6 +47,11 @@ struct TerrainMaterial {
     parallax_shadow_steps: u32,
     projection_sharpness: f32,
     projection_mode: u32,
+    layer_moisture: array<vec4<f32>, 4>,
+    wetness: f32,
+    wetness_darken: f32,
+    wetness_gloss: f32,
+    wetness_f0: f32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -91,6 +96,10 @@ fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
 
 fn terrain_parallax_depth(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_parallax[layer / 4u][layer % 4u];
+}
+
+fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
+    return tm.layer_moisture[layer / 4u][layer % 4u];
 }
 
 fn terrain_unpack_splats(w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, w3: vec4<f32>) -> array<f32, 16> {
@@ -291,6 +300,10 @@ var<private> terrain_taps: u32 = 0u;
 var<private> terrain_discarded: f32 = 0.0;
 var<private> terrain_selected_rgb: vec3<f32> = vec3<f32>(0.0);
 var<private> terrain_weight_rgb: vec3<f32> = vec3<f32>(0.0);
+var<private> terrain_wetness_factor: f32 = 0.0;
+var<private> terrain_cliff_blend_dbg: f32 = 0.0;
+var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
+var<private> terrain_wet_f0: f32 = 0.0;
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
@@ -736,6 +749,31 @@ fn evaluate_terrain_material(
         let cliff_grad = ts_to_surfgrad(normalize(cliff.normal_ts), tangent, bitangent);
         surfgrad = mix(surfgrad, cliff_grad, cliff_blend);
     }
+
+    var moisture = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let b = blend[s] / blend_sum;
+        if b > 0.0 {
+            moisture += terrain_moisture(tm, selected[s]) * b;
+        }
+    }
+    if cliff_blend > 0.0 {
+        moisture = mix(moisture, terrain_moisture(tm, tm.cliff_layer), cliff_blend);
+    }
+    let wet = saturate(tm.wetness * moisture);
+    albedo *= mix(1.0, tm.wetness_darken, wet);
+    roughness = mix(roughness, roughness * tm.wetness_gloss, wet);
+    terrain_wetness_factor = wet;
+    terrain_cliff_blend_dbg = cliff_blend;
+    var dom = vec3<f32>(0.0);
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        if blend[s] / blend_sum > 0.0 {
+            dom = samples[s].albedo;
+            break;
+        }
+    }
+    terrain_dominant_albedo = dom;
+    terrain_wet_f0 = tm.wetness_f0 * wet;
 
     var out: TerrainSurface;
     out.albedo = albedo;

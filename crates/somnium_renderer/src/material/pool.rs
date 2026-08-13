@@ -236,7 +236,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_800_byte_shader_layout() {
+    fn the_terrain_material_is_the_880_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
@@ -249,11 +249,12 @@ mod material_flag_tests {
         // Phase 25E took it to 256 with three more per-layer arrays plus the
         // height-blend flag; the trailing `_pad` is there because WGSL rounds a
         // struct up to its alignment and Rust does not. Phase 25D took it to
-        // 272 with the macro tier and the detail-fade range. Phase XV took it
-        // to 800 with sixteen layers and four splatmaps; scalars stay packed
-        // as `array<vec4<T>, 4>`, never `array<f32, 16>`.
+        // 272 with the macro tier and the detail-fade range. Phase XV-C took it
+        // to 800 with sixteen layers and four splatmaps; XV-H adds moisture
+        // affinity and wetness scalars to 880. Scalars stay packed as
+        // `array<vec4<T>, 4>`, never `array<f32, 16>`.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 800);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 880);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
@@ -287,5 +288,8 @@ mod material_flag_tests {
             offset(&m.projection_sharpness as *const f32 as *const u8),
             792
         );
+        assert_eq!(offset(m.layer_moisture.as_ptr() as *const u8), 800);
+        assert_eq!(offset(&m.wetness as *const f32 as *const u8), 864);
+        assert_eq!(offset(&m.wetness_f0 as *const f32 as *const u8), 876);
     }
 }

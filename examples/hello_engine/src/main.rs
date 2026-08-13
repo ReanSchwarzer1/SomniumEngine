@@ -673,8 +673,8 @@ impl GameApp for HelloGame {
         // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
         // now selects a variant rather than enabling it:
         //   unset / "flat" — the editor's own **Create > Terrain** geometry: the
-        //       default 16x16-chunk descriptor at y = 0, with a heightmap and
-        //       all eight materials auto-splatted by altitude and slope.
+        //       default 16x16-chunk descriptor at y = 0, with the sixteen-layer
+        //       Appalachia biome (the only default landscape).
         //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
         //       is what exercises the brush paths without editor input.
         //   "0" / "none"   — no terrain, for isolating everything else.
@@ -769,8 +769,8 @@ impl GameApp for HelloGame {
                     let terrain_id = renderer.create_terrain(render_ctx, desc);
                     let [wx, wz] = desc.world_size();
 
-                    // Phase 25L: real relief, so the eight materials have altitudes
-                    // and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
+                    // Phase 25L: real relief, so the sixteen biome materials have
+                    // altitudes and slopes to be assigned against. `SOMNIUM_HEIGHTMAP=<path>`
                     // loads a file (16-bit PNG, or CDLOD's `.tbmp`); otherwise the
                     // terrain gets procedural FBM hills, which is still landscape
                     // rather than the flat plain every earlier test scene used.
@@ -784,7 +784,6 @@ impl GameApp for HelloGame {
                             // The same path Create > Terrain takes, so the demo
                             // scene and an editor-created terrain cannot diverge.
                             terrain.apply_default_relief(amplitude);
-                            // Assign all eight materials by altitude and slope.
                             brush::auto_splat(terrain, amplitude * 0.62);
 
                             // `SOMNIUM_FOLIAGE=1` scatters foliage without the
@@ -888,7 +887,10 @@ impl GameApp for HelloGame {
                         for _ in 0..20 {
                             brush::apply_sculpt(terrain, &lower, wx * 0.7, wz * 0.7, 0.1);
                         }
-                        brush::auto_splat(terrain, 10.0);
+                        brush::auto_splat(
+                            terrain,
+                            somnium_renderer::terrain::DEFAULT_RELIEF_METRES * 0.62,
+                        );
                     }
 
                     let _terrain_entity = ctx.world.spawn((

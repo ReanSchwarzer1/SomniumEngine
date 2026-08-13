@@ -405,10 +405,10 @@ Procedural results must be bakeable into the same four splatmaps. Manual paint i
 
 ## 8. Implementation phases
 
-All subphases **XV-A through XV-F are implemented in engine** as of 2026-08-13.
-Live GPU evidence PNGs, adapter freeze, and SHA-256 of downloaded sources still
-need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
-*acceptance evidence* still requires those captures, not only compiling code.
+All subphases **XV-A through XV-I are implemented in engine** as of 2026-08-13.
+**XV-J (full verification, evidence PNGs, adapter freeze) is still planned** and
+is the next authorized session. Completing a subphase's *acceptance evidence*
+still requires those captures, not only compiling code.
 
 ### XV-A — Baseline and provenance gate
 
@@ -426,22 +426,22 @@ need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
 
 - Reproducible baseline report exists. **Met for the code contract** (cameras, tiling, residency, historical timings, codebase map). Live adapter/GPU/tap capture still pending an authorized engine run.
 - Every candidate has an exact first-party source/license record. **Met**, with two role substitutions (`terrain_red_01` → `cracked_red_ground`, `dry_riverbed_rock` → `ganges_river_pebbles`).
-- No new texture binary has entered the repository without its manifest entry. **Met** — nothing fetched.
+- No new texture binary has entered the repository without its manifest entry. **Met** — 2K sources fetched 2026-08-13 into `assets/terrain/_source/` (gitignored); SHA-256 in `_source/FETCH_REPORT.json`. Packed PNGs for 8–15 written beside shipping 4K 0–7.
 - File-level codebase map recorded. **Met** — [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
-**Not met (needs a live engine/fetch run):** evidence PNGs, SHA-256 of downloads, live GPU/tap/memory freeze. Manifest is installed at `assets/terrain/materials.json`. Sidecar v3 and sixteen-layer shaders are in the engine.
+**Not met (needs XV-J):** evidence PNGs, live GPU/tap/memory freeze. Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v3 and sixteen-layer shaders are in the engine.
 
 ### XV-B — Deterministic asset pipeline
 
-**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. BC7 encoder is not shipped; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both. Pack report estimates 2K residency.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. Live 2K fetch ran 2026-08-13 (`assets/terrain/_source/FETCH_REPORT.json`). Packer skips existing `*_albedo.png`/`*_surface.png` unless `--force`, so shipping 4K layers 0–7 were left alone and layers 8–15 packed at 2K. JPEG `nor_dx` pixels with XY length > 1 are clamped onto the unit disk (logged, not fatal unless length > 1.5). BC7 encoder is not shipped; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both.
 
 ### XV-C — Sixteen-layer data model and migration
 
-**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Sixteen-channel splat, paint 0–15 with four-nonzero, sidecar v3, v2 migration copies 0–7 and zeros 8–15. Auto-splat still writes 0–7 only (XV-G owns biome). Inspector still shows Tile 0–3 tiling (XV-I).
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Sixteen-channel splat, paint 0–15 with four-nonzero, sidecar v3, v2 migration copies 0–7 and zeros 8–15. Startup and Create → Terrain bake the XV-G biome (layers 0–15). The eight-layer F7 rebuild path is removed. Inspector palette is XV-I.
 
 ### XV-D — GPU layout and sparse evaluation
 
-**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** `GpuTerrainMaterial` is 800 bytes / four splatmaps. Strongest-four before PBR. GI uses the same unpack/select helpers but remains mean-albedo × weights. Debug: `SOMNIUM_SHADOW_DEBUG` 12/18/19/20.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** `GpuTerrainMaterial` is 880 bytes / four splatmaps / moisture+wetness (XV-H). Strongest-four before PBR. GI uses the same unpack/select helpers, then mean-albedo × weights with wetness darken. Debug: `SOMNIUM_SHADOW_DEBUG` / inspector 12, 18–23.
 
 ### XV-E — Compression and specular stability
 
@@ -468,6 +468,10 @@ need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
 
 ### XV-G — Biome preset and shared terrain creation
 
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Visual sign-off is XV-J.
+
+`BiomePreset::appalachia` in `terrain/biome.rs` writes all sixteen layers from elevation, slope, curvature, water datum (16.1 m), and noise. `auto_splat` delegates to it. `DefaultLandscapePreset` version is **2**. Startup and Create → Terrain are the only authors of the default splat; F7 is gone. Paint stamps still set `splat_lock` so a later explicit rebuild can preserve overrides.
+
 **Work**
 
 - Implement deterministic elevation/slope/curvature/water/moisture/exposure rules.
@@ -477,11 +481,15 @@ need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
 
 **Exit criteria**
 
-- Same seed, heightmap, water level, and preset produce identical splat hashes.
-- Waterline, beach, grassland, soil, mountain, cliff, talus, and snow regions read coherently.
-- Manual overrides survive a base-rule rebuild when requested.
+- Same seed, heightmap, water level, and preset produce identical splat hashes. **Met in unit tests** for `weights_at` bit-identity; full splat-hash capture is XV-J.
+- Waterline, beach, grassland, soil, mountain, cliff, talus, and snow regions read coherently. **Code path exists; GPU look is XV-J.**
+- Manual overrides survive a base-rule rebuild when requested. **Met** via `splat_lock` (no F7; rebuild is internal to the biome apply).
 
 ### XV-H — Macro, meso, and micro fidelity
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Visual A/B is XV-J.
+
+Layers 0–7 stay at tiling 0.25 (4 m tile) so old scenes do not retile. Layers 8–15 use `1 / physical_width_m`. Moisture affinity is packed as `array<vec4<f32>, 4>` at GPU offset 800. Global wetness (`SOMNIUM_TERRAIN_WETNESS` / inspector Wet) darkens albedo, drops roughness, and lifts F0 after the blend, weighted by moisture. Histogram-preserving blend is **not shipped** (no evidence yet). No extra RNM microdetail map; surface-gradient composition from XV-F stands.
 
 **Work**
 
@@ -493,13 +501,14 @@ need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
 
 **Exit criteria**
 
-- No obvious grid repetition in landscape, eye-level, and moving-camera captures.
-- Scanned features have plausible real-world scale.
-- Layer transitions and cliffs compose through surface gradients; microdetail RNM does not fight projection.
-- Wet sand, mud, and mossy rock read wet beside dry siblings without erasing material identity.
-- Macro colour does not wash out or exaggerate the source material.
+- No obvious grid repetition / plausible real-world scale / wet-vs-dry identity: **shader and constants are in; captures are XV-J.**
+- Histogram-preserving blend: **deferred** unless XV-J evidence asks for it.
 
 ### XV-I — Editor experience and diagnostics
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Named palette buttons (not texture thumbnails). Debug views ride the same codes as `SOMNIUM_SHADOW_DEBUG`, also settable from the inspector without an env var.
+
+Palette: sixteen abbreviated names. Paint stepper kept. Tile 0–3 replaced by tiling of the **current** paint layer, plus Wetness and Debug. Debug 12 taps, 18 discarded, 19 selected, 20 weights, 21 dominant albedo, 22 cliff blend, 23 wetness factor.
 
 **Work**
 
@@ -510,11 +519,13 @@ need a capture/fetch run. XV-G onward remain planned. Completing a subphase's
 
 **Exit criteria**
 
-- All sixteen materials are discoverable and paintable without memorizing indices.
-- The artist can identify why a material was selected, what was discarded, and how wetness is modulating roughness/albedo.
-- Debug UI remains native wgpu and does not introduce an opaque WebView background.
+- All sixteen materials are discoverable and paintable without memorizing indices. **Met** via named buttons + Paint stepper.
+- The artist can identify why a material was selected, what was discarded, and how wetness is modulating roughness/albedo. **Met for debug 18–23;** mip/residency views not added.
+- Debug UI remains native wgpu and does not introduce an opaque WebView background. **Met.**
 
 ### XV-J — Verification, attribution, and handoff
+
+**Status: PLANNED — do not start until asked.** G–I are in the engine; this subphase is the full verification pass (fmt/check/tests already run as a compile gate, but GPU captures, adapter freeze, landscape-kit matrix screenshots, and `context.md` close-out wait).
 
 **Work**
 
@@ -537,10 +548,10 @@ This list is planning guidance, not permission to perform unrelated refactors.
 |---|---|
 | Asset provenance | `assets/terrain/materials.json` + `assets/terrain/materials.schema.json`, `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` §1.6 |
 | Fetch/pack tools | `tools/fetch_terrain_textures.sh`, `crates/somnium_asset/examples/pack_terrain.rs` |
-| Terrain storage/upload | `crates/somnium_renderer/src/terrain/textures.rs`, `terrain/mod.rs`, `terrain/blend.rs`, `terrain/brush.rs` (paint still `.min(3)`) |
-| Terrain shading | `crates/somnium_renderer/src/shaders/terrain_material.wgsl`, `restir_gi.wgsl` (`gi_terrain_albedo` is mean-albedo only), `hextile.wgsl` (`hex_sample_normal` unused) |
-| Editor commands/UI | `crates/somnium_core/src/editor_commands.rs`, `app.rs` (paint `% 4`), `crates/somnium_ui/src/lib.rs` (Tile 0–3) |
-| Layout lock | `material/pool.rs`, `tests/shaders_validate.rs` (`GpuTerrainMaterial` == 448) |
+| Terrain storage/upload | `textures.rs`, `terrain/mod.rs`, `terrain/biome.rs`, `terrain/brush.rs` (paint 0–15, `splat_lock`) |
+| Terrain shading | `terrain_material.wgsl` (880-byte `TerrainMaterial` + wetness), `restir_gi.wgsl` (mean albedo × weights × wetness), `hextile.wgsl` |
+| Editor commands/UI | `app.rs` (paint 0–15), `somnium_ui` sixteen-name palette + Wet + Dbg |
+| Layout lock | `material/pool.rs`, `tests/shaders_validate.rs` (`GpuTerrainMaterial` == 880) |
 | Tests/docs | renderer/asset tests, `context.md` (§20 is Phase 14 — do not treat as live terrain; do not rewrite as if XV shipped), `ATTRIBUTION.md`, `assets/LICENSE.md`, this plan |
 
 Before editing, the implementing session must re-open the current files and check for changes made after this plan date. File names and layouts are not contractual APIs.
@@ -784,10 +795,10 @@ The next **implementation** session should begin with
 `context.md`, `ATTRIBUTION.md`, this plan, and
 [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
-XV-A through XV-F are in the engine. Remaining operational leftovers: live
-GPU/tap/memory captures from `DefaultLandscapePreset` cameras, SHA-256 via
-`fetch_terrain`, and packing layers 8–15. Next authorized subphase is
-**XV-G** (biome preset / Create Terrain sixteen-layer rules). Do not retile
-shipping 0–7 to 1:1 physical scale (XV-H). Inspector sixteen thumbnails are
-XV-I. Use the substituted roster (layer 11 `cracked_red_ground`, layer 15
-`ganges_river_pebbles`) unless a visual audit reopens the rejected IDs.
+XV-A through XV-I are in the engine. Remaining operational leftovers: live
+GPU/tap/memory captures from `DefaultLandscapePreset` cameras. Next authorized
+subphase is **XV-J** (verification / evidence / `context.md` close-out). Do not
+retile shipping 0–7 to 1:1 physical scale. Use the substituted roster (layer 11
+`cracked_red_ground`, layer 15 `ganges_river_pebbles`) unless a visual audit
+reopens the rejected IDs. Packed 8–15 are 2K; 0–7 remain 4K. BC7 encoder is
+still absent.

@@ -17,6 +17,7 @@
 //! shadows, traced visibility, IBL and correct TAA, and what retires the
 //! duplicated shadow and cluster code the old terrain pass carried.
 
+pub mod biome;
 pub mod blend;
 pub mod brush;
 pub mod collider;
@@ -159,7 +160,7 @@ pub struct TerrainLayer {
 }
 
 /// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
-/// `TerrainMaterial` in `terrain_material.wgsl` (800 bytes, Phase XV).
+/// `TerrainMaterial` in `terrain_material.wgsl` (880 bytes, Phase XV-H).
 ///
 /// **Every `vec4` member sits at a 16-byte offset**, which is what keeps Rust's
 /// `repr(C)` packing and WGSL's alignment rules agreeing.
@@ -221,6 +222,16 @@ pub struct GpuTerrainMaterial {
     pub projection_sharpness: f32,
     /// 0 = biplanar (default), 1 = triplanar debug.            offset 796
     pub projection_mode: u32,
+    /// Moisture affinity per layer (XV-H).                     offset 800 (64)
+    pub layer_moisture: [f32; 16],
+    /// Global wetness 0..1.                                    offset 864
+    pub wetness: f32,
+    /// Albedo multiplier when fully wet (porous darken).       offset 868
+    pub wetness_darken: f32,
+    /// Roughness scale when fully wet.                         offset 872
+    pub wetness_gloss: f32,
+    /// Extra dielectric F0 when wet.                           offset 876
+    pub wetness_f0: f32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -261,6 +272,10 @@ pub struct TerrainData {
     pub chunks: Vec<TerrainChunk>,
     pub layers: Vec<TerrainLayer>,
     pub splatmap: Splatmap,
+    /// Non-zero texels were painted by hand and survive biome rebuild (XV-G).
+    pub splat_lock: Vec<u8>,
+    /// Global wetness 0..1 (XV-H). `SOMNIUM_TERRAIN_WETNESS` seeds it.
+    pub wetness: f32,
     pub layer_textures: TerrainLayerTextures,
     /// Phase 25D: the macro tier. Rewritten in place when the heightfield
     /// changes wholesale, so its bindless index is stable.
@@ -394,7 +409,7 @@ impl TerrainData {
             .enumerate()
             .map(|(i, name)| TerrainLayer {
                 name: (*name).to_string(),
-                tiling: 0.25,
+                tiling: textures::LAYER_TILING[i],
                 blend: blend::LAYER_BLENDS[i],
             })
             .collect();
@@ -407,6 +422,12 @@ impl TerrainData {
             desc.grid_size[0] * desc.chunk_cells,
             desc.grid_size[1] * desc.chunk_cells,
         );
+        let splat_lock = vec![0u8; splatmap.data.len()];
+        let wetness = std::env::var("SOMNIUM_TERRAIN_WETNESS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
         let layer_textures = TerrainLayerTextures::load_or_generate(device, queue, bc_supported);
 
         // Generated flat here and regenerated once relief lands (see
@@ -434,6 +455,8 @@ impl TerrainData {
             chunks,
             layers,
             splatmap,
+            splat_lock,
+            wetness,
             layer_textures,
             index_blocks: HashMap::new(),
             chunk_vertex_capacity: verts_per_chunk,
@@ -548,6 +571,11 @@ impl TerrainData {
             parallax_shadow_steps: self.parallax_shadow_steps,
             projection_sharpness: self.projection_sharpness,
             projection_mode: self.projection_mode,
+            layer_moisture: textures::LAYER_MOISTURE,
+            wetness: self.wetness,
+            wetness_darken: 0.62,
+            wetness_gloss: 0.55,
+            wetness_f0: 0.02,
         }
     }
 

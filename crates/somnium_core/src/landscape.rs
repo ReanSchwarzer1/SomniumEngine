@@ -7,7 +7,7 @@ use crate::{
 
 /// Current serialized authoring recipe. Increment when defaults change in a
 /// way that should not silently alter existing scenes.
-pub const DEFAULT_LANDSCAPE_VERSION: u32 = 1;
+pub const DEFAULT_LANDSCAPE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy)]
 /// Versioned authoring values shared by startup and the editor factory.

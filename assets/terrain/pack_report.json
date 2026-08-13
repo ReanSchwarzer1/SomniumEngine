@@ -1,0 +1,163 @@
+{
+  "bc7": {
+    "budgets_mib": {
+      "bc7_2k": 200,
+      "rgba8_2k": 700
+    },
+    "encoded": false,
+    "estimated_2k_bc7_mib": 170.66666666666666,
+    "estimated_2k_rgba8_mib": 682.6666666666666,
+    "reason": "no compressor shipped; runtime loads assets/terrain/bc7/*.bc7 when complete, else RGBA8, never both"
+  },
+  "layer_count": 16,
+  "layers": [
+    {
+      "albedo": "assets/terrain\\aerial_grass_rock_albedo.png",
+      "height": 4096,
+      "id": "aerial_grass_rock",
+      "skipped": true,
+      "surface": "assets/terrain\\aerial_grass_rock_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\forrest_ground_01_albedo.png",
+      "height": 4096,
+      "id": "forrest_ground_01",
+      "skipped": true,
+      "surface": "assets/terrain\\forrest_ground_01_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\aerial_rocks_04_albedo.png",
+      "height": 4096,
+      "id": "aerial_rocks_04",
+      "skipped": true,
+      "surface": "assets/terrain\\aerial_rocks_04_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\snow_02_albedo.png",
+      "height": 4096,
+      "id": "snow_02",
+      "skipped": true,
+      "surface": "assets/terrain\\snow_02_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\leafy_grass_albedo.png",
+      "height": 4096,
+      "id": "leafy_grass",
+      "skipped": true,
+      "surface": "assets/terrain\\leafy_grass_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\brown_mud_albedo.png",
+      "height": 4096,
+      "id": "brown_mud",
+      "skipped": true,
+      "surface": "assets/terrain\\brown_mud_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\coast_sand_rocks_02_albedo.png",
+      "height": 4096,
+      "id": "coast_sand_rocks_02",
+      "skipped": true,
+      "surface": "assets/terrain\\coast_sand_rocks_02_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\gravel_floor_albedo.png",
+      "height": 4096,
+      "id": "gravel_floor",
+      "skipped": true,
+      "surface": "assets/terrain\\gravel_floor_surface.png",
+      "width": 4096
+    },
+    {
+      "albedo": "assets/terrain\\aerial_sand_albedo.png",
+      "height": 2048,
+      "id": "aerial_sand",
+      "skipped": true,
+      "surface": "assets/terrain\\aerial_sand_surface.png",
+      "width": 2048
+    },
+    {
+      "albedo": "assets/terrain\\coast_sand_01_albedo.png",
+      "height": 2048,
+      "id": "coast_sand_01",
+      "skipped": true,
+      "surface": "assets/terrain\\coast_sand_01_surface.png",
+      "width": 2048
+    },
+    {
+      "albedo": "assets/terrain\\dry_mud_field_001_albedo.png",
+      "height": 2048,
+      "id": "dry_mud_field_001",
+      "surface": "assets/terrain\\dry_mud_field_001_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 3759,
+      "xy_normal_length_max": 1.1954675912857056,
+      "xy_normal_length_min": 0.0055459351278841496
+    },
+    {
+      "albedo": "assets/terrain\\cracked_red_ground_albedo.png",
+      "height": 2048,
+      "id": "cracked_red_ground",
+      "surface": "assets/terrain\\cracked_red_ground_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 0,
+      "xy_normal_length_max": 0.9974207282066345,
+      "xy_normal_length_min": 0.0055459351278841496
+    },
+    {
+      "albedo": "assets/terrain\\sparse_grass_albedo.png",
+      "height": 2048,
+      "id": "sparse_grass",
+      "surface": "assets/terrain\\sparse_grass_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 246,
+      "xy_normal_length_max": 1.096146821975708,
+      "xy_normal_length_min": 0.0055459351278841496
+    },
+    {
+      "albedo": "assets/terrain\\mossy_rock_albedo.png",
+      "height": 2048,
+      "id": "mossy_rock",
+      "surface": "assets/terrain\\mossy_rock_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 105,
+      "xy_normal_length_max": 1.044595718383789,
+      "xy_normal_length_min": 0.0055459351278841496
+    },
+    {
+      "albedo": "assets/terrain\\rock_face_03_albedo.png",
+      "height": 2048,
+      "id": "rock_face_03",
+      "surface": "assets/terrain\\rock_face_03_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 115,
+      "xy_normal_length_max": 1.0727193355560303,
+      "xy_normal_length_min": 0.0055459351278841496
+    },
+    {
+      "albedo": "assets/terrain\\ganges_river_pebbles_albedo.png",
+      "height": 2048,
+      "id": "ganges_river_pebbles",
+      "surface": "assets/terrain\\ganges_river_pebbles_surface.png",
+      "width": 2048,
+      "xy_clamped_texels": 547,
+      "xy_normal_length_max": 1.1067025661468506,
+      "xy_normal_length_min": 0.0055459351278841496
+    }
+  ],
+  "layout": {
+    "albedo": "sRGB RGB + linear height A",
+    "surface": "DirectX normal XY + roughness + AO"
+  },
+  "manifest": "assets/terrain/materials.json",
+  "mips": "generated at load (linear albedo, renormalized normals, Toksvig roughness)",
+  "packed_edge": 4096,
+  "resolution_arg": "2k"
+}

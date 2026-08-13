@@ -198,6 +198,8 @@ pub struct Engine<G: GameApp> {
     terrain_edit_active: bool,
     /// Phase 14D: current terrain brush settings.
     terrain_brush: TerrainBrush,
+    /// Inspector debug view (same codes as `SOMNIUM_SHADOW_DEBUG`; 0 = env).
+    terrain_debug_view: f32,
     /// Active brush stroke (Some while LMB is held in terrain edit mode).
     terrain_stroke: Option<TerrainStroke>,
     /// Restore ops produced by `TerrainEditCmd` undo/redo, applied before render.
@@ -276,6 +278,7 @@ impl<G: GameApp + 'static> Engine<G> {
             default_material_id: None,
             terrain_edit_active: false,
             terrain_brush: TerrainBrush::default(),
+            terrain_debug_view: 0.0,
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
@@ -566,22 +569,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             self.terrain_brush.paint_layer = (self.terrain_brush.paint_layer + 1)
                                 % somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize;
                             info!("Paint layer: {}", self.terrain_brush.paint_layer);
-                        }
-                        WKC::F7 => {
-                            // Phase 14E-3: procedural splat by slope/height.
-                            if let Some(tc) = self.selected_terrain() {
-                                if let Some(t) = self
-                                    .renderer
-                                    .as_mut()
-                                    .and_then(|r| r.terrain_mut(tc.terrain_id))
-                                {
-                                    somnium_renderer::terrain::brush::auto_splat(t, 10.0);
-                                    info!(
-                                        "Auto-splatted terrain {} by slope/height",
-                                        tc.terrain_id
-                                    );
-                                }
-                            }
                         }
                         WKC::Digit1 if self.terrain_edit_active => self.set_terrain_tool(0),
                         WKC::Digit2 if self.terrain_edit_active => self.set_terrain_tool(1),
@@ -976,13 +963,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let r = self.renderer.as_ref()?;
                 let t = r.terrain(tc.terrain_id)?;
                 let tile = |i: usize| t.layers.get(i).map_or(1.0, |l| l.tiling);
+                let paint = self.terrain_brush.paint_layer;
                 Some([
-                    self.terrain_brush.paint_layer as f32,
-                    tile(0),
-                    tile(1),
-                    tile(2),
-                    tile(3),
+                    paint as f32,
+                    tile(paint),
                     t.parallax_scale,
+                    t.wetness,
+                    self.terrain_debug_view,
                 ])
             });
             let brush = self.foliage_brush;
@@ -2221,7 +2208,7 @@ impl<G: GameApp> Engine<G> {
                         self.undo_stack
                             .push(cmd, &mut self.world, &mut self.selected_entity);
                         info!(
-                            "Created landscape preset v{} ({}x{} chunks, {:.0}x{:.0} m) — press F6 to edit",
+                            "Created landscape preset v{} ({}x{} chunks, {:.0}x{:.0} m)",
                             built.preset.version, desc.grid_size[0], desc.grid_size[1], wx, wz,
                         );
                     }
@@ -2567,10 +2554,9 @@ impl<G: GameApp> Engine<G> {
                     field,
                     IF::TerrainPaintLayer
                         | IF::TerrainTile0
-                        | IF::TerrainTile1
-                        | IF::TerrainTile2
-                        | IF::TerrainTile3
                         | IF::TerrainRelief
+                        | IF::TerrainWetness
+                        | IF::TerrainDebugView
                 ) {
                     if field == IF::TerrainPaintLayer {
                         self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(
@@ -2594,12 +2580,26 @@ impl<G: GameApp> Engine<G> {
                         }
                         return;
                     }
-                    let slot = match field {
-                        IF::TerrainTile0 => 0,
-                        IF::TerrainTile1 => 1,
-                        IF::TerrainTile2 => 2,
-                        _ => 3,
-                    };
+                    if field == IF::TerrainWetness {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
+                            return;
+                        };
+                        if let Some(t) = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.terrain_mut(tc.terrain_id))
+                        {
+                            t.wetness = value.clamp(0.0, 1.0);
+                        }
+                        return;
+                    }
+                    if field == IF::TerrainDebugView {
+                        self.terrain_debug_view = value.round().clamp(0.0, 23.0);
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.shading_debug = self.terrain_debug_view;
+                        }
+                        return;
+                    }
                     let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
                         return;
                     };
@@ -2608,6 +2608,7 @@ impl<G: GameApp> Engine<G> {
                         .as_mut()
                         .and_then(|r| r.terrain_mut(tc.terrain_id))
                     {
+                        let slot = self.terrain_brush.paint_layer;
                         if let Some(layer) = t.layers.get_mut(slot) {
                             // A tiling of zero collapses the texture to one
                             // texel stretched over the whole terrain.
@@ -2931,6 +2932,11 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);
+            }
+
+            EditorEvent::SetTerrainPaintLayer(layer) => {
+                self.terrain_brush.paint_layer = (layer as usize)
+                    .min(somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize - 1);
             }
 
             EditorEvent::SetCameraSpeed(normalized) => {

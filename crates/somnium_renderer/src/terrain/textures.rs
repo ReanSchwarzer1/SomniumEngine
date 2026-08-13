@@ -229,6 +229,38 @@ pub const LAYER_NAMES: [&str; TERRAIN_LAYER_COUNT as usize] = [
     "Talus",
 ];
 
+/// UV repeats per metre. Layers 0–7 stay at the shipping 0.25 (4 m tile) so
+/// old scenes do not retile. Layers 8–15 use 1 / physical width (XV-H).
+pub const LAYER_TILING: [f32; TERRAIN_LAYER_COUNT as usize] = [
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    1.0 / 15.0,
+    1.0 / 15.0,
+    1.0 / 3.0,
+    1.0 / 2.0,
+    1.0 / 2.0,
+    1.0 / 3.0,
+    1.0 / 2.7,
+    1.0 / 2.16,
+];
+
+/// Moisture affinity 0..1 from the XV-A manifest (porous-wetting weights).
+pub const LAYER_MOISTURE: [f32; TERRAIN_LAYER_COUNT as usize] = [
+    0.55, 0.70, 0.25, 0.15, 0.60, 0.95, 0.45, 0.20, 0.35, 0.90, 0.40, 0.50, 0.55, 0.85, 0.20, 0.40,
+];
+
+/// Short inspector labels (XV-I palette).
+pub const LAYER_SHORT: [&str; TERRAIN_LAYER_COUNT as usize] = [
+    "Grass", "Forest", "Rock", "Snow", "Meadow", "Mud", "Coast", "Gravel", "DrySd", "DampSd",
+    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus",
+];
+
 fn noise_height(u: f32, v: f32, recipe: &LayerRecipe) -> f32 {
     fbm(u, v, recipe.seed)
 }

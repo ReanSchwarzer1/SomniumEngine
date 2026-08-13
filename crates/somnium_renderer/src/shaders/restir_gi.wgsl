@@ -147,12 +147,15 @@ fn gi_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let selected = terrain_strongest_four(weight);
     var c = vec3<f32>(0.0);
     var total = 0.0;
+    var moisture = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
         c += tm.layer_albedo[i].rgb * weight[i];
+        moisture += terrain_moisture(tm, i) * weight[i];
         total += weight[i];
     }
-    return c / max(total, 0.0001);
+    let wet = saturate(tm.wetness * moisture / max(total, 0.0001));
+    return (c / max(total, 0.0001)) * mix(1.0, tm.wetness_darken, wet);
 }
 
 /// Trace one ray and resolve what it hit into a shadeable surface.
