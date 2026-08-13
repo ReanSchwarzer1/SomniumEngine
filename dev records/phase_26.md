@@ -24,10 +24,11 @@
 > will keep needing inspector sections, menus, drawers, and Help pages. Treat
 > Metaphor as living chrome, not a finished product.
 > **Next GPU track is not a re-implementation of Halcyon.** Phase VV-A–H is
-> in the tree — start-here
-> [`halcyon_context_handoff.md`](halcyon_context_handoff.md). Remaining
-> Halcyon work is evidence captures. Do not fold water reflections into a
-> Metaphor rebuild.
+> in the tree. **Start-here:**
+> [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Remaining
+> Halcyon work is evidence captures. Next *implementation* phase is Daggerfall
+> ([`phase_DF.md`](phase_DF.md)) only when the user asks. Do not fold water
+> reflections into a Metaphor rebuild.
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85 docs / 1.88 effective, wgpu 29, winit 0.30
@@ -54,8 +55,8 @@ implementation is original Rust on the existing Fyrox-inspired stack
 This file is the chrome contract for Metaphor. 26-A–I plus the 2026-08-13
 UX polish (including immersive play and ComboBox overlay) are in the tree.
 A later **UI** session should **extend** this chrome — not restart at 26-A.
-A **Halcyon** session starts at
-[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and must **not**
+A **new model** starts at
+[`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) and must **not**
 re-implement VV-A–H. Chrome only if a later feature needs a new inspector
 field.
 
@@ -1186,8 +1187,8 @@ A Metaphor **implementation** session should:
 **Do not implement inside a Halcyon (VV) or terrain session** unless the user
 redirects. Terrain/lighting/animation work that *needs* new inspector fields
 is expected to add those fields — that is Metaphor staying open, not a
-forbidden fold-in. A Halcyon session starts at
-[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and must not
+forbidden fold-in. A new session starts at
+[`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) and must not
 re-implement VV-A–H.
 
 ---

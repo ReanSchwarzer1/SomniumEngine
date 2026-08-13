@@ -16,10 +16,12 @@ The engine is organized around three deliberate commitments:
 
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn — see [`context.md`](context.md) for the current phase
-> and the full phase history. **Phase VV (Halcyon)** ray-traced water
-> reflections are in the tree (VV-A–H). Start-here:
-> [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
-> Remaining Halcyon work is live evidence captures, not a re-implementation.
+> and the full phase history. **Start-here:**
+> [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
+> (learn the architecture, then audit Halcyon→HEAD). Next phase plan:
+> [`dev records/phase_DF.md`](dev%20records/phase_DF.md) (Daggerfall — terrain
+> clipmaps). Halcyon VV-A–H is in the tree; remaining Halcyon work is live
+> evidence captures, not a re-implementation.
 
 ## Screenshots
 
@@ -85,8 +87,11 @@ general specular GI, path tracer, software RT, probes, area lights) stay in
 [`context.md` §22](context.md). Water specular reflections are **Phase VV —
 Halcyon** (VV-A–H in tree), not 24N.
 
-Kill switch: `SOMNIUM_RT_REFLECT=0`. Start-here:
+Kill switch: `SOMNIUM_RT_REFLECT=0`. **Start-here:**
+[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
+(learn the architecture, then audit Halcyon→HEAD). Halcyon history:
 [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
+Next phase plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md).
 
 For the complete, continuously updated architecture reference, read
 [`context.md`](context.md).
@@ -131,8 +136,8 @@ Metaphor editor chrome (26-A–I, plus immersive play and ComboBox overlay) is i
 the tree, but **the UI phase is not over**. Later engine features will keep
 needing new inspector fields, panels, and Help pages. Water Help is
 [`docs/editor/water.md`](docs/editor/water.md). Halcyon (VV-A–H) is in the tree;
-remaining GPU work on that track is evidence captures
-(`dev records/halcyon_context_handoff.md`).
+remaining GPU work on that track is evidence captures. **Start-here:**
+[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
 
 ## Repository layout
 

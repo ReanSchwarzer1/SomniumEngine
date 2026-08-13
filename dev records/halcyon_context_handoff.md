@@ -1,12 +1,16 @@
 # Somnium Engine — Halcyon (Phase VV) Context Handoff
 
-> **Purpose:** start-here after Phase VV-A–H. Remaining Halcyon work is evidence
+> **Purpose:** VV-A–H history after Phase Halcyon shipped. Remaining Halcyon work is evidence
 > captures and §11 timings, not a re-implementation of A–H.  
+> **Current start-here:** [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) (audit Halcyon→HEAD, then Phase DF Daggerfall).  
 > **Snapshot date:** 2026-08-13 evening (updated after VV-A–H)  
 > **Branch:** `dev`  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms shading exception; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** as living chrome (26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (live SSR miss-rate capture and GPU budget numbers still open)
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms shading exception; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** as living chrome (26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (live SSR miss-rate capture and GPU budget numbers still open); FSR 3 and foliage LOD signed off 2026-08-14
 
-This document supersedes [`post_IV_context_handoff.md`](post_IV_context_handoff.md) as the **start-here** file. Keep the post-IV handoff for IV/XV history; keep [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) for IV A–J / asset-license narrative. Do not treat either as the current entry point.
+This document is **VV-A–H history**. It is **not** the current start-here —
+that is [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Keep
+the post-IV handoff for IV/XV history; keep [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md)
+for IV A–J / asset-license narrative.
 
 **Live contracts (do not silently retune):**
 
@@ -18,9 +22,12 @@ This document supersedes [`post_IV_context_handoff.md`](post_IV_context_handoff.
 
 ## 1. Read this first
 
-A later session should read these **in order**:
+A later session that continues Halcyon **evidence** should read these **in order**.
+A different model that must **audit Halcyon through HEAD** starts at
+[`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) instead (entire
+`context.md`, entire `ATTRIBUTION.md`, every markdown in this folder first).
 
-1. **This file** — current engine state, frozen contracts, what VV shipped, what is still open.
+1. **This file** — VV-A–H history, frozen contracts, what shipped, what is still open.
 2. [`phase_VV.md`](phase_VV.md) — plan plus the 2026-08-13 implementation record. **Do not re-implement VV-A–H.**
 3. [`context.md`](../context.md) — living architecture. §6 / §14 water + ray tracing; §8 editor chrome; roadmap rows IV / XV / 26 / VV. **Do not rewrite §20** (Phase 14 heightmap history).
 4. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference boundaries. Halcyon citations are in §1.7.

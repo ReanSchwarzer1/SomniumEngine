@@ -14,4 +14,5 @@ Suggested names (after tonemap):
 
 Code for VV-A–H is already in the tree. This folder is only the visual record.
 Plan and remaining work: [`../phase_VV.md`](../phase_VV.md) §11 and §13.
-Start-here: [`../halcyon_context_handoff.md`](../halcyon_context_handoff.md).
+VV history: [`../halcyon_context_handoff.md`](../halcyon_context_handoff.md).
+**Start-here:** [`../post_halcyon_audit_handoff.md`](../post_halcyon_audit_handoff.md).

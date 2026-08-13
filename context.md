@@ -1,9 +1,9 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-13 evening  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (immersive play, ComboBox overlay, drawer tiles; 26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (RT water reflections; live miss-rate capture still open)  
-> **Start-here:** `dev records/halcyon_context_handoff.md`  
-> **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
+> **Last updated:** 2026-08-14  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open**; Phase VV (Halcyon) **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off. **Next:** Phase DF (Daggerfall) plan only.  
+> **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
+> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
 > [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), closed on
@@ -27,8 +27,12 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
+> - **Audit (other model):** `dev records/post_halcyon_audit_handoff.md` — read
+>   all of `context.md`, `ATTRIBUTION.md`, and `dev records/**/*.md` first.
+> - **Phase DF — Daggerfall** — terrain material clipmaps (plan:
+>   `dev records/phase_DF.md`). Do not reintroduce per-pixel sample-count LOD.
 > - **Phase VV — Halcyon** — VV-A–H in tree (ray-traced water reflections).
->   **Start-here:** `dev records/halcyon_context_handoff.md`. Plan:
+>   History: `dev records/halcyon_context_handoff.md`. Plan:
 >   `dev records/phase_VV.md`. Kill switch `SOMNIUM_RT_REFLECT=0`. Live SSR
 >   miss-rate capture still open. Do not re-implement A–H.
 > - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish (including
@@ -1320,10 +1324,12 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
 | 25N | 🟡 Started | **Analytic gradients for visibility-buffer shading.** `textureSampleGrad` when shading_mode bit 3 is set (**Analytic Mips**, default on). See §25.14. |
-| 25P | 🟡 Started | **Foliage instancing and LOD.** Consecutive identical parts merge into one `instance_count=N` draw. **LOD** drops the heaviest part; **Impostor** swaps a camera-facing quad. **Cull** / **LOD** / **Impostor** distances are on the Foliage inspector. See §25.14. |
+| 25P | 🟡 Started / LOD signed off 2026-08-14 | **Foliage instancing and LOD.** **LOD** drops leaf/cutout parts; **Impostor** keeps solid parts (the dummy billboard was deleted — it was a black triangle). Distances are **horizontal**. GPU: no `instance_count>1` collapse; two-sided cone cull off. **Do not retune** unless asked. See §25.14. |
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
 | 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
-| VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** **Start-here:** `dev records/halcyon_context_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
+| VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
+| FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
+| DF | 📋 Plan | **Phase DF — Daggerfall:** nested material clipmaps (O3DE-style) so 32+ layers do not cost strongest-four×hex×POM on every pixel. Near-ground fidelity is a hard gate. **No per-pixel sample-count LOD.** Plan: `dev records/phase_DF.md`. |
 
 ---
 
@@ -2277,9 +2283,10 @@ rbfx's Urho-derived UI.
 > **Shipped (2026-08-13):** 26-A–I plus UX polish (immersive play, ComboBox
 > overlay, 80 px drawer tiles) are in the tree. **The UI phase is not over** —
 > later features still need chrome. 26-J is out unless requested; 26-H SDF
-> remains slipped. Phase VV (Halcyon) VV-A–H is in the tree
-> (`dev records/halcyon_context_handoff.md`); remaining Halcyon work is
-> evidence captures, not a UI rebuild. Contract:
+> remains slipped. Phase VV (Halcyon) VV-A–H is in the tree; remaining Halcyon
+> work is evidence captures, not a UI rebuild. **Start-here:**
+> [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
+> Contract:
 > [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
 > above is the original gap statement; do not treat it as the implementation
 > order, and do not restart at 26-A.
@@ -3131,6 +3138,15 @@ decides whether an instance exists, not how detailed it is.
 comparison from the Phase 29 profiler for each step, since each of the three is
 independently measurable.
 
+**Shipped (2026-08-14, user signed off — do not retune).** The dummy camera-facing
+quad was a black triangle and was deleted. **LOD** (horizontal, default 45 m)
+drops leaf/cutout parts (`FoliagePart.is_leaf`); **Impostor** (horizontal,
+default 90 m) keeps solid bark/branches only — it is not a billboard. **Cull**
+is 120 m horizontal. GPU: two-sided vis pipeline is `cull_mode: None`, so
+meshlet normal-cone cull is disabled (`cone.w = 2`); do not fold copies into
+`instance_count > 1` (the cull shader used to smash N→0/1). Hi-Z skips
+occlusion when screen AABB area > 0.25. Help: `docs/editor/terrain.md`.
+
 ---
 
 **Sequencing.** 25M first — it is a correctness bug, it is small, and it unblocks
@@ -3634,8 +3650,8 @@ splat, biome v3, aerial hex/POM LOD, frozen Great Lakes water):
 `dev records/phase XV/XV-Zeta_plan.md`. Verification record:
 `dev records/phase XV/evidence/XV-J_compile_gate.md`. Plan:
 `dev records/phase_XV.md`. IV/XV history:
-`dev records/post_IV_context_handoff.md`. Current start-here (Halcyon):
-`dev records/halcyon_context_handoff.md`. §20 below is still the Phase 14
+`dev records/post_IV_context_handoff.md`. **Start-here:**
+`dev records/post_halcyon_audit_handoff.md`. §20 below is still the Phase 14
 heightmap record — do not treat it as the XV API. Explicit exceptions: 1.10 ms
 shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
@@ -3653,9 +3669,14 @@ half-res reflection compute (`pass/water_reflection.rs`, `shaders/water_reflecti
 shared `rt_hit.wgsl` (GI wraps `rt_trace`), SSR/RT/env blend on confidence.
 TLAS cap 8192; water and transparents stay out of the TLAS. Inspector: water
 **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. Help:
-`docs/editor/water.md`. Start-here:
-`dev records/halcyon_context_handoff.md`. Plan: `dev records/phase_VV.md`.
+`docs/editor/water.md`. History: `dev records/halcyon_context_handoff.md`.
+**Start-here:** `dev records/post_halcyon_audit_handoff.md`. Plan: `dev records/phase_VV.md`.
 Kill switch: `SOMNIUM_RT_REFLECT=0`. Live SSR miss-rate capture still open.
+
+**Phase DF — Daggerfall (plan only, 2026-08-14).** Nested material clipmaps so
+32+ layers do not cost strongest-four × hex × POM on every pixel. Near-ground
+fidelity is a hard gate. No per-pixel sample-count LOD. Plan:
+`dev records/phase_DF.md`. Do not start this phase inside an audit session.
 
 ## 18. Known Issues & Active Bugs
 

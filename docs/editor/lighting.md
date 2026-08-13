@@ -50,7 +50,7 @@ On a terrain: **LOD Morph** (default off) and **Morph** (0–1, start of the ble
 
 ## Foliage LOD (25P)
 
-**Cull**, **LOD**, and **Impostor** distances in metres. Identical parts are instanced automatically. Impostor `0` keeps the mesh.
+**Cull**, **LOD**, and **Impostor** are **horizontal** metres. Past LOD, leaf/cutout parts drop; past Impostor, only solid bark/branches remain (not a billboard). Impostor `0` keeps every part.
 
 ## Profiler (29)
 

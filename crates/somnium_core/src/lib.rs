@@ -493,11 +493,12 @@ pub struct FoliageComponent {
     ///
     /// `0` means "never stop", which is the A/B against the old behaviour.
     pub foliage_shadow_distance: f32,
-    /// Past this distance the heaviest mesh part is dropped (Phase 25P).
+    /// Past this **horizontal** distance leaf/cutout parts are dropped (Phase 25P).
     /// `0` keeps every part.
     pub lod_distance: f32,
-    /// Past this distance a camera-facing quad replaces the mesh (Phase 25P).
-    /// `0` disables impostors.
+    /// Past this **horizontal** distance only solid parts remain (Phase 25P).
+    /// Not a billboard — the dummy camera-facing quad was deleted. `0` keeps
+    /// every remaining part.
     pub impostor_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,

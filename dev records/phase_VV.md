@@ -9,7 +9,10 @@
 > **Status:** VV-A through VV-H implemented 2026-08-13. Live SSR miss-rate
 > captures still need a play session (`dev records/phase VV/`); do not invent
 > evidence PNGs.
-> **Start-here:** [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
+> **Start-here for a new model:** [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)
+> (architecture first, then audit Halcyon→HEAD). This file is the VV-A–H plan
+> plus the 2026-08-13 implementation record. History:
+> [`halcyon_context_handoff.md`](halcyon_context_handoff.md).
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
@@ -421,9 +424,12 @@ Cited in `ATTRIBUTION.md` §1.7 as used:
 
 ## 13. Handoff rule
 
-Code for VV-A–H is in the tree (2026-08-13). The next session that *continues*
-Halcyon starts at [`halcyon_context_handoff.md`](halcyon_context_handoff.md),
-then this file, and should **not** re-implement A–H. Remaining Halcyon work:
+Code for VV-A–H is in the tree (2026-08-13). A later session that *continues*
+Halcyon evidence work starts at [`halcyon_context_handoff.md`](halcyon_context_handoff.md),
+then this file, and should **not** re-implement A–H. A **new model** that must
+audit Halcyon through HEAD starts at
+[`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Remaining
+Halcyon work:
 
 - Live SSR miss-rate and before/after captures into `dev records/phase VV/`.
 - Fill §11 timings from the profiler (Water reflection scope).

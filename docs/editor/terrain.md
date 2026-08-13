@@ -15,7 +15,7 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 ## Foliage
 
-**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground. **Cull** / **LOD** / **Impostor** are metres: past LOD the heaviest mesh part drops, past Impostor a camera-facing quad replaces it.
+**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground. **Cull** / **LOD** / **Impostor** are **horizontal** metres: past LOD leaf/cutout parts drop; past Impostor only solid parts remain (there is no camera-facing billboard). Impostor `0` keeps every part.
 
 ## LOD morph
 

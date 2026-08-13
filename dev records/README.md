@@ -6,8 +6,9 @@ with the phase identifier and describe the validated viewpoint or render stage.
 
 **Start-here handoffs**
 
-- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — **current start-here.** Phase VV (Halcyon) **VV-A–H in tree** (RT water reflections). Remaining Halcyon work is live evidence / §11 timings, not a re-implementation. IV and XV closed; Metaphor 26-A–I shipped (phase remains open). Plan: [`phase_VV.md`](phase_VV.md).
-- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). Superseded as start-here by the Halcyon handoff.
+- [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) — **current start-here.** A different model must learn the architecture (`context.md`, `ATTRIBUTION.md`, every markdown in this folder) then **audit Halcyon → HEAD** (VV, 24M–R, FSR 3, foliage LOD/cull). Phase 26 chrome is fine. Next phase plan: [`phase_DF.md`](phase_DF.md) (Daggerfall — terrain clipmaps).
+- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — Phase VV (Halcyon) **VV-A–H in tree**. Remaining Halcyon work is live evidence / §11 timings. **Superseded as start-here** by the post-Halcyon audit handoff. Plan: [`phase_VV.md`](phase_VV.md).
+- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). Superseded as start-here by the post-Halcyon audit handoff.
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — historical post-25M-2 / Phase IV A–J narrative; superseded as the XV entry point by the post-IV handoff.
 
 **Evidence folders**
@@ -22,6 +23,8 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase VV/` — ray-traced water reflection evidence (captures still open;
   do not invent PNGs). See [`phase VV/README.md`](phase%20VV/README.md) and
   [`phase_VV.md`](phase_VV.md).
+- `phase DF/` — Daggerfall terrain-clipmap evidence (create on first capture).
+  Plan: [`phase_DF.md`](phase_DF.md).
 - `phase XV/` — terrain evidence (XV-A–J **complete**).
   Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
   Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
