@@ -108,3 +108,8 @@ passes (2–4 way + weak fifth). Not a GPU-sampled photogrammetry ΔE.
 | 11, 14 | Met by the PNG corpus above (wet/dry shore included) |
 
 Histogram-preserving blend stays deferred. `WaterComponent::great_lakes` untouched.
+
+**Later the same day (not this freeze):** BC7 encoder + local packs + visual A/B.
+Hero 2048 + extra 1024 ~213 MiB, `compressed=true`. §9 RGBA8 fallback MAE 0.162
+overview / 0.599 cliff. Record:
+[`XV-BC7_visual_check.md`](XV-BC7_visual_check.md). 1.10 ms still not met.

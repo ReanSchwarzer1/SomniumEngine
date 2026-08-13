@@ -123,6 +123,8 @@ Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 **Status:** XV-A–I 2026-08-13; **XV-Zeta** 2026-08-13 (including aerial LOD and
 biome v3; live look signed off the same day). **XV-J complete** 2026-08-13
 ([`dev records/phase XV/evidence/XV-J_compile_gate.md`](dev%20records/phase%20XV/evidence/XV-J_compile_gate.md)).
+BC7 encoder + visual A/B the same day
+([`dev records/phase XV/evidence/XV-BC7_visual_check.md`](dev%20records/phase%20XV/evidence/XV-BC7_visual_check.md)).
 Provenance:
 [`dev records/phase XV/XV-A_research.md`](dev%20records/phase%20XV/XV-A_research.md),
 [`dev records/phase XV/XV-Zeta_plan.md`](dev%20records/phase%20XV/XV-Zeta_plan.md).
@@ -140,16 +142,20 @@ GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74.
 | Unreal Landscape / Fyrox terrain | Palette selects, stroke paints; mutually exclusive brushes | Inspector Terrain Paint vs Foliage Paint; palette click arms `BrushMode::Paint` |
 | GPU LOD / occupancy | Wave-uniform vs per-pixel sample-count branches | Aerial hex/POM via `gpu_material_for_camera` (uniform, 80 m above ground). Per-pixel `close`/`use_maps` compiled three paths and made walking slower — reverted |
 | Poly Haven / ambientCG CC0 | Photogrammetry with clear redistribution | `assets/terrain/materials.json`; `fetch_terrain` fail-closed MD5; layers 16 and 24 procedural (no CC0 lawn passed ΔE) |
+| Intel ISPC Texture Compressor via `intel_tex_2` 0.5 | Offline BC7 (alpha-aware; height/AO in A) | `somnium_renderer` example `encode_terrain_bc7`; runtime loads `assets/terrain/bc7/` when complete. Independent use; no compressor source copied |
 
 **Boundary:** no third-party terrain plugin code is copied. Godot MIT, Poly Haven
 CC0, Mikkelsen, and Bevy biplanar are cited as named validation / pattern
 references. Histogram-preserving blend and a painted wetness channel are not in
 this drop. XV-J is complete (`phase_XV-J_*.png` + wgpu freeze). Extra bank
-(16–31) loads at 1024 until a BC7 encoder exists; requested 2048+1024 RGBA8 is
-853 MiB so runtime drops both banks to 1024 (341 MiB) unless
-`SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1`. `GpuTerrainMaterial` is **1664** bytes. Snow cap is
+(16–31) loads at 1024; with BC7 packs, hero 0–15 stay 2048 (~213 MiB). RGBA8
+without packs still drops both banks to 1024 (341 MiB) unless
+`SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1`. Encoder: `encode_terrain_bc7` (ISPC via
+`intel_tex_2`). A/B: `SOMNIUM_TERRAIN_FORCE_RGBA8=1`. Record:
+[`dev records/phase XV/evidence/XV-BC7_visual_check.md`](dev%20records/phase%20XV/evidence/XV-BC7_visual_check.md).
+`GpuTerrainMaterial` is **1664** bytes. Snow cap is
 `relief * 0.48`. `WaterComponent::great_lakes` is frozen. Release overview
-shading 3.951 ms (1.10 ms budget not met).
+shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
 
 ---
 

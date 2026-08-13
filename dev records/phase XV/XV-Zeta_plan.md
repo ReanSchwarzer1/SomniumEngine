@@ -3,8 +3,10 @@
 **Status:** IN ENGINE — 2026-08-13, including post-E follow-up (aerial shading
 LOD, biome v3 seams/snow). Live look signed off the same day. **XV-J complete**
 the same day (compile gate + GPU PNGs + wgpu freeze + release profiler).
-1.10 ms shading and BC7 packs remain explicit exceptions:
-[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).  
+1.10 ms shading remains an explicit exception:
+[`evidence/XV-J_compile_gate.md`](evidence/XV-J_compile_gate.md).
+BC7 encoder + local packs + visual A/B:
+[`evidence/XV-BC7_visual_check.md`](evidence/XV-BC7_visual_check.md).  
 **Sits between:** XV-I (done) and XV-J (done).  
 **Parent:** [`phase_XV.md`](../phase_XV.md).
 
@@ -16,7 +18,7 @@ the same day (compile gate + GPU PNGs + wgpu freeze + release profiler).
 | Splat | 8 RGBA maps; ≤4 non-zero stored channels; sidecar **v4** |
 | `GpuTerrainMaterial` | **1664** bytes; WGSL `array<vec4<T>, 8>` |
 | Layers 16, 24 | Procedural lush lawn / wildgrass (`grass_path_*` failed ochre ΔE) |
-| Extra bank load | 16–31 at **1024** until BC7; 0–15 *request* `SOMNIUM_TERRAIN_RES` (2048). Projected 2048+1024 RGBA8 is **853 MiB**; runtime drops 0–15 to 1024 (**341 MiB**) unless `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1` |
+| Extra bank load | 16–31 at **1024**. With BC7 packs complete, 0–15 load at 2048 (**~213 MiB**, `compressed=true`). RGBA8 without packs, or `SOMNIUM_TERRAIN_FORCE_RGBA8=1`, still projects 2048+1024 as **853 MiB** and drops both banks to 1024 (**341 MiB**) unless `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET=1` |
 | Unique colour | `macro_map::from_splat` 512²; Great Lakes `macro_color.png` **not** auto-loaded; default Lerp **0.55** |
 | Biome | `BIOME_PRESET_VERSION = 3`; warped 4-octave FBM; overlapping forest/meadow |
 | Landscape recipe | `DEFAULT_LANDSCAPE_VERSION = 4`; snow cap `relief * 0.48` (~50.4 m) |
@@ -139,11 +141,14 @@ XVI budgets: BC7 2K ≤ 200 MiB, RGBA8 2K ≤ 700 MiB, never both resident.
 Existing 0–7 are 4K on disk, runtime default 2K. Sixteen 2K RGBA8 pairs are
 already ~683 MiB — at the RGBA8 ceiling **before** adding 16 layers.
 
-**Zeta default:** keep 0–15 at `SOMNIUM_TERRAIN_RES` (2048). Pack 16–31 at 2K
-sources but **load them at 1024** until a BC7 encoder exists. Log projected
-residency before allocation. If 16–31 at 1K still blows the budget on a given
-adapter, drop runtime 0–15 to 1024 with a one-line log (do not silently replace
-the committed 4K files). RVT stays deferred.
+**Zeta default (plan):** keep 0–15 at `SOMNIUM_TERRAIN_RES` (2048). Pack 16–31 at 2K
+sources but **load them at 1024** until a BC7 encoder exists.
+
+**Live (2026-08-13):** encoder ships (`encode_terrain_bc7`). With packs complete,
+0–15 load at 2048 and 16–31 at 1024 (**~213 MiB BC7**). RGBA8 without packs, or
+`SOMNIUM_TERRAIN_FORCE_RGBA8=1`, still drops both banks to 1024. Log projected
+residency before allocation. If mixed BC7 exceeds 220 MiB and overbudget is off,
+drop hero to 1024. RVT stays deferred.
 
 ## 6. Layers 16–31 — hue roles, not more dirt
 
@@ -224,7 +229,7 @@ Then **XV-J** (complete 2026-08-13). GPU evidence:
 - Quixel / AI / non-CC0.
 - Replacing the Great Lakes heightfield or water (`WaterComponent::great_lakes` stays frozen).
 - Keeping an eight-layer “old look” as default (already removed).
-- Remaining follow-up (not a new XV subphase): BC7 packs, second aerial shading PSO toward 1.10 ms.
+- Remaining follow-up (not a new XV subphase): second aerial shading PSO toward 1.10 ms. BC7 packs: encoder ships; packs are local gitignored artifacts.
 
 ## 11. Follow-up (2026-08-13, after Zeta-E)
 
@@ -263,8 +268,9 @@ bit 1 = PCSS, bit 2 = contact; defaults on. Inspector toggles default **on**.
 
 **Later (not XV-J):** a second shading PSO / permutation so aerial can drop to
 unique-colour / two-layer maps without compiling the close path into the same
-program. Do **not** reintroduce a per-pixel sample-count branch. BC7 (RGBA8
-bandwidth) is the other real lever; extra bank is already 1024.
+program. Do **not** reintroduce a per-pixel sample-count branch. BC7 is the
+residency lever (hero 2K at ~213 MiB); extra bank stays 1024. Shading 1.10 ms
+still wants a second aerial PSO, not a per-pixel branch.
 
 ### 11.2 Biome v3 — seams and sparse layers
 

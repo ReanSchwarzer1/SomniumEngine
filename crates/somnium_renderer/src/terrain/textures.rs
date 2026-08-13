@@ -697,33 +697,45 @@ fn bc7_packs_complete() -> bool {
     })
 }
 
-/// Raw BC7 mip chain: concatenated levels, each `(w/4)*(h/4)*16` bytes.
-fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>, String> {
-    let path = bc7_pack_path(material, suffix);
-    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+fn bc7_mip_bytes(w: u32, h: u32) -> usize {
+    ((w.max(4) / 4) * (h.max(4) / 4) * 16) as usize
+}
+
+fn bc7_chain_bytes(size: u32) -> usize {
+    let mut total = 0usize;
+    let mut w = size;
+    loop {
+        total += bc7_mip_bytes(w, w);
+        if w == 1 {
+            break;
+        }
+        w = (w / 2).max(1);
+    }
+    total
+}
+
+/// Split a concatenated BC7 mip chain encoded at `size`.
+fn parse_bc7_chain(bytes: &[u8], size: u32, path: &str) -> Result<Vec<Vec<u8>>, String> {
     let mut mips = Vec::new();
     let mut offset = 0usize;
     let mut w = size;
-    let mut h = size;
     loop {
-        let blocks = ((w.max(4) / 4) * (h.max(4) / 4)) as usize;
-        let len = blocks * 16;
+        let len = bc7_mip_bytes(w, w);
         let end = offset
             .checked_add(len)
             .ok_or_else(|| format!("{path}: overflow"))?;
         if end > bytes.len() {
             return Err(format!(
-                "{path}: truncated at mip {w}x{h} (need {end}, have {})",
+                "{path}: truncated at mip {w}x{w} (need {end}, have {})",
                 bytes.len()
             ));
         }
         mips.push(bytes[offset..end].to_vec());
         offset = end;
-        if w == 1 && h == 1 {
+        if w == 1 {
             break;
         }
         w = (w / 2).max(1);
-        h = (h / 2).max(1);
     }
     if offset != bytes.len() {
         return Err(format!(
@@ -732,6 +744,32 @@ fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>
         ));
     }
     Ok(mips)
+}
+
+/// Raw BC7 mip chain: concatenated levels, each `(w.max(4)/4)² * 16` bytes.
+///
+/// A file encoded at a higher power-of-two edge can satisfy a smaller load:
+/// leading mips are skipped. Encoding 2048 then loading 1024 is the RGBA8
+/// budget-drop case.
+fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>, String> {
+    let path = bc7_pack_path(material, suffix);
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    let mut encoded = size;
+    while encoded <= 4096 {
+        if bytes.len() == bc7_chain_bytes(encoded) {
+            let mips = parse_bc7_chain(&bytes, encoded, &path)?;
+            if encoded == size {
+                return Ok(mips);
+            }
+            let skip = (encoded.ilog2() - size.ilog2()) as usize;
+            return Ok(mips[skip..].to_vec());
+        }
+        encoded = encoded.saturating_mul(2);
+        if encoded == 0 {
+            break;
+        }
+    }
+    parse_bc7_chain(&bytes, size, &path)
 }
 
 fn create_bc7_array_texture(
@@ -794,8 +832,11 @@ fn create_bc7_array_texture(
                     rows_per_image: Some(rows),
                 },
                 wgpu::Extent3d {
-                    width: w,
-                    height: h,
+                    // wgpu requires compressed copies to be a multiple of the
+                    // 4×4 block even on 2×2 / 1×1 mips (the file already stores
+                    // one block for those levels).
+                    width: w.max(4),
+                    height: h.max(4),
                     depth_or_array_layers: 1,
                 },
             );
@@ -831,7 +872,15 @@ fn resize_rgba(data: &[u8], src: u32, dst: u32) -> Vec<u8> {
     image::imageops::resize(&img, dst, dst, image::imageops::FilterType::Lanczos3).into_raw()
 }
 
-fn choose_runtime_resolutions() -> (u32, u32) {
+fn overbudget_allowed() -> bool {
+    std::env::var("SOMNIUM_TERRAIN_ALLOW_OVERBUDGET").as_deref() == Ok("1")
+}
+
+fn force_rgba8() -> bool {
+    std::env::var("SOMNIUM_TERRAIN_FORCE_RGBA8").as_deref() == Ok("1")
+}
+
+fn choose_runtime_resolutions(compressed: bool) -> (u32, u32) {
     let requested = std::env::var("SOMNIUM_TERRAIN_RES")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -840,19 +889,39 @@ fn choose_runtime_resolutions() -> (u32, u32) {
     let extra = 1024.min(requested);
     let hero_maps = TERRAIN_HERO_LAYERS * 2;
     let extra_maps = (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2;
-    let mib = rgba8_residency_mib(requested, hero_maps) + rgba8_residency_mib(extra, extra_maps);
-    const BUDGET: f32 = 700.0;
-    if mib > BUDGET && std::env::var("SOMNIUM_TERRAIN_ALLOW_OVERBUDGET").as_deref() != Ok("1") {
-        let hero = 1024.min(requested);
-        tracing::warn!(
-            "terrain: projected {mib:.0} MiB RGBA8 exceeds 700 MiB; loading 0–15 at {hero} and 16–31 at {extra}"
-        );
-        (hero, extra.min(hero))
+    if compressed {
+        let mib = bc7_residency_mib(requested, hero_maps) + bc7_residency_mib(extra, extra_maps);
+        // 32-layer mixed 2048+1024 is ~213 MiB. The original 16-layer 2K BC7
+        // budget was 200; 220 is the 32-layer mixed ceiling so hero 2K returns.
+        const BC7_BUDGET: f32 = 220.0;
+        if mib > BC7_BUDGET && !overbudget_allowed() {
+            let hero = 1024.min(requested);
+            tracing::warn!(
+                "terrain: projected {mib:.0} MiB BC7 exceeds {BC7_BUDGET:.0} MiB; loading 0–15 at {hero} and 16–31 at {extra}"
+            );
+            (hero, extra.min(hero))
+        } else {
+            tracing::info!(
+                "terrain: projected {mib:.0} MiB BC7 (0–15 at {requested}, 16–31 at {extra})"
+            );
+            (requested, extra)
+        }
     } else {
-        tracing::info!(
-            "terrain: projected {mib:.0} MiB RGBA8 (0–15 at {requested}, 16–31 at {extra})"
-        );
-        (requested, extra)
+        let mib =
+            rgba8_residency_mib(requested, hero_maps) + rgba8_residency_mib(extra, extra_maps);
+        const BUDGET: f32 = 700.0;
+        if mib > BUDGET && !overbudget_allowed() {
+            let hero = 1024.min(requested);
+            tracing::warn!(
+                "terrain: projected {mib:.0} MiB RGBA8 exceeds 700 MiB; loading 0–15 at {hero} and 16–31 at {extra}"
+            );
+            (hero, extra.min(hero))
+        } else {
+            tracing::info!(
+                "terrain: projected {mib:.0} MiB RGBA8 (0–15 at {requested}, 16–31 at {extra})"
+            );
+            (requested, extra)
+        }
     }
 }
 
@@ -868,38 +937,54 @@ fn procedural_pair(i: usize, size: u32) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// Packed albedo+height / surface pair for one layer, resized to `size`.
+///
+/// Photographed PNGs win; procedural slots 16 and 24 (and any missing pack)
+/// use the hash-noise fallback. Used by the RGBA8 loader and the offline
+/// BC7 encoder example.
+pub fn layer_packed_rgba(index: usize, size: u32) -> (Vec<u8>, Vec<u8>, bool) {
+    let material = LAYER_MATERIALS[index];
+    match (
+        load_packed(material, "albedo", size),
+        load_packed(material, "surface", size),
+    ) {
+        (Ok(a), Ok(s)) => (a, s, true),
+        (albedo_err, surface_err) => {
+            if material.starts_with("procedural_") {
+                tracing::info!(
+                    "terrain: layer {index} `{material}` is a procedural slot (no CC0 scan passed ΔE)"
+                );
+            } else {
+                tracing::warn!(
+                    "terrain: layer {index} `{material}` packed PNG missing ({:?} / {:?}); procedural fallback",
+                    albedo_err.err(),
+                    surface_err.err()
+                );
+            }
+            let (a, s) = procedural_pair(index, size);
+            (a, s, false)
+        }
+    }
+}
+
+fn mean_albedo_from_sources() -> [[f32; 4]; TERRAIN_LAYER_COUNT as usize] {
+    std::array::from_fn(|i| {
+        let (a, _, _) = layer_packed_rgba(i, 256);
+        mean_linear_albedo(&a)
+    })
+}
+
 fn load_rgba_bank(range: std::ops::Range<usize>, size: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize) {
     let mut albedos = Vec::with_capacity(range.len());
     let mut surfaces = Vec::with_capacity(range.len());
     let mut photographed = 0usize;
     for i in range {
-        let material = LAYER_MATERIALS[i];
-        match (
-            load_packed(material, "albedo", size),
-            load_packed(material, "surface", size),
-        ) {
-            (Ok(a), Ok(s)) => {
-                photographed += 1;
-                albedos.push(a);
-                surfaces.push(s);
-            }
-            (albedo_err, surface_err) => {
-                if LAYER_MATERIALS[i].starts_with("procedural_") {
-                    tracing::info!(
-                        "terrain: layer {i} `{material}` is a procedural slot (no CC0 scan passed ΔE)"
-                    );
-                } else {
-                    tracing::warn!(
-                        "terrain: layer {i} `{material}` packed PNG missing ({:?} / {:?}); procedural fallback",
-                        albedo_err.err(),
-                        surface_err.err()
-                    );
-                }
-                let (a, s) = procedural_pair(i, size);
-                albedos.push(a);
-                surfaces.push(s);
-            }
+        let (a, s, from_png) = layer_packed_rgba(i, size);
+        if from_png {
+            photographed += 1;
         }
+        albedos.push(a);
+        surfaces.push(s);
     }
     (albedos, surfaces, photographed)
 }
@@ -919,9 +1004,17 @@ impl TerrainLayerTextures {
         // there are two. 2K is the default because terrain is viewed from
         // metres away, not centimetres; `SOMNIUM_TERRAIN_RES=4096` spends the
         // memory for the full detail the committed assets carry.
-        let (hero, extra) = choose_runtime_resolutions();
+        // Resolution is chosen *after* knowing whether BC7 will be used:
+        // RGBA8 2048+1024 is 853 MiB (drops to 1K); BC7 of the same mix is
+        // ~213 MiB and keeps hero 2K. `SOMNIUM_TERRAIN_FORCE_RGBA8=1` is the
+        // A/B switch once packs exist.
+        let want_bc7 = bc_supported && bc7_packs_complete() && !force_rgba8();
+        if force_rgba8() {
+            tracing::info!("terrain: SOMNIUM_TERRAIN_FORCE_RGBA8=1; skipping BC7");
+        }
+        let (mut hero, mut extra) = choose_runtime_resolutions(want_bc7);
 
-        if bc_supported && bc7_packs_complete() {
+        if want_bc7 {
             match Self::load_bc7_layers(device, queue, hero, extra) {
                 Ok(loaded) => {
                     tracing::info!(
@@ -929,11 +1022,14 @@ impl TerrainLayerTextures {
                     );
                     return loaded;
                 }
-                Err(e) => tracing::warn!("terrain: BC7 packs unusable ({e}); RGBA8 fallback"),
+                Err(e) => {
+                    tracing::warn!("terrain: BC7 packs unusable ({e}); RGBA8 fallback");
+                    (hero, extra) = choose_runtime_resolutions(false);
+                }
             }
-        } else if bc_supported {
+        } else if bc_supported && !force_rgba8() {
             tracing::info!("terrain: BC7 supported but packs absent; RGBA8 residency");
-        } else {
+        } else if !bc_supported {
             tracing::info!("terrain: BC compression unavailable; RGBA8 fallback");
         }
 
@@ -1098,7 +1194,7 @@ impl TerrainLayerTextures {
             compressed: true,
             resolution: hero,
             extra_resolution: extra,
-            mean_albedo: [[0.5, 0.5, 0.5, 1.0]; TERRAIN_LAYER_COUNT as usize],
+            mean_albedo: mean_albedo_from_sources(),
         })
     }
 
@@ -1288,5 +1384,35 @@ impl Splatmap {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bc7_pack_tests {
+    use super::*;
+
+    #[test]
+    fn bc7_chain_bytes_counts_4x4_blocks_through_1x1() {
+        // 4×4, 2×2, 1×1 each occupy one 16-byte block.
+        assert_eq!(bc7_chain_bytes(4), 16 * 3);
+        // 8×8 is four blocks, then the 4/2/1 tail.
+        assert_eq!(bc7_chain_bytes(8), 16 * (4 + 1 + 1 + 1));
+    }
+
+    #[test]
+    fn larger_encode_tail_is_the_smaller_chain() {
+        assert_eq!(bc7_chain_bytes(8) - bc7_mip_bytes(8, 8), bc7_chain_bytes(4));
+        assert_eq!(
+            bc7_chain_bytes(2048) - bc7_mip_bytes(2048, 2048),
+            bc7_chain_bytes(1024)
+        );
+    }
+
+    #[test]
+    fn parse_bc7_chain_rejects_leftover() {
+        let mut bytes = vec![0u8; bc7_chain_bytes(4) + 1];
+        assert!(parse_bc7_chain(&bytes, 4, "t.bc7").is_err());
+        bytes.pop();
+        assert_eq!(parse_bc7_chain(&bytes, 4, "t.bc7").unwrap().len(), 3);
     }
 }

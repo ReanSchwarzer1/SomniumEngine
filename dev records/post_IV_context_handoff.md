@@ -1,11 +1,11 @@
 # Somnium Engine — Post–Phase IV Context Handoff
 
 > **Purpose:** start-here history for Phase XV after Phase IV closed.  
-> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-J are **complete**. 1.10 ms shading and BC7 packs are recorded exceptions.  
+> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-J are **complete**. 1.10 ms shading remains an exception. BC7 encoder + local packs recorded.  
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
 > **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms / BC7 exceptions recorded); Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Iris) and Phase VV (Halcyon) **planned only**
 
 **Current live contract** (supersedes “research-complete / not implemented”
 below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
@@ -192,16 +192,16 @@ and hashes: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
 | ID | Scope | Est. sessions | Status |
 |---|---|---:|---|
 | XV-A | Baseline, provenance, landscape-kit matrix, codebase map | 1–2 | **IN ENGINE** 2026-08-13 |
-| XV-B | Manifest fetch/pack, semantic mips, BC7/RGBA8, Godot roughness fixture | 2 | **IN ENGINE** 2026-08-13 (BC7 encoder still absent) |
+| XV-B | Manifest fetch/pack, semantic mips, BC7/RGBA8, Godot roughness fixture | 2 | **IN ENGINE** 2026-08-13; BC7 encoder same day (`encode_terrain_bc7`) |
 | XV-C | Sixteen-layer CPU/editor, four-splat, sidecar v3. **Superseded by Zeta-C (32 / v4)** | 1–2 | **IN ENGINE** 2026-08-13 |
 | XV-D | GPU layout, strongest-four, shared indexing with GI. GI is mean-albedo only | 1–2 | **IN ENGINE** 2026-08-13 |
-| XV-E | Compression residency, specular stability | 1 | **IN ENGINE** 2026-08-13 |
+| XV-E | Compression residency, specular stability | 1 | **IN ENGINE** 2026-08-13; BC7 packs local, visual A/B recorded |
 | XV-F | Full-PBR biplanar cliffs, surface-gradient projection | 1–2 | **IN ENGINE** 2026-08-13 |
 | XV-G | Biome preset + paint overrides + Create Terrain | 1–2 | **IN ENGINE** 2026-08-13 (biome **v3**) |
 | XV-H | Physical scale, gradients, wetness response, hex/macro | 2 | **IN ENGINE** 2026-08-13 |
 | XV-I | Sixteen-material UI + diagnostics (incl. wetness / projection) | 1–2 | **IN ENGINE** 2026-08-13 (palette now 32) |
 | XV-Zeta | 32 layers, unique colour, paint UX, aerial LOD, biome v3 | 1 | **IN ENGINE** 2026-08-13 |
-| XV-J | Verification, attribution, handoff | 1 | **COMPLETE** 2026-08-13 (1.10 ms / BC7 exceptions) |
+| XV-J | Verification, attribution, handoff | 1 | **COMPLETE** 2026-08-13 (1.10 ms exception; BC7 follow-up same day) |
 
 **A–J are done.** GPU corpus and wgpu freeze: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
@@ -246,7 +246,7 @@ From [`phase_XV.md`](phase_XV.md) §10 — historical Phase 25D numbers are comp
 
 - ≤4 expensive material evals/pixel; base hex ≤24 material-map taps; steep biplanar ≤36.
 - Landscape avg ≤12 taps; eye-level ≤18; median terrain shader ≤1.10 ms on the Phase 25 reference corpus, ≤20–25% regression vs pre-XV baseline without approved justification.
-- 2K BC7 materials ≤200 MiB resident; RGBA8 fallback ≤700 MiB; never both.
+- 2K BC7 materials: original 16-layer budget 200 MiB; live 32-layer mixed 2048+1024 is **~213 MiB**. RGBA8 fallback ≤700 MiB; never both.
 - Strongest-four vs offline all-layer reference: CIEDE2000 / normal / roughness error gates in §10.3.
 
 ---
@@ -265,6 +265,7 @@ From [`phase_XV.md`](phase_XV.md) §10 — historical Phase 25D numbers are comp
 - Path: `dev records/phase XV/evidence/phase_XV-<subphase>_<purpose>.png`
 - Captures **after tonemapping** only.
 - XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+- BC7 A/B: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md) (`phase_XV-BC7_*`, `phase_XV-RGBA8_*`).
 - Live contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
 
 Historical test counts in `phase_IV.md` are evidence of a past worktree, not a guarantee. Re-run `cargo fmt`, `cargo check`, and relevant tests before claiming XV-A ready.
@@ -285,7 +286,8 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 ## 10. Next-session start checklist (Phase 26 / VV)
 
 XV-A–J are done. Next authorized work is Iris colour pickers or Halcyon
-reflections unless the user reopens terrain (BC7 / second aerial PSO).
+reflections unless the user reopens terrain (second aerial PSO).
+BC7: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 1. Confirm branch `dev`, note HEAD vs `2dec6bd`, and commit or stash any dirty XV research docs so the session has a clean baseline.
@@ -312,7 +314,7 @@ See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_
 Implementation and tests are truth; docs follow. This handoff is a snapshot at HEAD `2dec6bd` plus the 2026-08-13 XV research expansion.
 
 - Phase IV claims are **implemented** (with K-1 deferred, K-6 abandoned, K-7 skipped — stated, not implied).
-- Phase XV **A–J are complete**; 1.10 ms shading and BC7 packs are recorded exceptions (2026-08-13).
+- Phase XV **A–J are complete**; 1.10 ms shading remains a recorded exception (2026-08-13). BC7 encoder + local packs: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 - If a later session changes architecture, candidates, licenses, budgets, or milestone order, update [`phase_XV.md`](phase_XV.md) **and this handoff** (or a dated successor) rather than letting them diverge.
 
 ---

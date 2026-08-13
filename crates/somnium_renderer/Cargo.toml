@@ -28,3 +28,7 @@ exr          = { workspace = true }
 # parsing and validating each concatenated module in a test costs nothing and
 # catches the whole class before it ships.
 naga = { version = "29", features = ["wgsl-in"] }
+# Offline BC7 encoder for `examples/encode_terrain_bc7.rs`. Precompiled ISPC
+# kernels (Traverse Research fork of Graham Wihlidal's intel_tex). Not linked
+# into the engine binary.
+intel_tex_2 = "0.5.0"

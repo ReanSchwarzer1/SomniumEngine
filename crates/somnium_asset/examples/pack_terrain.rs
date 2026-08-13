@@ -24,9 +24,16 @@
 //! layers are dielectric. Semantic mips (linear albedo, renormalized normals,
 //! Toksvig roughness) are generated at load time, not stored in these PNGs.
 //!
-//! BC7 packs are **not** encoded here — no compressor is shipped. The runtime
-//! detects `TEXTURE_COMPRESSION_BC` and loads `assets/terrain/bc7/*.bc7` when
-//! every layer is present; otherwise it stays on RGBA8 and never keeps both.
+//! BC7 packs are encoded separately (semantic mips, then ISPC BC7):
+//!
+//! ```text
+//! cargo run --release -p somnium_renderer --example encode_terrain_bc7
+//! ```
+//!
+//! The runtime detects `TEXTURE_COMPRESSION_BC` and loads
+//! `assets/terrain/bc7/*.bc7` when every layer is present; otherwise it stays
+//! on RGBA8 and never keeps both. `SOMNIUM_TERRAIN_FORCE_RGBA8=1` forces the
+//! fallback for A/B.
 
 use image::{GenericImageView, ImageBuffer, Rgba};
 use serde_json::Value;
@@ -264,7 +271,8 @@ fn main() -> Result<(), String> {
         "mips": "generated at load (linear albedo, renormalized normals, Toksvig roughness)",
         "bc7": {
             "encoded": false,
-            "reason": "no compressor shipped; runtime loads assets/terrain/bc7/*.bc7 when complete, else RGBA8, never both",
+            "encoder": "somnium_renderer example encode_terrain_bc7",
+            "reason": "PNG packer does not emit BC7; run encode_terrain_bc7. Runtime loads assets/terrain/bc7/*.bc7 when complete, else RGBA8, never both",
             "estimated_2k_rgba8_mib": rgba8_mib_2k,
             "estimated_2k_bc7_mib": bc7_mib_2k,
             "estimated_runtime_hero2k_extra1k_rgba8_mib": runtime_rgba8_mib,

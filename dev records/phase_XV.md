@@ -6,7 +6,8 @@
 > **Codename:** Appalachia, after the setting of Bethesda Game Studios' *Fallout 76*  
 > **Status:** XV-A through XV-J **COMPLETE** (2026-08-13). GPU evidence:
 > [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
-> Shading 1.10 ms and BC7 packs remain explicit exceptions.  
+> Shading 1.10 ms remains an explicit exception. BC7 encoder + local packs:
+> [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).  
 > **Plan date:** 2026-08-12  
 > **Research expanded:** 2026-08-13 (second pass — papers, talks, open-source terrain systems, wetness)  
 > **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded.  
@@ -411,7 +412,9 @@ All subphases **XV-A through XV-Zeta are implemented in engine** as of 2026-08-1
 (including biome v3, landscape v4, and aerial hex/POM LOD). Canonical live
 numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J is
 complete** (compile gate + live GPU PNGs + wgpu adapter freeze + release
-profiler). Exceptions: 1.10 ms shading budget, BC7 packs absent. Record:
+profiler). Exception: 1.10 ms shading budget. BC7 encoder + local packs:
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
+XV-J record:
 [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
 ### XV-A — Baseline and provenance gate
@@ -433,11 +436,11 @@ profiler). Exceptions: 1.10 ms shading budget, BC7 packs absent. Record:
 - No new texture binary has entered the repository without its manifest entry. **Met** — 2K sources fetched 2026-08-13 into `assets/terrain/_source/` (gitignored); SHA-256 in `_source/FETCH_REPORT.json`. Packed PNGs for 8–15 written beside shipping 4K 0–7.
 - File-level codebase map recorded. **Met** — [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
 
-**Not met (follow-up, not XV-J):** 1.10 ms shading, BC7 packs. XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md). Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v4 and thirty-two-layer shaders are in the engine.
+**Not met (follow-up, not XV-J):** 1.10 ms shading. BC7 encoder + local packs: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md). XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md). Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v4 and thirty-two-layer shaders are in the engine.
 
 ### XV-B — Deterministic asset pipeline
 
-**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. Live 2K fetch ran 2026-08-13 (`assets/terrain/_source/FETCH_REPORT.json`). Packer skips existing `*_albedo.png`/`*_surface.png` unless `--force`, so shipping 4K layers 0–7 were left alone and layers 8–15 packed at 2K. JPEG `nor_dx` pixels with XY length > 1 are clamped onto the unit disk (logged, not fatal unless length > 1.5). BC7 encoder is not shipped; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. Live 2K fetch ran 2026-08-13 (`assets/terrain/_source/FETCH_REPORT.json`). Packer skips existing `*_albedo.png`/`*_surface.png` unless `--force`, so shipping 4K layers 0–7 were left alone and layers 8–15 packed at 2K. JPEG `nor_dx` pixels with XY length > 1 are clamped onto the unit disk (logged, not fatal unless length > 1.5). BC7 encoder is `encode_terrain_bc7`; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both.
 
 ### XV-C — Sixteen-layer data model and migration
 
@@ -449,7 +452,13 @@ profiler). Exceptions: 1.10 ms shading budget, BC7 packs absent. Record:
 
 ### XV-E — Compression and specular stability
 
-**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (detect + RGBA8 path). `TEXTURE_COMPRESSION_BC` is requested only when present. Semantic mips + Toksvig fixture are in. Distant-sparkle visual sign-off still needs a capture run.
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (detect + RGBA8 path + encoder).
+`TEXTURE_COMPRESSION_BC` is requested only when present. Semantic mips + Toksvig
+fixture are in. Offline BC7: `cargo run --release -p somnium_renderer --example encode_terrain_bc7`
+(`intel_tex_2` alpha_basic, packs gitignored). Runtime loads `assets/terrain/bc7/`
+when complete (hero 2048 + extra 1024, ~213 MiB); `SOMNIUM_TERRAIN_FORCE_RGBA8=1`
+keeps the fallback. Visual A/B (cliff MAE 0.599 vs RGBA8):
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 
 ### XV-F — Full-PBR mountain and cliff materials
 
@@ -550,8 +559,8 @@ dropped. Distant brown is kit + biome + macro, not missing maps.
 - **Zeta-C** — 32 global layers, eight RGBA splatmaps, sidecar v4, strongest-four
   unchanged, layout ~1600 bytes, `array<vec4<T>, 8>`.
 - **Zeta-D** — Audit + fetch + pack 16 new **hue-diverse** CC0 scans (not more
-  dirt). 16–31 load at 1024 until BC7 exists (32×2K RGBA8 ~1365 MiB fails the
-  700 MiB budget).
+  dirt). Extra bank 16–31 still loads at 1024; with BC7 packs, hero 0–15 stay
+  2048 (~213 MiB). RGBA8 32×2K ~1365 MiB fails the 700 MiB budget.
 - **Zeta-E** — 32-weight biome on Create → Terrain / startup; bump landscape
   version. **v3 biome / landscape v4 (same day):** warped FBM (no ruler
   isolines), overlapping forest/meadow, snow cap at `relief * 0.48` plus
@@ -561,8 +570,9 @@ dropped. Distant brown is kit + biome + macro, not missing maps.
 
 **Deferred (not XV-J):** further shading LOD. Per-pixel sample-count branches
 made walking *slower* (20→27 ms). Aerial hex/POM is a CPU uniform
-(`gpu_material_for_camera`, 80 m above ground). Next real cuts are a second
-shading PSO and BC7. See [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) §11.
+(`gpu_material_for_camera`, 80 m above ground). Next real cut is a second
+shading PSO (BC7 is the residency lever, not the 1.10 ms close). See
+[`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) §11.
 
 **Exit criteria**
 
@@ -576,8 +586,9 @@ shading PSO and BC7. See [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md
 
 ### XV-J — Verification, attribution, and handoff
 
-**Status: COMPLETE — 2026-08-13** (compile gate + GPU corpus). Exceptions: §10.1
-1.10 ms shading, BC7 packs.
+**Status: COMPLETE — 2026-08-13** (compile gate + GPU corpus). Exception: §10.1
+1.10 ms shading. BC7 follow-up the same day:
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
 
 Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
 
@@ -586,14 +597,15 @@ Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_comp
 - `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, Naga `shaders_validate`, sidecar v2/v3/v4, CIEDE2000 strongest-four fixture, `pack_terrain --validate-only` (30 photographed, 0 missing).
 - Live wgpu freeze: NVIDIA GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74, BC/RT/timestamps yes.
 - Release 1280×720 profiler at frame 240: overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Frame ~10.8 ms overview.
-- Residency: projected 853 MiB @2K+1K; runtime **1024+1024 ~341 MiB**.
+- Residency: projected 853 MiB @2K+1K; runtime **1024+1024 ~341 MiB** (RGBA8, packs absent at XV-J freeze).
 - Tonemapped `phase_XV-J_*.png` corpus (overview day/night, eye, shore dry/wet/night, cliff, snow ridge, forest, taps/discarded/selected).
+- Same-day BC7 follow-up: local packs, hero 2048 + extra 1024 ~213 MiB, `phase_XV-BC7_*` / `phase_XV-RGBA8_*`.
 
 **Exit criteria**
 
 - Compile/Naga/sidecar/pack: **met**.
-- Section 11: met or recorded as an approved exception (1.10 ms, BC7).
-- GPU PNG corpus: **met**. Phase XV implementation is closed; the 1.10 ms / BC7 items are follow-up, not a new subphase.
+- Section 11: met or recorded as an approved exception (1.10 ms). BC7 packs are local artifacts, not a new subphase.
+- GPU PNG corpus: **met**. Phase XV implementation is closed; remaining follow-up is the 1.10 ms aerial PSO, not a new subphase.
 
 ## 9. Expected implementation touch points
 
@@ -602,7 +614,7 @@ This list is planning guidance, not permission to perform unrelated refactors.
 | Area | Expected files |
 |---|---|
 | Asset provenance | `assets/terrain/materials.json` + `assets/terrain/materials.schema.json`, `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` §1.6 |
-| Fetch/pack tools | `tools/fetch_terrain_textures.sh`, `crates/somnium_asset/examples/pack_terrain.rs` |
+| Fetch/pack tools | `crates/somnium_asset/examples/fetch_terrain.rs`, `pack_terrain.rs`; BC7: `somnium_renderer/examples/encode_terrain_bc7.rs` |
 | Terrain storage/upload | `textures.rs`, `terrain/mod.rs`, `terrain/biome.rs`, `terrain/brush.rs` (paint 0–31, `splat_lock`) |
 | Terrain shading | `terrain_material.wgsl` (1664-byte `TerrainMaterial` + wetness), `restir_gi.wgsl` (mean albedo × weights × wetness), `hextile.wgsl` |
 | Editor commands/UI | `app.rs` (paint 0–31), `somnium_ui` 32-name palette + Terrain Paint + Hex + Wet + Dbg |
@@ -621,13 +633,13 @@ Before editing, the implementing session must re-open the current files and chec
 - Landscape average: at most 12 material-map taps.
 - Eye-level average: at most 18 material-map taps.
 - Median terrain shader target: at most 1.10 ms in the exact Phase 25 reference adapter, resolution, and camera corpus.
-- **XV-J measured 2026-08-13 (release, 1280×720, RTX 5080 Laptop, Vulkan):** overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Not 1.10 ms. Debug ~20 ms from the same day was unoptimized. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second PSO + BC7, not a per-pixel branch.
+- **XV-J measured 2026-08-13 (release, 1280×720, RTX 5080 Laptop, Vulkan):** overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Not 1.10 ms. Debug ~20 ms from the same day was unoptimized. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second aerial PSO, not a per-pixel branch. BC7 same day: overview **3.794 ms**, walk **5.250 ms**, hero 2048 + extra 1024 ~213 MiB (`XV-BC7_visual_check.md`).
 - No more than a 20–25% median regression from the captured pre-Phase-XV baseline without an approved image-quality justification.
 - Report control, macro, projected-material, and POM taps separately.
 
 ### 10.2 Memory and disk
 
-- Preferred 2K BC7 material arrays: at most 200 MiB resident.
+- Preferred 2K BC7 material arrays: original 16-layer budget 200 MiB. Live 32-layer mixed 2048+1024 is **~213 MiB** (logged; 220 MiB ceiling so hero 2K returns).
 - RGBA8 fallback 2K material arrays: at most 700 MiB resident.
 - Never hold preferred and fallback packs simultaneously.
 - Four 2K RGBA8 control maps: approximately 21.3 MiB including mips.
@@ -673,8 +685,8 @@ Phase XV is complete only when all of the following are true:
 6. Shader material cost is bounded by strongest-four selection before PBR sampling.
 7. Full-PBR cliff projection eliminates stretched albedo and fixed roughness, with aligned normals/height/AO composed via surface gradients.
 8. Offline mips are colour-, normal-, height-, AO-, and roughness-aware.
-9. BC7 is used only when supported; the RGBA8 fallback renders equivalently within the defined compression tolerances.
-10. Default 2K residency and shader timing meet section 10 budgets.
+9. BC7 is used only when supported; the RGBA8 fallback renders equivalently within the defined compression tolerances. **Met 2026-08-13** (overview MAE 0.162, cliff MAE 0.599; `XV-BC7_visual_check.md`). Packs are local/gitignored.
+10. Default 2K residency and shader timing meet section 10 budgets. **Residency met with BC7 ~213 MiB.** §10.1 1.10 ms **not met**.
 11. No obvious grid tiling, axis seam, transition pop, mip seam, or distant specular shimmer remains in the acceptance corpus.
 12. Terrain and ReSTIR GI use the same material indexing and interpretation.
 13. Native editor UI exposes all materials and the required diagnostic modes, including wetness response.
@@ -853,11 +865,12 @@ The next **implementation** session should begin with
 [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
 XV-A through XV-J are done (including biome v3 / landscape v4, aerial hex/POM
-LOD, and the GPU evidence corpus). Remaining follow-up is BC7 packs and a
+LOD, and the GPU evidence corpus). Remaining follow-up is a
 second aerial shading PSO toward the 1.10 ms budget — not a new XV subphase.
 Do not retile shipping 0–7 to 1:1
 physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31 pack at 2K and load at
 1024. Layers 16 and 24 are procedural lush/wildgrass (`grass_path_*` failed the
-ochre gate). BC7 encoder is still absent. `WaterComponent::great_lakes` stays
+ochre gate). BC7 encoder ships (`encode_terrain_bc7`); packs are local/gitignored.
+`WaterComponent::great_lakes` stays
 frozen. Do **not** reintroduce a per-pixel terrain sample-count LOD (walking
 regressed 20→27 ms). Snow cap is `relief * 0.48`, not `* 0.62`.
