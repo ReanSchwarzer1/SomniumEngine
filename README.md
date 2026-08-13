@@ -16,7 +16,8 @@ The engine is organized around three deliberate commitments:
 
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn — see [`context.md`](context.md) for the current phase
-> and the full phase history.
+> and the full phase history. **Next GPU track:** Phase VV Halcyon
+> ([`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md)).
 
 ## Screenshots
 
@@ -113,7 +114,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **RMB + scroll wheel** — adjust fly speed (0.5–500 m/s), or drag the **Camera Speed** slider above the viewport
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
-- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
+- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay or exit immersive play
 - **Ctrl+Space** — show or hide the docked Content Drawer · **Ctrl+P** — command palette
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
 - **F10** — A/B GPU frustum culling (a correct cull is invisible)
@@ -124,9 +125,10 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
   pick Raise / Lower / Smooth / Flatten / Noise / Paint, `[` / `]` size, `-` / `=` strength
 
-Metaphor editor chrome (26-A–I) is in the tree, but **the UI phase is not
-over**. Later engine features will keep needing new inspector fields, panels,
-and Help pages.
+Metaphor editor chrome (26-A–I, plus immersive play and ComboBox overlay) is in
+the tree, but **the UI phase is not over**. Later engine features will keep
+needing new inspector fields, panels, and Help pages. Next GPU work is Halcyon
+(`dev records/halcyon_context_handoff.md`).
 
 ## Repository layout
 

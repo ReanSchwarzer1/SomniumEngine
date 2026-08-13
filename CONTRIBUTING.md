@@ -39,6 +39,8 @@ A couple of conventions keep this codebase coherent — please follow them:
    [`context.md`](context.md) (and `ATTRIBUTION.md` if a new reference was used).
    New authoring UI also needs a [`docs/editor/`](docs/editor/) Help page or
    section — Metaphor chrome is not closed; it grows with the engine.
+   The next GPU track is Phase VV Halcyon; start-here
+   [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
 4. **Match the surrounding style.** New code should read like the code around it —
    naming, comment density, and idiom.
 

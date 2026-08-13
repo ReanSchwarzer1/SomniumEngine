@@ -104,9 +104,9 @@
 ### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor)
 
 **Status:** 26-A through 26-I plus the 2026-08-13 UX polish (custom title bar,
-docked drawer, wrapped Help, button states, scrollbars, tile browser)
-implemented 2026-08-13. 26-H SDF/cosmic-text slipped (bitmap Inter, supersampled).
-26-J not started.
+docked drawer, wrapped Help, button states, scrollbars, tile browser,
+immersive play, ComboBox overlay) implemented 2026-08-13. 26-H SDF/cosmic-text
+slipped (bitmap Inter, supersampled). 26-J not started.
 
 **This phase is not closed.** New renderer, terrain, animation, and gameplay
 features will keep needing inspector sections, menus, drawers, and Help
@@ -187,6 +187,29 @@ without packs still drops both banks to 1024 (341 MiB) unless
 `GpuTerrainMaterial` is **1664** bytes. Snow cap is
 `relief * 0.48`. `WaterComponent::great_lakes` is frozen. Release overview
 shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
+
+### 1.7 Ray-traced water reflections (Phase VV — Halcyon)
+
+**Status:** planned, **no engine code yet.** Start-here:
+[`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
+Plan: [`dev records/phase_VV.md`](dev%20records/phase_VV.md). Begin at VV-A.
+
+The codename is thematic. No third-party source is copied. Cite the named
+references **in this section as they are used** (do not pre-claim files that
+do not exist):
+
+| Reference | Pattern to study | Somnium target (when implemented) |
+|---|---|---|
+| Existing `gi_trace()` / `restir_gi.wgsl` | Hit resolution: instance → barycentrics → albedo | Extract shared `rt_hit.wgsl`; GI must stay bit-equivalent |
+| Wright et al., ReSTIR GI (NVIDIA 2021) | Already in-tree for diffuse; not the first tool for specular | Do not start with specular reservoirs |
+| Stachowiak, Stochastic SSR (SIGGRAPH 2015) | Screen-space march as near-field | Keep `trace_ssr`; blend on confidence (VV-G) |
+| Karis, Real Shading in UE4 (SIGGRAPH 2013) | GGX importance sampling | VV-E roughness-aware rays |
+| wgpu 29 `EXPERIMENTAL_RAY_QUERY` | Inline ray query in compute | Same gate as ReSTIR; fragment query untested here |
+| NVIDIA *Ray Tracing Gems* (reflection denoising chapters) | Temporal reuse / upsample | VV-F; not a copy of any listed filter |
+
+**Boundary:** GodotOceanWaves informed IV-K water shading, not this reflection
+architecture. Do not paste its SSR or any other engine's RT reflection shader.
+Hardware without ray query must look identical to today.
 
 ---
 

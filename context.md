@@ -1,7 +1,8 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI/UX as later features land; 26-J not started); Phase VV (Halcyon) planned  
+> **Last updated:** 2026-08-13 evening  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (immersive play, ComboBox overlay, drawer tiles; 26-J not started); Phase VV (Halcyon) **next GPU track — implementation not started**  
+> **Start-here:** `dev records/halcyon_context_handoff.md`  
 > **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
@@ -26,16 +27,17 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Planned next (independent tracks):
-> - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish are in
->   the tree (Nocturne shell, docked Content Drawer, Iris, Help, custom title
->   bar). **The UI phase is not closed:** later engine work keeps needing
->   inspector fields, menus, drawers, and Help pages. Queued: 26-J reflection
->   inspector (only if requested), 26-H SDF text, 26-D2 drag-drop. Contract:
->   `dev records/phase_26.md`.
-> - **Phase VV — Halcyon** — ray-traced water reflections. Plan:
->   `dev records/phase_VV.md`. Reflections are currently a 28-step screen-space
->   march with an environment-cube fallback, which is the largest remaining
->   fidelity gap for a low camera over open water.
+> - **Phase VV — Halcyon** — ray-traced water reflections. **Start-here:**
+>   `dev records/halcyon_context_handoff.md`. Plan: `dev records/phase_VV.md`.
+>   Begin at VV-A. Reflections are currently a 28-step screen-space march with
+>   an environment-cube fallback, which is the largest remaining fidelity gap
+>   for a low camera over open water.
+> - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish (including
+>   immersive play, ComboBox overlay, 80 px drawer tiles) are in the tree.
+>   **The UI phase is not closed:** later engine work keeps needing inspector
+>   fields, menus, drawers, and Help pages. Queued: 26-J reflection inspector
+>   (only if requested), 26-H SDF text, 26-D2 drag-drop. Contract:
+>   `dev records/phase_26.md`. Do not restart at 26-A inside a Halcyon session.
 
 ---
 
@@ -544,7 +546,7 @@ OS Window (HWND, undecorated)  ← wgpu 3D scene, then UI overlay
               ├──────────────────────────────────────────────┤  Row 1  menu
               │ File Edit Create View Window Help            │
               ├──────────────────────────────────────────────┤  Row 2  toolbar
-              │ Save  Select Landscape Foliage  ▶ ❚❚ ■       │
+              │ Save  Select Landscape Foliage  ▶ ⛶ ❚❚ ■       │
               ├──────────────────────────────────────────────┤  Row 3  26 px  viewport bar
               ├────────┬──────────────────────┬──────────────┤  Row 4  *  main
               │ Sculpt │  3D Viewport         │ Outliner     │
@@ -588,7 +590,7 @@ All widgets port the Fyrox UI architecture (see ATTRIBUTION §13.13–13.17):
 | `ToastHost` | `widgets/toast.rs` | Transient status toasts (26-I) |
 | `Splitter` | `widgets/splitter.rs` | Two-pane resizable container (Phase 26-A) |
 | `CheckBox` | `widgets/check_box.rs` | Real checkbox; replaces `[x]`/`[ ]` buttons (26-B) |
-| `ComboBox` | `widgets/combo_box.rs` | Dropdown; replaces foliage/tonemapper cyclers (26-B) |
+| `ComboBox` | `widgets/combo_box.rs` | Header in the inspector; list is a root `Popup` + `ComboDropdown` (26-B, overlay fix 2026-08-13 evening). Replaces foliage/tonemapper cyclers |
 | `TreeView` | `widgets/tree_view.rs` | Hierarchical outliner / content tree (26-B/E) |
 | `TabControl` | `widgets/tab_control.rs` | Header strip + one visible page (26-B) |
 | `Image` / `Icon` | `widgets/image.rs` | Icon-atlas textured quad (26-A) |
@@ -618,7 +620,7 @@ inspector) is still out unless requested.
 outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 status)
 ├── title bar — EngineMark, “Somnium Engine”, fps, Minimize / Maximize / Close
 ├── menu_bar — File/Edit/Create/View/Window/Help
-├── main toolbar — Save, Select, Landscape, Foliage, Play/Pause/Stop (selected fill, no tooltips)
+├── main toolbar — Save, Select, Landscape, Foliage, Play, Immersive play, Pause/Stop (selected fill)
 ├── viewport toolbar — camera speed, profiler
 ├── tools_split | content_split | details_split (resizable, persisted)
 │     ├── left Sculpt (named Raise/Lower/Smooth/Flatten/Noise/Paint, selected fill)
@@ -630,13 +632,14 @@ outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 
 
 Overlays (root children): compact File/Edit/Create/View/Window/Help menus,
 F1 Help (`docs/editor/*.md`, wrapped + TOC), command palette (Ctrl+P),
-unsaved-changes modal, colour picker, toasts. Click-away closes those
-transients; it does **not** close the docked drawer. Evidence PNGs were not
-invented — capture from a live session into `dev records/phase 26/` if needed.
+unsaved-changes modal, colour picker, toasts, **ComboBox dropdowns** (Type /
+Tonemap). Click-away closes those transients; it does **not** close the docked
+drawer. Evidence PNGs were not invented — capture from a live session into
+`dev records/phase 26/` if needed.
 
 **Keyboard:** F1 Help, Ctrl+Space toggles the docked Drawer, Esc closes the
-top overlay then falls through to quit. RMB over chrome can hit the UI; RMB
-over the viewport is still fly-cam.
+top overlay **or exits immersive play**, then falls through to quit. RMB over
+chrome can hit the UI; RMB over the viewport is still fly-cam.
 
 **UI event routing** (`app.rs::window_event`):
 1. `ui_consumed = ui.process_os_event(&event)` — routes mouse/keyboard to widget tree
@@ -1297,8 +1300,8 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX (inspector, menus, drawers, Help). 26-J reflection inspector not started. Contract: `dev records/phase_26.md`. |
-| VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
+| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
+| VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** **Start-here:** `dev records/halcyon_context_handoff.md`. Begin at VV-A. Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
 ---
 
@@ -2249,9 +2252,11 @@ popups and the cycler that replaced them in 17G. References: Flax
 `Engine/UI/UICanvas` and `GUI/`, Wicked `wiGUI` / `wiFont`, Stride `Stride.UI`,
 rbfx's Urho-derived UI.
 
-> **Shipped (2026-08-13):** 26-A–I plus UX polish are in the tree. **The UI
-> phase is not over** — later features still need chrome. 26-J is out unless
-> requested; 26-H SDF remains slipped. Contract:
+> **Shipped (2026-08-13):** 26-A–I plus UX polish (immersive play, ComboBox
+> overlay, 80 px drawer tiles) are in the tree. **The UI phase is not over** —
+> later features still need chrome. 26-J is out unless requested; 26-H SDF
+> remains slipped. Next GPU track is Halcyon
+> (`dev records/halcyon_context_handoff.md`). Contract:
 > [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
 > above is the original gap statement; do not treat it as the implementation
 > order, and do not restart at 26-A.
@@ -3606,8 +3611,9 @@ contract (32 layers, sidecar v4, 1664-byte GPU material, unique colour from
 splat, biome v3, aerial hex/POM LOD, frozen Great Lakes water):
 `dev records/phase XV/XV-Zeta_plan.md`. Verification record:
 `dev records/phase XV/evidence/XV-J_compile_gate.md`. Plan:
-`dev records/phase_XV.md`. Start-here history:
-`dev records/post_IV_context_handoff.md`. §20 below is still the Phase 14
+`dev records/phase_XV.md`. IV/XV history:
+`dev records/post_IV_context_handoff.md`. Current start-here (Halcyon):
+`dev records/halcyon_context_handoff.md`. §20 below is still the Phase 14
 heightmap record — do not treat it as the XV API. Explicit exceptions: 1.10 ms
 shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
@@ -3615,9 +3621,14 @@ artifacts — `dev records/phase XV/evidence/XV-BC7_visual_check.md`).
 
 **Phase 26 — Metaphor (26-A–I shipped 2026-08-13; phase remains open).**
 Nocturne editor chrome, docked Content Drawer, Iris colour pickers (26-F),
-custom title bar, F1 Help. Later engine features keep needing new UI/UX.
-26-J (reflection inspector) not started. Contract: `dev records/phase_26.md`.
-Independent of Phase VV.
+custom title bar, F1 Help, immersive play, ComboBox overlay. Later engine
+features keep needing new UI/UX. 26-J (reflection inspector) not started.
+Contract: `dev records/phase_26.md`. Independent of Phase VV except living
+chrome for debug views.
+
+**Phase VV — Halcyon (planned, not started).** Start-here:
+`dev records/halcyon_context_handoff.md`. Plan: `dev records/phase_VV.md`.
+Begin at VV-A.
 
 ## 18. Known Issues & Active Bugs
 

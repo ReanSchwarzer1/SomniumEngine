@@ -11,7 +11,7 @@ The drawer is the project file browser. It stays docked above the status bar, li
 ## What you see
 
 - Default root is project **assets/**, shown as **Game**.
-- Folders and files are tiles in a row that wraps. Double-click a folder to enter it. Click the breadcrumb to walk back.
+- Folders and files are large tiles in a row that wraps (80 px glyphs). Double-click a folder to enter it. Click the breadcrumb to walk back.
 - **Show Engine Content** reveals virtual primitives (Cube, Sphere, lights) under Engine.
 - Derived packs under **assets/terrain/bc7/** stay hidden.
 

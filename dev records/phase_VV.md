@@ -7,15 +7,17 @@
 > **Codename:** Halcyon, after the mythological bird said to still the winter sea
 > so it became a mirror
 > **Status:** PLANNED — IMPLEMENTATION NOT STARTED
+> **Start-here:** [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
 > **Depends on:** Phase IV-K (ocean fidelity, complete 2026-08-13) and Phase
-> 24K/24L (ReSTIR DI/GI)
+> 24K/24L (ReSTIR DI/GI). Metaphor 26-A–I chrome is in the tree; do not rebuild
+> it. A VV-A debug view may add a small inspector / View-menu binding.
 
 The codename is thematic. No third-party source code is copied by this phase;
 reference implementations named in section 12 inform an original Rust/WGSL
-design and must be cited in `ATTRIBUTION.md` as they are used.
+design and must be cited in `ATTRIBUTION.md` §1.7 as they are used.
 
 ## 1. Executive decision
 
@@ -366,11 +368,16 @@ To be cited in `ATTRIBUTION.md` as each is actually used.
 
 ## 13. Handoff rule
 
-The next session should re-read `context.md`, `ATTRIBUTION.md`,
-`dev records/phase_IV.md` section 14, and this file, then verify section 4
-against the worktree before writing code — that audit is dated. Phase IV-K
-closed on 2026-08-13, so the water pass is stable again, but the shading it
-settled on is what VV-D has to reproduce through a traced ray.
+The next session starts at [`halcyon_context_handoff.md`](halcyon_context_handoff.md),
+then this file, then verifies section 4 against the worktree before writing
+code — that audit is dated 2026-08-13 and line numbers drift. Also re-read
+`context.md`, `ATTRIBUTION.md` §1.7, and `dev records/phase_IV.md` section 14.
+Phase IV-K closed on 2026-08-13, so the water pass is stable again, but the
+shading it settled on is what VV-D has to reproduce through a traced ray.
+
+Metaphor chrome (26-A–I plus the 2026-08-13 evening polish) is the shipping
+editor. Do not restart it. Frozen: `WaterComponent::great_lakes`, XV terrain
+contract, `context.md` §20.
 
 Begin at VV-A. Do not begin at VV-C because it is the interesting one.
 

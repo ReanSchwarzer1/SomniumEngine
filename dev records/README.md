@@ -6,7 +6,8 @@ with the phase identifier and describe the validated viewpoint or render stage.
 
 **Start-here handoffs**
 
-- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — start-here history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
+- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — **current start-here.** Phase VV (Halcyon) next GPU track. IV and XV closed; Metaphor 26-A–I shipped (phase remains open). Plan: [`phase_VV.md`](phase_VV.md).
+- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). Superseded as start-here by the Halcyon handoff.
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — historical post-25M-2 / Phase IV A–J narrative; superseded as the XV entry point by the post-IV handoff.
 
 **Evidence folders**

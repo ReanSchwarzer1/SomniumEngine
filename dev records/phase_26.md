@@ -12,6 +12,10 @@
 > **Status:** 26-A through 26-I implemented 2026-08-13. UX polish (custom title
 > bar, docked Content Drawer, click-away, named sculpt tools, wrapped Help,
 > button hover/press, visible scrollbars, tile browser) landed the same day.
+> Evening polish the same day: immersive play, Content Drawer 80 px tiles,
+> ComboBox as a root popup overlay (Type / Tonemap), toolbar Select/Landscape/
+> Foliage wiring, terrain palette selected fill, inspector search reapply,
+> ScrollViewer zero-track thumb, ancestor layout invalidation on dirty measure.
 > 26-H SDF/cosmic-text slipped (bundled bitmap Inter, supersampled + HiDPI
 > raster). 26-J (reflection inspector) not started.
 >
@@ -19,6 +23,9 @@
 > baseline. New renderer, terrain, lighting, animation, and gameplay features
 > will keep needing inspector sections, menus, drawers, and Help pages. Treat
 > Metaphor as living chrome, not a finished product.
+> **Next GPU track is Phase VV (Halcyon)** — start-here
+> [`halcyon_context_handoff.md`](halcyon_context_handoff.md). Do not fold water
+> reflections into a Metaphor rebuild.
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85 docs / 1.88 effective, wgpu 29, winit 0.30
@@ -43,10 +50,11 @@ implementation is original Rust on the existing Fyrox-inspired stack
 ## 0. How to use this document (handoff)
 
 This file is the chrome contract for Metaphor. 26-A–I plus the 2026-08-13
-UX polish are in the tree. A later session should **extend** this chrome
-(new inspector sections, menus, drawers, Help pages) as other engine
-features land — not restart at 26-A. Do not re-audit engines unless a cited
-path moved.
+UX polish (including immersive play and ComboBox overlay) are in the tree.
+A later **UI** session should **extend** this chrome — not restart at 26-A.
+A **Halcyon** session starts at
+[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and only touches
+chrome if a stage needs a debug toggle.
 
 **Read in this order before writing code:**
 
@@ -640,7 +648,7 @@ Stay on the Fyrox-inspired `Control` trait. New widgets are new files under
 | `Icon` | Named glyph from the atlas (`IconId`) |
 | `Tooltip` | Delayed hover label; host on root canvas |
 | `CheckBox` | Replaces `[x]` buttons |
-| `ComboBox` | Replaces cyclers (foliage kind, tonemapper, view mode) |
+| `ComboBox` | Replaces cyclers (foliage kind, tonemapper, view mode). Header stays one row; the list is a root-parented `Popup` + `ComboDropdown` so inspector siblings cannot paint over it. |
 | `TreeView` | Outliner + content path tree |
 | `TabControl` | Outliner/Details tabs; docked Content vs Log |
 | `Splitter` | Drag to resize columns/rows |
@@ -966,10 +974,15 @@ is real.
 |---|---|
 | Toolkit A/B, Nocturne shell C, docked Content Drawer D (tiles, not a popup), Details/Outliner E, Iris F, `UiCanvas` G, bitmap Inter H (SDF slipped), palette/toasts/HiDPI/layout persist/unsaved I | 26-J reflection inspector; 26-H SDF/shaping; 26-D2 drag-drop spawn; async PNG thumbs |
 | Custom title bar (engine mark, “Somnium Engine”, min/max/close) | Native OS chrome is gone on purpose; keep engine widgets if the bar grows |
-| Click-away closes menus/Help/palette/colour/unsaved | Docked drawer does **not** close on click-away |
+| Click-away closes menus/Help/palette/colour/unsaved **and ComboBox lists** | Docked drawer does **not** close on click-away |
 | Named Sculpt tools with selected/hover/press fills | New tools (foliage modes, voxel brushes, etc.) must ship as labelled buttons, not two-letter codes |
 | F1 Help: wrapped pages + TOC (Welcome, Viewport, Shortcuts, Content Drawer, About, Outliner, Terrain) | Add a Help page (or section) whenever a feature adds authoring UI |
-| Visible scrollbars on Outliner, Details, Help, Drawer | Any new tall pane should use `ScrollViewer` |
+| Visible scrollbars on Outliner, Details, Help, Drawer | Any new tall pane should use `ScrollViewer`; thumb uses `MIN_THUMB.min(track_h)` so a 0-px track cannot panic |
+| Immersive play (toolbar after Play; `IconId::ImmersivePlay` last in the enum; Esc exits; restore maximized) | Do not insert new `IconId` variants except at the end of the enum |
+| ComboBox header in-place; list is a root `Popup` + `ComboDropdown` (opaque, File-menu z-order) | Do not go back to expand-in-place lists inside a vertical inspector stack |
+| Content Drawer `ICON_DRAWER = 80` (tiles ~112×120) | Keep tiles readable; do not silently shrink back to 48 px |
+| Toolbar Select / Landscape / Foliage wired (`SetGizmoMode`, `ToggleTerrainEdit`, `ToggleFoliage`) | Foliage toolbar enables the component; it does **not** arm paint |
+| Terrain palette `set_selected`; Details search reapplied after per-frame inspector writes | Filter must survive `update_inspector` |
 
 **Open by design:** Metaphor does not end when 26-J lands. Each later phase
 that adds an authoring lever (animation graphs, cooked assets, networking
@@ -997,7 +1010,7 @@ Re-test after **every** sub-phase that touches `lib.rs` or `app.rs`:
 5. File → Import Model (`rfd`) still imports glTF/GLB and selects a node.
 6. Save / New scene.
 7. Undo/Redo for **transform and light**.
-8. Play / Pause / Stop; Play hides editor overlays as today.
+8. Play / Pause / Stop / **immersive play**; Play hides editor overlays; immersive fills the monitor (Esc restores).
 9. Terrain: F6, tools 0–5, 32-layer palette, paint vs foliage mutual exclusion,
    hex toggle, sculpt.
 10. Foliage: paint/erase/single/kind, F8 enable, density/seed/slope/scale.
@@ -1170,7 +1183,8 @@ A Metaphor **implementation** session should:
 **Do not implement inside a Halcyon (VV) or terrain session** unless the user
 redirects. Terrain/lighting/animation work that *needs* new inspector fields
 is expected to add those fields — that is Metaphor staying open, not a
-forbidden fold-in.
+forbidden fold-in. A Halcyon session starts at
+[`halcyon_context_handoff.md`](halcyon_context_handoff.md) and begins at VV-A.
 
 ---
 
