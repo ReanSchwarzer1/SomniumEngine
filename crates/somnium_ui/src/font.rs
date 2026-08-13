@@ -11,9 +11,10 @@ use std::collections::HashMap;
 /// wgpu texture_id reserved for the font atlas (DrawCommand.texture_id = Some(this)).
 pub const FONT_ATLAS_TEXTURE_ID: u32 = 0;
 
-/// Atlas texture dimensions — must be power-of-two for wgpu mip compatibility.
-pub const ATLAS_WIDTH: u32 = 512;
-pub const ATLAS_HEIGHT: u32 = 512;
+/// Atlas texture dimensions — 1024² so a bundled Inter at several sizes fits
+/// (Phase 26-A; was 512² when the editor only used Segoe at 12 px).
+pub const ATLAS_WIDTH: u32 = 1024;
+pub const ATLAS_HEIGHT: u32 = 1024;
 
 /// Hash key for a cached glyph entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,12 +61,19 @@ pub struct FontAtlas {
 
     fonts: Vec<fontdue::Font>,
     glyphs: HashMap<GlyphKey, GlyphInfo>,
+    /// Physical pixels per logical pixel (HiDPI). Glyphs rasterize at
+    /// `px * dpi_scale * SUPER_SAMPLE` and draw at logical `px`.
+    pub dpi_scale: f32,
 
     // Shelf packing state
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
 }
+
+/// Raster larger than the layout size so 12–24 px Latin looks less crunchy.
+/// Full SDF / cosmic-text shaping is the 26-H slip (see phase_26.md).
+const SUPER_SAMPLE: f32 = 1.5;
 
 impl FontAtlas {
     pub fn new() -> Self {
@@ -77,6 +85,7 @@ impl FontAtlas {
             dirty: false,
             fonts: Vec::new(),
             glyphs: HashMap::new(),
+            dpi_scale: 1.0,
             cursor_x: 1, // 1px border to avoid UV bleeding
             cursor_y: 1,
             row_height: 0,
@@ -85,7 +94,13 @@ impl FontAtlas {
 
     /// Load a TrueType/OpenType font from bytes. Returns the font_id for use in draw calls.
     pub fn add_font(&mut self, bytes: &[u8]) -> Result<u8, &'static str> {
-        let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())?;
+        let font = fontdue::Font::from_bytes(
+            bytes,
+            fontdue::FontSettings {
+                collection_index: 0,
+                scale: 160.0,
+            },
+        )?;
         let id = self.fonts.len() as u8;
         self.fonts.push(font);
         Ok(id)
@@ -122,25 +137,34 @@ impl FontAtlas {
             .unwrap_or(px * 0.8)
     }
 
+    pub fn set_dpi_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(1.0, 4.0);
+        if (scale - self.dpi_scale).abs() > 0.01 {
+            self.dpi_scale = scale;
+        }
+    }
+
     /// Get cached glyph or rasterize it into the atlas. Returns None if no font loaded or atlas full.
     pub fn get_or_rasterize(&mut self, ch: char, px: f32, font_id: u8) -> Option<GlyphInfo> {
-        let key = GlyphKey::new(ch, px, font_id);
+        let raster_px = (px * self.dpi_scale * SUPER_SAMPLE).max(1.0);
+        let key = GlyphKey::new(ch, raster_px, font_id);
         if let Some(&info) = self.glyphs.get(&key) {
             return Some(info);
         }
         let font = self.fonts.get(font_id as usize)?;
-        let (metrics, bitmap) = font.rasterize(ch, px);
+        let (metrics, bitmap) = font.rasterize(ch, raster_px);
+        let inv = px / raster_px;
 
         // Whitespace / zero-size glyph — cache advance only
         if metrics.width == 0 || metrics.height == 0 {
             let info = GlyphInfo {
                 uv_min: [0.0; 2],
                 uv_max: [0.0; 2],
-                xmin: metrics.xmin as f32,
-                ymin: metrics.ymin as f32,
+                xmin: metrics.xmin as f32 * inv,
+                ymin: metrics.ymin as f32 * inv,
                 px_w: 0.0,
                 px_h: 0.0,
-                advance: metrics.advance_width,
+                advance: metrics.advance_width * inv,
             };
             self.glyphs.insert(key, info);
             return Some(info);
@@ -179,11 +203,11 @@ impl FontAtlas {
         let info = GlyphInfo {
             uv_min: [u0, v0],
             uv_max: [u1, v1],
-            xmin: metrics.xmin as f32,
-            ymin: metrics.ymin as f32,
-            px_w: gw as f32,
-            px_h: gh as f32,
-            advance: metrics.advance_width,
+            xmin: metrics.xmin as f32 * inv,
+            ymin: metrics.ymin as f32 * inv,
+            px_w: gw as f32 * inv,
+            px_h: gh as f32 * inv,
+            advance: metrics.advance_width * inv,
         };
 
         self.row_height = self.row_height.max(gh);

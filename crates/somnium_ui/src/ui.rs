@@ -410,6 +410,22 @@ impl UserInterface {
         to_nh(self.pick_node(self.root_ih, point))
     }
 
+    /// Cursor for the widget under the pointer (or the captured widget while dragging).
+    pub fn cursor_kind(&self) -> crate::node::CursorKind {
+        let handle = if self.captured_ih.is_some() {
+            to_nh(self.captured_ih)
+        } else {
+            self.hit_test(self.cursor_pos)
+        };
+        if handle.is_none() || handle == self.viewport_handle {
+            return crate::node::CursorKind::Default;
+        }
+        let Ok(node) = self.nodes.try_borrow(to_ih(handle)) else {
+            return crate::node::CursorKind::Default;
+        };
+        node.control.cursor_icon(&node.widget, self.cursor_pos)
+    }
+
     fn pick_node(&self, handle: IH, pt: Vec2) -> IH {
         let node = match self.nodes.try_borrow(handle) {
             Ok(n) => n,
@@ -450,6 +466,22 @@ impl UserInterface {
 
     pub fn set_focus(&mut self, handle: NodeHandle) {
         self.focused_ih = to_ih(handle);
+    }
+
+    /// Tooltip string on the widget under `pos`, walking parents if empty.
+    pub fn tooltip_at(&self, pos: Vec2) -> String {
+        let mut h = self.hit_test(pos);
+        while h.is_some() {
+            if let Ok(n) = self.nodes.try_borrow(to_ih(h)) {
+                if !n.widget.tooltip.is_empty() {
+                    return n.widget.tooltip.clone();
+                }
+                h = n.widget.parent;
+            } else {
+                break;
+            }
+        }
+        String::new()
     }
 
     // -----------------------------------------------------------------------
@@ -613,6 +645,22 @@ impl UserInterface {
         }
     }
 
+    pub fn first_child(&self, handle: NodeHandle) -> NodeHandle {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .ok()
+            .and_then(|n| n.widget.children.first().copied())
+            .unwrap_or(NodeHandle::NONE)
+    }
+
+    pub fn set_desired_position(&mut self, handle: NodeHandle, pos: Vec2) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            node.widget.desired_local_position = pos;
+            node.widget.measure_valid = false;
+            node.widget.arrange_valid = false;
+        }
+    }
+
     /// Show or hide a widget and invalidate layout.
     pub fn set_visibility(&mut self, handle: NodeHandle, visible: bool) {
         if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
@@ -660,13 +708,16 @@ impl UserInterface {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                // RMB always passes through for camera look
-                if *button == winit::event::MouseButton::Right {
-                    return false;
-                }
-
                 let pos = self.cursor_pos;
                 let hit = self.hit_test(pos);
+                // RMB over the viewport is fly-cam. RMB over chrome can open
+                // context menus (Phase 26-B).
+                if *button == winit::event::MouseButton::Right {
+                    let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                    if over_viewport {
+                        return false;
+                    }
+                }
 
                 // Check if the hit widget is a viewport area (transparent/non-interactive)
                 let over_viewport = !hit.is_some() || hit == self.viewport_handle;

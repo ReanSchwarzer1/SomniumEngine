@@ -13,7 +13,8 @@
 
 use crate::{
     draw::{DrawCommand, DrawingContext, Vertex},
-    font::{ATLAS_HEIGHT, ATLAS_WIDTH},
+    font::{ATLAS_HEIGHT, ATLAS_WIDTH, FONT_ATLAS_TEXTURE_ID},
+    icons::{ICON_ATLAS_HEIGHT, ICON_ATLAS_TEXTURE_ID, ICON_ATLAS_WIDTH},
 };
 use glam::Mat4;
 
@@ -35,6 +36,9 @@ pub struct UiPass {
     atlas_tex: wgpu::Texture,
     atlas_view: wgpu::TextureView,
     bg1_atlas: wgpu::BindGroup,
+    icon_tex: wgpu::Texture,
+    icon_view: wgpu::TextureView,
+    bg1_icon: wgpu::BindGroup,
     // Geometry buffers (recreated on overflow)
     vtx_buf: wgpu::Buffer,
     idx_buf: wgpu::Buffer,
@@ -168,9 +172,26 @@ impl UiPass {
         });
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let icon_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("UiPass Icon Atlas"),
+            size: wgpu::Extent3d {
+                width: ICON_ATLAS_WIDTH,
+                height: ICON_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let icon_view = icon_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         // ── BG1 bind groups ───────────────────────────────────────────────────
         let bg1_white = Self::make_bg1(device, &bg1_layout, &white_view, &sampler);
         let bg1_atlas = Self::make_bg1(device, &bg1_layout, &atlas_view, &sampler);
+        let bg1_icon = Self::make_bg1(device, &bg1_layout, &icon_view, &sampler);
 
         // ── Geometry buffers ──────────────────────────────────────────────────
         let vtx_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -272,6 +293,9 @@ impl UiPass {
             atlas_tex,
             atlas_view,
             bg1_atlas,
+            icon_tex,
+            icon_view,
+            bg1_icon,
             vtx_buf,
             idx_buf,
             vtx_capacity: INIT_VTX_CAP,
@@ -356,6 +380,31 @@ impl UiPass {
             // same GPU texture — just rebind so the sampler is guaranteed fresh.
             self.bg1_atlas =
                 Self::make_bg1(device, &self.bg1_layout, &self.atlas_view, &self.sampler);
+        }
+
+        if draw_ctx.icon_atlas.dirty {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.icon_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &draw_ctx.icon_atlas.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ICON_ATLAS_WIDTH * 4),
+                    rows_per_image: Some(ICON_ATLAS_HEIGHT),
+                },
+                wgpu::Extent3d {
+                    width: ICON_ATLAS_WIDTH,
+                    height: ICON_ATLAS_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+            );
+            draw_ctx.icon_atlas.dirty = false;
+            self.bg1_icon =
+                Self::make_bg1(device, &self.bg1_layout, &self.icon_view, &self.sampler);
         }
 
         // Vertices
@@ -447,8 +496,14 @@ impl UiPass {
             if cmd.texture_id != active_tex {
                 active_tex = cmd.texture_id;
                 match active_tex {
-                    Some(_) => rpass.set_bind_group(1, &self.bg1_atlas, &[]),
                     None => rpass.set_bind_group(1, &self.bg1_white, &[]),
+                    Some(id) if id == FONT_ATLAS_TEXTURE_ID => {
+                        rpass.set_bind_group(1, &self.bg1_atlas, &[])
+                    }
+                    Some(id) if id == ICON_ATLAS_TEXTURE_ID => {
+                        rpass.set_bind_group(1, &self.bg1_icon, &[])
+                    }
+                    Some(_) => rpass.set_bind_group(1, &self.bg1_atlas, &[]),
                 }
             }
 

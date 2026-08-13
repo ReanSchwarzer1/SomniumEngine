@@ -92,6 +92,10 @@ impl Control for Slider {
         );
     }
 
+    fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {
+        crate::node::CursorKind::EwResize
+    }
+
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,

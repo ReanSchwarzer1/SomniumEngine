@@ -571,33 +571,52 @@ All widgets port the Fyrox UI architecture (see ATTRIBUTION §13.13–13.17):
 | `Grid` | `widgets/grid.rs` | WPF-style rows/columns: Strict / Auto / Stretch size modes |
 | `ScrollViewer` | `widgets/scroll_viewer.rs` | Clipped vertical scroll container |
 | `TextBox` | `widgets/text_box.rs` | Single-line keyboard text input |
-| `NumericField` | `widgets/numeric_field.rs` | f32 numeric input with `NumericFieldMessage::Value` |
+| `NumericField` | `widgets/numeric_field.rs` | f32 numeric input with live `ValueChanging` / commit `ValueChanged` |
+| `UiCanvas` | `runtime.rs` | Game HUD/pause canvas without editor chrome (26-G) |
+| `ColorSwatch` / `ColorPicker` | `widgets/color_picker.rs` | Iris colour property + HSV popup (26-F) |
+| `CommandPalette` | `widgets/command_palette.rs` | Ctrl+P command search (26-I) |
+| `ToastHost` | `widgets/toast.rs` | Transient status toasts (26-I) |
+| `Splitter` | `widgets/splitter.rs` | Two-pane resizable container (Phase 26-A) |
+| `CheckBox` | `widgets/check_box.rs` | Real checkbox; replaces `[x]`/`[ ]` buttons (26-B) |
+| `ComboBox` | `widgets/combo_box.rs` | Dropdown; replaces foliage/tonemapper cyclers (26-B) |
+| `TreeView` | `widgets/tree_view.rs` | Hierarchical outliner / content tree (26-B/E) |
+| `TabControl` | `widgets/tab_control.rs` | Header strip + one visible page (26-B) |
+| `Image` / `Icon` | `widgets/image.rs` | Icon-atlas textured quad (26-A) |
+| `SearchBox` / `Breadcrumb` / `Tooltip` | `widgets/search_box.rs` | Filter, path crumbs, hover hint (26-B) |
+| `ContextMenu` | `widgets/context_menu.rs` | Right-click action list (26-B) |
+| `Popup` | `widgets/popup.rs` | Anchored overlay; File/Create follow their buttons on resize (26-A) |
 
-### 8.4 Editor Layout (Phase 12D-full)
+### 8.4 Editor Layout (Phase 26-A–I Metaphor)
 
-`UiManager::build_editor_layout()` constructs the full editor tree on init:
+`UiManager::build_editor_layout()` constructs the Nocturne editor tree on init.
+Font is bundled Inter (`crates/somnium_ui/assets/fonts/Inter-Regular.ttf`),
+rasterized with 1.5× supersampling and window DPI (26-H SDF slipped).
+Popups size to their content; File/Create follow their buttons. Columns are
+nested `Splitter`s with persisted widths. Inspector numerics include a slider
+beside the typed field. Native cursors follow splitter/slider/button hit tests.
+FPS is written every frame via `UiManager::set_fps`.
 
 ```
-outer_grid (3 rows: 28px | * | 192px)
-├── menu_bar_h  (row 0) — Grid(stretch col | auto col)
-│     ├── menu_stack (col 0) — StackPanel(Horizontal)
-│     │     └── Buttons: [Somnium Engine, File, Edit, View, Create]
-│     └── fps_text  (col 1) — Text "FPS: --" (right-aligned)
-│
-├── main_grid (row 1) — Grid(40px | * | 280px cols)
-│     ├── toolbar_h  (col 0) — StackPanel(Vertical): tool mode buttons
-│     ├── viewport_h (col 1) — Border(transparent): 3D render target area
-│     └── right_panel_h (col 2)
-│           ├── outliner_scroll — ScrollViewer
-│           │     └── outliner_stack — StackPanel(Vertical): entity Buttons (rebuilt per-frame)
-│           └── inspector_h — Grid(rows per TRS field)
-│                 └── NumericFields ×9: tx/ty/tz, rx/ry/rz, sx/sy/sz
-│
-└── bottom_h (row 2) — Grid(22px | * rows)
-      ├── log_header_border (row 0) — Border + Text "Output Log"
-      └── log_scroll (row 1) — ScrollViewer
-            └── log_stack — StackPanel(Vertical): log Text lines (rebuilt as logs arrive)
+outer_grid (6 rows: 28 | 32 | 26 | * | 160 | 24)
+├── menu_bar — engine mark, File/Edit/Create/View/Window/Help, FPS, Help ?
+├── main toolbar — Save, Select, Landscape, Foliage, Play/Pause/Stop icons
+├── viewport toolbar — camera speed, profiler
+├── tools_split | content_split | details_split (resizable, persisted)
+│     ├── left tools (terrain brushes)
+│     ├── viewport (transparent passthrough)
+│     └── Outliner TreeView + Details (CheckBox/Combo/ColorSwatch/slider rows)
+├── Output Log (ring buffer, 200 lines)
+└── status bar — Content Drawer, Output Log, status text
 ```
+
+Overlays (root children): compact File/Edit/Create/View/Window/Help menus,
+F1 Help (`docs/editor/*.md`), Content Drawer card (Ctrl+Space), command palette
+(Ctrl+P), unsaved-changes modal, colour picker, toasts. Evidence PNGs were not
+invented — capture from a live session into `dev records/phase 26/` if needed.
+
+**Keyboard:** F1 Help, Ctrl+Space Drawer, Esc closes popup/Help/Drawer then
+falls through to quit. RMB over chrome can hit the UI; RMB over the viewport
+is still fly-cam.
 
 **UI event routing** (`app.rs::window_event`):
 1. `ui_consumed = ui.process_os_event(&event)` — routes mouse/keyboard to widget tree
@@ -1258,7 +1277,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
 | 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | ⬜ Planned | **Phase 26 — Metaphor: UI framework + editor rebuild.** `somnium_ui` still only draws editor chrome (hand-positioned popups, cyclers, no content browser, no icons, no game UI). Metaphor hardens the retained toolkit, rebuilds the editor as an Unreal-like shell (dogfood), ships a Content Drawer (project `assets/` + Show Engine Content), icons for every type, then absorbs the former Iris colour pickers as 26-F. Runtime screen-space canvas is 26-G. Plan: `dev records/phase_26.md`. |
+| 26 | 🔧 26-A–I | **Phase 26 — Metaphor.** Toolkit, Unreal-like shell, Content Drawer, Details/Outliner, Iris colour pickers, `UiCanvas`, command palette, toasts, HiDPI, layout persist, unsaved modal. 26-H SDF slipped (supersampled bitmap Inter). 26-J remains. Plan: `dev records/phase_26.md`. |
 | VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
 
 ---

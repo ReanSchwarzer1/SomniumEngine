@@ -39,6 +39,8 @@ pub struct Widget {
     pub clip_to_bounds: bool,
     pub hit_test_visibility: bool,
     pub z_index: usize,
+    /// Hover label shown by the shell after `theme::TOOLTIP_DELAY_MS`.
+    pub tooltip: String,
 
     // --- hierarchy ---
     pub parent: NodeHandle,
@@ -78,6 +80,7 @@ impl Default for Widget {
             clip_to_bounds: true,
             hit_test_visibility: true,
             z_index: 0,
+            tooltip: String::new(),
             parent: NodeHandle::NONE,
             children: Vec::new(),
             measure_valid: false,
@@ -182,6 +185,21 @@ impl WidgetBuilder {
     }
     pub fn with_desired_position(mut self, p: Vec2) -> Self {
         self.widget.desired_local_position = p;
+        self
+    }
+
+    pub fn with_tooltip(mut self, t: impl Into<String>) -> Self {
+        self.widget.tooltip = t.into();
+        self
+    }
+
+    pub fn with_hit_test_visibility(mut self, v: bool) -> Self {
+        self.widget.hit_test_visibility = v;
+        self
+    }
+
+    pub fn with_clip_to_bounds(mut self, v: bool) -> Self {
+        self.widget.clip_to_bounds = v;
         self
     }
 

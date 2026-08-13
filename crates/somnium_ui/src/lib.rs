@@ -1,20 +1,28 @@
+pub mod color;
 pub mod draw;
 pub mod editor_event;
 pub mod font;
+pub mod icons;
+pub mod layout_persist;
 pub mod message;
+pub mod metaphor;
 pub mod node;
 pub mod pass;
 pub mod pool;
+pub mod runtime;
 pub mod theme;
 pub mod types;
 pub mod ui;
 pub mod widget;
 pub mod widgets;
 
-pub use editor_event::{CreateKind, EditorEvent, InspectorField, PostFxToggle};
+pub use editor_event::{ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle};
+pub use node::CursorKind;
+pub use runtime::UiCanvas;
 
 use crate::{
     editor_event::InspectorField as IF,
+    icons::IconId,
     message::{MessageDirection, NodeHandle, TextMessage, UiMessage},
     pass::UiPass,
     types::{HorizontalAlignment, Thickness, VerticalAlignment},
@@ -23,25 +31,43 @@ use crate::{
     widgets::{
         border::BorderBuilder,
         button::{ButtonBuilder, ButtonMessage},
+        check_box::{CheckBoxBuilder, CheckBoxMessage},
+        color_picker::{
+            ColorPickerBuilder, ColorPickerMessage, ColorSwatchBuilder, ColorSwatchMessage,
+        },
+        combo_box::{ComboBoxBuilder, ComboBoxMessage},
+        command_palette::{CommandPaletteBuilder, CommandPaletteMessage, PaletteItem},
+        context_menu::{ContextMenuBuilder, MenuItem},
         grid::{Column, GridBuilder, Row},
+        image::ImageBuilder,
         menu::{MenuBuilder, MenuMessage},
         numeric_field::{NumericFieldBuilder, NumericFieldMessage},
-        popup::{PopupBuilder, PopupMessage},
+        popup::{PopupBuilder, PopupMessage, PopupPlacement},
         scroll_viewer::ScrollViewerBuilder,
+        search_box::{
+            BreadcrumbBuilder, BreadcrumbMessage, SearchBoxBuilder, SearchBoxMessage,
+            TooltipBuilder, build_property_row,
+        },
         slider::{SliderBuilder, SliderMessage},
+        splitter::{SplitterBuilder, SplitterMessage, SplitterOrientation},
         stack_panel::{Orientation, StackPanelBuilder},
+        tab_control::{TabControlBuilder, TabControlMessage},
         text::TextBuilder,
+        toast::{ToastHostBuilder, ToastMessage},
+        tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
     },
 };
 use glam::Vec2;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::{info, warn};
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
+#[allow(dead_code)]
 struct InspectorHandles {
     pos_x: NodeHandle,
     pos_y: NodeHandle,
@@ -58,10 +84,11 @@ struct InspectorHandles {
     light_range: NodeHandle,
     light_inner: NodeHandle,
     light_outer: NodeHandle,
-    /// Linear-RGB colour rows (Phase 22C).
+    /// Linear-RGB colour rows (Phase 22C) — kept for event compatibility; hidden.
     light_col_r: NodeHandle,
     light_col_g: NodeHandle,
     light_col_b: NodeHandle,
+    light_color: NodeHandle,
     light_temp_k: NodeHandle,
     /// Row containers for the point/spot-only fields, so they can be hidden
     /// wholesale (label included) when a directional light is selected — range
@@ -121,6 +148,23 @@ struct InspectorHandles {
     water_edge_scale: NodeHandle,
     water_anisotropy: NodeHandle,
     water_caustic: NodeHandle,
+    water_deep: NodeHandle,
+    water_shallow: NodeHandle,
+    water_edge: NodeHandle,
+    water_abs: NodeHandle,
+    water_scatter: NodeHandle,
+    water_abs_mag: NodeHandle,
+    water_scatter_mag: NodeHandle,
+    water_underwater: NodeHandle,
+    water_dir_ax: NodeHandle,
+    water_dir_az: NodeHandle,
+    water_dir_bx: NodeHandle,
+    water_dir_bz: NodeHandle,
+    particle_section: NodeHandle,
+    particle_start: NodeHandle,
+    particle_end: NodeHandle,
+    material_section: NodeHandle,
+    material_base: NodeHandle,
     vessel_section: NodeHandle,
     vessel_buoyancy: NodeHandle,
     vessel_drag: NodeHandle,
@@ -314,6 +358,8 @@ struct EditorLayout {
     file_button: NodeHandle,
     file_popup: NodeHandle,
     file_import_item: NodeHandle,
+    file_new_item: NodeHandle,
+    file_save_item: NodeHandle,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
     play_button: NodeHandle,
@@ -334,9 +380,57 @@ struct EditorLayout {
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
     inner_h: NodeHandle,
+    content_split_h: NodeHandle,
+    right_split_h: NodeHandle,
     toolbar_h: NodeHandle,
     right_h: NodeHandle,
     bottom_h: NodeHandle,
+    fps_text: NodeHandle,
+    help_button: NodeHandle,
+    help_overlay: NodeHandle,
+    help_body: NodeHandle,
+    tooltip: NodeHandle,
+    edit_button: NodeHandle,
+    view_button: NodeHandle,
+    window_button: NodeHandle,
+    help_menu_button: NodeHandle,
+    edit_popup: NodeHandle,
+    view_popup: NodeHandle,
+    window_popup: NodeHandle,
+    help_menu_popup: NodeHandle,
+    edit_undo: NodeHandle,
+    edit_redo: NodeHandle,
+    edit_delete: NodeHandle,
+    edit_dup: NodeHandle,
+    view_profiler: NodeHandle,
+    view_content: NodeHandle,
+    window_dock_content: NodeHandle,
+    help_open_item: NodeHandle,
+    help_shortcuts: NodeHandle,
+    help_about: NodeHandle,
+    status_text: NodeHandle,
+    drawer_button: NodeHandle,
+    log_button: NodeHandle,
+    content_drawer: NodeHandle,
+    content_search: NodeHandle,
+    content_breadcrumb: NodeHandle,
+    content_engine_toggle: NodeHandle,
+    content_list: NodeHandle,
+    outliner_tree: NodeHandle,
+    outliner_search: NodeHandle,
+    inspector_search: NodeHandle,
+    foliage_kind_combo: NodeHandle,
+    post_tonemap_combo: NodeHandle,
+    save_button: NodeHandle,
+    palette_popup: NodeHandle,
+    palette_widget: NodeHandle,
+    toast_host: NodeHandle,
+    unsaved_popup: NodeHandle,
+    unsaved_save: NodeHandle,
+    unsaved_discard: NodeHandle,
+    unsaved_cancel: NodeHandle,
+    color_popup: NodeHandle,
+    color_picker: NodeHandle,
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
@@ -348,7 +442,9 @@ pub struct UiManager {
     ui_pass: UiPass,
     font_id: u8,
     // Live-update widget handles
+    #[allow(dead_code)]
     outliner_scroll: NodeHandle,
+    #[allow(dead_code)]
     outliner_stack: NodeHandle,
     #[allow(dead_code)]
     inspector_stack: NodeHandle,
@@ -367,14 +463,18 @@ pub struct UiManager {
     file_popup: NodeHandle,
     file_popup_open: bool,
     file_import_item: NodeHandle,
+    file_new_item: NodeHandle,
+    file_save_item: NodeHandle,
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
     pause_button: NodeHandle,
+    #[allow(dead_code)]
     pause_label: NodeHandle,
     stop_button: NodeHandle,
+    #[allow(dead_code)]
     stop_label: NodeHandle,
     // Terrain tool buttons (Phase 14F / XV-Zeta): (button, label, BrushMode index)
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
@@ -396,9 +496,83 @@ pub struct UiManager {
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
     inner_h: NodeHandle,
+    content_split_h: NodeHandle,
+    right_split_h: NodeHandle,
     toolbar_h: NodeHandle,
     right_h: NodeHandle,
     bottom_h: NodeHandle,
+    fps_text: NodeHandle,
+    help_button: NodeHandle,
+    help_overlay: NodeHandle,
+    help_body: NodeHandle,
+    tooltip: NodeHandle,
+    edit_button: NodeHandle,
+    view_button: NodeHandle,
+    window_button: NodeHandle,
+    help_menu_button: NodeHandle,
+    edit_popup: NodeHandle,
+    view_popup: NodeHandle,
+    window_popup: NodeHandle,
+    help_menu_popup: NodeHandle,
+    edit_undo: NodeHandle,
+    edit_redo: NodeHandle,
+    edit_delete: NodeHandle,
+    edit_dup: NodeHandle,
+    view_profiler: NodeHandle,
+    view_content: NodeHandle,
+    window_dock_content: NodeHandle,
+    help_open_item: NodeHandle,
+    help_shortcuts: NodeHandle,
+    help_about: NodeHandle,
+    status_text: NodeHandle,
+    drawer_button: NodeHandle,
+    log_button: NodeHandle,
+    content_drawer: NodeHandle,
+    content_search: NodeHandle,
+    content_breadcrumb: NodeHandle,
+    content_engine_toggle: NodeHandle,
+    content_list: NodeHandle,
+    outliner_tree: NodeHandle,
+    outliner_search: NodeHandle,
+    inspector_search: NodeHandle,
+    foliage_kind_combo: NodeHandle,
+    post_tonemap_combo: NodeHandle,
+    save_button: NodeHandle,
+    palette_popup: NodeHandle,
+    palette_widget: NodeHandle,
+    toast_host: NodeHandle,
+    unsaved_popup: NodeHandle,
+    unsaved_save: NodeHandle,
+    unsaved_discard: NodeHandle,
+    unsaved_cancel: NodeHandle,
+    color_popup: NodeHandle,
+    color_picker: NodeHandle,
+    help_open: bool,
+    drawer_open: bool,
+    drawer_docked: bool,
+    show_engine_content: bool,
+    ctrl_held: bool,
+    inspector_filter: String,
+    content_filter: String,
+    content_path: String,
+    outliner_expanded: std::collections::HashSet<u32>,
+    log_lines: VecDeque<String>,
+    edit_popup_open: bool,
+    view_popup_open: bool,
+    window_popup_open: bool,
+    help_menu_open: bool,
+    tooltip_since: Option<(NodeHandle, std::time::Instant)>,
+    help_page: u8,
+    content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
+    outliner_filter: String,
+    palette_open: bool,
+    unsaved_open: bool,
+    color_open: bool,
+    color_target: Option<crate::ColorField>,
+    color_original: [f32; 4],
+    color_live: [f32; 4],
+    scene_dirty: bool,
+    chrome_layout: crate::layout_persist::ChromeLayout,
 }
 
 impl UiManager {
@@ -415,29 +589,30 @@ impl UiManager {
         let (sw, sh) = (size.width as f32, size.height as f32);
         let mut native_ui = UserInterface::new(sw, sh);
 
-        let font_bytes = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
-            .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\arial.ttf"))
-            .or_else(|_| {
-                std::fs::read("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
-            })
-            .ok();
-        let font_id: u8 = if let Some(bytes) = font_bytes {
-            match native_ui.add_font(&bytes) {
-                Ok(id) => {
-                    info!("Native UI: font loaded (id={})", id);
-                    id
-                }
-                Err(e) => {
-                    warn!("Native UI: font load failed — {}", e);
-                    0
-                }
+        let font_bytes = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+        let font_id: u8 = match native_ui.add_font(font_bytes) {
+            Ok(id) => {
+                info!("Native UI: bundled Inter loaded (id={})", id);
+                id
             }
-        } else {
-            warn!("Native UI: no system font found — text will not render");
-            0
+            Err(e) => {
+                warn!("Native UI: bundled Inter failed ({e}); trying system fonts");
+                let fallback = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
+                    .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\arial.ttf"))
+                    .or_else(|_| {
+                        std::fs::read(
+                            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                        )
+                    })
+                    .ok();
+                fallback
+                    .and_then(|b| native_ui.add_font(&b).ok())
+                    .unwrap_or(0)
+            }
         };
 
-        let layout = build_editor_layout(&mut native_ui, font_id);
+        let layout_sizes = crate::layout_persist::load();
+        let layout = build_editor_layout(&mut native_ui, font_id, layout_sizes);
         let ui_pass = UiPass::new(device, queue, output_format);
 
         // Tell the UserInterface which handle is the viewport so mouse events pass through.
@@ -462,6 +637,8 @@ impl UiManager {
             file_popup: layout.file_popup,
             file_popup_open: false,
             file_import_item: layout.file_import_item,
+            file_new_item: layout.file_new_item,
+            file_save_item: layout.file_save_item,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
             play_button: layout.play_button,
@@ -484,9 +661,83 @@ impl UiManager {
             outer_grid: layout.outer_grid,
             menu_bar_h: layout.menu_bar_h,
             inner_h: layout.inner_h,
+            content_split_h: layout.content_split_h,
+            right_split_h: layout.right_split_h,
             toolbar_h: layout.toolbar_h,
             right_h: layout.right_h,
             bottom_h: layout.bottom_h,
+            fps_text: layout.fps_text,
+            help_button: layout.help_button,
+            help_overlay: layout.help_overlay,
+            help_body: layout.help_body,
+            tooltip: layout.tooltip,
+            edit_button: layout.edit_button,
+            view_button: layout.view_button,
+            window_button: layout.window_button,
+            help_menu_button: layout.help_menu_button,
+            edit_popup: layout.edit_popup,
+            view_popup: layout.view_popup,
+            window_popup: layout.window_popup,
+            help_menu_popup: layout.help_menu_popup,
+            edit_undo: layout.edit_undo,
+            edit_redo: layout.edit_redo,
+            edit_delete: layout.edit_delete,
+            edit_dup: layout.edit_dup,
+            view_profiler: layout.view_profiler,
+            view_content: layout.view_content,
+            window_dock_content: layout.window_dock_content,
+            help_open_item: layout.help_open_item,
+            help_shortcuts: layout.help_shortcuts,
+            help_about: layout.help_about,
+            status_text: layout.status_text,
+            drawer_button: layout.drawer_button,
+            log_button: layout.log_button,
+            content_drawer: layout.content_drawer,
+            content_search: layout.content_search,
+            content_breadcrumb: layout.content_breadcrumb,
+            content_engine_toggle: layout.content_engine_toggle,
+            content_list: layout.content_list,
+            outliner_tree: layout.outliner_tree,
+            outliner_search: layout.outliner_search,
+            inspector_search: layout.inspector_search,
+            foliage_kind_combo: layout.foliage_kind_combo,
+            post_tonemap_combo: layout.post_tonemap_combo,
+            save_button: layout.save_button,
+            palette_popup: layout.palette_popup,
+            palette_widget: layout.palette_widget,
+            toast_host: layout.toast_host,
+            unsaved_popup: layout.unsaved_popup,
+            unsaved_save: layout.unsaved_save,
+            unsaved_discard: layout.unsaved_discard,
+            unsaved_cancel: layout.unsaved_cancel,
+            color_popup: layout.color_popup,
+            color_picker: layout.color_picker,
+            help_open: false,
+            drawer_open: false,
+            drawer_docked: false,
+            show_engine_content: false,
+            ctrl_held: false,
+            inspector_filter: String::new(),
+            content_filter: String::new(),
+            content_path: String::new(),
+            outliner_expanded: std::collections::HashSet::new(),
+            log_lines: VecDeque::new(),
+            edit_popup_open: false,
+            view_popup_open: false,
+            window_popup_open: false,
+            help_menu_open: false,
+            tooltip_since: None,
+            help_page: 0,
+            content_entries: Vec::new(),
+            outliner_filter: String::new(),
+            palette_open: false,
+            unsaved_open: false,
+            color_open: false,
+            color_target: None,
+            color_original: [1.0, 1.0, 1.0, 1.0],
+            color_live: [1.0, 1.0, 1.0, 1.0],
+            scene_dirty: false,
+            chrome_layout: layout_sizes,
         }
     }
 
@@ -533,19 +784,26 @@ impl UiManager {
     /// Layout, draw, GPU upload, and render the native UI overlay.
     pub fn end_frame(
         &mut self,
-        _window: &Window,
+        window: &Window,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
+        let scale = window.scale_factor() as f32;
+        self.native_ui.draw_ctx.font_atlas.set_dpi_scale(scale);
+
         // Flush all queued widget messages; convert outgoing to EditorEvents.
         let outgoing = self.native_ui.update();
         self.process_outgoing(outgoing);
 
         let (w, h) = self.window_size;
         self.native_ui.perform_layout();
+        self.reanchor_open_popups();
+        self.update_tooltip();
+        self.native_ui.perform_layout();
         self.native_ui.draw();
+        window.set_cursor(self.native_ui.cursor_kind().to_winit());
         self.ui_pass
             .prepare(device, queue, &mut self.native_ui.draw_ctx, w, h);
         self.ui_pass.render(encoder, view);
@@ -555,7 +813,475 @@ impl UiManager {
 
     /// Route a winit event into the widget tree.  Returns true if consumed.
     pub fn process_os_event(&mut self, event: &WindowEvent) -> bool {
+        if let WindowEvent::ModifiersChanged(m) = event {
+            self.ctrl_held = m.state().control_key();
+        }
+        if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
+            let pressed = key_ev.state == ElementState::Pressed;
+            if let PhysicalKey::Code(code) = key_ev.physical_key {
+                match code {
+                    KeyCode::ControlLeft | KeyCode::ControlRight => {
+                        self.ctrl_held = pressed;
+                    }
+                    KeyCode::F1 if pressed => {
+                        self.toggle_help(None);
+                        return true;
+                    }
+                    KeyCode::Space if pressed && self.ctrl_held => {
+                        self.toggle_drawer();
+                        return true;
+                    }
+                    KeyCode::KeyP if pressed && self.ctrl_held => {
+                        self.toggle_palette();
+                        return true;
+                    }
+                    KeyCode::Escape if pressed => {
+                        if self.close_top_overlay() {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         self.native_ui.process_os_event(event)
+    }
+
+    pub fn push_toast(&mut self, text: &str) {
+        self.native_ui.send(UiMessage::new(
+            self.toast_host,
+            MessageDirection::ToWidget,
+            ToastMessage::Push(text.to_string()),
+        ));
+        self.native_ui
+            .send(TextMessage::set_text(self.status_text, text.to_string()));
+    }
+
+    pub fn set_scene_dirty(&mut self, dirty: bool) {
+        self.scene_dirty = dirty;
+    }
+
+    pub fn prompt_unsaved_new(&mut self) {
+        if !self.scene_dirty {
+            self.editor_events.push_back(EditorEvent::NewScene);
+            return;
+        }
+        self.unsaved_open = true;
+        self.native_ui.send(UiMessage::new(
+            self.unsaved_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(self.unsaved_popup);
+    }
+
+    pub fn set_fps(&mut self, fps: f64) {
+        self.native_ui.send(TextMessage::set_text(
+            self.fps_text,
+            format!("{fps:.0} fps"),
+        ));
+    }
+
+    pub fn set_play_overlays_hidden(&mut self, hidden: bool) {
+        if hidden && self.drawer_open && !self.drawer_docked {
+            self.drawer_open = false;
+            self.native_ui.set_visibility(self.content_drawer, false);
+            self.native_ui.send(UiMessage::new(
+                self.content_drawer,
+                MessageDirection::ToWidget,
+                PopupMessage::Close,
+            ));
+        }
+        if hidden && self.help_open {
+            self.help_open = false;
+            self.native_ui.set_visibility(self.help_overlay, false);
+        }
+    }
+
+    fn toggle_help(&mut self, page: Option<u8>) {
+        if let Some(p) = page {
+            self.help_page = p;
+            self.help_open = true;
+        } else {
+            self.help_open = !self.help_open;
+        }
+        self.native_ui
+            .set_visibility(self.help_overlay, self.help_open);
+        if self.help_open {
+            self.set_help_page(self.help_page);
+        }
+        self.native_ui.invalidate_ancestors(self.help_overlay);
+    }
+
+    fn set_help_page(&mut self, page: u8) {
+        self.help_page = page;
+        self.native_ui.send(TextMessage::set_text(
+            self.help_body,
+            crate::metaphor::help_page(page).to_string(),
+        ));
+    }
+
+    fn toggle_drawer(&mut self) {
+        self.drawer_open = !self.drawer_open;
+        let open = self.drawer_open;
+        self.native_ui.send(UiMessage::new(
+            self.content_drawer,
+            MessageDirection::ToWidget,
+            if open {
+                PopupMessage::Open
+            } else {
+                PopupMessage::Close
+            },
+        ));
+        self.native_ui.send(TextMessage::set_text(
+            self.status_text,
+            if open {
+                "Content Drawer".to_string()
+            } else {
+                "Ready".to_string()
+            },
+        ));
+        self.native_ui.invalidate_ancestors(self.content_drawer);
+    }
+
+    fn close_top_overlay(&mut self) -> bool {
+        if self.palette_open {
+            self.close_palette();
+            return true;
+        }
+        if self.color_open {
+            self.close_color_picker(false);
+            return true;
+        }
+        if self.unsaved_open {
+            self.close_unsaved();
+            return true;
+        }
+        if self.file_popup_open
+            || self.create_popup_open
+            || self.edit_popup_open
+            || self.view_popup_open
+            || self.window_popup_open
+            || self.help_menu_open
+        {
+            self.close_all_menus();
+            return true;
+        }
+        if self.help_open {
+            self.help_open = false;
+            self.native_ui.set_visibility(self.help_overlay, false);
+            return true;
+        }
+        if self.drawer_open && !self.drawer_docked {
+            self.drawer_open = false;
+            self.native_ui.send(UiMessage::new(
+                self.content_drawer,
+                MessageDirection::ToWidget,
+                PopupMessage::Close,
+            ));
+            return true;
+        }
+        false
+    }
+
+    fn close_all_menus(&mut self) {
+        for (flag, handle) in [
+            (&mut self.file_popup_open, self.file_popup),
+            (&mut self.create_popup_open, self.create_popup),
+            (&mut self.edit_popup_open, self.edit_popup),
+            (&mut self.view_popup_open, self.view_popup),
+            (&mut self.window_popup_open, self.window_popup),
+            (&mut self.help_menu_open, self.help_menu_popup),
+        ] {
+            *flag = false;
+            self.native_ui.send(UiMessage::new(
+                handle,
+                MessageDirection::ToWidget,
+                PopupMessage::Close,
+            ));
+        }
+    }
+
+    fn toggle_palette(&mut self) {
+        if self.palette_open {
+            self.close_palette();
+            return;
+        }
+        self.close_all_menus();
+        self.palette_open = true;
+        self.native_ui.send(UiMessage::new(
+            self.palette_widget,
+            MessageDirection::ToWidget,
+            CommandPaletteMessage::SetQuery(String::new()),
+        ));
+        self.native_ui.send(UiMessage::new(
+            self.palette_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.set_focus(self.palette_widget);
+        self.native_ui.invalidate_ancestors(self.palette_popup);
+    }
+
+    fn close_palette(&mut self) {
+        self.palette_open = false;
+        self.native_ui.set_focus(NodeHandle::NONE);
+        self.native_ui.send(UiMessage::new(
+            self.palette_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+        self.native_ui.invalidate_ancestors(self.palette_popup);
+    }
+
+    fn run_palette_command(&mut self, idx: usize) {
+        match idx {
+            0 => self.prompt_unsaved_new(),
+            1 => self.editor_events.push_back(EditorEvent::SaveScene),
+            2 => self.editor_events.push_back(EditorEvent::ImportModel),
+            3 => self.editor_events.push_back(EditorEvent::Undo),
+            4 => self.editor_events.push_back(EditorEvent::Redo),
+            5 => self.editor_events.push_back(EditorEvent::DeleteSelected),
+            6 => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            7 => self.editor_events.push_back(EditorEvent::PlaySimulation),
+            8 => self.editor_events.push_back(EditorEvent::PauseSimulation),
+            9 => self.editor_events.push_back(EditorEvent::StopSimulation),
+            10 => self.editor_events.push_back(EditorEvent::ToggleProfiler),
+            11 => self.toggle_drawer(),
+            12 => self.toggle_help(Some(0)),
+            13 => self
+                .editor_events
+                .push_back(EditorEvent::CreateEntity(CreateKind::Cube)),
+            14 => self
+                .editor_events
+                .push_back(EditorEvent::CreateEntity(CreateKind::DirectionalLight)),
+            _ => {}
+        }
+    }
+
+    fn close_unsaved(&mut self) {
+        self.unsaved_open = false;
+        self.native_ui.send(UiMessage::new(
+            self.unsaved_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+        self.native_ui.invalidate_ancestors(self.unsaved_popup);
+    }
+
+    fn dismiss_color_ui(&mut self) {
+        self.color_open = false;
+        self.color_target = None;
+        self.native_ui.send(UiMessage::new(
+            self.color_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+        self.native_ui.invalidate_ancestors(self.color_popup);
+    }
+
+    fn close_color_picker(&mut self, commit: bool) {
+        if let Some(field) = self.color_target {
+            if commit {
+                self.editor_events
+                    .push_back(EditorEvent::SetInspectorColor {
+                        field,
+                        rgba: self.color_live,
+                        live: false,
+                    });
+            } else {
+                self.editor_events
+                    .push_back(EditorEvent::CancelInspectorColor {
+                        field,
+                        rgba: self.color_original,
+                    });
+            }
+        }
+        self.dismiss_color_ui();
+    }
+
+    fn open_menu(&mut self, which: u8) {
+        self.close_all_menus();
+        let (flag, popup, anchor) = match which {
+            0 => (&mut self.file_popup_open, self.file_popup, self.file_button),
+            1 => (
+                &mut self.create_popup_open,
+                self.create_popup,
+                self.create_button,
+            ),
+            2 => (&mut self.edit_popup_open, self.edit_popup, self.edit_button),
+            3 => (&mut self.view_popup_open, self.view_popup, self.view_button),
+            4 => (
+                &mut self.window_popup_open,
+                self.window_popup,
+                self.window_button,
+            ),
+            _ => (
+                &mut self.help_menu_open,
+                self.help_menu_popup,
+                self.help_menu_button,
+            ),
+        };
+        *flag = true;
+        self.native_ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::SetAnchor(anchor),
+        ));
+        self.native_ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(popup);
+    }
+
+    fn reanchor_open_popups(&mut self) {
+        let open = [
+            (self.file_popup_open, self.file_popup, self.file_button),
+            (
+                self.create_popup_open,
+                self.create_popup,
+                self.create_button,
+            ),
+            (self.edit_popup_open, self.edit_popup, self.edit_button),
+            (self.view_popup_open, self.view_popup, self.view_button),
+            (
+                self.window_popup_open,
+                self.window_popup,
+                self.window_button,
+            ),
+            (
+                self.help_menu_open,
+                self.help_menu_popup,
+                self.help_menu_button,
+            ),
+        ];
+        for (is_open, popup, anchor) in open {
+            if is_open {
+                self.native_ui.send(UiMessage::new(
+                    popup,
+                    MessageDirection::ToWidget,
+                    PopupMessage::SetAnchor(anchor),
+                ));
+            }
+        }
+        if self.drawer_open {
+            let panel = self.native_ui.first_child(self.content_drawer);
+            let y = (self.window_size.1 as f32 - 280.0).max(0.0);
+            self.native_ui
+                .set_desired_position(panel, Vec2::new(0.0, y));
+        }
+        let outgoing = self.native_ui.update();
+        let _ = outgoing;
+    }
+
+    fn update_tooltip(&mut self) {
+        let pos = self.native_ui.cursor_pos;
+        let text = self.native_ui.tooltip_at(pos);
+        if text.is_empty() {
+            self.tooltip_since = None;
+            self.native_ui.set_visibility(self.tooltip, false);
+            return;
+        }
+        let now = std::time::Instant::now();
+        match self.tooltip_since {
+            Some((_, since)) if now.duration_since(since).as_millis() >= 400 => {
+                self.native_ui
+                    .send(TextMessage::set_text(self.tooltip, text));
+                self.native_ui
+                    .set_desired_position(self.tooltip, Vec2::new(pos.x + 12.0, pos.y + 18.0));
+                self.native_ui.set_visibility(self.tooltip, true);
+            }
+            Some(_) => {}
+            None => {
+                self.tooltip_since = Some((NodeHandle::NONE, now));
+                self.native_ui.set_visibility(self.tooltip, false);
+            }
+        }
+    }
+
+    fn refresh_content_list(&mut self) {
+        let root = std::env::current_dir().unwrap_or_default().join("assets");
+        let current = if self.content_path.is_empty() {
+            std::path::PathBuf::new()
+        } else {
+            root.join(&self.content_path)
+        };
+        let entries = crate::metaphor::list_content(
+            &root,
+            self.show_engine_content,
+            &self.content_filter,
+            &current,
+        );
+        self.native_ui.clear_children(self.content_list);
+        self.content_entries.clear();
+        let font_id = self.font_id;
+        let parent = self.content_list;
+        for entry in entries {
+            let btn = ButtonBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(22.0)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .build();
+            let bh = self.native_ui.add_node(btn, parent);
+            let row =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Horizontal)
+                    .build();
+            let row_h = self.native_ui.add_node(row, bh);
+            let icon = ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_width(theme::ICON_TREE)
+                    .with_height(theme::ICON_TREE),
+            )
+            .with_icon(entry.icon)
+            .with_size(theme::ICON_TREE)
+            .build();
+            self.native_ui.add_node(icon, row_h);
+            let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 3.0)))
+                .with_text(&entry.name)
+                .with_font_size(12.0)
+                .with_font_id(font_id)
+                .with_color(theme::TEXT_PRIMARY)
+                .build();
+            self.native_ui.add_node(lbl, row_h);
+            self.content_entries.push((bh, entry));
+        }
+        let mut parts = vec!["Game".to_string()];
+        if !self.content_path.is_empty() {
+            for p in self.content_path.split(['/', '\\']) {
+                if !p.is_empty() {
+                    parts.push(p.to_string());
+                }
+            }
+        }
+        self.native_ui.send(UiMessage::new(
+            self.content_breadcrumb,
+            MessageDirection::ToWidget,
+            BreadcrumbMessage::SetParts(parts),
+        ));
+    }
+
+    fn apply_inspector_filter(&mut self) {
+        let q = self.inspector_filter.to_ascii_lowercase();
+        let h = &self.inspector_handles;
+        let pairs = [
+            (h.light_section, "light"),
+            (h.post_section, "post fx bloom exposure tonemap"),
+            (h.terrain_section, "terrain paint layer hex"),
+            (h.foliage_section, "foliage grass tree"),
+            (h.water_section, "water body wave"),
+            (h.vessel_section, "vessel buoyancy"),
+        ];
+        if q.is_empty() {
+            return;
+        }
+        for (section, names) in pairs {
+            self.native_ui
+                .set_visibility(section, names.contains(q.as_str()));
+        }
     }
 
     /// Returns true if a text-input widget (TextBox or NumericField) has keyboard focus.
@@ -591,63 +1317,70 @@ impl UiManager {
     /// Keep the UE-style transport controls visually synchronized with the
     /// engine-owned simulation state.
     pub fn update_simulation_controls(&mut self, state: u8) {
-        let (play, pause, stop) = match state {
-            1 => ("[>] Playing", "[||] Pause", "[ ] Stop"),
-            2 => ("[>] Resume", "[||] Paused", "[ ] Stop"),
-            _ => ("[>] Play", "[||] Pause", "[ ] Reset"),
+        let play = match state {
+            1 => "Playing",
+            2 => "Paused",
+            _ => "Stopped",
         };
         self.native_ui
             .send(TextMessage::set_text(self.play_label, play.to_string()));
-        self.native_ui
-            .send(TextMessage::set_text(self.pause_label, pause.to_string()));
-        self.native_ui
-            .send(TextMessage::set_text(self.stop_label, stop.to_string()));
     }
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
     pub fn update_outliner(&mut self, entities: &[(u32, String)], selected: Option<u32>) {
-        let new_state = (entities.to_vec(), selected);
+        let rows: Vec<(u32, String, u8, bool)> = entities
+            .iter()
+            .map(|(id, name)| (*id, name.clone(), 0, false))
+            .collect();
+        self.update_outliner_tree(&rows, selected);
+    }
+
+    /// Hierarchical outliner (Phase 26-E). Each row is (id, name, depth, has_children).
+    pub fn update_outliner_tree(
+        &mut self,
+        entities: &[(u32, String, u8, bool)],
+        selected: Option<u32>,
+    ) {
+        let flat: Vec<(u32, String)> = entities
+            .iter()
+            .map(|(id, name, _, _)| (*id, name.clone()))
+            .collect();
+        let new_state = (flat, selected);
         if let Some(ref old_state) = self.last_outliner_state {
             if *old_state == new_state {
-                return; // No changes, do not destroy widgets
+                return;
             }
         }
         self.last_outliner_state = Some(new_state);
 
-        self.native_ui.clear_children(self.outliner_stack);
-        self.outliner_rows.clear();
-
-        let font_id = self.font_id;
-        let scroll_h = self.outliner_scroll;
-        let _ = scroll_h; // used for scrolling; content lives in outliner_stack directly
-
-        for &(eidx, ref name) in entities {
-            let is_sel = selected == Some(eidx);
-            let bg = if is_sel {
-                theme::ACCENT_BLUE
-            } else {
-                [0, 0, 0, 0]
-            };
-
-            let btn =
-                ButtonBuilder::new(WidgetBuilder::new().with_height(22.0).with_background(bg))
-                    .build();
-            let btn_h = self.native_ui.add_node(btn, self.outliner_stack);
-
-            let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-                left: 8.0,
-                top: 3.0,
-                right: 0.0,
-                bottom: 0.0,
-            }))
-            .with_text(name.as_str())
-            .with_font_size(12.0)
-            .with_font_id(font_id)
-            .with_color(theme::TEXT_PRIMARY)
-            .build();
-            self.native_ui.add_node(lbl, btn_h);
-
-            self.outliner_rows.push((btn_h, eidx));
+        let filter = self.outliner_filter.to_ascii_lowercase();
+        let mut items = Vec::new();
+        for &(id, ref name, depth, has_children) in entities {
+            if !filter.is_empty() && !name.to_ascii_lowercase().contains(&filter) {
+                continue;
+            }
+            let expanded = self.outliner_expanded.contains(&id) || !has_children;
+            if has_children && !self.outliner_expanded.contains(&id) && depth > 0 {
+                // collapsed children are omitted by the caller
+            }
+            items.push(TreeItem {
+                id,
+                label: name.clone(),
+                depth,
+                icon: crate::metaphor::icon_for_entity_name(name),
+                has_children,
+                expanded: expanded || self.outliner_expanded.contains(&id),
+            });
+        }
+        self.outliner_rows = items.iter().map(|i| (self.outliner_tree, i.id)).collect();
+        self.native_ui
+            .send(TreeViewMessage::set_items(self.outliner_tree, items));
+        if selected.is_some() {
+            self.native_ui.send(UiMessage::new(
+                self.outliner_tree,
+                MessageDirection::ToWidget,
+                TreeViewMessage::SetSelected(selected),
+            ));
         }
     }
 
@@ -687,7 +1420,7 @@ impl UiManager {
     ///
     /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b, moon_intensity]`, paired
     /// with whether the light is directional.
-    pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool)>) {
+    pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool, f32)>) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section,
@@ -696,7 +1429,8 @@ impl UiManager {
             h.light_inner,
             h.light_outer,
         );
-        let (col_r, col_g, col_b) = (h.light_col_r, h.light_col_g, h.light_col_b);
+        let light_color = h.light_color;
+        let light_temp = h.light_temp_k;
         let (range_row, inner_row, outer_row, moon_row, moon_int) = (
             h.light_range_row,
             h.light_inner_row,
@@ -705,7 +1439,7 @@ impl UiManager {
             h.light_moon_int,
         );
         match values {
-            Some(([i, r, ia, oa, cr, cg, cb, moon_i], directional)) => {
+            Some(([i, r, ia, oa, cr, cg, cb, moon_i], directional, kelvin)) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
                     .send(NumericFieldMessage::set_value(intensity, i));
@@ -715,12 +1449,18 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(inner, ia));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(outer, oa));
+                self.native_ui.send(UiMessage::new(
+                    light_color,
+                    MessageDirection::ToWidget,
+                    ColorSwatchMessage::SetColor([cr, cg, cb, 1.0]),
+                ));
+                self.native_ui.send(UiMessage::new(
+                    light_color,
+                    MessageDirection::ToWidget,
+                    ColorSwatchMessage::SetLocked(kelvin > 0.0),
+                ));
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(col_r, cr));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(col_g, cg));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(col_b, cb));
+                    .send(NumericFieldMessage::set_value(light_temp, kelvin));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(moon_int, moon_i));
                 self.native_ui.set_visibility(range_row, !directional);
@@ -750,10 +1490,26 @@ impl UiManager {
             h.post_ca_str,
             h.post_ibl,
         );
-        let (vig_label, ca_label, fxaa_label) =
-            (h.post_vig_label, h.post_ca_label, h.post_fxaa_label);
-        let (exp_comp, auto_label, tonemap_label) =
-            (h.post_exp_comp, h.post_auto_exp_label, h.post_tonemap_label);
+        let vig_toggle = h.post_vig_toggle;
+        let ca_toggle = h.post_ca_toggle;
+        let fxaa_toggle = h.post_fxaa_toggle;
+        let auto_toggle = h.post_auto_exp_toggle;
+        let tonemap_combo = h.post_tonemap_button;
+        let cel_toggle = h.post_cel_toggle;
+        let taa_toggle = h.post_taa_toggle;
+        let gtao_toggle = h.post_gtao_toggle;
+        let restir_toggle = h.post_restir_toggle;
+        let restir_gi_toggle = h.post_restir_gi_toggle;
+        let pcss_toggle = h.post_pcss_toggle;
+        let contact_toggle = h.post_contact_toggle;
+        let cas_toggle = h.post_cas_toggle;
+        let mb_toggle = h.post_mb_toggle;
+        let bloom_toggle = h.post_bloom_toggle;
+        let dof_toggle = h.post_dof_toggle;
+        let vol_toggle = h.post_vol_toggle;
+        let shafts_toggle = h.post_shafts_toggle;
+        let phys_toggle = h.post_phys_toggle;
+        let exp_comp = h.post_exp_comp;
 
         match values {
             Some(v) => {
@@ -777,52 +1533,35 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(ca_str, ca));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(ibl, ibl_i));
-                // Redraw the tick in each toggle's label.
-                let tick = |on: bool| if on { "[x]" } else { "[ ]" };
-                self.native_ui.send(TextMessage::set_text(
-                    vig_label,
-                    format!("{} Vignette", tick(vig_on)),
+                // Redraw the tick in each toggle's checkbox.
+                let tick = |ui: &mut UserInterface, handle: NodeHandle, on: bool| {
+                    ui.send(CheckBoxMessage::set_checked(handle, on));
+                };
+                tick(&mut self.native_ui, vig_toggle, vig_on);
+                tick(&mut self.native_ui, ca_toggle, ca_on);
+                tick(&mut self.native_ui, fxaa_toggle, fxaa_on);
+                tick(&mut self.native_ui, auto_toggle, auto_on);
+                self.native_ui.send(ComboBoxMessage::set_selected(
+                    tonemap_combo,
+                    crate::metaphor::tonemap_index(tonemap),
                 ));
-                self.native_ui.send(TextMessage::set_text(
-                    ca_label,
-                    format!("{} Chromatic Ab.", tick(ca_on)),
-                ));
-                self.native_ui.send(TextMessage::set_text(
-                    fxaa_label,
-                    format!("{} FXAA", tick(fxaa_on)),
-                ));
-                // These two were added with the exposure controls but never
-                // refreshed, so their ticks sat permanently empty regardless of
-                // the real state.
-                self.native_ui.send(TextMessage::set_text(
-                    auto_label,
-                    format!("{} Auto Exposure", tick(auto_on)),
-                ));
-                self.native_ui.send(TextMessage::set_text(
-                    tonemap_label,
-                    format!("Tonemap: {tonemap}"),
-                ));
-                self.native_ui.send(TextMessage::set_text(
-                    h.post_cel_label,
-                    format!("{} Cel Shading", tick(cel_on)),
-                ));
-                for (label, on, name) in [
-                    (h.post_taa_label, v.taa, "TAA"),
-                    (h.post_gtao_label, v.gtao, "GTAO"),
-                    (h.post_restir_label, v.restir, "RT Direct Light"),
-                    (h.post_restir_gi_label, v.restir_gi, "RT Indirect (GI)"),
-                    (h.post_pcss_label, v.pcss, "Soft Shadows"),
-                    (h.post_contact_label, v.contact_shadows, "Contact Shadows"),
-                    (h.post_cas_label, v.cas, "Sharpen (CAS)"),
-                    (h.post_mb_label, v.motion_blur, "Motion Blur"),
-                    (h.post_bloom_label, v.bloom, "Bloom"),
-                    (h.post_dof_label, v.dof, "Depth of Field"),
-                    (h.post_vol_label, v.volumetrics, "Volumetrics"),
-                    (h.post_shafts_label, v.shafts, "Light Shafts"),
-                    (h.post_phys_label, v.physical_camera, "Physical Camera"),
+                tick(&mut self.native_ui, cel_toggle, cel_on);
+                for (handle, on) in [
+                    (taa_toggle, v.taa),
+                    (gtao_toggle, v.gtao),
+                    (restir_toggle, v.restir),
+                    (restir_gi_toggle, v.restir_gi),
+                    (pcss_toggle, v.pcss),
+                    (contact_toggle, v.contact_shadows),
+                    (cas_toggle, v.cas),
+                    (mb_toggle, v.motion_blur),
+                    (bloom_toggle, v.bloom),
+                    (dof_toggle, v.dof),
+                    (vol_toggle, v.volumetrics),
+                    (shafts_toggle, v.shafts),
+                    (phys_toggle, v.physical_camera),
                 ] {
-                    self.native_ui
-                        .send(TextMessage::set_text(label, format!("{} {name}", tick(on))));
+                    tick(&mut self.native_ui, handle, on);
                 }
                 for (field, value) in [
                     (h.post_bloom_amt, v.extras[0]),
@@ -904,7 +1643,7 @@ impl UiManager {
         let macro_s = h.terrain_macro;
         let debug = h.terrain_debug;
         let mode_label = h.terrain_mode_label;
-        let paint_label = h.terrain_paint_label;
+        let _paint_label = h.terrain_paint_label;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
@@ -934,19 +1673,13 @@ impl UiManager {
                 };
                 self.native_ui
                     .send(TextMessage::set_text(mode_label, status));
-                let tick = if v.terrain_paint && !v.foliage_paint {
-                    "[x]"
-                } else {
-                    "[ ]"
-                };
-                self.native_ui.send(TextMessage::set_text(
-                    paint_label,
-                    format!("{tick} Terrain Paint"),
+                self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_paint_toggle,
+                    v.terrain_paint && !v.foliage_paint,
                 ));
-                let hex_tick = if v.hex_tiling { "[x]" } else { "[ ]" };
-                self.native_ui.send(TextMessage::set_text(
-                    h.terrain_hex_label,
-                    format!("{hex_tick} Hex Tiling"),
+                self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_hex_toggle,
+                    v.hex_tiling,
                 ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
                     let mark = if i == paint { ">" } else { " " };
@@ -1017,6 +1750,90 @@ impl UiManager {
         }
     }
 
+    pub fn update_water_iris(
+        &mut self,
+        values: Option<(
+            [f32; 4],
+            [f32; 4],
+            [f32; 4],
+            [f32; 3],
+            [f32; 3],
+            bool,
+            [f32; 4],
+        )>,
+    ) {
+        let h = &self.inspector_handles;
+        match values {
+            Some((deep, shallow, edge, abs, scatter, underwater, dirs)) => {
+                let (abs_tint, abs_mag) = crate::color::split_magnitude(abs);
+                let (sc_tint, sc_mag) = crate::color::split_magnitude(scatter);
+                for (handle, rgba) in [
+                    (h.water_deep, deep),
+                    (h.water_shallow, shallow),
+                    (h.water_edge, edge),
+                    (h.water_abs, [abs_tint[0], abs_tint[1], abs_tint[2], 1.0]),
+                    (h.water_scatter, [sc_tint[0], sc_tint[1], sc_tint[2], 1.0]),
+                ] {
+                    self.native_ui.send(UiMessage::new(
+                        handle,
+                        MessageDirection::ToWidget,
+                        ColorSwatchMessage::SetColor(rgba),
+                    ));
+                }
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_abs_mag, abs_mag));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_scatter_mag, sc_mag));
+                self.native_ui
+                    .send(CheckBoxMessage::set_checked(h.water_underwater, underwater));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_dir_ax, dirs[0]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_dir_az, dirs[1]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_dir_bx, dirs[2]));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.water_dir_bz, dirs[3]));
+            }
+            None => {}
+        }
+    }
+
+    pub fn update_particle_inspector(&mut self, values: Option<([f32; 4], [f32; 4])>) {
+        let h = &self.inspector_handles;
+        match values {
+            Some((start, end)) => {
+                self.native_ui.set_visibility(h.particle_section, true);
+                self.native_ui.send(UiMessage::new(
+                    h.particle_start,
+                    MessageDirection::ToWidget,
+                    ColorSwatchMessage::SetColor(start),
+                ));
+                self.native_ui.send(UiMessage::new(
+                    h.particle_end,
+                    MessageDirection::ToWidget,
+                    ColorSwatchMessage::SetColor(end),
+                ));
+            }
+            None => self.native_ui.set_visibility(h.particle_section, false),
+        }
+    }
+
+    pub fn update_material_inspector(&mut self, values: Option<[f32; 4]>) {
+        let h = &self.inspector_handles;
+        match values {
+            Some(base) => {
+                self.native_ui.set_visibility(h.material_section, true);
+                self.native_ui.send(UiMessage::new(
+                    h.material_base,
+                    MessageDirection::ToWidget,
+                    ColorSwatchMessage::SetColor(base),
+                ));
+            }
+            None => self.native_ui.set_visibility(h.material_section, false),
+        }
+    }
+
     /// Show buoyancy controls when a `BuoyantVessel` is selected.
     pub fn update_vessel_inspector(&mut self, values: Option<[f32; 6]>) {
         let h = &self.inspector_handles;
@@ -1065,36 +1882,36 @@ impl UiManager {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(*f, *val));
                 }
-                let tick = |on: bool| if on { "[x]" } else { "[ ]" };
-                let labels = [
-                    (h.foliage_label, "Enabled"),
-                    (h.foliage_paint_label, "Foliage Paint"),
-                    (h.foliage_erase_label, "Erase"),
-                    (h.foliage_single_label, "Single"),
+                let toggles = [
+                    h.foliage_toggle,
+                    h.foliage_paint_toggle,
+                    h.foliage_erase_toggle,
+                    h.foliage_single_toggle,
                 ];
-                for ((handle, text), on) in labels.iter().zip(flags.iter()) {
-                    self.native_ui.send(TextMessage::set_text(
-                        *handle,
-                        format!("{} {text}", tick(*on)),
-                    ));
+                for (handle, on) in toggles.iter().zip(flags.iter()) {
+                    self.native_ui
+                        .send(CheckBoxMessage::set_checked(*handle, *on));
                 }
-                // v[3] is the palette index; show its name on the picker button.
                 let kind = (v[3].round().max(0.0) as usize).min(FOLIAGE_KIND_NAMES.len() - 1);
                 self.foliage_kind_shown = kind as u8;
-                self.native_ui.send(TextMessage::set_text(
-                    h.foliage_kind_label,
-                    format!("Type: {}  >", FOLIAGE_KIND_NAMES[kind]),
-                ));
+                self.native_ui
+                    .send(ComboBoxMessage::set_selected(h.foliage_kind_button, kind));
             }
             None => self.native_ui.set_visibility(section, false),
         }
     }
 
-    /// Append a line to the output log panel (max 200 entries).
+    /// Append a line to the output log panel (ring buffer, max 200).
     pub fn append_log(&mut self, text: &str) {
         const MAX: usize = 200;
-        if self.log_entry_count >= MAX {
-            return;
+        self.log_lines.push_back(text.to_string());
+        if self.log_lines.len() > MAX {
+            self.log_lines.pop_front();
+            let first = self.native_ui.first_child(self.log_stack);
+            if first.is_some() {
+                self.native_ui.remove_node(first);
+            }
+            self.log_entry_count = self.log_entry_count.saturating_sub(1);
         }
         let font_id = self.font_id;
         let entry = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
@@ -1186,6 +2003,12 @@ impl UiManager {
             (h.water_edge_scale, IF::WaterEdgeScale),
             (h.water_anisotropy, IF::WaterAnisotropy),
             (h.water_caustic, IF::WaterCausticStrength),
+            (h.water_dir_ax, IF::WaterWaveDirAX),
+            (h.water_dir_az, IF::WaterWaveDirAZ),
+            (h.water_dir_bx, IF::WaterWaveDirBX),
+            (h.water_dir_bz, IF::WaterWaveDirBZ),
+            (h.water_abs_mag, IF::WaterAbsorptionMag),
+            (h.water_scatter_mag, IF::WaterScatteringMag),
             (h.vessel_buoyancy, IF::VesselBuoyancy),
             (h.vessel_drag, IF::VesselDrag),
             (h.vessel_angular_drag, IF::VesselAngularDrag),
@@ -1201,7 +2024,144 @@ impl UiManager {
             (h.foliage_shadow, IF::FoliageShadowDistance),
         ];
 
+        let color_map: &[(NodeHandle, crate::ColorField)] = &[
+            (h.light_color, crate::ColorField::Light),
+            (h.water_deep, crate::ColorField::WaterDeep),
+            (h.water_shallow, crate::ColorField::WaterShallow),
+            (h.water_edge, crate::ColorField::WaterEdge),
+            (h.water_abs, crate::ColorField::WaterAbsorption),
+            (h.water_scatter, crate::ColorField::WaterScattering),
+            (h.particle_start, crate::ColorField::ParticleStart),
+            (h.particle_end, crate::ColorField::ParticleEnd),
+            (h.material_base, crate::ColorField::MaterialBase),
+        ];
+
         for msg in msgs {
+            if let Some(ColorSwatchMessage::Clicked(rgba)) = msg.data::<ColorSwatchMessage>() {
+                if let Some((_, field)) = color_map.iter().find(|(h, _)| *h == msg.destination) {
+                    self.color_target = Some(*field);
+                    self.color_open = true;
+                    self.color_original = *rgba;
+                    self.color_live = *rgba;
+                    self.native_ui.send(UiMessage::new(
+                        self.color_picker,
+                        MessageDirection::ToWidget,
+                        ColorPickerMessage::SetColor(*rgba),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        self.color_popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::SetAnchor(msg.destination),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        self.color_popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::Open,
+                    ));
+                    self.native_ui.invalidate_ancestors(self.color_popup);
+                }
+                continue;
+            }
+            if let Some(cmsg) = msg.data::<ColorPickerMessage>() {
+                if let Some(field) = self.color_target {
+                    match cmsg {
+                        ColorPickerMessage::Changing(rgba) => {
+                            self.color_live = *rgba;
+                            self.editor_events
+                                .push_back(EditorEvent::SetInspectorColor {
+                                    field,
+                                    rgba: *rgba,
+                                    live: true,
+                                });
+                        }
+                        ColorPickerMessage::Changed(rgba) => {
+                            self.color_live = *rgba;
+                            self.editor_events
+                                .push_back(EditorEvent::SetInspectorColor {
+                                    field,
+                                    rgba: *rgba,
+                                    live: false,
+                                });
+                            self.dismiss_color_ui();
+                        }
+                        ColorPickerMessage::Cancelled(rgba) => {
+                            self.color_original = *rgba;
+                            self.editor_events
+                                .push_back(EditorEvent::CancelInspectorColor {
+                                    field,
+                                    rgba: *rgba,
+                                });
+                            self.dismiss_color_ui();
+                        }
+                        ColorPickerMessage::SetColor(_) => {}
+                    }
+                }
+                continue;
+            }
+            if let Some(CommandPaletteMessage::Run(idx)) = msg.data::<CommandPaletteMessage>() {
+                self.run_palette_command(*idx);
+                self.close_palette();
+                continue;
+            }
+            if let Some(SplitterMessage::Changed(size)) = msg.data::<SplitterMessage>() {
+                if msg.destination == self.inner_h {
+                    self.chrome_layout.tools = *size;
+                } else if msg.destination == self.content_split_h {
+                    self.chrome_layout.viewport = *size;
+                } else if msg.destination == self.right_split_h {
+                    self.chrome_layout.outliner = *size;
+                }
+                crate::layout_persist::save(self.chrome_layout);
+                continue;
+            }
+            if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if msg.destination == self.file_new_item {
+                    self.close_all_menus();
+                    self.prompt_unsaved_new();
+                    continue;
+                }
+                if msg.destination == self.file_save_item {
+                    self.close_all_menus();
+                    self.editor_events.push_back(EditorEvent::SaveScene);
+                    continue;
+                }
+                if msg.destination == self.unsaved_save {
+                    self.close_unsaved();
+                    self.editor_events.push_back(EditorEvent::SaveScene);
+                    self.editor_events.push_back(EditorEvent::NewScene);
+                    continue;
+                }
+                if msg.destination == self.unsaved_discard {
+                    self.close_unsaved();
+                    self.editor_events.push_back(EditorEvent::NewScene);
+                    continue;
+                }
+                if msg.destination == self.unsaved_cancel {
+                    self.close_unsaved();
+                    continue;
+                }
+            }
+            if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
+                if msg.destination == self.inspector_handles.water_underwater {
+                    let _ = on;
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleWaterUnderwater);
+                    continue;
+                }
+            }
+            if let Some(PopupMessage::Close) = msg.data::<PopupMessage>() {
+                if msg.destination == self.color_popup && self.color_open {
+                    // Click-away commits (Iris: OK = click-outside).
+                    self.close_color_picker(true);
+                }
+                if msg.destination == self.palette_popup {
+                    self.palette_open = false;
+                }
+                if msg.destination == self.unsaved_popup {
+                    self.unsaved_open = false;
+                }
+            }
+
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 // Outliner row
                 if let Some(&(_, eidx)) = self
@@ -1386,6 +2346,96 @@ impl UiManager {
                         .push_back(EditorEvent::SetTerrainTool(tool));
                     continue;
                 }
+                if msg.destination == self.edit_undo {
+                    self.editor_events.push_back(EditorEvent::Undo);
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.edit_redo {
+                    self.editor_events.push_back(EditorEvent::Redo);
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.edit_delete {
+                    self.editor_events.push_back(EditorEvent::DeleteSelected);
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.edit_dup {
+                    self.editor_events.push_back(EditorEvent::DuplicateSelected);
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.view_profiler {
+                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.view_content {
+                    self.close_all_menus();
+                    self.toggle_drawer();
+                    continue;
+                }
+                if msg.destination == self.window_dock_content {
+                    self.drawer_docked = true;
+                    if !self.drawer_open {
+                        self.toggle_drawer();
+                    }
+                    self.close_all_menus();
+                    continue;
+                }
+                if msg.destination == self.help_open_item || msg.destination == self.help_button {
+                    self.close_all_menus();
+                    self.toggle_help(Some(0));
+                    continue;
+                }
+                if msg.destination == self.help_shortcuts {
+                    self.close_all_menus();
+                    self.toggle_help(Some(2));
+                    continue;
+                }
+                if msg.destination == self.help_about {
+                    self.close_all_menus();
+                    self.toggle_help(Some(4));
+                    continue;
+                }
+                if msg.destination == self.log_button {
+                    continue;
+                }
+                if msg.destination == self.drawer_button {
+                    self.toggle_drawer();
+                    continue;
+                }
+                if msg.destination == self.save_button {
+                    self.editor_events.push_back(EditorEvent::SaveScene);
+                    continue;
+                }
+                if let Some((_, entry)) = self
+                    .content_entries
+                    .iter()
+                    .find(|(bh, _)| *bh == msg.destination)
+                    .cloned()
+                {
+                    if entry.is_dir {
+                        let root = std::env::current_dir().unwrap_or_default().join("assets");
+                        if let Ok(rel) = entry.path.strip_prefix(&root) {
+                            self.content_path = rel.to_string_lossy().into_owned();
+                        }
+                        self.refresh_content_list();
+                    } else if entry.is_engine {
+                        if let Some(kind) = match entry.name.as_str() {
+                            "Cube" => Some(CreateKind::Cube),
+                            "Sphere" => Some(CreateKind::Sphere),
+                            "Plane" => Some(CreateKind::Plane),
+                            "Cylinder" => Some(CreateKind::Cylinder),
+                            _ => None,
+                        } {
+                            self.editor_events
+                                .push_back(EditorEvent::CreateEntity(kind));
+                        }
+                    }
+                    continue;
+                }
                 // Create popup item
                 if let Some(&(_, kind)) = self
                     .create_popup_items
@@ -1405,46 +2455,51 @@ impl UiManager {
                 }
             } else if let Some(MenuMessage::Click) = msg.data::<MenuMessage>() {
                 if msg.destination == self.file_button {
-                    // Only one menu open at a time.
-                    self.create_popup_open = false;
-                    self.native_ui.send(UiMessage::new(
-                        self.create_popup,
-                        MessageDirection::ToWidget,
-                        PopupMessage::Close,
-                    ));
-                    self.file_popup_open = !self.file_popup_open;
-                    let open = self.file_popup_open;
-                    self.native_ui.send(UiMessage::new(
-                        self.file_popup,
-                        MessageDirection::ToWidget,
-                        if open {
-                            PopupMessage::Open
-                        } else {
-                            PopupMessage::Close
-                        },
-                    ));
-                    self.native_ui.invalidate_ancestors(self.file_popup);
+                    if self.file_popup_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(0);
+                    }
                     continue;
                 }
                 if msg.destination == self.create_button {
-                    self.file_popup_open = false;
-                    self.native_ui.send(UiMessage::new(
-                        self.file_popup,
-                        MessageDirection::ToWidget,
-                        PopupMessage::Close,
-                    ));
-                    self.create_popup_open = !self.create_popup_open;
-                    let open = self.create_popup_open;
-                    self.native_ui.send(UiMessage::new(
-                        self.create_popup,
-                        MessageDirection::ToWidget,
-                        if open {
-                            PopupMessage::Open
-                        } else {
-                            PopupMessage::Close
-                        },
-                    ));
-                    self.native_ui.invalidate_ancestors(self.create_popup);
+                    if self.create_popup_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(1);
+                    }
+                    continue;
+                }
+                if msg.destination == self.edit_button {
+                    if self.edit_popup_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(2);
+                    }
+                    continue;
+                }
+                if msg.destination == self.view_button {
+                    if self.view_popup_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(3);
+                    }
+                    continue;
+                }
+                if msg.destination == self.window_button {
+                    if self.window_popup_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(4);
+                    }
+                    continue;
+                }
+                if msg.destination == self.help_menu_button {
+                    if self.help_menu_open {
+                        self.close_all_menus();
+                    } else {
+                        self.open_menu(5);
+                    }
                     continue;
                 }
             } else if let Some(PopupMessage::Close) = msg.data::<PopupMessage>() {
@@ -1455,6 +2510,185 @@ impl UiManager {
                 if msg.destination == self.create_popup {
                     self.create_popup_open = false;
                     self.native_ui.invalidate_ancestors(self.create_popup);
+                }
+                if msg.destination == self.edit_popup {
+                    self.edit_popup_open = false;
+                }
+                if msg.destination == self.view_popup {
+                    self.view_popup_open = false;
+                }
+                if msg.destination == self.window_popup {
+                    self.window_popup_open = false;
+                }
+                if msg.destination == self.help_menu_popup {
+                    self.help_menu_open = false;
+                }
+                if msg.destination == self.content_drawer {
+                    self.drawer_open = false;
+                }
+            } else if let Some(CheckBoxMessage::Check(_)) = msg.data::<CheckBoxMessage>() {
+                if msg.destination == self.content_engine_toggle {
+                    self.show_engine_content = !self.show_engine_content;
+                    self.refresh_content_list();
+                    continue;
+                }
+                // Inspector checkboxes share the same destinations as the old buttons.
+                if msg.destination == self.inspector_handles.post_vig_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_auto_exp_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_cel_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::CelShading));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleFoliage);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_paint_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleFoliagePaint);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_paint_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainPaint);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_hex_toggle {
+                    self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_erase_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleFoliageErase);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_single_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleFoliageSingle);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_fxaa_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Fxaa));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_ca_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::ChromaticAberration));
+                    continue;
+                }
+                for (handle, which) in [
+                    (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
+                    (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
+                    (
+                        self.inspector_handles.post_restir_toggle,
+                        PostFxToggle::Restir,
+                    ),
+                    (
+                        self.inspector_handles.post_restir_gi_toggle,
+                        PostFxToggle::RestirGi,
+                    ),
+                    (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
+                    (
+                        self.inspector_handles.post_contact_toggle,
+                        PostFxToggle::ContactShadows,
+                    ),
+                    (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
+                    (
+                        self.inspector_handles.post_mb_toggle,
+                        PostFxToggle::MotionBlur,
+                    ),
+                    (
+                        self.inspector_handles.post_bloom_toggle,
+                        PostFxToggle::Bloom,
+                    ),
+                    (
+                        self.inspector_handles.post_dof_toggle,
+                        PostFxToggle::DepthOfField,
+                    ),
+                    (
+                        self.inspector_handles.post_vol_toggle,
+                        PostFxToggle::Volumetrics,
+                    ),
+                    (
+                        self.inspector_handles.post_shafts_toggle,
+                        PostFxToggle::LightShafts,
+                    ),
+                    (
+                        self.inspector_handles.post_phys_toggle,
+                        PostFxToggle::PhysicalCamera,
+                    ),
+                ] {
+                    if msg.destination == handle {
+                        self.editor_events
+                            .push_back(EditorEvent::TogglePostFx(which));
+                        break;
+                    }
+                }
+            } else if let Some(ComboBoxMessage::SelectionChanged(i)) = msg.data::<ComboBoxMessage>()
+            {
+                if msg.destination == self.inspector_handles.post_tonemap_button
+                    || msg.destination == self.post_tonemap_combo
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SetTonemapper(*i as u8));
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.foliage_kind_button
+                    || msg.destination == self.foliage_kind_combo
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SelectFoliageKind(*i as u8));
+                    continue;
+                }
+            } else if let Some(TreeViewMessage::Select(id)) = msg.data::<TreeViewMessage>() {
+                if msg.destination == self.outliner_tree {
+                    self.editor_events
+                        .push_back(EditorEvent::SelectEntity(Some(*id)));
+                }
+            } else if let Some(TreeViewMessage::ToggleExpand(id)) = msg.data::<TreeViewMessage>() {
+                if self.outliner_expanded.contains(id) {
+                    self.outliner_expanded.remove(id);
+                } else {
+                    self.outliner_expanded.insert(*id);
+                }
+                self.last_outliner_state = None;
+            } else if let Some(SearchBoxMessage::Query(q)) = msg.data::<SearchBoxMessage>() {
+                if msg.destination == self.content_search {
+                    self.content_filter = q.clone();
+                    self.refresh_content_list();
+                }
+                if msg.destination == self.outliner_search {
+                    self.outliner_filter = q.clone();
+                    self.last_outliner_state = None;
+                }
+                if msg.destination == self.inspector_search {
+                    self.inspector_filter = q.clone();
+                    self.apply_inspector_filter();
+                }
+            } else if let Some(BreadcrumbMessage::Navigate(i)) = msg.data::<BreadcrumbMessage>() {
+                if msg.destination == self.content_breadcrumb {
+                    if *i == 0 {
+                        self.content_path.clear();
+                    } else {
+                        let parts: Vec<&str> = self.content_path.split(['/', '\\']).collect();
+                        self.content_path =
+                            parts.iter().take(*i).copied().collect::<Vec<_>>().join("/");
+                    }
+                    self.refresh_content_list();
+                }
+            } else if let Some(TabControlMessage::Select(i)) = msg.data::<TabControlMessage>() {
+                if self.help_open {
+                    self.set_help_page(*i as u8);
                 }
             }
 
@@ -1488,15 +2722,21 @@ impl UiManager {
 
 // ── Editor layout builder ─────────────────────────────────────────────────────
 
-fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
+fn build_editor_layout(
+    ui: &mut UserInterface,
+    font_id: u8,
+    layout: crate::layout_persist::ChromeLayout,
+) -> EditorLayout {
     let root = ui.root();
 
-    // ── Outer grid: 3 rows × 1 col ───────────────────────────────────────────
+    // ── Outer grid: menu | toolbar | viewport bar | main | log | status ──────
     let outer_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(28.0)) // menu bar
+        .add_row(Row::strict(theme::MENU_HEIGHT)) // menu bar
+        .add_row(Row::strict(theme::TOOLBAR_HEIGHT)) // main toolbar (Phase 26-C)
         .add_row(Row::strict(26.0)) // viewport toolbar (camera speed)
         .add_row(Row::stretch()) // main area
         .add_row(Row::strict(160.0)) // output log
+        .add_row(Row::strict(24.0)) // status bar
         .add_column(Column::stretch())
         .build();
     let outer_h = ui.add_node(outer_grid, root);
@@ -1537,11 +2777,29 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     let menu_stack_h = ui.add_node(menu_stack, menu_grid_h);
 
+    let mark = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_width(22.0)
+            .with_height(22.0)
+            .with_margin(Thickness {
+                left: 8.0,
+                top: 3.0,
+                right: 4.0,
+                bottom: 0.0,
+            })
+            .with_tooltip("Somnium Engine"),
+    )
+    .with_icon(IconId::EngineMark)
+    .with_size(theme::ICON_TREE)
+    .with_tint(theme::ACCENT)
+    .build();
+    ui.add_node(mark, menu_stack_h);
+
     // Engine title
     let title = TextBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness {
-                left: 10.0,
+                left: 4.0,
                 right: 16.0,
                 top: 6.0,
                 bottom: 0.0,
@@ -1567,16 +2825,7 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         .build();
     ui.add_node(file_lbl, file_button);
 
-    // "Edit" — plain text (no action yet)
-    {
-        let item = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-            .with_text("Edit")
-            .with_font_size(13.0)
-            .with_font_id(font_id)
-            .with_color(theme::TEXT_PRIMARY)
-            .build();
-        ui.add_node(item, menu_stack_h);
-    }
+    let edit_button = menu_button(ui, menu_stack_h, "Edit", font_id);
 
     // "Create" — Menu so clicks are captured
     let create_btn_node = MenuBuilder::new(
@@ -1599,20 +2848,72 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         .build();
     ui.add_node(create_lbl, create_button);
 
-    // "View" — plain text
-    let view_item = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-        .with_text("View")
-        .with_font_size(13.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
-    ui.add_node(view_item, menu_stack_h);
+    let view_button = menu_button(ui, menu_stack_h, "View", font_id);
+    let window_button = menu_button(ui, menu_stack_h, "Window", font_id);
+    let help_menu_button = menu_button(ui, menu_stack_h, "Help", font_id);
 
-    // ── Row 1: viewport toolbar — camera speed (Phase 20B) ───────────────────
+    let fps_col = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let fps_col_h = ui.add_node(fps_col, menu_grid_h);
+    let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
+        .with_text("— fps")
+        .with_font_size(11.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_SECONDARY)
+        .build();
+    let fps_text = ui.add_node(fps_node, fps_col_h);
+    let help_button = icon_tool_button(ui, fps_col_h, IconId::HelpCircle, "Help (F1)");
+
+    // ── Row 1: main toolbar ──────────────────────────────────────────────────
+    let main_tb = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 1.0,
+    })
+    .build();
+    let main_tb_h = ui.add_node(main_tb, outer_h);
+    let main_tb_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let main_tb_stack_h = ui.add_node(main_tb_stack, main_tb_h);
+    let save_button = icon_tool_button(ui, main_tb_stack_h, IconId::Save, "Save (Ctrl+S)");
+    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Select, "Select");
+    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
+    let _ = icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
+    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "Play");
+    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "Pause");
+    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "Stop / Reset");
+    let play_label_n =
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 5.0)))
+            .with_text("Stopped")
+            .with_font_size(11.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_SECONDARY)
+            .build();
+    let play_label = ui.add_node(play_label_n, main_tb_stack_h);
+    let pause_label = play_label;
+    let stop_label = play_label;
+
+    // ── Row 2: viewport toolbar — camera speed (Phase 20B) ───────────────────
     // Sits between the menu bar and the viewport, like UE5's viewport toolbar.
     let vp_bar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(1)
+            .with_row(2)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -1674,33 +2975,7 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
 
-    // Phase IV-I: editor transport controls. These live in the viewport bar,
-    // where their state remains visible while inspecting the moving vessel.
-    let transport_button =
-        |ui: &mut UserInterface, parent: NodeHandle, text: &str, font_id: u8, left: f32| {
-            let button = ButtonBuilder::new(WidgetBuilder::new().with_height(20.0).with_margin(
-                Thickness {
-                    left,
-                    top: 3.0,
-                    right: 3.0,
-                    bottom: 0.0,
-                },
-            ))
-            .build();
-            let button_handle = ui.add_node(button, parent);
-            let label =
-                TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(7.0, 3.0)))
-                    .with_text(text)
-                    .with_font_size(11.0)
-                    .with_font_id(font_id)
-                    .with_color(theme::TEXT_PRIMARY)
-                    .build();
-            let label_handle = ui.add_node(label, button_handle);
-            (button_handle, label_handle)
-        };
-    let (play_button, play_label) = transport_button(ui, vp_stack_h, "[>] Play", font_id, 14.0);
-    let (pause_button, pause_label) = transport_button(ui, vp_stack_h, "[||] Pause", font_id, 0.0);
-    let (stop_button, stop_label) = transport_button(ui, vp_stack_h, "[ ] Stopped", font_id, 0.0);
+    // Play/Pause/Stop live on the main toolbar (Phase 26-C).
 
     // Phase 29: the profiler switch lives on the viewport toolbar rather than
     // in a menu, because it is a thing you flick on and off while looking at
@@ -1736,25 +3011,23 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     ui.add_node(hint, vp_stack_h);
 
-    // ── Row 2: inner grid — toolbar | viewport | right panel ─────────────────
-    let inner_grid = GridBuilder::new(
+    // ── Row 3: resizable columns — tools | viewport | details ────────────────
+    let tools_split = SplitterBuilder::new(
         WidgetBuilder::new()
-            .with_row(2)
+            .with_row(3)
             .with_column(0)
             .with_background(theme::TRANSPARENT),
     )
-    .add_row(Row::stretch())
-    .add_column(Column::strict(40.0))
-    .add_column(Column::stretch())
-    .add_column(Column::strict(280.0))
+    .with_orientation(SplitterOrientation::Horizontal)
+    .with_first_size(layout.tools)
+    .with_min_first(36.0)
+    .with_min_second(240.0)
     .build();
-    let inner_h = ui.add_node(inner_grid, outer_h);
+    let inner_h = ui.add_node(tools_split, outer_h);
 
     // Left toolbar strip
     let toolbar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(0)
-            .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
     )
@@ -1766,6 +3039,15 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     })
     .build();
     let toolbar_h = ui.add_node(toolbar, inner_h);
+
+    let content_split =
+        SplitterBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(SplitterOrientation::Horizontal)
+            .with_first_size(layout.viewport)
+            .with_min_first(200.0)
+            .with_min_second(180.0)
+            .build();
+    let content_split_h = ui.add_node(content_split, inner_h);
 
     // Terrain tool palette (Phase 14F): label + 6 brush mode buttons.
     // Active only while a terrain entity is selected (F6 toggles edit mode).
@@ -1832,14 +3114,12 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     // will hit-test to this handle, which the UI knows to NOT consume.
     let viewport_border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(0)
-            .with_column(1)
             .with_background(theme::TRANSPARENT)
             .with_foreground(theme::TRANSPARENT),
     )
     .with_stroke_thickness(Thickness::ZERO)
     .build();
-    let viewport_handle = ui.add_node(viewport_border, inner_h);
+    let viewport_handle = ui.add_node(viewport_border, content_split_h);
 
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
@@ -1932,8 +3212,6 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     // Right panel: two sections (outliner top, inspector bottom)
     let right_border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(0)
-            .with_column(2)
             .with_background(theme::BG_DARK)
             .with_foreground(theme::BORDER_DARK),
     )
@@ -1944,16 +3222,32 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         bottom: 0.0,
     })
     .build();
-    let right_h = ui.add_node(right_border, inner_h);
+    let right_h = ui.add_node(right_border, content_split_h);
 
-    let right_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(24.0)) // Outliner header
-        .add_row(Row::strict(200.0)) // Outliner content
-        .add_row(Row::strict(24.0)) // Inspector header
-        .add_row(Row::stretch()) // Inspector content
+    let right_split =
+        SplitterBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(SplitterOrientation::Vertical)
+            .with_first_size(layout.outliner)
+            .with_min_first(80.0)
+            .with_min_second(120.0)
+            .build();
+    let right_split_h = ui.add_node(right_split, right_h);
+
+    let out_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::strict(24.0))
+        .add_row(Row::strict(22.0))
+        .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build();
-    let right_grid_h = ui.add_node(right_grid, right_h);
+    let out_grid_h = ui.add_node(out_grid, right_split_h);
+
+    let ins_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::strict(24.0))
+        .add_row(Row::strict(22.0))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .build();
+    let ins_grid_h = ui.add_node(ins_grid, right_split_h);
 
     // Outliner header
     let out_hdr = BorderBuilder::new(
@@ -1970,7 +3264,7 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         bottom: 1.0,
     })
     .build();
-    let out_hdr_h = ui.add_node(out_hdr, right_grid_h);
+    let out_hdr_h = ui.add_node(out_hdr, out_grid_h);
     let out_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 8.0,
         top: 5.0,
@@ -1984,26 +3278,39 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
     .build();
     ui.add_node(out_hdr_txt, out_hdr_h);
 
-    // Outliner content (ScrollViewer + inner StackPanel)
+    let outliner_search = {
+        let n = SearchBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_row(1)
+                .with_column(0)
+                .with_background(theme::BG_INPUT),
+        )
+        .with_font_id(font_id)
+        .build();
+        ui.add_node(n, out_grid_h)
+    };
+
     let out_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
-            .with_row(1)
+            .with_row(2)
             .with_column(0)
             .with_background(theme::BG_DARK),
     )
     .build();
-    let outliner_scroll = ui.add_node(out_scroll, right_grid_h);
+    let outliner_scroll = ui.add_node(out_scroll, out_grid_h);
 
-    let out_stack =
-        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-            .with_orientation(Orientation::Vertical)
+    let outliner_tree = {
+        let t = TreeViewBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_font_id(font_id)
             .build();
-    let outliner_stack = ui.add_node(out_stack, outliner_scroll);
+        ui.add_node(t, outliner_scroll)
+    };
+    let outliner_stack = outliner_tree;
 
     // Inspector header
     let ins_hdr = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(2)
+            .with_row(0)
             .with_column(0)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
@@ -2015,35 +3322,40 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         bottom: 1.0,
     })
     .build();
-    let ins_hdr_h = ui.add_node(ins_hdr, right_grid_h);
+    let ins_hdr_h = ui.add_node(ins_hdr, ins_grid_h);
     let ins_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 8.0,
         top: 5.0,
         right: 0.0,
         bottom: 0.0,
     }))
-    .with_text("INSPECTOR")
+    .with_text("DETAILS")
     .with_font_size(11.0)
     .with_font_id(font_id)
     .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(ins_hdr_txt, ins_hdr_h);
 
-    // Inspector content
-    // A ScrollViewer, matching the outliner above it. It was a plain Border,
-    // which clips silently: the inspector has grown section by section — light,
-    // post-processing, terrain, foliage — and its lower rows had started
-    // disappearing behind the log panel with no way to reach them. Anything
-    // that grows with the feature set needs to scroll rather than be trusted to
-    // fit.
+    let inspector_search = {
+        let n = SearchBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_row(1)
+                .with_column(0)
+                .with_background(theme::BG_INPUT),
+        )
+        .with_font_id(font_id)
+        .build();
+        ui.add_node(n, ins_grid_h)
+    };
+
     let ins_content = ScrollViewerBuilder::new(
         WidgetBuilder::new()
-            .with_row(3)
+            .with_row(2)
             .with_column(0)
             .with_background(theme::BG_DARK),
     )
     .build();
-    let ins_content_h = ui.add_node(ins_content, right_grid_h);
+    let ins_content_h = ui.add_node(ins_content, ins_grid_h);
 
     let inspector_stack =
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
@@ -2053,10 +3365,10 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
 
     let inspector_handles = build_inspector(ui, inspector_stack, font_id);
 
-    // ── Row 2: bottom log panel ───────────────────────────────────────────────
+    // ── Row 4: bottom log panel ───────────────────────────────────────────────
     let bottom = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(3)
+            .with_row(4)
             .with_column(0)
             .with_background(theme::BG_DARK)
             .with_foreground(theme::BORDER_DARK),
@@ -2124,9 +3436,263 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
             .build();
     let log_stack = ui.add_node(log_stack_node, log_scroll_h);
 
+    // ── Row 5: status bar ────────────────────────────────────────────────────
+    let status_bar = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(5)
+            .with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 1.0,
+        bottom: 0.0,
+    })
+    .build();
+    let status_h = ui.add_node(status_bar, outer_h);
+    let status_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let status_stack_h = ui.add_node(status_stack, status_h);
+    let drawer_button = icon_tool_button(
+        ui,
+        status_stack_h,
+        IconId::ContentDrawer,
+        "Content Drawer (Ctrl+Space)",
+    );
+    let log_button = icon_tool_button(ui, status_stack_h, IconId::OutputLog, "Output Log");
+    let status_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
+        .with_text("Ready")
+        .with_font_size(11.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_SECONDARY)
+        .build();
+    let status_text = ui.add_node(status_lbl, status_stack_h);
+
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
-    let (file_popup, file_import_item) = build_file_popup(ui, root, font_id);
+    let (file_popup, file_items) = popup_items(
+        ui,
+        root,
+        font_id,
+        &["New Scene", "Save Scene", "Import Model..."],
+    );
+    let file_new_item = file_items[0];
+    let file_save_item = file_items[1];
+    let file_import_item = file_items[2];
+    let (edit_popup, edit_items) =
+        popup_items(ui, root, font_id, &["Undo", "Redo", "Delete", "Duplicate"]);
+    let edit_undo = edit_items[0];
+    let edit_redo = edit_items[1];
+    let edit_delete = edit_items[2];
+    let edit_dup = edit_items[3];
+    let (view_popup, view_items) = popup_items(ui, root, font_id, &["Profiler", "Content Drawer"]);
+    let view_profiler = view_items[0];
+    let view_content = view_items[1];
+    let (window_popup, window_items) = popup_items(ui, root, font_id, &["Dock Content in Layout"]);
+    let window_dock_content = window_items[0];
+    let (help_menu_popup, help_items) = popup_items(
+        ui,
+        root,
+        font_id,
+        &["Help Overlay (F1)", "Shortcuts", "About"],
+    );
+    let help_open_item = help_items[0];
+    let help_shortcuts = help_items[1];
+    let help_about = help_items[2];
+
+    let (help_overlay, help_body) = build_help_overlay(ui, root, font_id);
+    let (content_drawer, content_search, content_breadcrumb, content_engine_toggle, content_list) =
+        build_content_drawer(ui, root, font_id);
+
+    let tooltip_node = TooltipBuilder::new(
+        WidgetBuilder::new()
+            .with_visibility(false)
+            .with_desired_position(Vec2::new(0.0, 0.0)),
+    )
+    .with_font_id(font_id)
+    .build();
+    let tooltip = ui.add_node(tooltip_node, root);
+
+    let _ctx = ContextMenuBuilder::new(
+        WidgetBuilder::new()
+            .with_visibility(false)
+            .with_desired_position(Vec2::new(0.0, 0.0)),
+    )
+    .with_items(vec![
+        MenuItem {
+            id: 1,
+            label: "Duplicate".into(),
+            enabled: true,
+        },
+        MenuItem {
+            id: 2,
+            label: "Delete".into(),
+            enabled: true,
+        },
+    ])
+    .with_font_id(font_id)
+    .build();
+    let _ = ui.add_node(_ctx, root);
+
+    let palette_items = vec![
+        PaletteItem {
+            label: "New Scene".into(),
+            hint: "Ctrl+N".into(),
+        },
+        PaletteItem {
+            label: "Save Scene".into(),
+            hint: "Ctrl+S".into(),
+        },
+        PaletteItem {
+            label: "Import Model…".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Undo".into(),
+            hint: "Ctrl+Z".into(),
+        },
+        PaletteItem {
+            label: "Redo".into(),
+            hint: "Ctrl+Y".into(),
+        },
+        PaletteItem {
+            label: "Delete".into(),
+            hint: "Del".into(),
+        },
+        PaletteItem {
+            label: "Duplicate".into(),
+            hint: "Ctrl+D".into(),
+        },
+        PaletteItem {
+            label: "Play".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Pause".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Stop".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Toggle Profiler".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Content Drawer".into(),
+            hint: "Ctrl+Space".into(),
+        },
+        PaletteItem {
+            label: "Help".into(),
+            hint: "F1".into(),
+        },
+        PaletteItem {
+            label: "Create Cube".into(),
+            hint: String::new(),
+        },
+        PaletteItem {
+            label: "Create Directional Light".into(),
+            hint: String::new(),
+        },
+    ];
+    let palette_popup_node = PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 80]))
+        .with_placement(PopupPlacement::Center)
+        .build();
+    let palette_popup = ui.add_node(palette_popup_node, root);
+    let palette_widget_node = CommandPaletteBuilder::new(
+        WidgetBuilder::new()
+            .with_background(theme::BG_HEADER)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_font_id(font_id)
+    .with_items(palette_items)
+    .build();
+    let palette_widget = ui.add_node(palette_widget_node, palette_popup);
+
+    let toast_node = ToastHostBuilder::new(WidgetBuilder::new())
+        .with_font_id(font_id)
+        .build();
+    let toast_host = ui.add_node(toast_node, root);
+
+    let unsaved_popup_node =
+        PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 100]))
+            .with_placement(PopupPlacement::Center)
+            .build();
+    let unsaved_popup = ui.add_node(unsaved_popup_node, root);
+    let unsaved_border = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(340.0)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(1.0))
+    .build();
+    let unsaved_border_h = ui.add_node(unsaved_border, unsaved_popup);
+    let unsaved_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let unsaved_stack_h = ui.add_node(unsaved_stack, unsaved_border_h);
+    let unsaved_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(12.0)))
+        .with_text("Save changes to the current scene?")
+        .with_font_id(font_id)
+        .with_font_size(13.0)
+        .with_color(theme::TEXT_PRIMARY)
+        .build();
+    ui.add_node(unsaved_lbl, unsaved_stack_h);
+    let unsaved_row =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let unsaved_row_h = ui.add_node(unsaved_row, unsaved_stack_h);
+    let mk_modal_btn = |ui: &mut UserInterface, label: &str, parent: NodeHandle| {
+        let b = ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_width(100.0)
+                .with_height(24.0)
+                .with_margin(Thickness::axes(8.0, 8.0))
+                .with_background(theme::BG_RAISED),
+        )
+        .build();
+        let h = ui.add_node(b, parent);
+        let t = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
+            .with_text(label)
+            .with_font_id(font_id)
+            .with_font_size(12.0)
+            .with_color(theme::TEXT_PRIMARY)
+            .build();
+        ui.add_node(t, h);
+        h
+    };
+    let unsaved_save = mk_modal_btn(ui, "Save", unsaved_row_h);
+    let unsaved_discard = mk_modal_btn(ui, "Don't Save", unsaved_row_h);
+    let unsaved_cancel = mk_modal_btn(ui, "Cancel", unsaved_row_h);
+
+    let color_popup_node =
+        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_placement(PopupPlacement::AnchorBelow)
+            .build();
+    let color_popup = ui.add_node(color_popup_node, root);
+    let color_picker_node = ColorPickerBuilder::new(
+        WidgetBuilder::new()
+            .with_background(theme::BG_HEADER)
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top),
+    )
+    .with_font_id(font_id)
+    .build();
+    let color_picker = ui.add_node(color_picker_node, color_popup);
+
+    let foliage_kind_combo = inspector_handles.foliage_kind_button;
+    let post_tonemap_combo = inspector_handles.post_tonemap_button;
 
     EditorLayout {
         outliner_scroll,
@@ -2139,6 +3705,8 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         file_button,
         file_popup,
         file_import_item,
+        file_new_item,
+        file_save_item,
         camera_speed_slider,
         camera_speed_label,
         play_button,
@@ -2158,9 +3726,57 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         outer_grid: outer_h,
         menu_bar_h,
         inner_h,
+        content_split_h,
+        right_split_h,
         toolbar_h,
         right_h,
         bottom_h,
+        fps_text,
+        help_button,
+        help_overlay,
+        help_body,
+        tooltip,
+        edit_button,
+        view_button,
+        window_button,
+        help_menu_button,
+        edit_popup,
+        view_popup,
+        window_popup,
+        help_menu_popup,
+        edit_undo,
+        edit_redo,
+        edit_delete,
+        edit_dup,
+        view_profiler,
+        view_content,
+        window_dock_content,
+        help_open_item,
+        help_shortcuts,
+        help_about,
+        status_text,
+        drawer_button,
+        log_button,
+        content_drawer,
+        content_search,
+        content_breadcrumb,
+        content_engine_toggle,
+        content_list,
+        outliner_tree,
+        outliner_search,
+        inspector_search,
+        foliage_kind_combo,
+        post_tonemap_combo,
+        save_button,
+        palette_popup,
+        palette_widget,
+        toast_host,
+        unsaved_popup,
+        unsaved_save,
+        unsaved_discard,
+        unsaved_cancel,
+        color_popup,
+        color_picker,
     }
 }
 
@@ -2178,7 +3794,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
                        drag_step: f32| {
         let row = StackPanelBuilder::new(
             WidgetBuilder::new()
-                .with_height(22.0)
+                .with_height(theme::ROW_HEIGHT)
                 .with_background(theme::TRANSPARENT),
         )
         .with_orientation(Orientation::Horizontal)
@@ -2212,6 +3828,33 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         .build();
         (row_h, ui.add_node(field, row_h))
     };
+    let make_color =
+        |ui: &mut UserInterface, label: &str, label_w: f32, font_id: u8, parent: NodeHandle| {
+            let row = StackPanelBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::ROW_HEIGHT)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Horizontal)
+            .build();
+            let row_h = ui.add_node(row, parent);
+            let lbl = TextBuilder::new(WidgetBuilder::new().with_width(label_w).with_margin(
+                Thickness {
+                    left: 6.0,
+                    top: 4.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                },
+            ))
+            .with_text(label)
+            .with_font_size(11.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_SECONDARY)
+            .build();
+            ui.add_node(lbl, row_h);
+            let swatch = ColorSwatchBuilder::new(WidgetBuilder::new()).build();
+            ui.add_node(swatch, row_h)
+        };
     // 0.05 per pixel: a 100-pixel drag moves a position by 5 units, which is
     // the right feel for metres and degrees alike.
     let make_row_w =
@@ -2271,14 +3914,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
 
     sec_label(ui, "Light", font_id, light_section);
     let light_intensity = make_row_w(ui, "Int", 34.0, font_id, light_section);
-    // Colour before the point/spot-only fields, so the sun's two meaningful
-    // controls — intensity and colour — sit together at the top.
-    // Colour channels sit in 0..1, so they need a much finer rate than a position.
-    let light_col_r = make_row_step(ui, "Col R", 34.0, font_id, light_section, 0.005);
-    let light_col_g = make_row_step(ui, "Col G", 34.0, font_id, light_section, 0.005);
-    let light_col_b = make_row_step(ui, "Col B", 34.0, font_id, light_section, 0.005);
-    // Phase 24E: one physically meaningful dial in place of three coupled
-    // channels. 0 keeps whatever explicit RGB is set above.
+    let light_color = make_color(ui, "Color", 34.0, font_id, light_section);
+    let light_col_r = NodeHandle::NONE;
+    let light_col_g = NodeHandle::NONE;
+    let light_col_b = NodeHandle::NONE;
     let light_temp_k = make_row_step(ui, "Kelvin", 34.0, font_id, light_section, 5.0);
     let (light_range_row, light_range) = make_row_rw(ui, "Rng", 34.0, font_id, light_section, 0.1);
     let (light_inner_row, light_inner) = make_row_rw(ui, "In°", 34.0, font_id, light_section, 0.2);
@@ -2315,8 +3954,15 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // rate makes that row usable.
     let post_shutter = make_row_step(ui, "1/s", 34.0, font_id, post_section, 1.0);
     let post_iso = make_row_step(ui, "ISO", 34.0, font_id, post_section, 2.0);
-    let (post_tonemap_button, post_tonemap_label) =
-        make_toggle(ui, "Tonemap: AgX", font_id, post_section);
+    let (post_tonemap_button, post_tonemap_label) = {
+        let tonemap_combo =
+            ComboBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
+                .with_items(["AgX", "ACES", "Reinhard"])
+                .with_font_id(font_id)
+                .build();
+        let (_, h) = build_property_row(ui, post_section, "Tonemap", font_id, tonemap_combo);
+        (h, h)
+    };
     // Indirect-light strength. Low values give contrasty shadows, high values a
     // flatter, brighter scene — see `PostProcessComponent::ibl_intensity`.
     let post_ibl = make_row_step(ui, "IBL", 34.0, font_id, post_section, 0.005);
@@ -2405,11 +4051,13 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Erase", font_id, foliage_section);
     let (foliage_single_toggle, foliage_single_label) =
         make_toggle(ui, "Single", font_id, foliage_section);
-    // Phase 17F: a named picker rather than a numeric index — nobody should
-    // have to remember that "2" means Fir Sapling. It sits directly under the
-    // mode toggles because choosing what to paint comes before tuning how.
-    let (foliage_kind_button, foliage_kind_label) =
-        make_toggle(ui, "Type: Grass Medium  >", font_id, foliage_section);
+    let kind_combo = ComboBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
+        .with_items(FOLIAGE_KIND_NAMES)
+        .with_font_id(font_id)
+        .build();
+    let (_, foliage_kind_button) =
+        build_property_row(ui, foliage_section, "Type", font_id, kind_combo);
+    let foliage_kind_label = foliage_kind_button;
     // Density is per square metre and lives well under 1, so it needs a far
     // finer drag rate than a position.
     let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.02);
@@ -2519,7 +4167,44 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let water_edge_scale = make_row_step(ui, "Edge", 34.0, font_id, water_section, 0.05);
     let water_anisotropy = make_row_step(ui, "Aniso", 34.0, font_id, water_section, 0.01);
     let water_caustic = make_row_step(ui, "Caustic", 34.0, font_id, water_section, 0.05);
+    let water_deep = make_color(ui, "Deep", 34.0, font_id, water_section);
+    let water_shallow = make_color(ui, "Shallow", 34.0, font_id, water_section);
+    let water_edge = make_color(ui, "Edge", 34.0, font_id, water_section);
+    let water_abs = make_color(ui, "Abs", 34.0, font_id, water_section);
+    let water_abs_mag = make_row_step(ui, "Abs Mag", 34.0, font_id, water_section, 0.005);
+    let water_scatter = make_color(ui, "Scatter", 34.0, font_id, water_section);
+    let water_scatter_mag = make_row_step(ui, "Sc Mag", 34.0, font_id, water_section, 0.005);
+    let water_dir_ax = make_row_step(ui, "DirAX", 34.0, font_id, water_section, 0.01);
+    let water_dir_az = make_row_step(ui, "DirAZ", 34.0, font_id, water_section, 0.01);
+    let water_dir_bx = make_row_step(ui, "DirBX", 34.0, font_id, water_section, 0.01);
+    let water_dir_bz = make_row_step(ui, "DirBZ", 34.0, font_id, water_section, 0.01);
+    let (water_underwater, _) = {
+        let cb = CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
+            .with_label("Underwater")
+            .with_font_id(font_id)
+            .build();
+        (ui.add_node(cb, water_section), NodeHandle::NONE)
+    };
     ui.set_visibility(water_section, false);
+
+    let particle_panel =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let particle_section = ui.add_node(particle_panel, parent);
+    sec_label(ui, "Particles", font_id, particle_section);
+    let particle_start = make_color(ui, "Start", 34.0, font_id, particle_section);
+    let particle_end = make_color(ui, "End", 34.0, font_id, particle_section);
+    ui.set_visibility(particle_section, false);
+
+    let material_panel =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let material_section = ui.add_node(material_panel, parent);
+    sec_label(ui, "Material", font_id, material_section);
+    let material_base = make_color(ui, "Base", 34.0, font_id, material_section);
+    ui.set_visibility(material_section, false);
 
     let vessel_panel =
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
@@ -2553,6 +4238,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_col_r,
         light_col_g,
         light_col_b,
+        light_color,
         light_temp_k,
         light_range_row,
         light_inner_row,
@@ -2592,6 +4278,23 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         water_edge_scale,
         water_anisotropy,
         water_caustic,
+        water_deep,
+        water_shallow,
+        water_edge,
+        water_abs,
+        water_scatter,
+        water_abs_mag,
+        water_scatter_mag,
+        water_underwater,
+        water_dir_ax,
+        water_dir_az,
+        water_dir_bx,
+        water_dir_bz,
+        particle_section,
+        particle_start,
+        particle_end,
+        material_section,
+        material_base,
         vessel_section,
         vessel_buoyancy,
         vessel_drag,
@@ -2721,16 +4424,15 @@ fn make_palette_button(
     (btn_h, lbl_h)
 }
 
-/// Build a checkbox-style toggle row: a full-width button whose text label
-/// shows `[x]` / `[ ]`. Returns `(button, label)` — the label handle is kept so
-/// the tick can be rewritten when the value changes.
+/// Build a checkbox toggle row (Phase 26-B). Both handles are the CheckBox
+/// so existing inspector fields that stored a separate label still compile.
 fn make_toggle(
     ui: &mut UserInterface,
     text: &str,
     font_id: u8,
     parent: NodeHandle,
 ) -> (NodeHandle, NodeHandle) {
-    let btn = ButtonBuilder::new(
+    let cb = CheckBoxBuilder::new(
         WidgetBuilder::new()
             .with_height(22.0)
             .with_margin(Thickness {
@@ -2739,77 +4441,231 @@ fn make_toggle(
                 right: 6.0,
                 bottom: 0.0,
             })
-            .with_background(theme::BG_DARK),
+            .with_background(theme::TRANSPARENT),
     )
-    .build();
-    let btn_h = ui.add_node(btn, parent);
-
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 6.0,
-        top: 4.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_text(&format!("[ ] {text}"))
-    .with_font_size(11.0)
+    .with_label(text)
     .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
+    .with_font_size(11.0)
     .build();
-    let lbl_h = ui.add_node(lbl, btn_h);
-    (btn_h, lbl_h)
+    let h = ui.add_node(cb, parent);
+    (h, h)
 }
 
-/// Build the File dropdown popup (initially hidden, child of root).
-/// Returns `(popup, import_item)`.
-fn build_file_popup(
+fn menu_button(ui: &mut UserInterface, parent: NodeHandle, label: &str, font_id: u8) -> NodeHandle {
+    let node = MenuBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
+    let h = ui.add_node(node, parent);
+    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
+        .with_text(label)
+        .with_font_size(13.0)
+        .with_font_id(font_id)
+        .with_color(theme::TEXT_PRIMARY)
+        .build();
+    ui.add_node(lbl, h);
+    h
+}
+
+fn popup_items(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, NodeHandle) {
-    let popup_backdrop =
-        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
-    let popup_h = ui.add_node(popup_backdrop, root);
-
-    let popup_border = BorderBuilder::new(
+    items: &[&str],
+) -> (NodeHandle, Vec<NodeHandle>) {
+    let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
+    let popup_h = ui.add_node(popup, root);
+    let border = BorderBuilder::new(
         WidgetBuilder::new()
-            // Sits under the "File" item in the menu bar.
-            .with_desired_position(Vec2::new(52.0, 28.0))
-            .with_width(180.0)
+            .with_width(200.0)
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
-    let popup_border_h = ui.add_node(popup_border, popup_h);
-
-    let popup_stack =
-        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-            .with_orientation(Orientation::Vertical)
+    let border_h = ui.add_node(border, popup_h);
+    let stack = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_orientation(Orientation::Vertical)
+        .build();
+    let stack_h = ui.add_node(stack, border_h);
+    let mut handles = Vec::with_capacity(items.len());
+    for item in items {
+        let btn = ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_height(22.0)
+                .with_background(theme::TRANSPARENT),
+        )
+        .build();
+        let bh = ui.add_node(btn, stack_h);
+        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
+            .with_text(*item)
+            .with_font_size(12.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_PRIMARY)
             .build();
-    let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
+        ui.add_node(lbl, bh);
+        handles.push(bh);
+    }
+    (popup_h, handles)
+}
 
+fn icon_tool_button(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    icon: IconId,
+    tooltip: &str,
+) -> NodeHandle {
     let btn = ButtonBuilder::new(
         WidgetBuilder::new()
-            .with_height(22.0)
-            .with_background(theme::TRANSPARENT),
+            .with_width(36.0)
+            .with_height(theme::TOOLBAR_HEIGHT)
+            .with_margin(Thickness::axes(2.0, 2.0))
+            .with_tooltip(tooltip)
+            .with_background(theme::BG_RAISED),
     )
     .build();
-    let import_item = ui.add_node(btn, popup_stack_h);
+    let h = ui.add_node(btn, parent);
+    let img = ImageBuilder::new(WidgetBuilder::new())
+        .with_icon(icon)
+        .with_size(theme::ICON_TOOL)
+        .with_tint(theme::TEXT_PRIMARY)
+        .build();
+    ui.add_node(img, h);
+    h
+}
 
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 4.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_text("Import Model...")
-    .with_font_size(12.0)
+fn build_help_overlay(
+    ui: &mut UserInterface,
+    root: NodeHandle,
+    font_id: u8,
+) -> (NodeHandle, NodeHandle) {
+    let overlay = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_background([0x0E, 0x10, 0x14, 0xE0])
+            .with_visibility(false)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(0.0))
+    .build();
+    let overlay_h = ui.add_node(overlay, root);
+
+    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::strict(180.0))
+        .add_column(Column::stretch())
+        .build();
+    let grid_h = ui.add_node(grid, overlay_h);
+
+    let tabs = TabControlBuilder::new(
+        WidgetBuilder::new()
+            .with_column(0)
+            .with_row(0)
+            .with_background(theme::BG_PANEL),
+    )
+    .with_titles([
+        "Welcome",
+        "Viewport",
+        "Shortcuts",
+        "Content Drawer",
+        "About",
+    ])
+    .with_font_id(font_id)
+    .build();
+    ui.add_node(tabs, grid_h);
+
+    let body = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_column(1)
+            .with_row(0)
+            .with_margin(Thickness::uniform(16.0)),
+    )
+    .with_text(crate::metaphor::HELP_WELCOME)
+    .with_font_size(13.0)
     .with_font_id(font_id)
     .with_color(theme::TEXT_PRIMARY)
     .build();
-    ui.add_node(lbl, import_item);
+    let body_h = ui.add_node(body, grid_h);
+    (overlay_h, body_h)
+}
 
-    (popup_h, import_item)
+fn build_content_drawer(
+    ui: &mut UserInterface,
+    root: NodeHandle,
+    font_id: u8,
+) -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
+    let popup = PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 90]))
+        .with_placement(PopupPlacement::BottomCenter)
+        .build();
+    let popup_h = ui.add_node(popup, root);
+
+    let panel = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(640.0)
+            .with_height(320.0)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Bottom)
+            .with_background(theme::BG_PANEL)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(1.0))
+    .build();
+    let panel_h = ui.add_node(panel, popup_h);
+
+    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::strict(26.0))
+        .add_row(Row::strict(22.0))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let grid_h = ui.add_node(grid, panel_h);
+
+    let search = SearchBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_INPUT),
+    )
+    .with_font_id(font_id)
+    .build();
+    let search_h = ui.add_node(search, grid_h);
+
+    let engine = CheckBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
+            .with_margin(Thickness::axes(8.0, 2.0)),
+    )
+    .with_label("Show Engine Content")
+    .with_font_id(font_id)
+    .with_font_size(11.0)
+    .build();
+    let engine_h = ui.add_node(engine, grid_h);
+
+    let crumb = BreadcrumbBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_parts(["Game"])
+    .with_font_id(font_id)
+    .build();
+    let crumb_h = ui.add_node(crumb, grid_h);
+
+    let list_scroll = ScrollViewerBuilder::new(
+        WidgetBuilder::new()
+            .with_row(2)
+            .with_column(0)
+            .with_background(theme::BG_CONTENT),
+    )
+    .build();
+    let list_scroll_h = ui.add_node(list_scroll, grid_h);
+    let list = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_orientation(Orientation::Vertical)
+        .build();
+    let list_h = ui.add_node(list, list_scroll_h);
+
+    (popup_h, search_h, crumb_h, engine_h, list_h)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).
@@ -2826,6 +4682,8 @@ fn build_create_popup(
         WidgetBuilder::new()
             .with_desired_position(Vec2::new(148.0, 28.0))
             .with_width(160.0)
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
             .with_background(theme::BG_HEADER)
             .with_foreground(theme::BORDER_DARK),
     )

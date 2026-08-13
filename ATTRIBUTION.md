@@ -95,36 +95,31 @@
 | UE5 Feature | Somnium Equivalent | Notes |
 |---|---|---|
 | Viewport right-click fly-cam (W/A/S/D/Q/E + Shift) | `EditorCamera` in `hello_engine/src/main.rs` | Identical bindings and speed-boost via Shift |
-| Outliner panel (actor hierarchy) | `#right_panel` → `#outliner-list` | Entities synced every 60 frames via IPC |
-| Details panel (per-actor properties) | `#right_panel` → `#selection-details` | Shows Transform TRS for selected entity |
-| Content Browser (asset grid) | `#bottom_browser` | Static layout, asset loading in Phase 10 |
-| Toolbar (Play/Pause/Stop) | `#toolbar` | Buttons wired in HTML; engine integration pending |
-| FPS counter (top-right toolbar) | `#fps-counter` | Updated via `update_fps` IPC message each frame |
+| Outliner panel (actor hierarchy) | Native `TreeView` in `somnium_ui` | Parent/child depth, type icons, search (Phase 26-E) |
+| Details panel (per-actor properties) | Native inspector `CheckBox` / `ComboBox` / `NumericField` | Every `InspectorField` kept; foliage kind + tonemapper are combos |
+| Content Browser (asset grid) | Content Drawer overlay | Ctrl+Space; project `assets/`; Show Engine Content off by default (26-D) |
+| Toolbar (Play/Pause/Stop) | Icon buttons on the main toolbar | `EditorEvent::PlaySimulation` / Pause / Stop |
+| FPS counter (top-right toolbar) | Menu-bar `fps_text` | `UiManager::set_fps` each frame |
 
-### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor, planned)
+### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor)
 
-**Status:** plan only as of 2026-08-13. No Somnium Metaphor widget code yet.
+**Status:** 26-A through 26-I implemented (2026-08-13). 26-H SDF/cosmic-text slipped (bitmap Inter, supersampled). 26-J not started.
 Controlling plan: `dev records/phase_26.md`. Codename is thematic (Atlus);
-**no Atlus art**. Visual IA is Unreal Editor 5 (Starship-like dark chrome).
-**No** `EditorStyle` / Starship icons, Slate, or UMG source.
+**no Atlus art**. Visual IA is Unreal Editor 5. **No** `EditorStyle` / Starship
+icons, Slate, or UMG source.
 
-| UE5 piece | Pattern to adopt | Somnium target |
-|---|---|---|
-| Level Editor IA (menu, toolbars, viewport, Outliner, Details, Content Drawer, bottom toolbar) | Same slots; Somnium v1 cuts Platforms/DDC/Blueprints | `UiManager` rebuild on new widgets (26-C) |
-| `UStatusBarSubsystem` + `SWidgetDrawer` hosting a Content Browser | Temporary drawer; Ctrl+Space; dismiss on focus loss; Dock in Layout pins the same widget | `ContentBrowser` + status-bar drawer (26-D) |
-| `FContentBrowserInstanceConfig::bShowEngineContent` | Project content default; engine content opt-in | `/Game/` = app `assets/`; `/Engine/` = engine builtins; toggle off by default |
-| `SContentBrowser` / `SAssetView` / `SPathView` / `SFilterList` | Tree + tiles/list + search + type filters | Same IA; original Rust widgets |
-| `FThumbnailManager` | Per-type thumbs; async | PNG 128² async; meshes = type icon in v1 |
+**Icons:** original geometric strokes rasterized to a 512² atlas (`icons.rs`).
+Optical sizes follow Lucide; SVG paths are not copied. Engine mark is original.
 
-**Icons:** Lucide (ISC) or Phosphor (MIT), rasterized to an atlas. Never Epic
-EditorStyle. Engine mark is original.
+**Font:** Inter latin-400, SIL OFL 1.1, bundled at
+`crates/somnium_ui/assets/fonts/Inter-Regular.ttf`.
 
-**Paint:** Somnium **Nocturne** (see `dev records/phase_26.md` §2.4) — lunar
-indigo `#7A86FF`, Inter, cool `#14161C` void. Unreal IA only; **not** Epic
+**Paint:** Somnium **Nocturne** (`theme.rs`, `dev records/phase_26.md` §2.4) —
+lunar indigo `#7A86FF`, Inter, cool `#14161C` void. Unreal IA only; **not** Epic
 `#0070E0` / Roboto / Starship radii.
 
-**Colour picker** (Metaphor 26-F, former Iris plan) — still the Details
-property-editor pattern below. No widget code yet.
+**Colour picker** (Metaphor 26-F Iris) — Details swatch + HSV popup; Cancel restores.
+Linear storage, approximate sRGB display. Kelvin > 0 locks the light swatch.
 
 **Boundary:** UE EULA — pattern and information architecture only. No Slate
 source is copied. Widget implementation will be original Rust on the existing
@@ -132,7 +127,7 @@ Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 
 ### 1.5.1 Colour picker — Details property editor (26-F Iris)
 
-**Status:** planned inside Metaphor; no Somnium widget code yet.
+**Status:** 26-F Iris implemented 2026-08-13 (`widgets/color_picker.rs`).
 
 | UE5 piece | Pattern to adopt | Somnium target |
 |---|---|---|

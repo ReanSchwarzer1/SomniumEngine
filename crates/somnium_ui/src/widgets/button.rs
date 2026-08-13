@@ -49,6 +49,10 @@ impl Control for Button {
         ctx.push_rect_filled(widget.screen_bounds(), widget.background);
     }
 
+    fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {
+        crate::node::CursorKind::Pointer
+    }
+
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,

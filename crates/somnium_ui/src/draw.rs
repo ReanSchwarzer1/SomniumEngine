@@ -6,6 +6,7 @@
 
 use crate::{
     font::{FONT_ATLAS_TEXTURE_ID, FontAtlas},
+    icons::IconAtlas,
     types::Rect,
 };
 use glam::Vec2;
@@ -60,6 +61,7 @@ pub struct DrawingContext {
     clip_stack: Vec<Rect>,
     current_clip: Rect,
     pub font_atlas: FontAtlas,
+    pub icon_atlas: IconAtlas,
 }
 
 impl DrawingContext {
@@ -72,6 +74,7 @@ impl DrawingContext {
             clip_stack: Vec::new(),
             current_clip: root_clip,
             font_atlas: FontAtlas::new(),
+            icon_atlas: IconAtlas::new(),
         }
     }
 
@@ -205,5 +208,39 @@ impl DrawingContext {
         ]);
         self.push_indices(base, base + 1, base + 2);
         self.push_indices(base + 2, base + 3, base);
+    }
+
+    /// 9-slice: corners stay unscaled, edges stretch on one axis, center tiles.
+    /// `slice` is the inset from each edge of `src` (UV space 0..1 of the bound texture).
+    pub fn push_nine_slice(&mut self, dest: Rect, texture_id: u32, slice: f32, color: [u8; 4]) {
+        let s = slice.clamp(0.0, 0.49);
+        let dw = dest.w.max(1.0);
+        let dh = dest.h.max(1.0);
+        let cx = (s * dw).min(dw * 0.45);
+        let cy = (s * dh).min(dh * 0.45);
+        let xs = [dest.x, dest.x + cx, dest.x + dw - cx, dest.x + dw];
+        let ys = [dest.y, dest.y + cy, dest.y + dh - cy, dest.y + dh];
+        let us = [0.0, s, 1.0 - s, 1.0];
+        let vs = [0.0, s, 1.0 - s, 1.0];
+        for row in 0..3 {
+            for col in 0..3 {
+                let r = Rect::new(
+                    xs[col],
+                    ys[row],
+                    xs[col + 1] - xs[col],
+                    ys[row + 1] - ys[row],
+                );
+                if r.w <= 0.0 || r.h <= 0.0 {
+                    continue;
+                }
+                let uv = [
+                    Vec2::new(us[col], vs[row]),
+                    Vec2::new(us[col + 1], vs[row]),
+                    Vec2::new(us[col + 1], vs[row + 1]),
+                    Vec2::new(us[col], vs[row + 1]),
+                ];
+                self.push_textured_rect(r, uv, color, texture_id);
+            }
+        }
     }
 }

@@ -9,7 +9,7 @@
 > **Codename:** Metaphor, after Atlus's *Metaphor: ReFantazio* (and the
 > Persona-family discipline of treating UI as identity, not chrome). The name
 > is thematic. **Zero Atlus art, fonts, motion, or layout is copied.**
-> **Status:** PLANNED — IMPLEMENTATION NOT STARTED
+> **Status:** 26-A through 26-I implemented 2026-08-13. 26-H SDF/cosmic-text slipped (bundled bitmap Inter, supersampled + HiDPI raster). 26-J not started.
 > **Plan date:** 2026-08-13
 > **Project:** Somnium Engine
 > **Target:** Rust 1.85 docs / 1.88 effective, wgpu 29, winit 0.30
@@ -933,8 +933,8 @@ Order is dependency. Do not skip A/B to "get to the Drawer".
 | **26-E** | Details / Outliner | Tree outliner, PropertyRows, CheckBox/Combo replacements, inspector search, section icons | No InspectorField lost; foliage/tonemapper are combos; terrain palette and paint still arm brushes |
 | **26-F** | Iris | Colour widget + lights + water colours/leftovers + particles + material base | See §11; Cancel restores; Kelvin lock; water defaults unchanged |
 | **26-G** | Runtime UI | Screen-space `UiCanvas` API usable from `hello_engine` without `UiManager` editor chrome; 9-slice; simple HUD/pause stub **optional** as dogfood | A game can build a widget tree and draw it through `UiPass` (or a second pass) without linking editor layout |
-| **26-H** | Type | SDF or MSDF atlas, rustybuzz/cosmic-text shaping, kerning | Latin editor strings look correct at 12–24 px and under scale; **may slip** — if slipped, say so in the completion note and keep the bundled bitmap font |
-| **26-I** | Polish | Command palette (Ctrl+P or Ctrl+Shift+P), toasts, HiDPI scale, layout width persistence, modal unsaved, evidence set, ATTRIBUTION, context.md §8 diagram | Walkthrough PNGs under `dev records/phase 26/`; no invented shots |
+| **26-H** | Type | **Slipped.** Bundled bitmap Inter, 1.5× supersample + window DPI raster. No SDF/MSDF, no rustybuzz/cosmic-text. | Latin at 12–24 px is readable; shaping/kerning remain a later pass |
+| **26-I** | Polish | Command palette (Ctrl+P), toasts, HiDPI scale, layout width persistence, modal unsaved, ATTRIBUTION, context.md §8. Evidence PNGs **not invented** — capture live into `dev records/phase 26/` | Palette/toasts/layout persist/unsaved modal work; screenshots optional |
 
 **26-D2 (optional inside D):** drag-drop spawn from drawer to viewport.
 Requires Widget drag-drop restored. If not ready, ship double-click spawn.
