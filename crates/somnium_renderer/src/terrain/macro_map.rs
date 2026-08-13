@@ -202,6 +202,73 @@ pub fn generate(
     MacroMap { texels, size }
 }
 
+/// Splat-weighted unique colour: each macro texel is the strongest-four
+/// blend of per-layer mean albedo (Phase XV-Zeta).
+///
+/// Encoded in the same perceptual (sqrt-linear) space the shading pass blends
+/// in, so a Lerp toward this map at landscape scale shows *which material won*
+/// rather than a satellite brown overlay.
+#[must_use]
+pub fn from_splat(
+    splat: &[super::textures::SplatTexel],
+    splat_w: u32,
+    splat_h: u32,
+    mean_albedo: &[[f32; 4]; super::textures::TERRAIN_LAYER_COUNT as usize],
+) -> MacroMap {
+    let size = MACRO_SIZE;
+    let mut texels = Vec::with_capacity((size * size * 4) as usize);
+    if splat_w == 0 || splat_h == 0 || splat.is_empty() {
+        texels.resize((size * size * 4) as usize, 128);
+        return MacroMap { texels, size };
+    }
+    for y in 0..size {
+        for x in 0..size {
+            let sx = ((x as u64 * splat_w as u64) / size as u64).min(splat_w as u64 - 1) as usize;
+            let sy = ((y as u64 * splat_h as u64) / size as u64).min(splat_h as u64 - 1) as usize;
+            let t = splat[sy * splat_w as usize + sx];
+            let mut weights = [0.0f32; super::textures::TERRAIN_LAYER_COUNT as usize];
+            let mut sum = 0.0f32;
+            for i in 0..super::textures::TERRAIN_LAYER_COUNT as usize {
+                weights[i] = f32::from(t[i]);
+                sum += weights[i];
+            }
+            if sum > 0.0 {
+                for w in &mut weights {
+                    *w /= sum;
+                }
+            } else {
+                weights[0] = 1.0;
+            }
+            let selected = super::splat::strongest_four(&weights);
+            let mut c = [0.0f32; 3];
+            let mut kept = 0.0f32;
+            for idx in selected {
+                if idx == u32::MAX {
+                    break;
+                }
+                let i = idx as usize;
+                let w = weights[i];
+                c[0] += mean_albedo[i][0] * w;
+                c[1] += mean_albedo[i][1] * w;
+                c[2] += mean_albedo[i][2] * w;
+                kept += w;
+            }
+            let inv = 1.0 / kept.max(0.0001);
+            // Linear → perceptual for the shader's Lerp (which happens after sqrt).
+            for channel in &mut c {
+                *channel = (*channel * inv).max(0.0).sqrt().clamp(0.0, 1.0);
+            }
+            texels.extend([
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+                255,
+            ]);
+        }
+    }
+    MacroMap { texels, size }
+}
+
 /// Upload a generated macro map as a single non-sRGB RGBA8 texture.
 pub fn upload(
     device: &wgpu::Device,
@@ -361,5 +428,19 @@ mod tests {
             texel(&fine, MACRO_SIZE / 2, MACRO_SIZE / 2)[3],
         );
         assert_eq!(ca, fa, "same grade, different cell size, different alpha");
+    }
+
+    #[test]
+    fn unique_colour_follows_the_painted_layer_mean() {
+        let mut texel = [0u8; super::super::textures::TERRAIN_LAYER_COUNT as usize];
+        texel[16] = 255;
+        let splat = vec![texel; 4];
+        let mut means = [[0.5, 0.5, 0.5, 1.0]; super::super::textures::TERRAIN_LAYER_COUNT as usize];
+        means[16] = [0.05, 0.4, 0.06, 1.0];
+        let map = from_splat(&splat, 2, 2, &means);
+        assert_eq!(map.size, MACRO_SIZE);
+        let p = &map.texels[0..4];
+        assert!(p[1] > p[0] + 40, "lawn unique colour should be green, got {p:?}");
+        assert_eq!(p[3], 255);
     }
 }

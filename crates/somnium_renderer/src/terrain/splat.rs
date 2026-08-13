@@ -7,8 +7,8 @@
 
 use super::textures::{SplatTexel, TERRAIN_LAYER_COUNT};
 
-/// RGBA control maps for sixteen layers (0–3, 4–7, 8–11, 12–15).
-pub const SPLAT_MAP_COUNT: usize = 4;
+/// RGBA control maps for thirty-two layers (eight groups of four).
+pub const SPLAT_MAP_COUNT: usize = 8;
 
 /// Stored non-zero channels allowed per splat texel.
 pub const MAX_STORED_NONZERO: usize = 4;
@@ -25,14 +25,12 @@ pub fn splat_channel(layer: usize) -> usize {
     layer % 4
 }
 
-/// De-interleave one CPU texel into four RGBA bytes groups.
+/// De-interleave one CPU texel into eight RGBA byte groups.
 pub fn deinterleave(texel: &SplatTexel) -> [[u8; 4]; SPLAT_MAP_COUNT] {
-    [
-        [texel[0], texel[1], texel[2], texel[3]],
-        [texel[4], texel[5], texel[6], texel[7]],
-        [texel[8], texel[9], texel[10], texel[11]],
-        [texel[12], texel[13], texel[14], texel[15]],
-    ]
+    std::array::from_fn(|g| {
+        let i = g * 4;
+        [texel[i], texel[i + 1], texel[i + 2], texel[i + 3]]
+    })
 }
 
 /// Quantize so surviving weights sum to 255, dumping remainder on the last

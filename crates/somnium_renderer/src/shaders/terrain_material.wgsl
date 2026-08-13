@@ -17,37 +17,34 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (880 bytes, Phase XV-H). Every vec4 sits
+// Mirrors `terrain::GpuTerrainMaterial` (1664 bytes, Phase XV-Zeta). Every vec4 sits
 // on a 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
-    layer_tiling: array<vec4<f32>, 4>,
+    layer_tiling: array<vec4<f32>, 8>,
     brush: vec4<f32>,
-    albedo_maps: array<vec4<i32>, 4>,
-    surface_maps: array<vec4<i32>, 4>,
+    albedo_maps: array<vec4<i32>, 8>,
+    surface_maps: array<vec4<i32>, 8>,
     terrain_origin: vec2<f32>,
     inv_world_size: vec2<f32>,
-    splat_map: i32,
-    splat_map_hi: i32,
-    splat_map_2: i32,
-    splat_map_3: i32,
+    splat_maps: array<vec4<i32>, 2>,
     cliff_layer: u32,
     hex_tiling: u32,
     height_blend: u32,
     macro_map: i32,
-    layer_height_scale: array<vec4<f32>, 4>,
-    layer_blend_width: array<vec4<f32>, 4>,
-    layer_weight_clamp: array<vec4<f32>, 4>,
-    layer_parallax: array<vec4<f32>, 4>,
+    layer_height_scale: array<vec4<f32>, 8>,
+    layer_blend_width: array<vec4<f32>, 8>,
+    layer_weight_clamp: array<vec4<f32>, 8>,
+    layer_parallax: array<vec4<f32>, 8>,
     macro_mode: u32,
     macro_strength: f32,
     detail_fade_start: f32,
     detail_fade_end: f32,
-    layer_albedo: array<vec4<f32>, 16>,
+    layer_albedo: array<vec4<f32>, 32>,
     parallax_steps: u32,
     parallax_shadow_steps: u32,
     projection_sharpness: f32,
     projection_mode: u32,
-    layer_moisture: array<vec4<f32>, 4>,
+    layer_moisture: array<vec4<f32>, 8>,
     wetness: f32,
     wetness_darken: f32,
     wetness_gloss: f32,
@@ -55,7 +52,7 @@ struct TerrainMaterial {
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
-const TERRAIN_LAYERS: u32 = 16u;
+const TERRAIN_LAYERS: u32 = 32u;
 
 /// Below this weight a layer cannot change the result, so it is not sampled.
 ///
@@ -102,23 +99,28 @@ fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_moisture[layer / 4u][layer % 4u];
 }
 
-fn terrain_unpack_splats(w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, w3: vec4<f32>) -> array<f32, 16> {
-    let total = max(
-        w0.x + w0.y + w0.z + w0.w + w1.x + w1.y + w1.z + w1.w +
-        w2.x + w2.y + w2.z + w2.w + w3.x + w3.y + w3.z + w3.w,
-        0.0001,
-    );
-    return array<f32, 16>(
-        w0.x / total, w0.y / total, w0.z / total, w0.w / total,
-        w1.x / total, w1.y / total, w1.z / total, w1.w / total,
-        w2.x / total, w2.y / total, w2.z / total, w2.w / total,
-        w3.x / total, w3.y / total, w3.z / total, w3.w / total,
-    );
+fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
+    var w = array<f32, 32>();
+    var total = 0.0;
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let v = s[g];
+        let base = g * 4u;
+        w[base + 0u] = v.x;
+        w[base + 1u] = v.y;
+        w[base + 2u] = v.z;
+        w[base + 3u] = v.w;
+        total += v.x + v.y + v.z + v.w;
+    }
+    total = max(total, 0.0001);
+    for (var i = 0u; i < 32u; i = i + 1u) {
+        w[i] = w[i] / total;
+    }
+    return w;
 }
 
 /// Deterministic strongest-four. Lower index wins ties.
-fn terrain_strongest_four(weight: array<f32, 16>) -> array<u32, 4> {
-    var used = array<bool, 16>();
+fn terrain_strongest_four(weight: array<f32, 32>) -> array<u32, 4> {
+    var used = array<bool, 32>();
     var out = array<u32, 4>(0u, 0u, 0u, 0u);
     for (var s = 0u; s < 4u; s = s + 1u) {
         var best = -1.0;
@@ -596,14 +598,15 @@ fn evaluate_terrain_material(
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
 
-    let w0 = textureSample(textures[tm.splat_map], default_sampler, splat_uv);
-    let w1 = textureSample(textures[tm.splat_map_hi], default_sampler, splat_uv);
-    let w2 = textureSample(textures[tm.splat_map_2], default_sampler, splat_uv);
-    let w3 = textureSample(textures[tm.splat_map_3], default_sampler, splat_uv);
-    var weight = terrain_unpack_splats(w0, w1, w2, w3);
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSample(textures[id], default_sampler, splat_uv);
+    }
+    var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
     var kept = 0.0;
-    var gated = array<f32, 16>();
+    var gated = array<f32, 32>();
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
         gated[i] = weight[i];
@@ -611,7 +614,7 @@ fn evaluate_terrain_material(
     }
     let discarded = 1.0 - kept;
     let selected_rgb = vec3<f32>(
-        f32(selected[0]), f32(selected[1]), f32(selected[2])) / 15.0;
+        f32(selected[0]), f32(selected[1]), f32(selected[2])) / 31.0;
     let weight_rgb = vec3<f32>(
         weight[selected[0]], weight[selected[1]], weight[selected[2]]);
     kept = max(kept, 0.0001);

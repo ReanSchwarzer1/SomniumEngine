@@ -89,12 +89,17 @@ struct InspectorHandles {
     post_ibl: NodeHandle,
     // Terrain + foliage sections (Phase 17C), hidden unless a terrain is picked.
     terrain_section: NodeHandle,
+    terrain_mode_label: NodeHandle,
+    terrain_paint_toggle: NodeHandle,
+    terrain_paint_label: NodeHandle,
+    terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
-    terrain_palette: [NodeHandle; 16],
-    terrain_palette_labels: [NodeHandle; 16],
+    terrain_palette: [NodeHandle; 32],
+    terrain_palette_labels: [NodeHandle; 32],
     terrain_tile: NodeHandle,
     terrain_relief: NodeHandle,
     terrain_wetness: NodeHandle,
+    terrain_macro: NodeHandle,
     terrain_debug: NodeHandle,
     water_section: NodeHandle,
     water_surface: NodeHandle,
@@ -226,6 +231,23 @@ pub struct PostInspectorState {
     pub tonemapper: &'static str,
 }
 
+/// Terrain inspector payload (Phase 17C / XV-Zeta).
+#[derive(Debug, Clone, Copy)]
+pub struct TerrainInspectorState {
+    pub paint_layer: f32,
+    pub tile: f32,
+    pub relief: f32,
+    pub wetness: f32,
+    pub debug_view: f32,
+    pub macro_strength: f32,
+    /// `BrushMode` index 0..=5.
+    pub brush: u8,
+    pub terrain_edit: bool,
+    /// True when terrain edit is on and the brush is Paint.
+    pub terrain_paint: bool,
+    pub foliage_paint: bool,
+}
+
 /// One line of the profiler overlay (Phase 29).
 ///
 /// Split into label and value rather than one pre-formatted string because the
@@ -255,11 +277,16 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Island Tree",
 ];
 
-/// Short paint-palette labels (Phase XV-I). Indices match the renderer roster.
-const TERRAIN_LAYER_SHORT: [&str; 16] = [
+/// Short paint-palette labels (Phase XV-I / XV-Zeta). Indices match the renderer roster.
+const TERRAIN_LAYER_SHORT: [&str; 32] = [
     "Grass", "Forest", "Rock", "Snow", "Meadow", "Mud", "Coast", "Gravel", "DrySd", "DampSd",
-    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus",
+    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus", "Lawn", "Duff", "GrayRk", "Slate",
+    "MossC", "Lime", "Loam", "Pine", "Wild", "Peat", "Gran", "Dune", "Lichen", "Autumn", "Path",
+    "Crust",
 ];
+
+const TERRAIN_BRUSH_SHORT: [&str; 6] = ["Rs", "Lw", "Sm", "Fl", "Nz", "Pt"];
+const TERRAIN_BRUSH_NAMES: [&str; 6] = ["Raise", "Lower", "Smooth", "Flatten", "Noise", "Paint"];
 
 pub type LightInspectorValues = [f32; 8];
 
@@ -284,7 +311,7 @@ struct EditorLayout {
     pause_label: NodeHandle,
     stop_button: NodeHandle,
     stop_label: NodeHandle,
-    terrain_tool_items: Vec<(NodeHandle, u8)>,
+    terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: InspectorHandles,
     viewport_handle: NodeHandle,
     /// Phase 29 profiler overlay.
@@ -338,8 +365,8 @@ pub struct UiManager {
     pause_label: NodeHandle,
     stop_button: NodeHandle,
     stop_label: NodeHandle,
-    // Terrain tool buttons (Phase 14F): (button_handle, BrushMode index)
-    terrain_tool_items: Vec<(NodeHandle, u8)>,
+    // Terrain tool buttons (Phase 14F / XV-Zeta): (button, label, BrushMode index)
+    terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
     outliner_rows: Vec<(NodeHandle, u32)>,
     // Inspector field handles
@@ -855,35 +882,81 @@ impl UiManager {
         }
     }
 
-    /// Show or hide the Terrain section and refresh it (Phase 17C / XV-I).
-    ///
-    /// `values` is `[paint_layer, current_tile, relief, wetness, debug_view]`.
-    pub fn update_terrain_inspector(&mut self, values: Option<[f32; 5]>) {
+    /// Show or hide the Terrain section and refresh it (Phase 17C / XV-I / XV-Zeta).
+    pub fn update_terrain_inspector(&mut self, values: Option<TerrainInspectorState>) {
         let h = &self.inspector_handles;
         let (section, layer, tile) = (h.terrain_section, h.terrain_layer, h.terrain_tile);
         let relief = h.terrain_relief;
         let wetness = h.terrain_wetness;
+        let macro_s = h.terrain_macro;
         let debug = h.terrain_debug;
+        let mode_label = h.terrain_mode_label;
+        let paint_label = h.terrain_paint_label;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(layer, v[0]));
+                    .send(NumericFieldMessage::set_value(layer, v.paint_layer));
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(tile, v[1]));
+                    .send(NumericFieldMessage::set_value(tile, v.tile));
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(relief, v[2]));
+                    .send(NumericFieldMessage::set_value(relief, v.relief));
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(wetness, v[3]));
+                    .send(NumericFieldMessage::set_value(wetness, v.wetness));
                 self.native_ui
-                    .send(NumericFieldMessage::set_value(debug, v[4]));
-                let paint = (v[0].round().max(0.0) as usize).min(15);
+                    .send(NumericFieldMessage::set_value(macro_s, v.macro_strength));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(debug, v.debug_view));
+                let paint =
+                    (v.paint_layer.round().max(0.0) as usize).min(TERRAIN_LAYER_SHORT.len() - 1);
+                let brush = (v.brush as usize).min(TERRAIN_BRUSH_NAMES.len() - 1);
+                let status = if v.foliage_paint {
+                    "Active: FOLIAGE paint".to_string()
+                } else if v.terrain_edit && v.terrain_paint {
+                    format!("Active: TERRAIN paint — {}", TERRAIN_LAYER_SHORT[paint])
+                } else if v.terrain_edit {
+                    format!("Active: TERRAIN sculpt — {}", TERRAIN_BRUSH_NAMES[brush])
+                } else {
+                    "Active: none — click Terrain Paint or a layer".to_string()
+                };
+                self.native_ui
+                    .send(TextMessage::set_text(mode_label, status));
+                let tick = if v.terrain_paint && !v.foliage_paint {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                self.native_ui.send(TextMessage::set_text(
+                    paint_label,
+                    format!("{tick} Terrain Paint"),
+                ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
                     let mark = if i == paint { ">" } else { " " };
                     self.native_ui.send(TextMessage::set_text(
                         *label,
                         format!("{mark}{}", TERRAIN_LAYER_SHORT[i]),
                     ));
+                }
+                let active_brush = if v.terrain_edit { Some(brush) } else { None };
+                for &(_, lbl, tool) in &h.terrain_brush_items {
+                    let name = TERRAIN_BRUSH_SHORT[tool as usize];
+                    let mark = if active_brush == Some(tool as usize) {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    self.native_ui
+                        .send(TextMessage::set_text(lbl, format!("{mark}{name}")));
+                }
+                for &(_btn, lbl, tool) in &self.terrain_tool_items {
+                    let name = TERRAIN_BRUSH_SHORT[tool as usize];
+                    let mark = if active_brush == Some(tool as usize) {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    self.native_ui
+                        .send(TextMessage::set_text(lbl, format!("{mark}{name}")));
                 }
             }
             None => self.native_ui.set_visibility(section, false),
@@ -977,7 +1050,7 @@ impl UiManager {
                 let tick = |on: bool| if on { "[x]" } else { "[ ]" };
                 let labels = [
                     (h.foliage_label, "Enabled"),
-                    (h.foliage_paint_label, "Paint Mode"),
+                    (h.foliage_paint_label, "Foliage Paint"),
                     (h.foliage_erase_label, "Erase"),
                     (h.foliage_single_label, "Single"),
                 ];
@@ -1076,6 +1149,7 @@ impl UiManager {
             (h.terrain_tile, IF::TerrainTile0),
             (h.terrain_relief, IF::TerrainRelief),
             (h.terrain_wetness, IF::TerrainWetness),
+            (h.terrain_macro, IF::TerrainMacroStrength),
             (h.terrain_debug, IF::TerrainDebugView),
             (h.water_surface, IF::WaterSurface),
             (h.water_depth, IF::WaterMaxDepth),
@@ -1232,6 +1306,11 @@ impl UiManager {
                         .push_back(EditorEvent::ToggleFoliagePaint);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_paint_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainPaint);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleFoliageErase);
@@ -1260,11 +1339,21 @@ impl UiManager {
                         .push_back(EditorEvent::TogglePostFx(PostFxToggle::ChromaticAberration));
                     continue;
                 }
+                if let Some(&(_, _, tool)) = self
+                    .inspector_handles
+                    .terrain_brush_items
+                    .iter()
+                    .find(|(bh, _, _)| *bh == msg.destination)
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SetTerrainTool(tool));
+                    continue;
+                }
                 // Terrain tool button (Phase 14F)
-                if let Some(&(_, tool)) = self
+                if let Some(&(_, _, tool)) = self
                     .terrain_tool_items
                     .iter()
-                    .find(|(bh, _)| *bh == msg.destination)
+                    .find(|(bh, _, _)| *bh == msg.destination)
                 {
                     self.editor_events
                         .push_back(EditorEvent::SetTerrainTool(tool));
@@ -1708,8 +1797,8 @@ fn build_editor_layout(ui: &mut UserInterface, font_id: u8) -> EditorLayout {
         .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)
         .build();
-        ui.add_node(lbl, btn_h);
-        terrain_tool_items.push((btn_h, tool));
+        let lbl_h = ui.add_node(lbl, btn_h);
+        terrain_tool_items.push((btn_h, lbl_h, tool));
     }
 
     // Viewport area (col 1) — transparent, no hit-test. Mouse events in this region
@@ -2280,7 +2369,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // Phase 17F: the brush. Paint arms it, Erase flips the stroke, Single
     // places one instance at the cursor — which is how trees get placed.
     let (foliage_paint_toggle, foliage_paint_label) =
-        make_toggle(ui, "Paint Mode", font_id, foliage_section);
+        make_toggle(ui, "Foliage Paint", font_id, foliage_section);
     let (foliage_erase_toggle, foliage_erase_label) =
         make_toggle(ui, "Erase", font_id, foliage_section);
     let (foliage_single_toggle, foliage_single_label) =
@@ -2316,12 +2405,42 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             .build();
     let terrain_section = ui.add_node(terrain_panel, parent);
     sec_label(ui, "Terrain", font_id, terrain_section);
+    let terrain_mode_label = TextBuilder::new(WidgetBuilder::new().with_height(32.0).with_margin(
+        Thickness {
+            left: 6.0,
+            top: 2.0,
+            right: 6.0,
+            bottom: 2.0,
+        },
+    ))
+    .with_text("Active: none")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    let terrain_mode_label = ui.add_node(terrain_mode_label, terrain_section);
+    let (terrain_paint_toggle, terrain_paint_label) =
+        make_toggle(ui, "Terrain Paint", font_id, terrain_section);
+    let mut terrain_brush_items = Vec::with_capacity(6);
+    for row in 0..2 {
+        let row_panel =
+            StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                .with_orientation(Orientation::Horizontal)
+                .build();
+        let row_h = ui.add_node(row_panel, terrain_section);
+        for col in 0..3 {
+            let tool = (row * 3 + col) as u8;
+            let (btn, lbl) =
+                make_palette_button(ui, TERRAIN_BRUSH_SHORT[tool as usize], font_id, row_h);
+            terrain_brush_items.push((btn, lbl, tool));
+        }
+    }
     // Whole steps: the paint layer is an index, and a fractional drag would be
     // meaningless.
     let terrain_layer = make_row_step(ui, "Paint", 34.0, font_id, terrain_section, 0.02);
-    let mut terrain_palette = [NodeHandle::NONE; 16];
-    let mut terrain_palette_labels = [NodeHandle::NONE; 16];
-    for row in 0..4 {
+    let mut terrain_palette = [NodeHandle::NONE; 32];
+    let mut terrain_palette_labels = [NodeHandle::NONE; 32];
+    for row in 0..8 {
         let row_panel =
             StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                 .with_orientation(Orientation::Horizontal)
@@ -2340,6 +2459,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // between gravel and mud. 0 switches parallax off.
     let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
     let terrain_wetness = make_row_step(ui, "Wet", 34.0, font_id, terrain_section, 0.02);
+    let terrain_macro = make_row_step(ui, "Macro", 34.0, font_id, terrain_section, 0.02);
     let terrain_debug = make_row_step(ui, "Dbg", 34.0, font_id, terrain_section, 1.0);
     ui.set_visibility(terrain_section, false);
 
@@ -2407,12 +2527,17 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_moon_row,
         light_moon_int,
         terrain_section,
+        terrain_mode_label,
+        terrain_paint_toggle,
+        terrain_paint_label,
+        terrain_brush_items,
         terrain_layer,
         terrain_palette,
         terrain_palette_labels,
         terrain_tile,
         terrain_relief,
         terrain_wetness,
+        terrain_macro,
         terrain_debug,
         water_section,
         water_surface,

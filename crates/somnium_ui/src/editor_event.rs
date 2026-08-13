@@ -117,7 +117,7 @@ pub enum InspectorField {
     PostAoRadius,
     PostAoIntensity,
     // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
-    /// Which splat layer the paint brush writes, 0..=15.
+    /// Which splat layer the paint brush writes, 0..=31.
     TerrainPaintLayer,
     /// World-space tiling of the currently selected paint layer.
     TerrainTile0,
@@ -126,6 +126,8 @@ pub enum InspectorField {
     TerrainRelief,
     /// Global wetness 0..1 (XV-H).
     TerrainWetness,
+    /// Unique-colour / macro blend strength 0..1 (XV-Zeta).
+    TerrainMacroStrength,
     /// Debug visualisation code (same numbers as `SOMNIUM_SHADOW_DEBUG`).
     TerrainDebugView,
     // First-class lake body settings (Phase IV-C).
@@ -232,8 +234,11 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
-    /// Palette click: set the paint layer (XV-I).
+    /// Palette click: set the paint layer (XV-I). The engine also arms
+    /// terrain paint and turns foliage paint off (XV-Zeta).
     SetTerrainPaintLayer(u8),
+    /// Arm or disarm terrain layer paint from the inspector (XV-Zeta).
+    ToggleTerrainPaint,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
     /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).

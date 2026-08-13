@@ -139,11 +139,12 @@ struct GiHit {
 fn gi_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
     let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
-    let w0 = textureSampleLevel(textures[tm.splat_map], default_sampler, uv, 0.0);
-    let w1 = textureSampleLevel(textures[tm.splat_map_hi], default_sampler, uv, 0.0);
-    let w2 = textureSampleLevel(textures[tm.splat_map_2], default_sampler, uv, 0.0);
-    let w3 = textureSampleLevel(textures[tm.splat_map_3], default_sampler, uv, 0.0);
-    let weight = terrain_unpack_splats(w0, w1, w2, w3);
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
+    }
+    let weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
     var c = vec3<f32>(0.0);
     var total = 0.0;

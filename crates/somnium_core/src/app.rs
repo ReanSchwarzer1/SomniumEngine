@@ -13,7 +13,7 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
 use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
-use somnium_ui::{EditorEvent, UiManager};
+use somnium_ui::{EditorEvent, TerrainInspectorState, UiManager};
 
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
@@ -964,13 +964,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let t = r.terrain(tc.terrain_id)?;
                 let tile = |i: usize| t.layers.get(i).map_or(1.0, |l| l.tiling);
                 let paint = self.terrain_brush.paint_layer;
-                Some([
-                    paint as f32,
-                    tile(paint),
-                    t.parallax_scale,
-                    t.wetness,
-                    self.terrain_debug_view,
-                ])
+                Some(TerrainInspectorState {
+                    paint_layer: paint as f32,
+                    tile: tile(paint),
+                    relief: t.parallax_scale,
+                    wetness: t.wetness,
+                    debug_view: self.terrain_debug_view,
+                    macro_strength: t.macro_strength,
+                    brush: match self.terrain_brush.mode {
+                        BrushMode::Raise => 0,
+                        BrushMode::Lower => 1,
+                        BrushMode::Smooth => 2,
+                        BrushMode::Flatten => 3,
+                        BrushMode::Noise => 4,
+                        BrushMode::Paint => 5,
+                    },
+                    terrain_edit: self.terrain_edit_active,
+                    terrain_paint: self.terrain_edit_active
+                        && self.terrain_brush.mode == BrushMode::Paint,
+                    foliage_paint: self.foliage_paint_active,
+                })
             });
             let brush = self.foliage_brush;
             let paint_on = self.foliage_paint_active;
@@ -1319,6 +1332,7 @@ impl<G: GameApp> Engine<G> {
         if self.selected_terrain().is_some() {
             self.terrain_edit_active = true;
         }
+        self.foliage_paint_active = false;
         info!("Terrain tool: {}", self.terrain_brush.mode.label());
     }
 
@@ -1517,6 +1531,13 @@ impl<G: GameApp> Engine<G> {
         };
         // Stroke effects are already applied — record for undo only.
         self.undo_stack.push_silent(cmd);
+        if stroke.is_paint {
+            if let Some(r) = self.renderer.as_mut() {
+                if let Some(t) = r.terrain_mut(stroke.terrain_id) {
+                    t.invalidate_unique_colour();
+                }
+            }
+        }
         true
     }
 
@@ -1566,6 +1587,7 @@ impl<G: GameApp> Engine<G> {
                             .copy_from_slice(&texels[i * w..(i + 1) * w]);
                     }
                     terrain.splatmap.mark_dirty(x0, z0, x1, z1);
+                    terrain.invalidate_unique_colour();
                     terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
                 }
             }
@@ -2556,6 +2578,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainTile0
                         | IF::TerrainRelief
                         | IF::TerrainWetness
+                        | IF::TerrainMacroStrength
                         | IF::TerrainDebugView
                 ) {
                     if field == IF::TerrainPaintLayer {
@@ -2590,6 +2613,19 @@ impl<G: GameApp> Engine<G> {
                             .and_then(|r| r.terrain_mut(tc.terrain_id))
                         {
                             t.wetness = value.clamp(0.0, 1.0);
+                        }
+                        return;
+                    }
+                    if field == IF::TerrainMacroStrength {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
+                            return;
+                        };
+                        if let Some(t) = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.terrain_mut(tc.terrain_id))
+                        {
+                            t.macro_strength = value.clamp(0.0, 1.0);
                         }
                         return;
                     }
@@ -2937,6 +2973,20 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::SetTerrainPaintLayer(layer) => {
                 self.terrain_brush.paint_layer = (layer as usize)
                     .min(somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize - 1);
+                self.set_terrain_tool(5);
+            }
+
+            EditorEvent::ToggleTerrainPaint => {
+                let already = self.terrain_edit_active
+                    && self.terrain_brush.mode == BrushMode::Paint
+                    && !self.foliage_paint_active;
+                if already {
+                    self.terrain_edit_active = false;
+                    info!("Terrain paint: off");
+                } else {
+                    self.set_terrain_tool(5);
+                    info!("Terrain paint: ON");
+                }
             }
 
             EditorEvent::SetCameraSpeed(normalized) => {

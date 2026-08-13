@@ -11,11 +11,14 @@
 pub const LAYER_TEXTURE_SIZE: u32 = 256;
 /// Number of material layers.
 ///
-/// Phase XV: sixteen global materials, carried by **four** RGBA8 splatmaps.
-/// At most four weights are stored per texel (see [`super::splat`]); the shader
-/// selects the strongest four before PBR sampling. Indices 0–7 stay
-/// compatibility-locked with Phase 25L.
-pub const TERRAIN_LAYER_COUNT: u32 = 16;
+/// Phase XV-Zeta: thirty-two global materials, carried by **eight** RGBA8
+/// splatmaps. At most four weights are stored per texel (see [`super::splat`]);
+/// the shader selects the strongest four before PBR sampling. Indices 0–7 stay
+/// compatibility-locked with Phase 25L; 8–15 with XV-C.
+pub const TERRAIN_LAYER_COUNT: u32 = 32;
+/// Photographed layers 0–15 live in the hero array; 16–31 in the extra array
+/// so the two banks can load at different resolutions (XVI RGBA8 budget).
+pub const TERRAIN_HERO_LAYERS: u32 = 16;
 
 /// One splatmap texel: a weight per material layer.
 ///
@@ -207,6 +210,134 @@ const RECIPES: [LayerRecipe; TERRAIN_LAYER_COUNT as usize] = [
         bump: 1.05,
         seed: 197,
     },
+    // 16: Lush lawn — saturated green, the distant meadow identity.
+    LayerRecipe {
+        tone_a: [0.12, 0.38, 0.10],
+        tone_b: [0.22, 0.52, 0.14],
+        roughness: 0.88,
+        bump: 0.45,
+        seed: 211,
+    },
+    // 17: Dark conifer duff
+    LayerRecipe {
+        tone_a: [0.10, 0.12, 0.08],
+        tone_b: [0.18, 0.20, 0.12],
+        roughness: 0.92,
+        bump: 0.7,
+        seed: 223,
+    },
+    // 18: Cool gray aerial rock
+    LayerRecipe {
+        tone_a: [0.38, 0.40, 0.42],
+        tone_b: [0.55, 0.57, 0.60],
+        roughness: 0.78,
+        bump: 1.0,
+        seed: 227,
+    },
+    // 19: Dark slate wall
+    LayerRecipe {
+        tone_a: [0.16, 0.17, 0.20],
+        tone_b: [0.28, 0.30, 0.34],
+        roughness: 0.72,
+        bump: 1.05,
+        seed: 233,
+    },
+    // 20: Green moss carpet
+    LayerRecipe {
+        tone_a: [0.10, 0.28, 0.08],
+        tone_b: [0.20, 0.42, 0.14],
+        roughness: 0.80,
+        bump: 0.55,
+        seed: 239,
+    },
+    // 21: Pale limestone
+    LayerRecipe {
+        tone_a: [0.62, 0.58, 0.48],
+        tone_b: [0.82, 0.78, 0.66],
+        roughness: 0.70,
+        bump: 0.8,
+        seed: 241,
+    },
+    // 22: Dark wet loam
+    LayerRecipe {
+        tone_a: [0.12, 0.10, 0.08],
+        tone_b: [0.22, 0.18, 0.12],
+        roughness: 0.68,
+        bump: 0.6,
+        seed: 251,
+    },
+    // 23: Pine-needle litter
+    LayerRecipe {
+        tone_a: [0.22, 0.18, 0.10],
+        tone_b: [0.36, 0.28, 0.14],
+        roughness: 0.90,
+        bump: 0.65,
+        seed: 257,
+    },
+    // 24: Bright wildgrass / meadow
+    LayerRecipe {
+        tone_a: [0.28, 0.46, 0.12],
+        tone_b: [0.48, 0.62, 0.18],
+        roughness: 0.86,
+        bump: 0.4,
+        seed: 263,
+    },
+    // 25: Wetland / peat
+    LayerRecipe {
+        tone_a: [0.14, 0.18, 0.12],
+        tone_b: [0.22, 0.28, 0.16],
+        roughness: 0.75,
+        bump: 0.5,
+        seed: 269,
+    },
+    // 26: Gray granite talus
+    LayerRecipe {
+        tone_a: [0.42, 0.42, 0.44],
+        tone_b: [0.62, 0.62, 0.64],
+        roughness: 0.84,
+        bump: 1.1,
+        seed: 271,
+    },
+    // 27: Light cool dune
+    LayerRecipe {
+        tone_a: [0.70, 0.68, 0.58],
+        tone_b: [0.88, 0.86, 0.74],
+        roughness: 0.80,
+        bump: 0.25,
+        seed: 277,
+    },
+    // 28: Lichen rock
+    LayerRecipe {
+        tone_a: [0.30, 0.34, 0.22],
+        tone_b: [0.48, 0.50, 0.32],
+        roughness: 0.76,
+        bump: 0.9,
+        seed: 281,
+    },
+    // 29: Autumn leaf litter
+    LayerRecipe {
+        tone_a: [0.42, 0.22, 0.08],
+        tone_b: [0.62, 0.36, 0.12],
+        roughness: 0.88,
+        bump: 0.6,
+        seed: 283,
+    },
+    // 30: Packed pale path
+    LayerRecipe {
+        tone_a: [0.48, 0.44, 0.38],
+        tone_b: [0.64, 0.60, 0.52],
+        roughness: 0.65,
+        bump: 0.35,
+        seed: 293,
+    },
+    // 31: Hard wind-crust snow
+    LayerRecipe {
+        tone_a: [0.88, 0.90, 0.94],
+        tone_b: [0.98, 0.99, 1.00],
+        roughness: 0.28,
+        bump: 0.2,
+        seed: 307,
+    },
 ];
 
 /// Names matching the recipe order, used by the layer-management UI.
@@ -227,10 +358,28 @@ pub const LAYER_NAMES: [&str; TERRAIN_LAYER_COUNT as usize] = [
     "Mossy Rock",
     "Cliff",
     "Talus",
+    "Lush Lawn",
+    "Conifer Duff",
+    "Cool Gray Rock",
+    "Dark Slate",
+    "Moss Carpet",
+    "Limestone",
+    "Dark Loam",
+    "Pine Litter",
+    "Wildgrass",
+    "Wetland",
+    "Gray Talus",
+    "Light Dune",
+    "Lichen Rock",
+    "Autumn Litter",
+    "Packed Path",
+    "Hard Snow",
 ];
 
 /// UV repeats per metre. Layers 0–7 stay at the shipping 0.25 (4 m tile) so
-/// old scenes do not retile. Layers 8–15 use 1 / physical width (XV-H).
+/// old scenes do not retile. Layers 8–15 and photographed 16–31 use
+/// `1 / physical_width_m` (aerial scans clamped to 15 m). Slots 16 and 24 are
+/// procedural lawn/wildgrass.
 pub const LAYER_TILING: [f32; TERRAIN_LAYER_COUNT as usize] = [
     0.25,
     0.25,
@@ -248,17 +397,36 @@ pub const LAYER_TILING: [f32; TERRAIN_LAYER_COUNT as usize] = [
     1.0 / 3.0,
     1.0 / 2.7,
     1.0 / 2.16,
+    1.0 / 2.0,
+    1.0 / 12.6,
+    1.0 / 15.0,
+    1.0 / 20.0,
+    1.0 / 20.0,
+    1.0 / 18.0,
+    1.0 / 20.7,
+    1.0 / 30.0,
+    1.0 / 2.0,
+    1.0 / 21.1,
+    1.0 / 18.0,
+    1.0 / 15.0,
+    1.0 / 20.0,
+    1.0 / 21.4,
+    1.0 / 20.0,
+    1.0 / 20.0,
 ];
 
 /// Moisture affinity 0..1 from the XV-A manifest (porous-wetting weights).
 pub const LAYER_MOISTURE: [f32; TERRAIN_LAYER_COUNT as usize] = [
     0.55, 0.70, 0.25, 0.15, 0.60, 0.95, 0.45, 0.20, 0.35, 0.90, 0.40, 0.50, 0.55, 0.85, 0.20, 0.40,
+    0.65, 0.75, 0.20, 0.15, 0.90, 0.30, 0.85, 0.60, 0.55, 0.95, 0.20, 0.25, 0.40, 0.70, 0.15, 0.10,
 ];
 
 /// Short inspector labels (XV-I palette).
 pub const LAYER_SHORT: [&str; TERRAIN_LAYER_COUNT as usize] = [
     "Grass", "Forest", "Rock", "Snow", "Meadow", "Mud", "Coast", "Gravel", "DrySd", "DampSd",
-    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus",
+    "Earth", "Clay", "Sparse", "Moss", "Cliff", "Talus", "Lawn", "Duff", "GrayRk", "Slate",
+    "MossC", "Lime", "Loam", "Pine", "Wild", "Peat", "Gran", "Dune", "Lichen", "Autumn", "Path",
+    "Crust",
 ];
 
 fn noise_height(u: f32, v: f32, recipe: &LayerRecipe) -> f32 {
@@ -405,14 +573,21 @@ pub struct TerrainLayerTextures {
     /// R,G = normal XY (Z reconstructed), B = roughness, A = occlusion.
     pub surface: wgpu::Texture,
     pub surface_view: wgpu::TextureView,
+    /// Layers 16–31, possibly at a lower resolution than the hero bank.
+    pub albedo_extra: wgpu::Texture,
+    pub albedo_extra_view: wgpu::TextureView,
+    pub surface_extra: wgpu::Texture,
+    pub surface_extra_view: wgpu::TextureView,
     /// False when the packed assets were missing and the procedural fallback
     /// was generated instead.
     pub from_assets: bool,
     /// True when the GPU arrays are BC7 rather than RGBA8 (Phase XV-E).
     /// Mutually exclusive with the RGBA8 path — never both resident.
     pub compressed: bool,
-    /// Edge length of the uploaded arrays.
+    /// Edge length of the uploaded hero arrays (layers 0–15).
     pub resolution: u32,
+    /// Edge length of layers 16–31 (often 1024 to stay in the RGBA8 budget).
+    pub extra_resolution: u32,
     /// Mean **linear** albedo of each layer (Phase 24L).
     ///
     /// A ray that bounces off the ground has to pick up the ground's colour,
@@ -480,6 +655,22 @@ pub const LAYER_MATERIALS: [&str; TERRAIN_LAYER_COUNT as usize] = [
     "mossy_rock",           // 13 mossy mountain rock
     "rock_face_03",         // 14 dedicated cliff face
     "ganges_river_pebbles", // 15 talus / river stone
+    "procedural_lush_lawn", // 16 — grass_path_3 failed ochre ΔE
+    "leaves_forest_ground", // 17 dark conifer duff
+    "aerial_rocks_01",      // 18 cool gray aerial rock
+    "rock_wall_02",         // 19 dark slate wall
+    "forest_ground_05",     // 20 green moss / forest carpet
+    "rock_boulder_dry",     // 21 pale limestone
+    "dirt_floor",           // 22 dark wet loam
+    "forest_leaves_02",     // 23 pine-needle litter
+    "procedural_wildgrass", // 24 — grass_path_2 failed ochre ΔE
+    "forest_ground_06",     // 25 wetland / peat
+    "gray_rocks",           // 26 gray granite talus
+    "aerial_beach_01",      // 27 light cool dune
+    "lichen_rock",          // 28 lichen rock
+    "forest_floor",         // 29 autumn leaf litter
+    "grassy_cobblestone",   // 30 packed pale path
+    "snow_01",              // 31 hard wind-crust snow
 ];
 
 /// Where the packed layer materials live, relative to the working directory.
@@ -640,6 +831,79 @@ fn resize_rgba(data: &[u8], src: u32, dst: u32) -> Vec<u8> {
     image::imageops::resize(&img, dst, dst, image::imageops::FilterType::Lanczos3).into_raw()
 }
 
+fn choose_runtime_resolutions() -> (u32, u32) {
+    let requested = std::env::var("SOMNIUM_TERRAIN_RES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| v.is_power_of_two() && *v >= 256)
+        .unwrap_or(2048);
+    let extra = 1024.min(requested);
+    let hero_maps = TERRAIN_HERO_LAYERS * 2;
+    let extra_maps = (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2;
+    let mib = rgba8_residency_mib(requested, hero_maps) + rgba8_residency_mib(extra, extra_maps);
+    const BUDGET: f32 = 700.0;
+    if mib > BUDGET && std::env::var("SOMNIUM_TERRAIN_ALLOW_OVERBUDGET").as_deref() != Ok("1") {
+        let hero = 1024.min(requested);
+        tracing::warn!(
+            "terrain: projected {mib:.0} MiB RGBA8 exceeds 700 MiB; loading 0–15 at {hero} and 16–31 at {extra}"
+        );
+        (hero, extra.min(hero))
+    } else {
+        tracing::info!(
+            "terrain: projected {mib:.0} MiB RGBA8 (0–15 at {requested}, 16–31 at {extra})"
+        );
+        (requested, extra)
+    }
+}
+
+fn procedural_pair(i: usize, size: u32) -> (Vec<u8>, Vec<u8>) {
+    let (a, n, r) = generate_layer(&RECIPES[i]);
+    let mut surface = Vec::with_capacity(a.len());
+    for j in (0..n.len()).step_by(4) {
+        surface.extend([n[j], n[j + 1], r[j], 255]);
+    }
+    (
+        resize_rgba(&a, LAYER_TEXTURE_SIZE, size),
+        resize_rgba(&surface, LAYER_TEXTURE_SIZE, size),
+    )
+}
+
+fn load_rgba_bank(range: std::ops::Range<usize>, size: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize) {
+    let mut albedos = Vec::with_capacity(range.len());
+    let mut surfaces = Vec::with_capacity(range.len());
+    let mut photographed = 0usize;
+    for i in range {
+        let material = LAYER_MATERIALS[i];
+        match (
+            load_packed(material, "albedo", size),
+            load_packed(material, "surface", size),
+        ) {
+            (Ok(a), Ok(s)) => {
+                photographed += 1;
+                albedos.push(a);
+                surfaces.push(s);
+            }
+            (albedo_err, surface_err) => {
+                if LAYER_MATERIALS[i].starts_with("procedural_") {
+                    tracing::info!(
+                        "terrain: layer {i} `{material}` is a procedural slot (no CC0 scan passed ΔE)"
+                    );
+                } else {
+                    tracing::warn!(
+                        "terrain: layer {i} `{material}` packed PNG missing ({:?} / {:?}); procedural fallback",
+                        albedo_err.err(),
+                        surface_err.err()
+                    );
+                }
+                let (a, s) = procedural_pair(i, size);
+                albedos.push(a);
+                surfaces.push(s);
+            }
+        }
+    }
+    (albedos, surfaces, photographed)
+}
+
 impl TerrainLayerTextures {
     /// Load the packed photographed layers, falling back to procedural ones.
     ///
@@ -655,17 +919,13 @@ impl TerrainLayerTextures {
         // there are two. 2K is the default because terrain is viewed from
         // metres away, not centimetres; `SOMNIUM_TERRAIN_RES=4096` spends the
         // memory for the full detail the committed assets carry.
-        let size = std::env::var("SOMNIUM_TERRAIN_RES")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|v| v.is_power_of_two() && *v >= 256)
-            .unwrap_or(2048);
+        let (hero, extra) = choose_runtime_resolutions();
 
         if bc_supported && bc7_packs_complete() {
-            match Self::load_bc7_layers(device, queue, size) {
+            match Self::load_bc7_layers(device, queue, hero, extra) {
                 Ok(loaded) => {
                     tracing::info!(
-                        "terrain: BC7 packs resident at {size}x{size} (RGBA8 not uploaded)"
+                        "terrain: BC7 packs resident (hero {hero}, extra {extra}; RGBA8 not uploaded)"
                     );
                     return loaded;
                 }
@@ -677,7 +937,7 @@ impl TerrainLayerTextures {
             tracing::info!("terrain: BC compression unavailable; RGBA8 fallback");
         }
 
-        match Self::load_packed_layers(device, queue, size) {
+        match Self::load_packed_layers(device, queue, hero, extra) {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::warn!(
@@ -693,54 +953,27 @@ impl TerrainLayerTextures {
     fn load_packed_layers(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        size: u32,
+        hero: u32,
+        extra: u32,
     ) -> Result<Self, String> {
-        let mut albedos = Vec::with_capacity(LAYER_MATERIALS.len());
-        let mut surfaces = Vec::with_capacity(LAYER_MATERIALS.len());
-        let mut photographed = 0usize;
-        for (i, material) in LAYER_MATERIALS.iter().enumerate() {
-            match (
-                load_packed(material, "albedo", size),
-                load_packed(material, "surface", size),
-            ) {
-                (Ok(a), Ok(s)) => {
-                    photographed += 1;
-                    albedos.push(a);
-                    surfaces.push(s);
-                }
-                (albedo_err, surface_err) => {
-                    tracing::warn!(
-                        "terrain: layer {i} `{material}` packed PNG missing ({:?} / {:?}); procedural fallback",
-                        albedo_err.err(),
-                        surface_err.err()
-                    );
-                    let (a, n, r) = generate_layer(&RECIPES[i]);
-                    let mut surface = Vec::with_capacity(a.len());
-                    for j in (0..n.len()).step_by(4) {
-                        surface.extend([n[j], n[j + 1], r[j], 255]);
-                    }
-                    // Procedural maps are LAYER_TEXTURE_SIZE; resize to `size`.
-                    albedos.push(resize_rgba(&a, LAYER_TEXTURE_SIZE, size));
-                    surfaces.push(resize_rgba(&surface, LAYER_TEXTURE_SIZE, size));
-                }
-            }
-        }
-        let from_assets = photographed == LAYER_MATERIALS.len();
+        let hero_n = TERRAIN_HERO_LAYERS as usize;
+        let (a0, s0, p0) = load_rgba_bank(0..hero_n, hero);
+        let (a1, s1, p1) = load_rgba_bank(hero_n..TERRAIN_LAYER_COUNT as usize, extra);
+        let photographed = p0 + p1;
+        let mib = rgba8_residency_mib(hero, hero_n as u32 * 2)
+            + rgba8_residency_mib(extra, (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2);
         tracing::info!(
-            "terrain: {photographed}/{} photographed layers at {size}x{size} (~{:.0} MiB RGBA8 mips)",
+            "terrain: {photographed}/{} photographed layers (0–15 at {hero}x{hero}, 16–31 at {extra}x{extra}, ~{mib:.0} MiB RGBA8 mips)",
             LAYER_MATERIALS.len(),
-            rgba8_residency_mib(size, LAYER_MATERIALS.len() as u32 * 2),
         );
 
-        // Albedo is sRGB; the surface pack is linear data — a normal, a
-        // roughness and an occlusion, none of which are colours.
         let (albedo, albedo_view) = create_array_texture(
             device,
             queue,
             "Terrain Albedo+Height Array",
             wgpu::TextureFormat::Rgba8UnormSrgb,
-            size,
-            &albedos,
+            hero,
+            &a0,
             super::mips::PackedKind::AlbedoHeight,
         );
         let (surface, surface_view) = create_array_texture(
@@ -748,23 +981,50 @@ impl TerrainLayerTextures {
             queue,
             "Terrain Surface Array",
             wgpu::TextureFormat::Rgba8Unorm,
-            size,
-            &surfaces,
+            hero,
+            &s0,
+            super::mips::PackedKind::Surface,
+        );
+        let (albedo_extra, albedo_extra_view) = create_array_texture(
+            device,
+            queue,
+            "Terrain Albedo+Height Extra",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            extra,
+            &a1,
+            super::mips::PackedKind::AlbedoHeight,
+        );
+        let (surface_extra, surface_extra_view) = create_array_texture(
+            device,
+            queue,
+            "Terrain Surface Extra",
+            wgpu::TextureFormat::Rgba8Unorm,
+            extra,
+            &s1,
             super::mips::PackedKind::Surface,
         );
         let mean_albedo = std::array::from_fn(|i| {
-            albedos
-                .get(i)
-                .map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+            if i < hero_n {
+                a0.get(i)
+                    .map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+            } else {
+                a1.get(i - hero_n)
+                    .map_or([0.5, 0.5, 0.5, 1.0], |a| mean_linear_albedo(a))
+            }
         });
         Ok(Self {
             albedo,
             albedo_view,
             surface,
             surface_view,
-            from_assets,
+            albedo_extra,
+            albedo_extra_view,
+            surface_extra,
+            surface_extra_view,
+            from_assets: photographed == LAYER_MATERIALS.len(),
             compressed: false,
-            resolution: size,
+            resolution: hero,
+            extra_resolution: extra,
             mean_albedo,
         })
     }
@@ -772,55 +1032,84 @@ impl TerrainLayerTextures {
     fn load_bc7_layers(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        size: u32,
+        hero: u32,
+        extra: u32,
     ) -> Result<Self, String> {
-        let mut albedos = Vec::with_capacity(LAYER_MATERIALS.len());
-        let mut surfaces = Vec::with_capacity(LAYER_MATERIALS.len());
-        for material in LAYER_MATERIALS {
-            albedos.push(load_bc7_mips(material, "albedo", size)?);
-            surfaces.push(load_bc7_mips(material, "surface", size)?);
+        let hero_n = TERRAIN_HERO_LAYERS as usize;
+        let mut a0 = Vec::with_capacity(hero_n);
+        let mut s0 = Vec::with_capacity(hero_n);
+        for material in &LAYER_MATERIALS[..hero_n] {
+            a0.push(load_bc7_mips(material, "albedo", hero)?);
+            s0.push(load_bc7_mips(material, "surface", hero)?);
+        }
+        let mut a1 = Vec::with_capacity(LAYER_MATERIALS.len() - hero_n);
+        let mut s1 = Vec::with_capacity(LAYER_MATERIALS.len() - hero_n);
+        for material in &LAYER_MATERIALS[hero_n..] {
+            a1.push(load_bc7_mips(material, "albedo", extra)?);
+            s1.push(load_bc7_mips(material, "surface", extra)?);
         }
         let (albedo, albedo_view) = create_bc7_array_texture(
             device,
             queue,
             "Terrain Albedo+Height Array BC7",
             wgpu::TextureFormat::Bc7RgbaUnormSrgb,
-            size,
-            &albedos,
+            hero,
+            &a0,
         );
         let (surface, surface_view) = create_bc7_array_texture(
             device,
             queue,
             "Terrain Surface Array BC7",
             wgpu::TextureFormat::Bc7RgbaUnorm,
-            size,
-            &surfaces,
+            hero,
+            &s0,
+        );
+        let (albedo_extra, albedo_extra_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Albedo+Height Extra BC7",
+            wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+            extra,
+            &a1,
+        );
+        let (surface_extra, surface_extra_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Surface Extra BC7",
+            wgpu::TextureFormat::Bc7RgbaUnorm,
+            extra,
+            &s1,
         );
         tracing::info!(
-            "terrain: BC7 residency ~{:.0} MiB at {size}x{size}",
-            bc7_residency_mib(size, LAYER_MATERIALS.len() as u32 * 2),
+            "terrain: BC7 residency ~{:.0} MiB (hero {hero}, extra {extra})",
+            bc7_residency_mib(hero, hero_n as u32 * 2)
+                + bc7_residency_mib(extra, (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2),
         );
         Ok(Self {
             albedo,
             albedo_view,
             surface,
             surface_view,
+            albedo_extra,
+            albedo_extra_view,
+            surface_extra,
+            surface_extra_view,
             from_assets: true,
             compressed: true,
-            resolution: size,
+            resolution: hero,
+            extra_resolution: extra,
             mean_albedo: [[0.5, 0.5, 0.5, 1.0]; TERRAIN_LAYER_COUNT as usize],
         })
     }
 
-    /// Generate the four default procedural layers and upload them.
+    /// Generate procedural layers and upload them as two 16-layer banks.
     pub fn generate_default(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let size = LAYER_TEXTURE_SIZE;
+        let hero_n = TERRAIN_HERO_LAYERS as usize;
         let mut albedos = Vec::new();
         let mut surfaces = Vec::new();
         for recipe in &RECIPES {
             let (a, n, r) = generate_layer(recipe);
-            // Match the packed layout the shader expects: the procedural
-            // albedo already carries its noise "height" in alpha, and the
-            // surface pack is normal XY, roughness, and a fully-open occlusion.
             let mut surface = Vec::with_capacity(a.len());
             for i in (0..n.len()).step_by(4) {
                 surface.extend([n[i], n[i + 1], r[i], 255]);
@@ -833,8 +1122,8 @@ impl TerrainLayerTextures {
             queue,
             "Terrain Albedo+Height Array",
             wgpu::TextureFormat::Rgba8UnormSrgb,
-            LAYER_TEXTURE_SIZE,
-            &albedos,
+            size,
+            &albedos[..hero_n],
             super::mips::PackedKind::AlbedoHeight,
         );
         let (surface, surface_view) = create_array_texture(
@@ -842,8 +1131,26 @@ impl TerrainLayerTextures {
             queue,
             "Terrain Surface Array",
             wgpu::TextureFormat::Rgba8Unorm,
-            LAYER_TEXTURE_SIZE,
-            &surfaces,
+            size,
+            &surfaces[..hero_n],
+            super::mips::PackedKind::Surface,
+        );
+        let (albedo_extra, albedo_extra_view) = create_array_texture(
+            device,
+            queue,
+            "Terrain Albedo+Height Extra",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            size,
+            &albedos[hero_n..],
+            super::mips::PackedKind::AlbedoHeight,
+        );
+        let (surface_extra, surface_extra_view) = create_array_texture(
+            device,
+            queue,
+            "Terrain Surface Extra",
+            wgpu::TextureFormat::Rgba8Unorm,
+            size,
+            &surfaces[hero_n..],
             super::mips::PackedKind::Surface,
         );
         let mean_albedo = std::array::from_fn(|i| {
@@ -856,31 +1163,26 @@ impl TerrainLayerTextures {
             albedo_view,
             surface,
             surface_view,
+            albedo_extra,
+            albedo_extra_view,
+            surface_extra,
+            surface_extra_view,
             from_assets: false,
             compressed: false,
-            resolution: LAYER_TEXTURE_SIZE,
+            resolution: size,
+            extra_resolution: size,
             mean_albedo,
         }
     }
 }
 
-/// Four RGBA weight textures controlling sixteen-layer blending (Phase XV).
+/// Eight RGBA weight textures controlling thirty-two-layer blending (XV-Zeta).
 ///
 /// Channels of each map weight four consecutive layers. The CPU copy is the
 /// paint target; dirty regions are re-uploaded with `upload_dirty`.
 pub struct Splatmap {
-    /// Layers 0-3.
-    pub texture: wgpu::Texture,
-    pub view: wgpu::TextureView,
-    /// Layers 4-7 (Phase 25L).
-    pub texture_hi: wgpu::Texture,
-    pub view_hi: wgpu::TextureView,
-    /// Layers 8-11 (Phase XV).
-    pub texture_2: wgpu::Texture,
-    pub view_2: wgpu::TextureView,
-    /// Layers 12-15 (Phase XV).
-    pub texture_3: wgpu::Texture,
-    pub view_3: wgpu::TextureView,
+    pub textures: [wgpu::Texture; super::splat::SPLAT_MAP_COUNT],
+    pub views: [wgpu::TextureView; super::splat::SPLAT_MAP_COUNT],
     /// CPU copy for painting: one weight per layer, row-major.
     pub data: Vec<SplatTexel>,
     pub width: u32,
@@ -895,9 +1197,19 @@ impl Splatmap {
         let mut first = [0u8; TERRAIN_LAYER_COUNT as usize];
         first[0] = 255;
         let data = vec![first; (width * height) as usize];
-        let make = |label: &str| {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
+        let labels = [
+            "Terrain Splatmap 0-3",
+            "Terrain Splatmap 4-7",
+            "Terrain Splatmap 8-11",
+            "Terrain Splatmap 12-15",
+            "Terrain Splatmap 16-19",
+            "Terrain Splatmap 20-23",
+            "Terrain Splatmap 24-27",
+            "Terrain Splatmap 28-31",
+        ];
+        let textures: [wgpu::Texture; super::splat::SPLAT_MAP_COUNT] = std::array::from_fn(|i| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(labels[i]),
                 size: wgpu::Extent3d {
                     width,
                     height,
@@ -909,23 +1221,14 @@ impl Splatmap {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (texture, view)
-        };
-        let (texture, view) = make("Terrain Splatmap 0-3");
-        let (texture_hi, view_hi) = make("Terrain Splatmap 4-7");
-        let (texture_2, view_2) = make("Terrain Splatmap 8-11");
-        let (texture_3, view_3) = make("Terrain Splatmap 12-15");
+            })
+        });
+        let views: [wgpu::TextureView; super::splat::SPLAT_MAP_COUNT] = std::array::from_fn(|i| {
+            textures[i].create_view(&wgpu::TextureViewDescriptor::default())
+        });
         let mut splat = Self {
-            texture,
-            view,
-            texture_hi,
-            view_hi,
-            texture_2,
-            view_2,
-            texture_3,
-            view_3,
+            textures,
+            views,
             data,
             width,
             height,
@@ -945,7 +1248,7 @@ impl Splatmap {
         });
     }
 
-    /// Upload the dirty region to all four splat textures (whole rows).
+    /// Upload the dirty region to all splat textures (whole rows).
     pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
         let Some((_, z0, _, z1)) = self.dirty.take() else {
             return;
@@ -955,26 +1258,16 @@ impl Splatmap {
         let texels = (rows * self.width) as usize;
         let slice = &self.data[offset..offset + texels];
 
-        let mut groups = [
-            Vec::with_capacity(texels * 4),
-            Vec::with_capacity(texels * 4),
-            Vec::with_capacity(texels * 4),
-            Vec::with_capacity(texels * 4),
-        ];
+        let mut groups: [Vec<u8>; super::splat::SPLAT_MAP_COUNT] =
+            std::array::from_fn(|_| Vec::with_capacity(texels * 4));
         for texel in slice {
             let g = super::splat::deinterleave(texel);
-            for i in 0..4 {
+            for i in 0..super::splat::SPLAT_MAP_COUNT {
                 groups[i].extend_from_slice(&g[i]);
             }
         }
 
-        let textures = [
-            &self.texture,
-            &self.texture_hi,
-            &self.texture_2,
-            &self.texture_3,
-        ];
-        for (texture, bytes) in textures.iter().zip(groups.iter()) {
+        for (texture, bytes) in self.textures.iter().zip(groups.iter()) {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,

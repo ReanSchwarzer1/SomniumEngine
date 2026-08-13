@@ -160,87 +160,78 @@ pub struct TerrainLayer {
 }
 
 /// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
-/// `TerrainMaterial` in `terrain_material.wgsl` (880 bytes, Phase XV-H).
+/// `TerrainMaterial` in `terrain_material.wgsl` (1664 bytes, Phase XV-Zeta).
 ///
 /// **Every `vec4` member sits at a 16-byte offset**, which is what keeps Rust's
 /// `repr(C)` packing and WGSL's alignment rules agreeing.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTerrainMaterial {
-    /// UV repeats per metre, one per layer.                    offset 0  (64)
-    pub layer_tiling: [f32; 16],
+    /// UV repeats per metre, one per layer.                    offset 0    (128)
+    pub layer_tiling: [f32; 32],
     /// xy = brush world XZ, z = radius, w = mode
-    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 64
+    /// (0 off, 1 sculpt, 2 paint, 3 foliage).                  offset 128
     pub brush: [f32; 4],
-    /// Bindless index of each layer's albedo+height map.       offset 80 (64)
-    pub albedo_maps: [i32; 16],
-    /// Bindless index of each layer's packed surface map.      offset 144 (64)
-    pub surface_maps: [i32; 16],
-    /// World XZ of terrain-local (0, 0).                       offset 208
+    /// Bindless index of each layer's albedo+height map.       offset 144  (128)
+    pub albedo_maps: [i32; 32],
+    /// Bindless index of each layer's packed surface map.      offset 272  (128)
+    pub surface_maps: [i32; 32],
+    /// World XZ of terrain-local (0, 0).                       offset 400
     pub terrain_origin: [f32; 2],
-    /// 1 / world size, for the splat lookup.                   offset 216
+    /// 1 / world size, for the splat lookup.                   offset 408
     pub inv_world_size: [f32; 2],
-    /// Bindless index of the layer 0-3 weights.                offset 224
-    pub splat_map: i32,
-    /// Layers 4-7.                                             offset 228
-    pub splat_map_hi: i32,
-    /// Layers 8-11.                                            offset 232
-    pub splat_map_2: i32,
-    /// Layers 12-15.                                           offset 236
-    pub splat_map_3: i32,
-    /// Layer index used for biplanar cliff projection.         offset 240
+    /// Bindless indices of the eight RGBA splatmaps.           offset 416  (32)
+    pub splat_maps: [i32; 8],
+    /// Layer index used for biplanar cliff projection.         offset 448
     pub cliff_layer: u32,
-    /// Non-zero applies stochastic hex-tiling.                 offset 244
+    /// Non-zero applies stochastic hex-tiling.                 offset 452
     pub hex_tiling: u32,
-    /// Non-zero runs the height-weighted blend.                offset 248
+    /// Non-zero runs the height-weighted blend.                offset 456
     pub height_blend: u32,
-    /// Bindless index of the macro colour map, -1 for none.    offset 252
+    /// Bindless index of the macro colour map, -1 for none.    offset 460
     pub macro_map: i32,
-    /// Per-layer height blend scale.                           offset 256 (64)
-    pub layer_height_scale: [f32; 16],
-    /// Width of the layer's transition band.                   offset 320 (64)
-    pub layer_blend_width: [f32; 16],
-    /// Reciprocal of the layer's minimum weight.               offset 384 (64)
-    pub layer_weight_clamp: [f32; 16],
-    /// Relief depth per layer, in metres.                      offset 448 (64)
-    pub layer_parallax: [f32; 16],
-    /// `macro_map::MacroBlendMode`.                            offset 512
+    /// Per-layer height blend scale.                           offset 464  (128)
+    pub layer_height_scale: [f32; 32],
+    /// Width of the layer's transition band.                   offset 592  (128)
+    pub layer_blend_width: [f32; 32],
+    /// Reciprocal of the layer's minimum weight.               offset 720  (128)
+    pub layer_weight_clamp: [f32; 32],
+    /// Relief depth per layer, in metres.                      offset 848  (128)
+    pub layer_parallax: [f32; 32],
+    /// `macro_map::MacroBlendMode`.                            offset 976
     pub macro_mode: u32,
-    /// Blend factor; 0 leaves the detail untouched.            offset 516
+    /// Blend factor; 0 leaves the detail untouched.            offset 980
     pub macro_strength: f32,
-    /// Metres at which the layer budget starts falling.        offset 520
+    /// Metres at which the layer budget starts falling.        offset 984
     pub detail_fade_start: f32,
-    /// Metres at which only the dominant layers survive.       offset 524
+    /// Metres at which only the dominant layers survive.       offset 988
     pub detail_fade_end: f32,
-    /// Mean linear albedo per layer.                           offset 528 (256)
-    pub layer_albedo: [[f32; 4]; 16],
-    /// Steps the parallax march takes at its closest.          offset 784
+    /// Mean linear albedo per layer.                           offset 992  (512)
+    pub layer_albedo: [[f32; 4]; 32],
+    /// Steps the parallax march takes at its closest.          offset 1504
     pub parallax_steps: u32,
-    /// Steps of the self-shadow march toward the sun.          offset 788
+    /// Steps of the self-shadow march toward the sun.          offset 1508
     pub parallax_shadow_steps: u32,
-    /// Biplanar/triplanar axis sharpness (XV-F).               offset 792
+    /// Biplanar/triplanar axis sharpness (XV-F).               offset 1512
     pub projection_sharpness: f32,
-    /// 0 = biplanar (default), 1 = triplanar debug.            offset 796
+    /// 0 = biplanar (default), 1 = triplanar debug.            offset 1516
     pub projection_mode: u32,
-    /// Moisture affinity per layer (XV-H).                     offset 800 (64)
-    pub layer_moisture: [f32; 16],
-    /// Global wetness 0..1.                                    offset 864
+    /// Moisture affinity per layer (XV-H).                     offset 1520 (128)
+    pub layer_moisture: [f32; 32],
+    /// Global wetness 0..1.                                    offset 1648
     pub wetness: f32,
-    /// Albedo multiplier when fully wet (porous darken).       offset 868
+    /// Albedo multiplier when fully wet (porous darken).       offset 1652
     pub wetness_darken: f32,
-    /// Roughness scale when fully wet.                         offset 872
+    /// Roughness scale when fully wet.                         offset 1656
     pub wetness_gloss: f32,
-    /// Extra dielectric F0 when wet.                           offset 876
+    /// Extra dielectric F0 when wet.                           offset 1660
     pub wetness_f0: f32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainTextureIds {
-    pub splat_map: i32,
-    pub splat_map_hi: i32,
-    pub splat_map_2: i32,
-    pub splat_map_3: i32,
+    pub splat_maps: [i32; splat::SPLAT_MAP_COUNT],
     /// Phase 25D: the whole-terrain macro colour map.
     pub macro_map: i32,
     pub albedo: [i32; TERRAIN_LAYER_COUNT as usize],
@@ -250,10 +241,7 @@ pub struct TerrainTextureIds {
 impl Default for TerrainTextureIds {
     fn default() -> Self {
         Self {
-            splat_map: -1,
-            splat_map_hi: -1,
-            splat_map_2: -1,
-            splat_map_3: -1,
+            splat_maps: [-1; splat::SPLAT_MAP_COUNT],
             macro_map: -1,
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
@@ -319,6 +307,7 @@ pub struct TerrainData {
     pub macro_strength: f32,
     /// Authored whole-landscape colour. When present this wins over the
     /// procedural macro generator after terrain edits/rebuilds.
+    #[allow(dead_code)]
     authored_macro: Option<macro_map::MacroMap>,
     /// Phase 25D: metres over which the per-pixel layer budget falls away.
     pub detail_fade_start: f32,
@@ -464,11 +453,11 @@ impl TerrainData {
             material_id: 0,
             terrain_index: 0,
             hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
-            macro_mode: macro_map::MacroBlendMode::Overlay,
+            macro_mode: macro_map::MacroBlendMode::Lerp,
             macro_strength: if std::env::var("SOMNIUM_TERRAIN_MACRO").as_deref() == Ok("0") {
                 0.0
             } else {
-                macro_map::DEFAULT_MACRO_STRENGTH
+                0.55
             },
             authored_macro: None,
             // Roughly: full detail out to the far edge of LOD 0, then a fall
@@ -536,10 +525,7 @@ impl TerrainData {
             surface_maps: self.texture_ids.surface,
             terrain_origin: [origin.x, origin.z],
             inv_world_size: [1.0 / wx, 1.0 / wz],
-            splat_map: self.texture_ids.splat_map,
-            splat_map_hi: self.texture_ids.splat_map_hi,
-            splat_map_2: self.texture_ids.splat_map_2,
-            splat_map_3: self.texture_ids.splat_map_3,
+            splat_maps: self.texture_ids.splat_maps,
             cliff_layer: 14,
             hex_tiling: u32::from(self.hex_tiling),
             height_blend: u32::from(self.height_blend),
@@ -645,14 +631,7 @@ impl TerrainData {
         let path =
             std::env::var("SOMNIUM_HEIGHTMAP").unwrap_or_else(|_| DEFAULT_HEIGHTMAP.to_string());
         match self.load_heightmap_file(&path, amplitude) {
-            Ok(()) => {
-                if path == DEFAULT_HEIGHTMAP {
-                    if let Err(e) = self.load_authored_macro_file(DEFAULT_MACRO_MAP) {
-                        tracing::warn!("terrain: authored macro map unavailable ({e})");
-                    }
-                }
-                path
-            }
+            Ok(()) => path,
             Err(e) => {
                 tracing::info!("terrain: heightmap unavailable ({e}); procedural relief");
                 self.generate_relief(1337, amplitude);
@@ -687,6 +666,11 @@ impl TerrainData {
         self.macro_strength = 0.68;
         self.macro_dirty = true;
         Ok(())
+    }
+
+    /// Rebuild the splat-weighted unique-colour macro after paint or biome.
+    pub fn invalidate_unique_colour(&mut self) {
+        self.macro_dirty = true;
     }
 
     /// Fill the heightmap with procedural FBM relief (Phase 25L).
@@ -912,20 +896,12 @@ impl TerrainData {
         rewritten: &mut Vec<u32>,
     ) {
         if std::mem::take(&mut self.macro_dirty) {
-            let generated;
-            let map = if let Some(authored) = self.authored_macro.as_ref() {
-                authored
-            } else {
-                generated = macro_map::generate(
-                    &self.heightmap,
-                    self.desc.total_vertices_x(),
-                    self.desc.total_vertices_z(),
-                    self.desc.cell_size,
-                    self.desc.height_scale,
-                    0,
-                );
-                &generated
-            };
+            let generated = macro_map::from_splat(
+                &self.splatmap.data,
+                self.splatmap.width,
+                self.splatmap.height,
+                &self.layer_textures.mean_albedo,
+            );
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.macro_texture,
@@ -933,15 +909,15 @@ impl TerrainData {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &map.texels,
+                &generated.texels,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(map.size * 4),
-                    rows_per_image: Some(map.size),
+                    bytes_per_row: Some(generated.size * 4),
+                    rows_per_image: Some(generated.size),
                 },
                 wgpu::Extent3d {
-                    width: map.size,
-                    height: map.size,
+                    width: generated.size,
+                    height: generated.size,
                     depth_or_array_layers: 1,
                 },
             );
@@ -1105,8 +1081,8 @@ impl TerrainData {
     pub fn save_binary(&self, path: &str) -> std::io::Result<()> {
         let mut out: Vec<u8> = Vec::with_capacity(self.heightmap.len() * 4 + 24);
         out.extend(Self::SIDECAR_MAGIC.to_le_bytes());
-        // Version 3: Phase XV widened a splat texel from 8 weights to 16.
-        out.extend(3u32.to_le_bytes());
+        // Version 4: Phase XV-Zeta widened a splat texel from 16 weights to 32.
+        out.extend(4u32.to_le_bytes());
         out.extend(self.desc.total_vertices_x().to_le_bytes());
         out.extend(self.desc.total_vertices_z().to_le_bytes());
         out.extend(self.splatmap.width.to_le_bytes());
@@ -1132,9 +1108,9 @@ impl TerrainData {
             return Err("not a terrain sidecar file".into());
         }
         let version = u32_at(4)?;
-        if version != 2 && version != 3 {
+        if version != 2 && version != 3 && version != 4 {
             return Err(format!(
-                "terrain sidecar is version {version}; this build reads 2 (migrate) or 3 (sixteen layers)"
+                "terrain sidecar is version {version}; this build reads 2/3 (migrate) or 4 (thirty-two layers)"
             ));
         }
         let (tx, tz) = (u32_at(8)?, u32_at(12)?);
@@ -1148,10 +1124,10 @@ impl TerrainData {
         }
         let h_bytes = (tx * tz) as usize * 4;
         let texel_count = (sw * sh) as usize;
-        let src_channels: usize = if version == 2 {
-            8
-        } else {
-            TERRAIN_LAYER_COUNT as usize
+        let src_channels: usize = match version {
+            2 => 8,
+            3 => 16,
+            _ => TERRAIN_LAYER_COUNT as usize,
         };
         let s_bytes = texel_count * src_channels;
         let body = bytes
@@ -1160,18 +1136,29 @@ impl TerrainData {
         self.heightmap
             .copy_from_slice(bytemuck::cast_slice(&body[..h_bytes]));
         let splat_src = &body[h_bytes..];
-        if version == 3 {
+        if version == 4 {
             self.splatmap
                 .data
                 .copy_from_slice(bytemuck::cast_slice(splat_src));
+        } else if version == 3 {
+            // v3 → v4: copy layers 0–15, zero 16–31. Do not run four-nonzero.
+            for (dst, src) in self
+                .splatmap
+                .data
+                .iter_mut()
+                .zip(splat_src.chunks_exact(16))
+            {
+                dst[..16].copy_from_slice(src);
+                dst[16..].fill(0);
+            }
         } else {
-            // v2 → v3: copy layers 0–7 byte-for-byte, zero 8–15. Do not run
-            // four-nonzero decay — old scenes must keep their 0–7 appearance.
+            // v2 → v4: copy layers 0–7, zero 8–31.
             for (dst, src) in self.splatmap.data.iter_mut().zip(splat_src.chunks_exact(8)) {
                 dst[..8].copy_from_slice(src);
                 dst[8..].fill(0);
             }
         }
+        self.macro_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }

@@ -1450,12 +1450,12 @@ impl SomniumRenderer {
             })
         };
         let mut ids = crate::terrain::TerrainTextureIds::default();
-        ids.splat_map = self.add_texture(ctx, terrain.splatmap.view.clone()) as i32;
-        ids.splat_map_hi = self.add_texture(ctx, terrain.splatmap.view_hi.clone()) as i32;
-        ids.splat_map_2 = self.add_texture(ctx, terrain.splatmap.view_2.clone()) as i32;
-        ids.splat_map_3 = self.add_texture(ctx, terrain.splatmap.view_3.clone()) as i32;
+        ids.splat_maps = std::array::from_fn(|i| {
+            self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+        });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
-        for layer in 0..crate::terrain::textures::TERRAIN_LAYER_COUNT {
+        let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+        for layer in 0..hero {
             let i = layer as usize;
             ids.albedo[i] = self.add_texture(
                 ctx,
@@ -1471,6 +1471,25 @@ impl SomniumRenderer {
                     &terrain.layer_textures.surface,
                     layer,
                     "Terrain Layer Surface",
+                ),
+            ) as i32;
+        }
+        for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
+            let i = (hero + layer) as usize;
+            ids.albedo[i] = self.add_texture(
+                ctx,
+                layer_view(
+                    &terrain.layer_textures.albedo_extra,
+                    layer,
+                    "Terrain Layer Albedo+Height Extra",
+                ),
+            ) as i32;
+            ids.surface[i] = self.add_texture(
+                ctx,
+                layer_view(
+                    &terrain.layer_textures.surface_extra,
+                    layer,
+                    "Terrain Layer Surface Extra",
                 ),
             ) as i32;
         }

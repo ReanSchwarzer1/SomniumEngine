@@ -36,7 +36,10 @@ original author as specified by the CC-BY-NC 4.0 license terms.  See the full li
 CC0 imposes no attribution requirement; the credit below is given anyway, and
 the licence is the reason this source was chosen over commercial libraries.
 
-Sixteen shipping layers (indices 0–7 compatibility-locked from Phase 25K):
+Sixteen shipping layers (indices 0–7 compatibility-locked from Phase 25K),
+plus XV-H 8–15, plus XV-Zeta photographed 17–23 and 25–31. Layers **16**
+(lush lawn) and **24** (wildgrass) stay procedural: Poly Haven `grass_path_2`
+/ `grass_path_3` failed the ochre ΔE gate.
 
 | # | id | display | authors |
 |---|----|---------|---------|
@@ -56,6 +59,22 @@ Sixteen shipping layers (indices 0–7 compatibility-locked from Phase 25K):
 | 13 | `mossy_rock` | Mossy Rock | Rob Tuytel |
 | 14 | `rock_face_03` | Cliff Face | Dario Barresi (photography), Rico Cilliers (processing) |
 | 15 | `ganges_river_pebbles` | Talus / River Stone | Amal Kumar |
+| 16 | *(procedural)* | Lush Lawn | Somnium (no CC0 lawn passed ΔE) |
+| 17 | `leaves_forest_ground` | Conifer Duff | Dimitrios Savva (photography), Dario Barresi (processing) |
+| 18 | `aerial_rocks_01` | Cool Gray Rock | Rob Tuytel |
+| 19 | `rock_wall_02` | Dark Slate | Rob Tuytel |
+| 20 | `forest_ground_05` | Moss Carpet | Charlotte Baglioni |
+| 21 | `rock_boulder_dry` | Limestone | Dimitrios Savva (photography), Rico Cilliers (processing) |
+| 22 | `dirt_floor` | Dark Loam | eye-candy.xyz |
+| 23 | `forest_leaves_02` | Pine Litter | Rob Tuytel |
+| 24 | *(procedural)* | Wildgrass | Somnium (no CC0 meadow passed ΔE) |
+| 25 | `forest_ground_06` | Wetland | Charlotte Baglioni |
+| 26 | `gray_rocks` | Gray Talus | Dimitrios Savva |
+| 27 | `aerial_beach_01` | Light Dune | Rob Tuytel |
+| 28 | `lichen_rock` | Lichen Rock | Rico Cilliers |
+| 29 | `forest_floor` | Autumn Litter | eye-candy.xyz |
+| 30 | `grassy_cobblestone` | Packed Path | Charlotte Baglioni (photography), Dario Barresi (processing) |
+| 31 | `snow_01` | Hard Snow | Rob Tuytel |
 
 `terrain_red_01` and `dry_riverbed_rock` were rejected for role overlap and are
 not shipping layers. Substitutes are `cracked_red_ground` and

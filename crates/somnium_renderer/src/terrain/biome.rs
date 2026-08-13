@@ -1,4 +1,4 @@
-//! Deterministic sixteen-layer biome splat (Phase XV-G).
+//! Deterministic thirty-two-layer biome splat (Phase XV-G / XV-Zeta).
 //!
 //! Shared by startup and Create → Terrain. Weights are elevation / slope /
 //! curvature / water / exposure / noise, then strongest-four quantized. Paint
@@ -9,7 +9,7 @@ use super::textures::{SplatTexel, TERRAIN_LAYER_COUNT};
 use super::{DEFAULT_WATER_LEVEL_METRES, TerrainData};
 
 /// Versioned Appalachia landscape kit. Bump when default rules change.
-pub const BIOME_PRESET_VERSION: u32 = 1;
+pub const BIOME_PRESET_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct BiomePreset {
@@ -78,8 +78,17 @@ pub fn weights_at(
         * (1.0 - steep)
         * n
         * 0.55;
-    let mossy = steep * (1.0 - cliff) * (1.0 - snow) * smoothstep(0.4, 0.75, n2) * 0.7;
-    let rock = steep * (1.0 - cliff) * (1.0 - snow) * (1.0 - mossy);
+    let mossy = steep * (1.0 - cliff) * (1.0 - snow) * smoothstep(0.4, 0.75, n2) * 0.35;
+    let gray_rock = steep * (1.0 - cliff) * (1.0 - snow) * (1.0 - n2) * 0.9;
+    let rock = steep * (1.0 - cliff) * (1.0 - snow) * 0.15;
+    let moss_carpet = steep * (1.0 - cliff) * (1.0 - snow) * smoothstep(0.55, 0.85, n) * 0.55;
+    let lichen = steep * (1.0 - cliff) * smoothstep(0.2, 0.5, n2) * 0.35;
+    let granite = talus_band * smoothstep(0.35, 0.75, n2);
+    let wetland = (1.0 - smoothstep(0.3, 3.5, above))
+        * (1.0 - steep)
+        * smoothstep(0.04, 0.18, curvature.max(0.0))
+        * 0.85;
+    let hard_snow = snow * smoothstep(0.55, 0.85, n);
 
     let cover = (1.0
         - cliff
@@ -94,29 +103,55 @@ pub fn weights_at(
         - dry_earth
         - sparse
         - mossy
-        - rock)
+        - gray_rock
+        - rock
+        - moss_carpet
+        - lichen
+        - granite
+        - wetland
+        - hard_snow)
         .max(0.0);
-    let forest = cover * smoothstep(0.55, 0.82, n2);
-    let grass = cover * (1.0 - smoothstep(0.55, 0.82, n2)) * (1.0 - n);
-    let meadow = cover * (1.0 - smoothstep(0.55, 0.82, n2)) * n;
+    let forest = cover * smoothstep(0.50, 0.78, n2);
+    let duff = forest * smoothstep(0.45, 0.80, n);
+    let pine = forest * (1.0 - smoothstep(0.45, 0.80, n)) * 0.65;
+    let lawn = cover * (1.0 - smoothstep(0.50, 0.78, n2)) * (1.0 - n);
+    let wild = cover * (1.0 - smoothstep(0.50, 0.78, n2)) * n;
+    let meadow = wild * 0.25;
+    let autumn = forest * smoothstep(0.15, 0.40, n) * 0.2;
 
     let mut w = [0.0f32; TERRAIN_LAYER_COUNT as usize];
-    w[0] = grass;
-    w[1] = forest;
+    w[0] = lawn * 0.15;
+    w[1] = forest * 0.45;
     w[2] = rock;
-    w[3] = snow;
+    w[3] = snow * (1.0 - hard_snow);
     w[4] = meadow;
-    w[5] = mud;
+    w[5] = mud * 0.55;
     w[6] = pebble_shore;
     w[7] = gravel;
-    w[8] = dry_beach * (1.0 - pebble_shore);
+    w[8] = dry_beach * (1.0 - pebble_shore) * 0.35;
     w[9] = damp_band;
-    w[10] = dry_earth;
-    w[11] = red_clay;
-    w[12] = sparse;
+    w[10] = dry_earth * 0.35;
+    w[11] = red_clay * 0.4;
+    w[12] = sparse * 0.35;
     w[13] = mossy;
-    w[14] = cliff;
-    w[15] = talus_band;
+    w[14] = cliff * 0.55;
+    w[15] = talus_band * 0.45;
+    w[16] = lawn;
+    w[17] = duff;
+    w[18] = gray_rock;
+    w[19] = cliff * 0.45;
+    w[20] = moss_carpet;
+    w[21] = lichen * 0.4;
+    w[22] = mud * 0.45;
+    w[23] = pine;
+    w[24] = wild;
+    w[25] = wetland;
+    w[26] = granite + talus_band * 0.4;
+    w[27] = dry_beach * (1.0 - pebble_shore) * 0.65;
+    w[28] = lichen;
+    w[29] = autumn;
+    w[30] = 0.0;
+    w[31] = hard_snow;
     w
 }
 
@@ -161,6 +196,7 @@ pub fn apply_biome(terrain: &mut TerrainData, preset: &BiomePreset, preserve_ove
         }
     }
     terrain.splatmap.mark_dirty(0, 0, sw - 1, sh - 1);
+    terrain.invalidate_unique_colour();
 }
 
 #[cfg(test)]
@@ -188,6 +224,22 @@ mod tests {
         let p = BiomePreset::appalachia(65.0);
         let w = weights_at(80.0, 4.0, 0.0, 0.4, 0.4, &p);
         assert!(w[3] > w[0] && w[3] > w[14]);
+    }
+
+    #[test]
+    fn inland_cover_prefers_lush_green() {
+        let p = BiomePreset::appalachia(65.0);
+        let w = weights_at(p.water_level + 12.0, 6.0, 0.0, 0.2, 0.3, &p);
+        let green = w[16] + w[24] + w[1] + w[17];
+        let soil = w[5] + w[10] + w[11];
+        assert!(
+            green > soil,
+            "inland should read green/forest, not mud/earth (green {green} soil {soil})"
+        );
+        assert!(
+            w[16] + w[24] > w[0],
+            "lush/wildgrass should beat ochre grass"
+        );
     }
 
     #[test]

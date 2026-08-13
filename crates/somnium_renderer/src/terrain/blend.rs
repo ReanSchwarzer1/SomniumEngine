@@ -190,6 +190,118 @@ pub const LAYER_BLENDS: [LayerBlend; TERRAIN_LAYER_COUNT as usize] = [
         min_weight: 0.08,
         parallax_depth: 0.045,
     },
+    // 16 lush lawn
+    LayerBlend {
+        height_scale: 0.45,
+        blend_width: 0.50,
+        min_weight: 0.10,
+        parallax_depth: 0.018,
+    },
+    // 17 conifer duff
+    LayerBlend {
+        height_scale: 0.65,
+        blend_width: 0.35,
+        min_weight: 0.10,
+        parallax_depth: 0.030,
+    },
+    // 18 cool gray aerial rock
+    LayerBlend {
+        height_scale: 0.95,
+        blend_width: 0.18,
+        min_weight: 0.08,
+        parallax_depth: 0.055,
+    },
+    // 19 dark slate
+    LayerBlend {
+        height_scale: 1.0,
+        blend_width: 0.15,
+        min_weight: 0.08,
+        parallax_depth: 0.058,
+    },
+    // 20 moss carpet
+    LayerBlend {
+        height_scale: 0.55,
+        blend_width: 0.40,
+        min_weight: 0.10,
+        parallax_depth: 0.022,
+    },
+    // 21 limestone
+    LayerBlend {
+        height_scale: 0.80,
+        blend_width: 0.22,
+        min_weight: 0.08,
+        parallax_depth: 0.040,
+    },
+    // 22 dark loam
+    LayerBlend {
+        height_scale: 0.35,
+        blend_width: 0.50,
+        min_weight: 0.10,
+        parallax_depth: 0.010,
+    },
+    // 23 pine litter
+    LayerBlend {
+        height_scale: 0.60,
+        blend_width: 0.35,
+        min_weight: 0.10,
+        parallax_depth: 0.028,
+    },
+    // 24 wildgrass
+    LayerBlend {
+        height_scale: 0.50,
+        blend_width: 0.48,
+        min_weight: 0.10,
+        parallax_depth: 0.020,
+    },
+    // 25 wetland
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.55,
+        min_weight: 0.10,
+        parallax_depth: 0.012,
+    },
+    // 26 gray granite talus
+    LayerBlend {
+        height_scale: 0.95,
+        blend_width: 0.15,
+        min_weight: 0.08,
+        parallax_depth: 0.050,
+    },
+    // 27 light dune
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.45,
+        min_weight: 0.10,
+        parallax_depth: 0.010,
+    },
+    // 28 lichen rock
+    LayerBlend {
+        height_scale: 0.85,
+        blend_width: 0.20,
+        min_weight: 0.08,
+        parallax_depth: 0.048,
+    },
+    // 29 autumn litter
+    LayerBlend {
+        height_scale: 0.55,
+        blend_width: 0.38,
+        min_weight: 0.10,
+        parallax_depth: 0.025,
+    },
+    // 30 packed path
+    LayerBlend {
+        height_scale: 0.25,
+        blend_width: 0.30,
+        min_weight: 0.10,
+        parallax_depth: 0.008,
+    },
+    // 31 hard snow
+    LayerBlend {
+        height_scale: 0.30,
+        blend_width: 0.55,
+        min_weight: 0.15,
+        parallax_depth: 0.012,
+    },
 ];
 
 /// Reciprocal of `min_weight`, which is the form the shader multiplies by.

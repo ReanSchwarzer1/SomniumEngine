@@ -10,8 +10,9 @@
 //! Existing `*_albedo.png` + `*_surface.png` pairs are skipped unless `--force`
 //! is passed, so a 2K pack of layers 8–15 will not replace shipping 4K 0–7.
 //!
-//! Sixteen materials from `assets/terrain/materials.json` become **two**
-//! textures each:
+//! Photographed materials from `assets/terrain/materials.json` become **two**
+//! textures each. Procedural palette slots (currently 16 and 24) are omitted
+//! from `layers` and are not packed:
 //!
 //! | output          | R        | G        | B         | A      |
 //! |-----------------|----------|----------|-----------|--------|
@@ -51,8 +52,18 @@ fn layer_ids(manifest: &Value) -> Result<Vec<String>, String> {
             .ok_or("layer missing id")?;
         ids.push(id.to_string());
     }
-    if ids.len() != 16 {
-        return Err(format!("expected 16 layers, got {}", ids.len()));
+    let palette = manifest
+        .get("layer_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(32);
+    if ids.is_empty() {
+        return Err("manifest layers empty".into());
+    }
+    if ids.len() as u64 > palette {
+        return Err(format!(
+            "layers has {} ids but layer_count is {palette}",
+            ids.len()
+        ));
     }
     Ok(ids)
 }
@@ -176,12 +187,16 @@ fn main() -> Result<(), String> {
         .and_then(|v| v.get("width"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let rgba8_mib_2k = 16.0 * 2.0 * 2048.0 * 2048.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0);
+    let photographed = packed.len() as f32;
+    let rgba8_mib_2k = photographed * 2.0 * 2048.0 * 2048.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0);
     let bc7_mib_2k = rgba8_mib_2k / 4.0;
+    let runtime_rgba8_mib = 16.0 * 2.0 * 2048.0 * 2048.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0)
+        + 16.0 * 2.0 * 1024.0 * 1024.0 * 4.0 * (4.0 / 3.0) / (1024.0 * 1024.0);
     let report = serde_json::json!({
         "manifest": MANIFEST,
         "resolution_arg": res,
         "packed_edge": size,
+        "photographed_layers": packed.len(),
         "layer_count": packed.len(),
         "layout": {
             "albedo": "sRGB RGB + linear height A",
@@ -193,6 +208,7 @@ fn main() -> Result<(), String> {
             "reason": "no compressor shipped; runtime loads assets/terrain/bc7/*.bc7 when complete, else RGBA8, never both",
             "estimated_2k_rgba8_mib": rgba8_mib_2k,
             "estimated_2k_bc7_mib": bc7_mib_2k,
+            "estimated_runtime_hero2k_extra1k_rgba8_mib": runtime_rgba8_mib,
             "budgets_mib": { "bc7_2k": 200, "rgba8_2k": 700 },
         },
         "layers": packed,

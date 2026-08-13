@@ -8,7 +8,7 @@
 > **Plan date:** 2026-08-12  
 > **Research expanded:** 2026-08-13 (second pass — papers, talks, open-source terrain systems, wetness)  
 > **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded; no textures downloaded.  
-> **XV-A codebase map:** 2026-08-13 — see [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md). Plan-vs-code corrections below; no engine code changed.  
+> **XV-Zeta:** 2026-08-13 — 32-layer landscape identity, paint UX, distant hue. In engine. **XV-J is next.**  
 > **Project:** Somnium Engine  
 > **Target:** Rust 1.85, wgpu 29, winit 0.30
 
@@ -406,9 +406,10 @@ Procedural results must be bakeable into the same four splatmaps. Manual paint i
 ## 8. Implementation phases
 
 All subphases **XV-A through XV-I are implemented in engine** as of 2026-08-13.
-**XV-J (full verification, evidence PNGs, adapter freeze) is still planned** and
-is the next authorized session. Completing a subphase's *acceptance evidence*
-still requires those captures, not only compiling code.
+**XV-Zeta is in engine** (32 materials, paint UX, landscape-scale colour) —
+[`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J stays after
+Zeta.** Completing a subphase's *acceptance evidence* still requires captures,
+not only compiling code.
 
 ### XV-A — Baseline and provenance gate
 
@@ -523,9 +524,46 @@ Palette: sixteen abbreviated names. Paint stepper kept. Tile 0–3 replaced by t
 - The artist can identify why a material was selected, what was discarded, and how wetness is modulating roughness/albedo. **Met for debug 18–23;** mip/residency views not added.
 - Debug UI remains native wgpu and does not introduce an opaque WebView background. **Met.**
 
+### XV-Zeta — 32-layer landscape identity (before XV-J)
+
+**Status: IN ENGINE — 2026-08-13.** XV-J still waits.
+
+Live default landscape after XV-I: close-up scans work; from the overview camera
+the ground is one ochre. Inspector palette clicks select a layer but do not
+paint (foliage Paint Mode was on; terrain paint still needs F6 + key 6 + a
+viewport drag; default brush is Raise).
+
+**PBR channels (already used):** albedo RGB, displacement as height (blend +
+dominant POM, not tessellation), DirectX normal XY, roughness, AO. Metallic
+dropped. Distant brown is kit + biome + macro, not missing maps.
+
+**Work (A→E in engine 2026-08-13)**
+
+- **Zeta-A** — Terrain Paint Mode; palette click arms paint and disables foliage
+  paint; stroke still happens on the viewport.
+- **Zeta-B** — Splat-weighted unique colour / macro so distant pixels show which
+  material won; stop the Great Lakes satellite diffuse from owning the continent;
+  retune 0–15 biome toward green/gray inland, sand/mud at the waterline.
+- **Zeta-C** — 32 global layers, eight RGBA splatmaps, sidecar v4, strongest-four
+  unchanged, layout ~1600 bytes, `array<vec4<T>, 8>`.
+- **Zeta-D** — Audit + fetch + pack 16 new **hue-diverse** CC0 scans (not more
+  dirt). 16–31 load at 1024 until BC7 exists (32×2K RGBA8 ~1365 MiB fails the
+  700 MiB budget).
+- **Zeta-E** — 32-weight biome on Create → Terrain / startup; bump landscape
+  version.
+
+**Exit criteria**
+
+- Clicking a palette name and dragging the ground paints that material.
+- Overview camera reads green / gray / tan / shore / snow without zooming in.
+- 32 photographed (or explicitly substituted) CC0 layers; v3 scenes keep 0–15.
+  Layers 16 and 24 are the substitutions (procedural lush/wildgrass).
+- Strongest-four tap caps unchanged. Residency logged. Water datum / Great Lakes
+  body untouched.
+
 ### XV-J — Verification, attribution, and handoff
 
-**Status: PLANNED — do not start until asked.** G–I are in the engine; this subphase is the full verification pass (fmt/check/tests already run as a compile gate, but GPU captures, adapter freeze, landscape-kit matrix screenshots, and `context.md` close-out wait).
+**Status: PLANNED — after XV-Zeta, not before.**
 
 **Work**
 
@@ -795,10 +833,9 @@ The next **implementation** session should begin with
 `context.md`, `ATTRIBUTION.md`, this plan, and
 [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
 
-XV-A through XV-I are in the engine. Remaining operational leftovers: live
-GPU/tap/memory captures from `DefaultLandscapePreset` cameras. Next authorized
-subphase is **XV-J** (verification / evidence / `context.md` close-out). Do not
-retile shipping 0–7 to 1:1 physical scale. Use the substituted roster (layer 11
-`cracked_red_ground`, layer 15 `ganges_river_pebbles`) unless a visual audit
-reopens the rejected IDs. Packed 8–15 are 2K; 0–7 remain 4K. BC7 encoder is
-still absent.
+XV-A through XV-Zeta are in the engine. Next authorized subphase is **XV-J**
+(verification, attribution close-out, GPU evidence). Do not retile
+shipping 0–7 to 1:1 physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31
+pack at 2K and load at 1024. Layers 16 and 24 are procedural lush/wildgrass
+(`grass_path_*` failed the ochre gate). BC7 encoder is still absent.
+`WaterComponent::great_lakes` stays frozen.

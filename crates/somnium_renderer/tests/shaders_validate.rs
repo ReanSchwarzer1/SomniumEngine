@@ -100,7 +100,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 880, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 1664, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -113,27 +113,26 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
             .offset
     };
     assert_eq!(offset("layer_tiling"), 0);
-    assert_eq!(offset("brush"), 64);
-    assert_eq!(offset("albedo_maps"), 80);
-    assert_eq!(offset("surface_maps"), 144);
-    assert_eq!(offset("terrain_origin"), 208);
-    assert_eq!(offset("inv_world_size"), 216);
-    assert_eq!(offset("splat_map"), 224);
-    assert_eq!(offset("splat_map_3"), 236);
-    assert_eq!(offset("hex_tiling"), 244);
-    assert_eq!(offset("layer_height_scale"), 256);
-    assert_eq!(offset("layer_blend_width"), 320);
-    assert_eq!(offset("layer_weight_clamp"), 384);
-    assert_eq!(offset("layer_parallax"), 448);
-    assert_eq!(offset("macro_mode"), 512);
-    assert_eq!(offset("macro_strength"), 516);
-    assert_eq!(offset("detail_fade_start"), 520);
-    assert_eq!(offset("detail_fade_end"), 524);
-    assert_eq!(offset("layer_albedo"), 528);
-    assert_eq!(offset("parallax_steps"), 784);
-    assert_eq!(offset("projection_sharpness"), 792);
-    assert_eq!(offset("layer_moisture"), 800);
-    assert_eq!(offset("wetness"), 864);
+    assert_eq!(offset("brush"), 128);
+    assert_eq!(offset("albedo_maps"), 144);
+    assert_eq!(offset("surface_maps"), 272);
+    assert_eq!(offset("terrain_origin"), 400);
+    assert_eq!(offset("inv_world_size"), 408);
+    assert_eq!(offset("splat_maps"), 416);
+    assert_eq!(offset("hex_tiling"), 452);
+    assert_eq!(offset("layer_height_scale"), 464);
+    assert_eq!(offset("layer_blend_width"), 592);
+    assert_eq!(offset("layer_weight_clamp"), 720);
+    assert_eq!(offset("layer_parallax"), 848);
+    assert_eq!(offset("macro_mode"), 976);
+    assert_eq!(offset("macro_strength"), 980);
+    assert_eq!(offset("detail_fade_start"), 984);
+    assert_eq!(offset("detail_fade_end"), 988);
+    assert_eq!(offset("layer_albedo"), 992);
+    assert_eq!(offset("parallax_steps"), 1504);
+    assert_eq!(offset("projection_sharpness"), 1512);
+    assert_eq!(offset("layer_moisture"), 1520);
+    assert_eq!(offset("wetness"), 1648);
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass

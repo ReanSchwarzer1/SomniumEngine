@@ -18,8 +18,8 @@
     "manifest_version": { "type": "integer", "minimum": 1 },
     "access_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
     "user_agent": { "type": "string", "minLength": 1 },
-    "sidecar_version_when_shipping": { "type": "integer", "const": 3 },
-    "layer_count": { "type": "integer", "const": 16 },
+    "sidecar_version_when_shipping": { "type": "integer", "const": 4 },
+    "layer_count": { "type": "integer", "const": 32 },
     "max_stored_nonzero_per_texel": { "type": "integer", "const": 4 },
     "license_policy": {
       "type": "string",
@@ -48,7 +48,7 @@
     "layers": {
       "type": "array",
       "minItems": 16,
-      "maxItems": 16,
+      "maxItems": 32,
       "items": { "$ref": "#/$defs/layer" }
     }
   },
@@ -57,11 +57,11 @@
       "type": "object",
       "required": ["planned_index", "id", "reason", "page_url", "substitute_id"],
       "properties": {
-        "planned_index": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "planned_index": { "type": "integer", "minimum": 0, "maximum": 31 },
         "id": { "type": "string" },
         "reason": { "type": "string" },
         "page_url": { "type": "string", "format": "uri" },
-        "substitute_id": { "type": "string" },
+        "substitute_id": { "type": ["string", "null"] },
         "files_hash": { "type": "string" }
       }
     },
@@ -100,7 +100,7 @@
         "files"
       ],
       "properties": {
-        "index": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "index": { "type": "integer", "minimum": 0, "maximum": 31 },
         "id": { "type": "string" },
         "display_name": { "type": "string" },
         "role_tags": { "type": "array", "items": { "type": "string" } },

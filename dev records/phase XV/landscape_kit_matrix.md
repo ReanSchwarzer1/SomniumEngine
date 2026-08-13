@@ -11,7 +11,7 @@ Frozen from `DefaultLandscapePreset::current()` — **not** F7 auto-splat (snow 
 | Water local translation | (512, 15, 512) — shipping Great Lakes water |
 | Default camera | position `(0, 150.75, 460.8)`, yaw −90°, pitch −22° |
 | Runtime texture res | `SOMNIUM_TERRAIN_RES` default 2048 |
-| Engine tiling | 0.25 / m (4 m repeat) for all layers until XV-H |
+| Engine tiling | 0.25 / m (4 m repeat) for layers 0–7; 8–31 use `1 / physical_width_m` |
 
 ## Capture set
 
@@ -31,6 +31,8 @@ pending an engine run; do not invent timings or images.
 | `cliff_day` | looking at a steep face | noon | layer 14 biplanar, no albedo stretch |
 | `talus_day` | cliff base | noon | layer 15 vs 14 vs 2 |
 | `snow_day` | high ridge (~65 m+) | noon | layer 3 band |
+| `lush_inland_day` | default cam, inland | noon | layers 16/24 lawn+wildgrass vs ochre 0 |
+| `cool_cliff_day` | steep face | noon | layers 18/19/26 with cliff 14 |
 | `cliff_triplanar_debug` | same as cliff_day | noon | `SOMNIUM_TERRAIN_TRIPLANAR=1` |
 | `taps` | default cam | any | `SOMNIUM_SHADOW_DEBUG=12` |
 | `discarded` | default cam | any | `SOMNIUM_SHADOW_DEBUG=18` |

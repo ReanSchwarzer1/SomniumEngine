@@ -10,7 +10,8 @@
 //! manifest (avoids scrambling key order). User-Agent:
 //! `SomniumEngine-terrain-fetch/XV`.
 //!
-//! Rejected IDs (`terrain_red_01`, `dry_riverbed_rock`) are never downloaded.
+//! Rejected IDs (`terrain_red_01`, `dry_riverbed_rock`, `grass_path_2`,
+//! `grass_path_3`) are never downloaded.
 
 use md5::{Digest, Md5};
 use serde_json::{Map, Value};
