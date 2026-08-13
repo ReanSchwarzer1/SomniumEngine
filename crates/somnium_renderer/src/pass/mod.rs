@@ -4,6 +4,7 @@ pub mod bloom;
 pub mod cas;
 pub mod cull;
 pub mod dof;
+pub mod fsr;
 pub mod fxaa;
 pub mod gizmo;
 pub mod grid;

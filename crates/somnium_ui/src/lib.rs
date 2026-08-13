@@ -211,6 +211,9 @@ struct InspectorHandles {
     post_fxaa_label: NodeHandle,
     post_cel_toggle: NodeHandle,
     post_cel_label: NodeHandle,
+    post_fsr_toggle: NodeHandle,
+    post_fsr_label: NodeHandle,
+    post_fsr_sharp: NodeHandle,
     post_taa_toggle: NodeHandle,
     post_taa_label: NodeHandle,
     post_gtao_toggle: NodeHandle,
@@ -322,6 +325,8 @@ pub struct PostInspectorState {
     pub mesh_sdf: bool,
     pub probes: bool,
     pub analytic_grad: bool,
+    pub fsr: bool,
+    pub fsr_sharpness: f32,
     pub cache_intensity: f32,
     pub cache_cell: f32,
     pub spec_rough: f32,
@@ -2011,6 +2016,7 @@ impl UiManager {
                     (h.post_sdf_toggle, v.mesh_sdf),
                     (h.post_probes_toggle, v.probes),
                     (h.post_analytic_toggle, v.analytic_grad),
+                    (h.post_fsr_toggle, v.fsr),
                 ] {
                     tick(&mut self.native_ui, handle, on);
                 }
@@ -2043,6 +2049,7 @@ impl UiManager {
                     (h.post_path_bounces, v.path_bounces),
                     (h.post_probe_intensity, v.probe_intensity),
                     (h.post_shaft_amt, v.shaft_intensity),
+                    (h.post_fsr_sharp, v.fsr_sharpness),
                 ] {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(field, value));
@@ -2447,6 +2454,7 @@ impl UiManager {
             (h.post_iso, IF::PostIso),
             (h.post_ao_radius, IF::PostAoRadius),
             (h.post_ao_intensity, IF::PostAoIntensity),
+            (h.post_fsr_sharp, IF::PostFsrSharpness),
             (h.post_cas_sharp, IF::PostCasSharpness),
             (h.post_cas_strength, IF::PostCasStrength),
             (h.post_mb_shutter, IF::PostMotionBlurShutter),
@@ -2766,6 +2774,7 @@ impl UiManager {
                         self.inspector_handles.post_analytic_toggle,
                         PostFxToggle::AnalyticGrad,
                     ),
+                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
                 ] {
                     if msg.destination == handle {
                         self.editor_events
@@ -3223,6 +3232,7 @@ impl UiManager {
                         self.inspector_handles.post_analytic_toggle,
                         PostFxToggle::AnalyticGrad,
                     ),
+                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
                 ] {
                     if msg.destination == handle {
                         self.editor_events
@@ -4738,9 +4748,14 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_mb_shutter = make_row_step(ui, "Shutter", 34.0, font_id, post_section, 0.01);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
 
+    // FSR 3 temporal reconstruct. Default on; owns AA (and RCAS) while enabled.
+    let (post_fsr_toggle, post_fsr_label) = make_toggle(ui, "FSR", font_id, post_section);
+    let post_fsr_sharp = make_row_step(ui, "FSR Sharp", 34.0, font_id, post_section, 0.01);
+
     // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
     // list reads as a pipeline rather than an unsorted pile of switches.
-    let (post_taa_toggle, post_taa_label) = make_toggle(ui, "TAA", font_id, post_section);
+    let (post_taa_toggle, post_taa_label) =
+        make_toggle(ui, "TAA (FSR owns AA)", font_id, post_section);
     let (post_gtao_toggle, post_gtao_label) = make_toggle(ui, "GTAO", font_id, post_section);
     // Radius is in metres and is the control that decides whether AO reads as
     // contact darkening under an object or as a broad smear across a hillside.
@@ -5131,6 +5146,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_ca_label,
         post_cel_toggle,
         post_cel_label,
+        post_fsr_toggle,
+        post_fsr_label,
+        post_fsr_sharp,
         post_taa_toggle,
         post_taa_label,
         post_gtao_toggle,

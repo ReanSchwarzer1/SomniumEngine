@@ -137,6 +137,12 @@ pub struct SomniumRenderer {
     pub cas_pass: crate::pass::cas::CasPass,
     /// Bilinear blit when the 3D target is smaller than the swapchain.
     present_pass: crate::pass::present::PresentPass,
+    /// FSR 3 temporal reconstruct to display resolution.
+    pub fsr_pass: crate::pass::fsr::FsrPass,
+    /// LDR post chain size (FXAA / CAS / present). Display-sized when FSR is
+    /// on, scene-sized otherwise.
+    ldr_width: u32,
+    ldr_height: u32,
     /// Phase 24AD: screen-space motion, for motion blur and future object motion.
     pub velocity_pass: crate::pass::velocity::VelocityPass,
     /// Phase 24Z: motion blur, which waited on 24AD for its velocity.
@@ -614,6 +620,16 @@ impl SomniumRenderer {
                 ctx.config.width,
                 ctx.config.height,
             ),
+            fsr_pass: crate::pass::fsr::FsrPass::new(
+                &ctx.device,
+                &ctx.queue,
+                ctx.config.width,
+                ctx.config.height,
+                ctx.config.width,
+                ctx.config.height,
+            ),
+            ldr_width: ctx.config.width,
+            ldr_height: ctx.config.height,
             shadow_radius_threshold: std::env::var("SOMNIUM_SHADOW_RADIUS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -921,18 +937,37 @@ impl SomniumRenderer {
         self.view_proj_unjittered = proj * view;
 
         // Phase 24F: nudge the projection by a sub-pixel offset so successive
-        // frames sample the scene at slightly different positions. Applied to
-        // the clip-space translation, which shifts the whole image without
-        // touching the projection's shape.
-        let jitter = self
-            .taa_pass
-            .jitter_ndc(self.render_width, self.render_height);
+        // frames sample the scene at slightly different positions. FSR and TAA
+        // both apply that offset on z_axis (Bevy's wgpu convention).
+        let jitter = if self.fsr_pass.enabled {
+            self.fsr_pass
+                .jitter_ndc(self.render_width, self.render_height)
+        } else {
+            self.taa_pass
+                .jitter_ndc(self.render_width, self.render_height)
+        };
+        // Bevy / AMD jitter-space: NDC offset on z_axis. `translate * proj`
+        // inverts it on perspective_rh (z_axis.w == −1).
         let mut jittered = proj;
         jittered.z_axis.x += jitter.x;
         jittered.z_axis.y += jitter.y;
 
         self.view_proj = jittered * view;
         self.camera_pos = camera_pos;
+    }
+
+    fn write_view_buffer(&self, queue: &wgpu::Queue, view_proj: glam::Mat4) {
+        let inv_view_proj = view_proj.inverse();
+        let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
+        let mut view_data = Vec::with_capacity(224);
+        view_data.extend_from_slice(bytemuck::bytes_of(&view_proj.to_cols_array()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&inv_view_proj.to_cols_array()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&self.view_matrix.to_cols_array()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&self.camera_pos.to_array()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
+        view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
+        view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        queue.write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
     }
 
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
@@ -1296,6 +1331,16 @@ impl SomniumRenderer {
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.present_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
+            self.fsr_pass.resize(
+                &ctx.device,
+                &ctx.queue,
+                width,
+                height,
+                ctx.config.width,
+                ctx.config.height,
+            );
+            self.ldr_width = 0;
+            self.ldr_height = 0;
             self.velocity_pass
                 .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
             self.water_pass.resize(&ctx.device, width, height);
@@ -1323,6 +1368,24 @@ impl SomniumRenderer {
             // plane, so occlusion has to stand down until it is rebuilt.
             self.hiz_ready = false;
         }
+    }
+
+    /// FXAA / CAS / present follow the tone-map attachment. FSR tone-maps at
+    /// display size; the TAA+blit path stays at scene size.
+    fn ensure_ldr_size(&mut self, ctx: &RenderContext, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.ldr_width == width && self.ldr_height == height {
+            return;
+        }
+        self.fxaa_pass
+            .resize(&ctx.device, ctx.config.format, width, height);
+        self.cas_pass
+            .resize(&ctx.device, ctx.config.format, width, height);
+        self.present_pass
+            .resize(&ctx.device, ctx.config.format, width, height);
+        self.ldr_width = width;
+        self.ldr_height = height;
     }
 
     /// Submit a draw command.
@@ -1593,6 +1656,13 @@ impl SomniumRenderer {
         // below start accumulating.
         self.profiler.begin_frame();
 
+        let (ldr_w, ldr_h) = if self.fsr_pass.enabled {
+            (ctx.config.width, ctx.config.height)
+        } else {
+            (self.render_width, self.render_height)
+        };
+        self.ensure_ldr_size(ctx, ldr_w, ldr_h);
+
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
@@ -1606,21 +1676,8 @@ impl SomniumRenderer {
             self.shading_mode,
         );
         self.local_lights.clear();
-        // ── 0. Upload view buffer (208 bytes) ────────────────────────────────
-        // Layout: view_proj(64) | inv_view_proj(64) | view(64) | camera_pos(12) | cascade_debug_flag(4)
-        let inv_view_proj = self.view_proj.inverse();
-        let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
-
-        let mut view_data = Vec::with_capacity(224);
-        view_data.extend_from_slice(bytemuck::bytes_of(&self.view_proj.to_cols_array()));
-        view_data.extend_from_slice(bytemuck::bytes_of(&inv_view_proj.to_cols_array()));
-        view_data.extend_from_slice(bytemuck::bytes_of(&self.view_matrix.to_cols_array()));
-        view_data.extend_from_slice(bytemuck::bytes_of(&self.camera_pos.to_array()));
-        view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
-        view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
-        view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3])); // _pad1
-        ctx.queue
-            .write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
+        // ── 0. Upload view buffer ────────────────────────────────────────────
+        self.write_view_buffer(&ctx.queue, self.view_proj);
 
         // ── 0.5 Phase 19: refresh the environment cubemap ────────────────────
         // No-ops unless the sun actually moved, so this is free in the common
@@ -2695,6 +2752,30 @@ impl SomniumRenderer {
             (self.render_width, self.render_height),
         );
 
+        // ── 7.97 FSR 3 temporal reconstruct to display resolution ───────────
+        // Replaces Somnium TAA and the bilinear present blit. HDR in, HDR out;
+        // tone map runs after, at window size. RCAS is inside this dispatch.
+        self.profiler.end(&mut encoder);
+        self.profiler.begin(&mut encoder, "FSR");
+        let fsr_ok = self.fsr_pass.record(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &self.postprocess_pass.hdr_texture,
+            &self.vis_pass.depth_texture,
+            self.velocity_pass.texture(),
+            self.exposure,
+            self.proj_matrix,
+            self.frame_delta_time,
+            false,
+        );
+        if fsr_ok {
+            self.postprocess_pass
+                .bind_color(&ctx.device, self.fsr_pass.output_view());
+        } else {
+            self.postprocess_pass.bind_scene(&ctx.device);
+        }
+
         // ── 8. Post-process Pass: HDR → swapchain (tone map + vignette) ──────
         // A TAA debug view must reach the screen unmodified: exposure would
         // crush a 0/1 flag image to black, and a tone curve would grade the
@@ -2738,18 +2819,21 @@ impl SomniumRenderer {
         // and there is nothing left for FXAA to usefully do once TAA is on.
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Post + present");
-        let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled();
+        let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled() && !fsr_ok;
         // Phase 24AC: when CAS is running it owns the swapchain, and whatever
         // would have written there writes into its input instead. Placed here
         // rather than at the very end of the frame on purpose — the gizmos, the
         // outline and the UI draw into the surface *after* this, and sharpening
         // a 1-pixel gizmo line or a font glyph would only ring it.
-        let cas_active = self.cas_pass.active();
-        let upscale =
-            self.render_width != ctx.config.width || self.render_height != ctx.config.height;
+        // FSR RCAS already sharpened the HDR reconstruct; stacking CAS rings.
+        let cas_active = self.cas_pass.active() && !fsr_ok;
+        let upscale = !fsr_ok
+            && (self.render_width != ctx.config.width || self.render_height != ctx.config.height);
         {
             // Scene-sized colour target. Native writes this straight to the
             // swapchain; a lower preset lands here and is blitted after CAS.
+            // FSR already wrote display-sized HDR, so tone map goes to the
+            // window (or CAS/FXAA at window size) with no extra blit.
             let scene_present: &wgpu::TextureView = if upscale {
                 self.present_pass.src_view()
             } else {
@@ -2762,7 +2846,7 @@ impl SomniumRenderer {
             };
             if fxaa_active {
                 self.fxaa_pass
-                    .update(&ctx.queue, self.render_width, self.render_height);
+                    .update(&ctx.queue, self.ldr_width, self.ldr_height);
                 self.postprocess_pass
                     .record(&mut encoder, &self.fxaa_pass.ldr_view);
                 self.fxaa_pass.record(&mut encoder, ldr_target);
@@ -2779,6 +2863,11 @@ impl SomniumRenderer {
         if upscale {
             self.present_pass.record(&mut encoder, &surface_view);
         }
+
+        // Overlays draw onto the reconstructed image. The scene used a jittered
+        // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
+        // here makes gizmos and outlines swim by a pixel every frame.
+        self.write_view_buffer(&ctx.queue, self.view_proj_unjittered);
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
         if self.editor_overlays_enabled
@@ -2801,7 +2890,7 @@ impl SomniumRenderer {
                 &ctx.queue,
                 &mut encoder,
                 &surface_view,
-                self.view_proj,
+                self.view_proj_unjittered,
                 model,
                 v_off,
                 i_off,
@@ -2832,7 +2921,7 @@ impl SomniumRenderer {
                 &ctx.queue,
                 &mut encoder,
                 &surface_view,
-                self.view_proj,
+                self.view_proj_unjittered,
                 self.view_matrix,
                 &self.pending_particles,
             );

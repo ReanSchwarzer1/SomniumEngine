@@ -409,6 +409,32 @@ impl PostProcessPass {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 
+    /// Point tone-map at a different HDR colour target (FSR output vs scene).
+    pub fn bind_color(&mut self, device: &wgpu::Device, color: &wgpu::TextureView) {
+        self.bind_group = Self::make_bind_group(
+            device,
+            &self.bind_group_layout,
+            color,
+            &self.sampler,
+            &self.params_buffer,
+            &self.exposure_buffer,
+            &self.bloom_view,
+        );
+    }
+
+    /// Restore tone-map sampling of the scene-resolution HDR target.
+    pub fn bind_scene(&mut self, device: &wgpu::Device) {
+        self.bind_group = Self::make_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.hdr_view,
+            &self.sampler,
+            &self.params_buffer,
+            &self.exposure_buffer,
+            &self.bloom_view,
+        );
+    }
+
     /// Record the post-process pass into `encoder`, writing to `surface_view`.
     pub fn record(&self, encoder: &mut wgpu::CommandEncoder, surface_view: &wgpu::TextureView) {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

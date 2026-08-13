@@ -168,8 +168,6 @@ pub struct Engine<G: GameApp> {
     /// is painted — loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
     foliage_meshes: [Option<Vec<FoliagePart>>; FOLIAGE_PALETTE.len()],
-    /// Camera-facing quad used past `impostor_distance` (Phase 25P).
-    foliage_impostor: Option<FoliagePart>,
     /// Palette entries whose import failed, so we stop retrying them.
     foliage_failed: [bool; FOLIAGE_PALETTE.len()],
     /// Phase 17F: the foliage brush.
@@ -273,7 +271,6 @@ impl<G: GameApp + 'static> Engine<G> {
             viewport_size: initial_vp,
             gizmo_drag: None,
             foliage_meshes: std::array::from_fn(|_| None),
-            foliage_impostor: None,
             foliage_failed: [false; FOLIAGE_PALETTE.len()],
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
             foliage_paint_active: false,
@@ -1000,6 +997,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     mesh_sdf: pp.mesh_sdf,
                     probes: pp.probes,
                     analytic_grad: pp.analytic_grad,
+                    fsr: pp.fsr_enabled,
+                    fsr_sharpness: pp.fsr_sharpness,
                     cache_intensity: pp.cache_intensity,
                     cache_cell: pp.cache_cell_size,
                     spec_rough: pp.spec_roughness,
@@ -1868,7 +1867,9 @@ impl<G: GameApp> Engine<G> {
                 | if pp.pcss_enabled { 2 } else { 0 }
                 | if pp.contact_shadows_enabled { 4 } else { 0 }
                 | if pp.analytic_grad { 8 } else { 0 };
-            r.taa_pass.set_enabled(pp.taa_enabled);
+            r.fsr_pass.set_enabled(pp.fsr_enabled);
+            r.fsr_pass.sharpness = pp.fsr_sharpness;
+            r.taa_pass.set_enabled(pp.taa_enabled && !pp.fsr_enabled);
             r.gtao_pass.enabled = pp.gtao_enabled;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
@@ -1881,7 +1882,7 @@ impl<G: GameApp> Engine<G> {
                 pp.rt_reflect_enabled && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
                 pp.rt_refract_enabled && r.water_reflection_pass.supported();
-            r.cas_pass.enabled = pp.cas_enabled;
+            r.cas_pass.enabled = pp.cas_enabled && !pp.fsr_enabled;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
             r.motion_blur_pass.enabled = pp.motion_blur_enabled;
@@ -2065,7 +2066,6 @@ impl<G: GameApp> Engine<G> {
         if let Some(r) = self.renderer.as_mut() {
             r.profiler.cpu_begin("Foliage");
         }
-        self.ensure_impostor_mesh();
 
         for (terrain_id, model, cull_distance, shadow_distance, lod_distance, impostor_distance) in
             terrains
@@ -2123,40 +2123,32 @@ impl<G: GameApp> Engine<G> {
                 // you back on.
                 let casts = d.x * d.x + d.z * d.z <= shadow_sq;
                 let dist = (d.x * d.x + d.z * d.z).sqrt();
-                if impostor_distance > 0.0 && dist > impostor_distance {
-                    if let Some(impostor) = self.foliage_impostor {
-                        let world_pos = model.transform_point3(inst.position);
-                        let to_cam = (camera_ws - world_pos).normalize_or_zero();
-                        let rot = if to_cam.length_squared() > 1.0e-8 {
-                            glam::Quat::from_rotation_arc(glam::Vec3::Y, to_cam)
-                        } else {
-                            glam::Quat::IDENTITY
-                        };
-                        let billboard = glam::Mat4::from_scale_rotation_translation(
-                            glam::Vec3::splat(inst.scale * 2.0),
-                            rot,
-                            world_pos,
-                        );
-                        let mut part = impostor;
-                        if let Some(src) = parts.first() {
-                            part.material_id = src.material_id;
-                        }
-                        self.foliage_batch.push((part, billboard, casts));
-                    }
-                    continue;
-                }
-                let drop_heavy = lod_distance > 0.0 && dist > lod_distance && parts.len() > 1;
-                let skip_idx = if drop_heavy {
-                    parts
-                        .iter()
-                        .enumerate()
-                        .max_by_key(|(_, p)| p.index_count)
-                        .map(|(i, _)| i)
-                } else {
-                    None
-                };
+                // Three mesh LODs. The old "impostor" was an untextured ground
+                // plane rotated toward the camera — a black triangle that FSR
+                // then ghosted. Past impostor_distance keep the cheapest real
+                // primitive (usually the trunk) instead.
+                let keep_only = impostor_distance > 0.0
+                    && dist > impostor_distance
+                    && parts.len() > 1;
+                let drop_heavy = !keep_only
+                    && lod_distance > 0.0
+                    && dist > lod_distance
+                    && parts.len() > 1;
+                let cheapest = parts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, p)| p.index_count)
+                    .map(|(i, _)| i);
+                let heaviest = parts
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, p)| p.index_count)
+                    .map(|(i, _)| i);
                 for (i, part) in parts.iter().enumerate() {
-                    if skip_idx == Some(i) {
+                    if keep_only && cheapest != Some(i) {
+                        continue;
+                    }
+                    if drop_heavy && heaviest == Some(i) {
                         continue;
                     }
                     self.foliage_batch
@@ -2294,51 +2286,6 @@ impl<G: GameApp> Engine<G> {
             built.len()
         );
         self.foliage_meshes[idx] = Some(built);
-    }
-
-    fn ensure_impostor_mesh(&mut self) {
-        if self.foliage_impostor.is_some() {
-            return;
-        }
-        let (Some(renderer), Some(ctx)) = (&mut self.renderer, &self.render_ctx) else {
-            return;
-        };
-        let mat_id = if let Some(id) = self.default_material_id {
-            id
-        } else {
-            let id = renderer.materials_pool.add_material(
-                &ctx.queue,
-                somnium_renderer::material::pool::GpuMaterial {
-                    base_color: [0.25, 0.4, 0.18, 1.0],
-                    roughness: 0.8,
-                    metallic: 0.0,
-                    albedo_map: -1,
-                    normal_map: -1,
-                    metallic_roughness_map: -1,
-                    alpha_cutoff: 0.0,
-                    flags: 0,
-                    occlusion_map: -1,
-                    transmission: 0.0,
-                    emissive: [0.0; 3],
-                    emissive_map: -1,
-                    terrain_index: -1,
-                    _pad: [0.0; 2],
-                },
-            );
-            self.default_material_id = Some(id);
-            id
-        };
-        let (verts, idxs) = somnium_asset::generate_plane(1.0, 1);
-        let alloc = renderer
-            .geometry
-            .upload_mesh(&ctx.queue, &verts, &idxs, mat_id);
-        self.foliage_impostor = Some(FoliagePart {
-            vertex_offset: alloc.vertex_offset,
-            index_offset: alloc.index_offset,
-            index_count: alloc.index_count,
-            material_id: mat_id,
-            local: glam::Mat4::IDENTITY,
-        });
     }
 
     /// Apply one dab of the foliage brush under the cursor (Phase 17F).
@@ -3016,6 +2963,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostIso
                         | IF::PostAoRadius
                         | IF::PostAoIntensity
+                        | IF::PostFsrSharpness
                         | IF::PostCasSharpness
                         | IF::PostCasStrength
                         | IF::PostMotionBlurShutter
@@ -3066,6 +3014,7 @@ impl<G: GameApp> Engine<G> {
                             IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
                             IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
                             IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
+                            IF::PostFsrSharpness => pp.fsr_sharpness = value.clamp(0.0, 1.0),
                             IF::PostCasSharpness => pp.cas_sharpness = value.clamp(0.0, 1.0),
                             IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
                             IF::PostMotionBlurShutter => {
@@ -3938,6 +3887,10 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::AnalyticGrad => {
                             pp.analytic_grad = !pp.analytic_grad;
                             pp.analytic_grad
+                        }
+                        PostFxToggle::Fsr => {
+                            pp.fsr_enabled = !pp.fsr_enabled;
+                            pp.fsr_enabled
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

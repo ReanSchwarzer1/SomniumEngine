@@ -2,6 +2,10 @@
 
 These controls live on the **Post Processing** entity unless noted. Select that entity in the Outliner, then use Details. Expensive paths default **off**; turn them on from Details.
 
+## FSR (temporal upscale)
+
+**FSR** is **on by default**. It reconstructs the viewport **Resolution** preset to the window (including Native, where it is the AA). Somnium TAA and CAS stay off while it is on — **FSR Sharp** is AMD RCAS (0–1, default 0.8). `SOMNIUM_FSR=0` kills it at startup. Frame generation is not in the engine. Water and transparents may ghost under camera motion; that is a missing reactive mask, not a water shading bug.
+
 ## World cache (24M)
 
 **World Cache** is **off by default**. It does **not** make the frame cheaper.

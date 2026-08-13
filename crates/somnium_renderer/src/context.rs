@@ -75,6 +75,23 @@ pub const PROFILER_FEATURES: wgpu::Features =
 /// Never request this bit if the adapter lacks it.
 pub const BC_COMPRESSION_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC;
 
+/// Features FSR 3 needs on the device (detect, do not demand).
+///
+/// wgpu-ffx's tests request *every* adapter feature. We ask for the set it
+/// actually uses so a later `create_texture` / `create_shader_module` / encode
+/// does not panic on a missing bit:
+/// - `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` — `rg16float` / `r16float` UAVs
+/// - `PASSTHROUGH_SHADERS` — AMD SPIR-V uses GLSL `coherent` on images; naga
+///   only allows `@coherent` on storage buffers, so wgpu-ffx passthroughs SPIR-V
+/// - `TEXTURE_FORMAT_16BIT_NORM` — Lanczos2 LUT is `r16snorm`
+/// - `FLOAT32_FILTERABLE` — dilated depth is `r32float` sampled as filterable
+/// - `CLEAR_TEXTURE` — dispatch clears accumulation / SPD mips with `clear_texture`
+pub const FSR_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+    .union(wgpu::Features::PASSTHROUGH_SHADERS)
+    .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+    .union(wgpu::Features::FLOAT32_FILTERABLE)
+    .union(wgpu::Features::CLEAR_TEXTURE);
+
 impl RenderContext {
     /// Create a new `RenderContext` asynchronously.
     ///
@@ -190,18 +207,31 @@ impl RenderContext {
             required_features
         };
 
+        let fsr = available_features.contains(FSR_FEATURES);
+        if fsr {
+            info!("FSR 3 available (adapter storage formats + shader passthrough)");
+        } else {
+            info!("FSR 3 unavailable — missing adapter storage formats or shader passthrough");
+        }
+        let required_features = if fsr {
+            required_features | FSR_FEATURES
+        } else {
+            required_features
+        };
+
         let mut limits = wgpu::Limits::default();
         limits.max_binding_array_elements_per_shader_stage = 1024;
         limits.max_storage_buffers_per_shader_stage = 16;
-        // Phase 24AC: SPD writes six mip levels from one dispatch, and wgpu's
-        // default ceiling is four storage textures per stage. Asked for from
-        // the adapter rather than demanded — a device that cannot manage six
-        // falls back to the per-mip pyramid, which is why `HiZPass` checks the
-        // granted limit rather than assuming this succeeded.
+        // Phase 24AC / FSR: SPD writes six mip UAVs from one dispatch, and FSR's
+        // luma pyramid binds those plus two more. wgpu's default ceiling is four
+        // storage textures per stage. Asked for from the adapter rather than
+        // demanded — a device that cannot manage six falls back to the per-mip
+        // pyramid, which is why `HiZPass` checks the granted limit rather than
+        // assuming this succeeded.
         limits.max_storage_textures_per_shader_stage = adapter
             .limits()
             .max_storage_textures_per_shader_stage
-            .min(8)
+            .min(16)
             .max(limits.max_storage_textures_per_shader_stage);
         // Phase 17E: the geometry pool is a storage buffer, and wgpu's default
         // ceiling of 128 MB is small for a scene holding a photoscanned model.
@@ -299,6 +329,11 @@ impl RenderContext {
     /// Whether BC7 terrain packs may be uploaded (Phase XV-E).
     pub fn supports_bc_compression(&self) -> bool {
         self.features.contains(BC_COMPRESSION_FEATURES)
+    }
+
+    /// Whether FSR 3 may create `Rg16Float` storage images and load AMD SPIR-V.
+    pub fn supports_fsr(&self) -> bool {
+        self.features.contains(FSR_FEATURES)
     }
 
     /// Resize the surface.

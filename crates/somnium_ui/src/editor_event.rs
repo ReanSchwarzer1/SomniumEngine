@@ -131,6 +131,8 @@ pub enum InspectorField {
     /// darkening or as a broad dirty smear.
     PostAoRadius,
     PostAoIntensity,
+    /// FSR RCAS sharpness, 0..=1.
+    PostFsrSharpness,
     // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
     /// Which splat layer the paint brush writes, 0..=31.
     TerrainPaintLayer,
@@ -263,6 +265,8 @@ pub enum PostFxToggle {
     Probes,
     /// Analytic UV gradients (Phase 25N). Default on.
     AnalyticGrad,
+    /// AMD FSR 3 temporal upscale. Default on; owns AA while enabled.
+    Fsr,
 }
 
 /// High-level editor commands produced by the native UI layer.

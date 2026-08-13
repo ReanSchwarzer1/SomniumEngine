@@ -1026,6 +1026,18 @@ engine is only the shape of the solution.
 | `cas.hlsl` (no `CAS_BETTER_DIAGONALS` / `CAS_SLOW`) | AMD default: cross-only contrast, green weight for all channels | same configuration |
 | `APrxLoRcpF1` / `APrxLoSqrtF1` | Deliberately **not** ported: approximations for slow-rcp hardware; exact forms are AMD’s own `CAS_GO_SLOWER` | exact `sqrt` and division, plus a `max(mx, 1e-5)` NaN guard |
 
+### 13B.7 AMD FidelityFX FSR 3 via wgpu-ffx
+
+**Copyright:** AMD FidelityFX Super Resolution 3 (MIT); wgpu-ffx (c) Connor Fitzgerald and contributors, MIT.
+**Source:** vendored `third_party/wgpu-ffx` and `third_party/wgpu-ffx-shaders-spv` from https://github.com/cwfitzgerald/wgpu-ffx (precompiled SPIR-V; no `glslc` at build).
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| FSR 3 upscaler (no frame gen) | Temporal reconstruct from render-res HDR + depth + motion vectors + Halton jitter to display res; RCAS sharpen | `pass/fsr.rs` wrapping `wgpu_ffx::FsrContext` |
+| `get_jitter_offset` / `get_jitter_phase_count` | Halton (bases 2, 3) in pixel units `[-0.5, 0.5]` | applied to the projection like TAA (`* 2 / resolution`) |
+| Frame interpolation / optical flow / swapchain proxy | **Not ported.** Needs DX12/Vulkan swapchain replace; wgpu/winit cannot host it | — |
+| `GenerateReactive` | **Unimplemented** in wgpu-ffx | water/transparents may ghost; documented, not a water retune |
+
 ### 13B.4 O3DE — terrain material blending (Phases 25D, 25E)
 
 **Source:** `example_repo/o3de-development/.../Gems/Terrain/`
@@ -1117,6 +1129,7 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/pass/water_reflection.rs`, `shaders/water_reflection.wgsl` (VV-C–G) | Half-res compute reflections: GGX/mirror rays, temporal mix, 2×2 upsample, SSR/RT/env blend. Architecture studied from existing `gi_trace`, Karis GGX, Stachowiak SSR; original WGSL. See §1.7 |
 | `somnium_renderer/src/shaders/rt_hit.wgsl` (VV-D) | Shared hit resolve extracted from `restir_gi.wgsl` `gi_trace`; GI wraps `rt_trace`. Hit lighting is `evaluate_brdf` sun + IBL with cascade shadow sample, not a second ray |
 | `somnium_renderer/src/pass/taa.rs`, `shaders/taa.wgsl` (IV-D) | Existing Somnium TAA retained for opaque pixels; water-only motion-vector selection and surface coverage target are original integration work |
+| `somnium_renderer/src/pass/fsr.rs` | AMD FidelityFX FSR 3 via wgpu-ffx (temporal upscale, no frame gen) |
 | `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
 | `somnium_renderer/src/pass/water_spectrum.rs`, `shaders/water_spectrum.wgsl` (IV-F) | Tessendorf wind-spectrum/deep-water-dispersion model plus Wicked Engine's persistent displacement/gradient/folding resource split; Somnium's deterministic spectrum generation, radix-2 wgpu scheduling, two finite-lake scales, WGSL, and temporal foam integration are original |
 | `somnium_renderer/src/pass/underwater.rs`, `shaders/underwater.wgsl` (IV-G) | Wicked Engine's HDR underwater composition ordering and finite-medium concerns were studied; Somnium's ray-segment mask, RGB medium, caustics, and transition WGSL are original and deliberately exclude Wicked's Shadertoy-cited Brown–Conrady/god-ray helpers |

@@ -776,6 +776,13 @@ pub struct PostProcessComponent {
     pub analytic_grad: bool,
     /// Light-shaft boost on the sun in-scatter (Phase 24U). 1 is unscaled air.
     pub shaft_intensity: f32,
+    /// AMD FSR 3 temporal reconstruct to the window. Default on; `SOMNIUM_FSR=0`.
+    ///
+    /// Replaces Somnium TAA and the bilinear present blit while enabled. RCAS
+    /// sharpness lives in `fsr_sharpness`; Somnium CAS stays off on this path.
+    pub fsr_enabled: bool,
+    /// FSR RCAS sharpness, 0..=1. Default 0.8.
+    pub fsr_sharpness: f32,
 }
 
 impl Default for PostProcessComponent {
@@ -869,6 +876,8 @@ impl Default for PostProcessComponent {
             probe_intensity: 1.0,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
+            fsr_enabled: std::env::var("SOMNIUM_FSR").as_deref() != Ok("0"),
+            fsr_sharpness: 0.8,
         }
     }
 }
