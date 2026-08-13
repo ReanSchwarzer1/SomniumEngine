@@ -259,10 +259,7 @@ impl Control for ComboDropdown {
         } else {
             w
         };
-        Vec2::new(
-            width,
-            (self.items.len().max(1) as f32) * theme::ROW_HEIGHT,
-        )
+        Vec2::new(width, (self.items.len().max(1) as f32) * theme::ROW_HEIGHT)
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {

@@ -135,6 +135,7 @@ impl somnium_ecs::Component for Transform {}
 ///
 /// `Directional` — infinite-range sun light (Phase 11).
 /// `Point` / `Spot` — local lights with range & falloff (Phase 13C).
+/// `Rect` / `Disc` / `Tube` — area lights (Phase 24R).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightType {
     /// Infinite-range sun light (direction only).
@@ -143,6 +144,12 @@ pub enum LightType {
     Point,
     /// Local cone light with range falloff and inner/outer angles.
     Spot,
+    /// Rectangular area light (Phase 24R, LTC). Width/height are half-extents.
+    Rect,
+    /// Disc area light (Phase 24R). `source_radius` is the disc radius; forward is the normal.
+    Disc,
+    /// Capsule / tube area light (Phase 24R). `area_width` is half-length; `source_radius` is radius.
+    Tube,
 }
 
 /// ECS component that marks an entity as a light source.
@@ -211,6 +218,10 @@ pub struct LightComponent {
     pub outer_angle: f32,
     /// Directional moonlight illuminance in lux (Phase 25M-2). Default 0.010 lux.
     pub moon_intensity: f32,
+    /// Rect-light half-width in metres (Phase 24R). Ignored for other kinds.
+    pub area_width: f32,
+    /// Rect-light half-height in metres (Phase 24R). Ignored for other kinds.
+    pub area_height: f32,
 }
 
 impl LightComponent {
@@ -234,7 +245,9 @@ impl LightComponent {
     pub fn photometric_color(&self) -> glam::Vec3 {
         let scale = match self.light_type {
             LightType::Directional => self.intensity,
-            LightType::Point => light_units::point_candela(self.intensity),
+            LightType::Point | LightType::Rect | LightType::Disc | LightType::Tube => {
+                light_units::point_candela(self.intensity)
+            }
             LightType::Spot => light_units::spot_candela(self.intensity, self.outer_angle),
         };
         self.tint() * scale
@@ -252,6 +265,8 @@ impl LightComponent {
             inner_angle: 0.0,
             outer_angle: 0.0,
             moon_intensity: 0.010,
+            area_width: 0.0,
+            area_height: 0.0,
         }
     }
 
@@ -267,6 +282,8 @@ impl LightComponent {
             inner_angle: 0.0,
             outer_angle: 0.0,
             moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
         }
     }
 
@@ -282,6 +299,62 @@ impl LightComponent {
             inner_angle,
             outer_angle,
             moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white rectangular area light, in **lumens**.
+    pub fn rect(intensity: f32, range: f32, half_width: f32, half_height: f32) -> Self {
+        Self {
+            light_type: LightType::Rect,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: half_width.max(half_height),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: half_width,
+            area_height: half_height,
+        }
+    }
+
+    /// Convenience constructor for a white disc area light, in **lumens**.
+    pub fn disc(intensity: f32, range: f32, radius: f32) -> Self {
+        Self {
+            light_type: LightType::Disc,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: radius.max(0.05),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: 0.0,
+            area_height: 0.0,
+        }
+    }
+
+    /// Convenience constructor for a white tube area light, in **lumens**.
+    ///
+    /// `half_length` is metres along the entity forward axis from the centre;
+    /// `radius` is the tube's cross-section.
+    pub fn tube(intensity: f32, range: f32, half_length: f32, radius: f32) -> Self {
+        Self {
+            light_type: LightType::Tube,
+            color: glam::Vec3::ONE,
+            intensity,
+            color_temperature_k: 0.0,
+            source_radius: radius.max(0.02),
+            range,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            moon_intensity: 0.0,
+            area_width: half_length.max(0.05),
+            area_height: 0.0,
         }
     }
 }
@@ -420,6 +493,13 @@ pub struct FoliageComponent {
     ///
     /// `0` means "never stop", which is the A/B against the old behaviour.
     pub foliage_shadow_distance: f32,
+    /// Past this **horizontal** distance leaf/cutout parts are dropped (Phase 25P).
+    /// `0` keeps every part.
+    pub lod_distance: f32,
+    /// Past this **horizontal** distance only solid parts remain (Phase 25P).
+    /// Not a billboard — the dummy camera-facing quad was deleted. `0` keeps
+    /// every remaining part.
+    pub impostor_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -444,6 +524,8 @@ impl Default for FoliageComponent {
             // individual blades within a few metres and as texture within a
             // few tens; past that they are noise that costs four cascades.
             foliage_shadow_distance: 40.0,
+            lod_distance: 45.0,
+            impostor_distance: 90.0,
             max_instances: 18_000,
         }
     }
@@ -587,6 +669,17 @@ pub struct PostProcessComponent {
     /// solution; the specular lobe still comes from the cubemap. Off means the
     /// constant ambient term the engine has always had.
     pub restir_gi_enabled: bool,
+    /// Ray-traced water reflections (Phase VV — Halcyon).
+    ///
+    /// Off, or `SOMNIUM_RT_REFLECT=0`, restores the previous SSR + environment
+    /// cube look. Hardware without ray query skips the pass regardless.
+    pub rt_reflect_enabled: bool,
+    /// Ray-traced water refraction (Phase VV+1).
+    ///
+    /// Default **off**. Traces a Snell ray through the surface and replaces the
+    /// screen-space bed sample on a hit. `SOMNIUM_RT_REFRACT=0` forces it off
+    /// even if this toggle is on. Hardware without ray query skips it.
+    pub rt_refract_enabled: bool,
     /// Contrast adaptive sharpening (Phase 24AC).
     ///
     /// Recovers the high frequencies TAA averages away, by an amount derived
@@ -660,6 +753,37 @@ pub struct PostProcessComponent {
     /// specular occlusion, and ReSTIR GI now provide the indirect-light
     /// visibility that the old pre-AO `0.35` workaround was waiting for.
     pub ibl_intensity: f32,
+    /// World-space radiance cache (Phase 24M). Default off; `SOMNIUM_WORLD_CACHE=1`.
+    pub world_cache: bool,
+    /// How hard the cache contributes to ambient.
+    pub cache_intensity: f32,
+    /// Cache voxel size in metres.
+    pub cache_cell_size: f32,
+    /// Scene-wide ray-traced specular (Phase 24N). Default off.
+    pub specular_gi: bool,
+    /// Roughness cutoff for the specular GI trace.
+    pub spec_roughness: f32,
+    /// Offline path tracer (Phase 24O). Replaces the image while on. Default off.
+    pub path_tracer: bool,
+    /// Bounces the path tracer takes. 1..=8.
+    pub path_bounces: u32,
+    /// Mesh-SDF cone trace (Phase 24P). Default off.
+    pub mesh_sdf: bool,
+    /// SH irradiance probes (Phase 24Q). Default off.
+    pub probes: bool,
+    /// Probe contribution; scales the SH bake.
+    pub probe_intensity: f32,
+    /// Analytic UV gradients in vis-buffer shading (Phase 25N). Default on.
+    pub analytic_grad: bool,
+    /// Light-shaft boost on the sun in-scatter (Phase 24U). 1 is unscaled air.
+    pub shaft_intensity: f32,
+    /// AMD FSR 3 temporal reconstruct to the window. Default on; `SOMNIUM_FSR=0`.
+    ///
+    /// Replaces Somnium TAA and the bilinear present blit while enabled. RCAS
+    /// sharpness lives in `fsr_sharpness`; Somnium CAS stays off on this path.
+    pub fsr_enabled: bool,
+    /// FSR RCAS sharpness, 0..=1. Default 0.8.
+    pub fsr_sharpness: f32,
 }
 
 impl Default for PostProcessComponent {
@@ -700,6 +824,8 @@ impl Default for PostProcessComponent {
             // a look — a kilometre of air between the camera and a hill is
             // always there. `SOMNIUM_VOLUMETRICS=0` is the A/B switch.
             restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
+            rt_reflect_enabled: std::env::var("SOMNIUM_RT_REFLECT").as_deref() != Ok("0"),
+            rt_refract_enabled: false,
             cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,
@@ -739,6 +865,20 @@ impl Default for PostProcessComponent {
             fxaa_enabled: true,
             pcss_enabled: true,
             contact_shadows_enabled: true,
+            world_cache: std::env::var("SOMNIUM_WORLD_CACHE").as_deref() == Ok("1"),
+            cache_intensity: 1.0,
+            cache_cell_size: 2.0,
+            specular_gi: std::env::var("SOMNIUM_SPECULAR_GI").as_deref() == Ok("1"),
+            spec_roughness: 0.15,
+            path_tracer: std::env::var("SOMNIUM_PATH_TRACER").as_deref() == Ok("1"),
+            path_bounces: 3,
+            mesh_sdf: std::env::var("SOMNIUM_MESH_SDF").as_deref() == Ok("1"),
+            probes: std::env::var("SOMNIUM_PROBES").as_deref() == Ok("1"),
+            probe_intensity: 1.0,
+            analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
+            shaft_intensity: 1.5,
+            fsr_enabled: std::env::var("SOMNIUM_FSR").as_deref() != Ok("0"),
+            fsr_sharpness: 0.8,
         }
     }
 }
@@ -1207,6 +1347,10 @@ pub struct WaterComponent {
     pub anisotropy: f32,
     /// Screen-space reflection contribution before environment fallback.
     pub ssr_strength: f32,
+    /// Ray-traced reflection mix when Halcyon is running (Phase VV).
+    pub rt_reflect_strength: f32,
+    /// 0 off, 1 SSR hit/miss, 2 reflection-source colouring (Phase VV-A).
+    pub reflect_debug: f32,
     /// Blend from deterministic Gerstner (0) to the two-cascade spectral tier (1).
     pub spectrum_blend: f32,
     /// Authored wind speed in metres per second. Scales the spectral cascade
@@ -1254,6 +1398,8 @@ impl Default for WaterComponent {
             roughness: 0.65,
             anisotropy: 0.35,
             ssr_strength: 0.85,
+            rt_reflect_strength: 1.0,
+            reflect_debug: 0.0,
             spectrum_blend: 0.75,
             wind_speed: 8.0,
             foam_decay: 0.9,
@@ -1312,6 +1458,7 @@ impl WaterComponent {
             roughness: 0.02,
             anisotropy: 0.45,
             ssr_strength: 1.0,
+            rt_reflect_strength: 1.0,
             spectrum_blend: 0.64,
             // Wind = 10 leaves the cascade roster at its design speeds; 6.5 is
             // a calmer inland lake. Foam and Whitecap drive the spectral foam
@@ -1396,6 +1543,23 @@ mod camera_speed_tests {
     #[test]
     fn directional_light_uses_the_accepted_moonlight_default() {
         assert_eq!(LightComponent::directional(100_000.0).moon_intensity, 0.010);
+    }
+
+    #[test]
+    fn disc_and_tube_convert_lumens_like_a_point() {
+        let point = LightComponent::point(800.0, 10.0).photometric_color();
+        let disc = LightComponent::disc(800.0, 10.0, 0.4).photometric_color();
+        let tube = LightComponent::tube(800.0, 10.0, 0.75, 0.04).photometric_color();
+        assert!((point - disc).length() < 1e-5);
+        assert!((point - tube).length() < 1e-5);
+        assert_eq!(
+            LightComponent::disc(800.0, 10.0, 0.4).light_type,
+            LightType::Disc
+        );
+        assert_eq!(
+            LightComponent::tube(800.0, 10.0, 0.75, 0.04).light_type,
+            LightType::Tube
+        );
     }
 
     #[test]

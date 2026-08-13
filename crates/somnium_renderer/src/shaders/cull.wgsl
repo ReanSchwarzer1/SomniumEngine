@@ -97,6 +97,14 @@ fn is_occluded(world_min: vec3<f32>, world_max: vec3<f32>) -> bool {
     hi = clamp(hi, vec2<f32>(0.0), vec2<f32>(1.0));
     min_z = max(min_z, 0.0);
 
+    // A tree filling the view (camera in the canopy, or standing next to a
+    // scaled sapling) covers most of the screen. Four coarse Hi-Z samples
+    // then hit nearby ground and neighbouring trees, which is enough to
+    // reject the whole object. Close-up candidates must draw.
+    if (hi.x - lo.x) * (hi.y - lo.y) > 0.25 {
+        return false;
+    }
+
     // Pick the level where the footprint spans at most 2x2 texels, so four
     // samples cover any candidate however large it is on screen.
     let extent = max(max((hi.x - lo.x) * params.hiz_size.x,
@@ -138,8 +146,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Escape hatch: keep everything (used to A/B the culling result).
     if params.disabled != 0u {
         // Only phase one draws when culling is off, so phase two must not
-        // resubmit the same geometry.
-        draws[i].instance_count = select(1u, 0u, params.phase == 1u);
+        // resubmit the same geometry. Leave the uploaded instance_count
+        // alone in phase one — replacing it with 1 collapsed batched draws
+        // down to a single copy.
+        if params.phase == 1u {
+            draws[i].instance_count = 0u;
+        }
         occluded_flags[i] = 0u;
         return;
     }
@@ -240,7 +252,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         hidden = is_occluded(world_min, world_max);
     }
 
-    draws[i].instance_count = select(1u, 0u, hidden);
+    // Zero to skip the draw. Do not replace a live count with 1: batched
+    // copies share one argument and would all vanish except the first.
+    if hidden {
+        draws[i].instance_count = 0u;
+    } else if params.phase == 1u {
+        // Phase one left this at 0. Revival is always a single instance;
+        // the CPU no longer collapses copies into instance_count > 1.
+        draws[i].instance_count = 1u;
+    }
     if params.phase == 0u {
         // Remember it for phase two, which re-tests against a fresher pyramid.
         occluded_flags[i] = select(0u, 1u, hidden);

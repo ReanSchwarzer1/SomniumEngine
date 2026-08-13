@@ -871,7 +871,8 @@ underwater enable toggle remain authored in the component but were still missing
 from the inspector at close; exposing them is part of
 [Phase 26 — Iris](phase_26.md) (inspector colour pickers), not a Phase IV
 reopen. Ray-traced water reflections, the largest remaining gap in water
-fidelity, are planned separately as [Phase VV — Halcyon](phase_VV.md).
+fidelity at IV close, shipped later as [Phase VV — Halcyon](phase_VV.md)
+(VV-A–H in tree, 2026-08-13).
 
 Phase IV is complete only when:
 

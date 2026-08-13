@@ -15,7 +15,7 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
 use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
-use somnium_ui::{ColorField, EditorEvent, TerrainInspectorState, UiManager};
+use somnium_ui::{ColorField, EditorEvent, LightInspectorState, TerrainInspectorState, UiManager};
 
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
@@ -136,6 +136,11 @@ struct FoliagePart {
     index_count: u32,
     material_id: u32,
     local: glam::Mat4,
+    /// Cutout / foliage material — the part LOD should drop first (leaves,
+    /// twigs). Bark stays until the impostor band, then we keep only this
+    /// being false. Index-count is the fallback when the glTF did not mark
+    /// any part this way.
+    is_leaf: bool,
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
@@ -209,6 +214,8 @@ pub struct Engine<G: GameApp> {
     /// Phase 20B: editor camera speed as a normalized 0..1 slider position.
     /// Game code reads the mapped speed via `EngineContext::camera_speed`.
     camera_speed_norm: f32,
+    /// Viewport toolbar 3D resolution preset. 0 = Native (window pixels).
+    viewport_resolution: usize,
     /// UE-style editor transport state and deterministic gameplay time.
     simulation_clock: SimulationClock,
     /// True from Play until Stop, including while a play session is paused.
@@ -288,6 +295,7 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
+            viewport_resolution: 0,
             simulation_clock: SimulationClock::default(),
             play_session_active: false,
             simulation_accumulator: 0.0,
@@ -447,7 +455,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 r_ctx.resize(size.width, size.height);
             }
             if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx) {
-                r.resize(c, size.width, size.height);
+                let (sw, sh) = somnium_renderer::scene_size_for_preset(
+                    size.width,
+                    size.height,
+                    self.viewport_resolution,
+                );
+                r.resize(c, sw, sh);
             }
             if let (Some(ui), Some(window)) = (&mut self.ui_manager, &self.window) {
                 ui.reposition_panels(window);
@@ -972,6 +985,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
+                    rt_reflect: pp.rt_reflect_enabled,
+                    rt_refract: pp.rt_refract_enabled,
                     pcss: pp.pcss_enabled,
                     contact_shadows: pp.contact_shadows_enabled,
                     cas: pp.cas_enabled,
@@ -981,6 +996,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     volumetrics: pp.volumetrics_enabled,
                     physical_camera: pp.use_physical_camera,
                     shafts: pp.light_shafts,
+                    world_cache: pp.world_cache,
+                    specular_gi: pp.specular_gi,
+                    path_tracer: pp.path_tracer,
+                    mesh_sdf: pp.mesh_sdf,
+                    probes: pp.probes,
+                    analytic_grad: pp.analytic_grad,
+                    fsr: pp.fsr_enabled,
+                    fsr_sharpness: pp.fsr_sharpness,
+                    cache_intensity: pp.cache_intensity,
+                    cache_cell: pp.cache_cell_size,
+                    spec_rough: pp.spec_roughness,
+                    path_bounces: pp.path_bounces as f32,
+                    probe_intensity: pp.probe_intensity,
+                    shaft_intensity: pp.shaft_intensity,
                     extras: [
                         pp.bloom_intensity,
                         pp.dof_focus_distance,
@@ -1040,6 +1069,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         && self.terrain_brush.mode == BrushMode::Paint,
                     foliage_paint: self.foliage_paint_active,
                     hex_tiling: t.hex_tiling,
+                    lod_morph: t.lod_morph,
+                    morph_start: t.lod_morph_start,
                 })
             });
             let brush = self.foliage_brush;
@@ -1059,6 +1090,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             brush.scale_min,
                             brush.scale_max,
                             f.foliage_shadow_distance,
+                            f.cull_distance,
+                            f.lod_distance,
+                            f.impostor_distance,
                         ],
                         [f.enabled, paint_on, erase_on, single_on],
                     )
@@ -1074,6 +1108,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         water.amplitude,
                         water.roughness,
                         water.ssr_strength,
+                        water.rt_reflect_strength,
+                        water.reflect_debug,
                         water.wave_length_a,
                         water.wave_length_b,
                         water.wave_speed,
@@ -1105,21 +1141,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_light = self
                 .selected_entity
                 .and_then(|e| self.world.get::<LightComponent>(e).copied())
-                .map(|lc| {
-                    (
-                        [
-                            lc.intensity,
-                            lc.range,
-                            lc.inner_angle.to_degrees(),
-                            lc.outer_angle.to_degrees(),
-                            lc.tint().x,
-                            lc.tint().y,
-                            lc.tint().z,
-                            lc.moon_intensity,
-                        ],
-                        lc.light_type == LightType::Directional,
-                        lc.color_temperature_k,
-                    )
+                .map(|lc| LightInspectorState {
+                    values: [
+                        lc.intensity,
+                        lc.range,
+                        lc.inner_angle.to_degrees(),
+                        lc.outer_angle.to_degrees(),
+                        lc.tint().x,
+                        lc.tint().y,
+                        lc.tint().z,
+                        lc.moon_intensity,
+                        lc.source_radius,
+                        lc.area_width,
+                        lc.area_height,
+                    ],
+                    kelvin: lc.color_temperature_k,
+                    directional: lc.light_type == LightType::Directional,
+                    show_cone: lc.light_type == LightType::Spot,
+                    show_width: matches!(lc.light_type, LightType::Rect | LightType::Tube),
+                    show_height: lc.light_type == LightType::Rect,
                 });
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
@@ -1187,27 +1227,72 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .filter(|r| r.profiler.enabled())
                 .map(|r| {
                     let p = &r.profiler;
-                    let mut rows: Vec<somnium_ui::ProfilerRow> = p
-                        .results()
-                        .iter()
-                        .map(|s| somnium_ui::ProfilerRow {
-                            label: s.name.to_string(),
-                            value: format!("{:.3} ms", s.ms),
-                            depth: s.depth,
-                        })
-                        .collect();
-                    if rows.is_empty() {
+                    let mut rows: Vec<somnium_ui::ProfilerRow> = Vec::new();
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "— GPU —".to_string(),
+                        value: String::new(),
+                        depth: 0,
+                    });
+                    rows.extend(p.results().iter().map(|s| somnium_ui::ProfilerRow {
+                        label: s.name.to_string(),
+                        value: format!("{:.3} ms", s.ms),
+                        depth: s.depth.saturating_add(1),
+                    }));
+                    if p.results().is_empty() {
                         rows.push(somnium_ui::ProfilerRow {
                             label: "collecting…".to_string(),
                             value: String::new(),
-                            depth: 0,
+                            depth: 1,
                         });
                     }
                     rows.push(somnium_ui::ProfilerRow {
                         label: "unattributed".to_string(),
                         value: format!("{:.3} ms", p.unattributed_ms()),
+                        depth: 1,
+                    });
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "— Graph —".to_string(),
+                        value: String::new(),
                         depth: 0,
                     });
+                    let graph = p
+                        .results()
+                        .iter()
+                        .filter(|s| s.depth <= 1)
+                        .map(|s| s.name)
+                        .collect::<Vec<_>>()
+                        .join(" → ");
+                    if graph.is_empty() {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: "collecting…".to_string(),
+                            value: String::new(),
+                            depth: 1,
+                        });
+                    } else {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: graph,
+                            value: String::new(),
+                            depth: 1,
+                        });
+                    }
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "— CPU —".to_string(),
+                        value: String::new(),
+                        depth: 0,
+                    });
+                    if p.cpu_results().is_empty() {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: "collecting…".to_string(),
+                            value: String::new(),
+                            depth: 1,
+                        });
+                    } else {
+                        rows.extend(p.cpu_results().iter().map(|s| somnium_ui::ProfilerRow {
+                            label: s.name.to_string(),
+                            value: format!("{:.3} ms", s.ms),
+                            depth: s.depth.saturating_add(1),
+                        }));
+                    }
                     let c = p.last_counters;
                     rows.push(somnium_ui::ProfilerRow {
                         label: "draws".to_string(),
@@ -1785,8 +1870,11 @@ impl<G: GameApp> Engine<G> {
             r.exposure_compensation = pp.exposure_compensation;
             r.shading_mode = u32::from(pp.cel_shading)
                 | if pp.pcss_enabled { 2 } else { 0 }
-                | if pp.contact_shadows_enabled { 4 } else { 0 };
-            r.taa_pass.set_enabled(pp.taa_enabled);
+                | if pp.contact_shadows_enabled { 4 } else { 0 }
+                | if pp.analytic_grad { 8 } else { 0 };
+            r.fsr_pass.set_enabled(pp.fsr_enabled);
+            r.fsr_pass.sharpness = pp.fsr_sharpness;
+            r.taa_pass.set_enabled(pp.taa_enabled && !pp.fsr_enabled);
             r.gtao_pass.enabled = pp.gtao_enabled;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
@@ -1795,7 +1883,11 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled;
             r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
-            r.cas_pass.enabled = pp.cas_enabled;
+            r.water_reflection_pass.enabled =
+                pp.rt_reflect_enabled && r.water_reflection_pass.supported();
+            r.water_reflection_pass.refract_enabled =
+                pp.rt_refract_enabled && r.water_reflection_pass.supported();
+            r.cas_pass.enabled = pp.cas_enabled && !pp.fsr_enabled;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
             r.motion_blur_pass.enabled = pp.motion_blur_enabled;
@@ -1808,6 +1900,35 @@ impl<G: GameApp> Engine<G> {
             r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
             r.volumetric_pass.fog.shafts = pp.light_shafts;
+            r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
+            {
+                use somnium_renderer::pass::lighting_extra::{
+                    FLAG_CACHE, FLAG_PATH, FLAG_PROBES, FLAG_SDF, FLAG_SPECULAR,
+                };
+                let rt = r.raytrace_pass.supported();
+                let mut flags = 0u32;
+                if pp.world_cache && rt {
+                    flags |= FLAG_CACHE;
+                }
+                if pp.specular_gi && rt {
+                    flags |= FLAG_SPECULAR;
+                }
+                if pp.path_tracer && rt {
+                    flags |= FLAG_PATH;
+                }
+                if pp.mesh_sdf {
+                    flags |= FLAG_SDF;
+                }
+                if pp.probes && rt {
+                    flags |= FLAG_PROBES;
+                }
+                r.lighting_extra_pass.flags = flags;
+                r.lighting_extra_pass.intensity = pp.cache_intensity;
+                r.lighting_extra_pass.probe_intensity = pp.probe_intensity;
+                r.lighting_extra_pass.cell_size = pp.cache_cell_size;
+                r.lighting_extra_pass.spec_rough = pp.spec_roughness;
+                r.lighting_extra_pass.path_bounces = pp.path_bounces;
+            }
             r.grading = somnium_renderer::pass::postprocess::Grading {
                 temperature: pp.temperature,
                 tint: pp.tint,
@@ -1923,7 +2044,7 @@ impl<G: GameApp> Engine<G> {
             .renderer
             .as_ref()
             .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32, f32)> = self
+        let terrains: Vec<(u32, glam::Mat4, f32, f32, f32, f32)> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -1941,11 +2062,19 @@ impl<G: GameApp> Engine<G> {
                     model,
                     fc.cull_distance,
                     fc.foliage_shadow_distance,
+                    fc.lod_distance,
+                    fc.impostor_distance,
                 ))
             })
             .collect();
 
-        for (terrain_id, model, cull_distance, shadow_distance) in terrains {
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_begin("Foliage");
+        }
+
+        for (terrain_id, model, cull_distance, shadow_distance, lod_distance, impostor_distance) in
+            terrains
+        {
             // Which palette entries this terrain actually uses, so nothing is
             // loaded for a kind that has never been painted.
             let kinds: Vec<u8> = {
@@ -1998,11 +2127,57 @@ impl<G: GameApp> Engine<G> {
                 // reason: climbing a hill should not switch every shadow below
                 // you back on.
                 let casts = d.x * d.x + d.z * d.z <= shadow_sq;
-                for part in parts {
+                let dist = (d.x * d.x + d.z * d.z).sqrt();
+                // Three mesh LODs. The old "impostor" was an untextured ground
+                // plane rotated toward the camera — a black triangle that FSR
+                // then ghosted. Past impostor_distance keep the solid parts
+                // (trunk / branches). Past lod_distance drop the leaf/twig
+                // cutouts. Index-count is only the fallback when the glTF did
+                // not mark any part as foliage.
+                let keep_only = impostor_distance > 0.0
+                    && dist > impostor_distance
+                    && parts.len() > 1;
+                let drop_heavy = !keep_only
+                    && lod_distance > 0.0
+                    && dist > lod_distance
+                    && parts.len() > 1;
+                let has_leaf = parts.iter().any(|p| p.is_leaf);
+                let cheapest = parts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, p)| p.index_count)
+                    .map(|(i, _)| i);
+                let heaviest = parts
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, p)| p.index_count)
+                    .map(|(i, _)| i);
+                for (i, part) in parts.iter().enumerate() {
+                    if keep_only {
+                        if has_leaf {
+                            if part.is_leaf {
+                                continue;
+                            }
+                        } else if cheapest != Some(i) {
+                            continue;
+                        }
+                    }
+                    if drop_heavy {
+                        if has_leaf {
+                            if part.is_leaf {
+                                continue;
+                            }
+                        } else if heaviest == Some(i) {
+                            continue;
+                        }
+                    }
                     self.foliage_batch
                         .push((*part, model * placement * part.local, casts));
                 }
             }
+            self.foliage_batch.sort_by_key(|(part, _, _)| {
+                (part.vertex_offset, part.index_offset, part.material_id)
+            });
 
             if let Some(r) = self.renderer.as_mut() {
                 for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
@@ -2017,6 +2192,9 @@ impl<G: GameApp> Engine<G> {
                     });
                 }
             }
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_end();
         }
     }
 
@@ -2114,12 +2292,26 @@ impl<G: GameApp> Engine<G> {
         let inv_node = node_xform.inverse();
         let built: Vec<FoliagePart> = parts
             .iter()
-            .map(|n| FoliagePart {
-                vertex_offset: n.vertex_offset,
-                index_offset: n.index_offset,
-                index_count: n.index_count,
-                material_id: n.material_id,
-                local: inv_node * n.transform,
+            .map(|n| {
+                let is_leaf = scene
+                    .nodes
+                    .iter()
+                    .find(|sn| sn.name == n.entity_name)
+                    .and_then(|sn| sn.material_index)
+                    .and_then(|i| scene.materials.get(i))
+                    .is_some_and(|m| {
+                        m.foliage
+                            || m.alpha_mode != somnium_asset::AlphaMode::Opaque
+                            || m.alpha_cutoff > 0.0
+                    });
+                FoliagePart {
+                    vertex_offset: n.vertex_offset,
+                    index_offset: n.index_offset,
+                    index_count: n.index_count,
+                    material_id: n.material_id,
+                    local: inv_node * n.transform,
+                    is_leaf,
+                }
             })
             .collect();
         let tris: u32 = built.iter().map(|p| p.index_count / 3).sum();
@@ -2221,8 +2413,8 @@ impl<G: GameApp> Engine<G> {
                 let transform = self.world.get::<Transform>(e)?;
                 let kind = match light.light_type {
                     LightType::Directional => LightGizmoKind::Directional,
-                    LightType::Point => LightGizmoKind::Point,
-                    LightType::Spot => LightGizmoKind::Spot,
+                    LightType::Point | LightType::Rect | LightType::Disc => LightGizmoKind::Point,
+                    LightType::Spot | LightType::Tube => LightGizmoKind::Spot,
                 };
                 Some(LightGizmoDesc {
                     kind,
@@ -2487,6 +2679,23 @@ impl<G: GameApp> Engine<G> {
                         25.0_f32.to_radians(),
                         35.0_f32.to_radians(),
                     )),
+                    CreateKind::RectLight => Some(LightComponent::rect(
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        0.5,
+                        0.25,
+                    )),
+                    CreateKind::DiscLight => Some(LightComponent::disc(
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        0.4,
+                    )),
+                    CreateKind::TubeLight => Some(LightComponent::tube(
+                        crate::light_units::lumens::FLOODLIGHT,
+                        15.0,
+                        0.75,
+                        0.04,
+                    )),
                     _ => None,
                 };
 
@@ -2560,13 +2769,31 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
+                let spawn_dist = if light.is_some() { 5.0 } else { 8.0 };
+                let (spawn_pos, look, right) =
+                    camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
+                let rotation = match kind {
+                    CreateKind::DiscLight | CreateKind::RectLight | CreateKind::SpotLight => {
+                        glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, look)
+                    }
+                    CreateKind::TubeLight => {
+                        glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, right)
+                    }
+                    _ => glam::Quat::IDENTITY,
+                };
+                let transform = Transform {
+                    translation: spawn_pos,
+                    rotation,
+                    scale: glam::Vec3::ONE,
+                };
+                let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
-                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
                     mesh,
                     mat,
-                    wt: Some(WorldTransform::identity()),
+                    wt: Some(world),
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
@@ -2651,6 +2878,8 @@ impl<G: GameApp> Engine<G> {
                         | IF::WaterAmplitude
                         | IF::WaterRoughness
                         | IF::WaterSsrStrength
+                        | IF::WaterRtReflect
+                        | IF::WaterReflectDebug
                         | IF::WaterWaveLengthA
                         | IF::WaterWaveLengthB
                         | IF::WaterWaveSpeed
@@ -2677,6 +2906,10 @@ impl<G: GameApp> Engine<G> {
                             IF::WaterAmplitude => water.amplitude = value.max(0.0),
                             IF::WaterRoughness => water.roughness = value.clamp(0.02, 1.0),
                             IF::WaterSsrStrength => water.ssr_strength = value.clamp(0.0, 1.0),
+                            IF::WaterRtReflect => water.rt_reflect_strength = value.clamp(0.0, 1.0),
+                            IF::WaterReflectDebug => {
+                                water.reflect_debug = value.clamp(0.0, 2.0).round()
+                            }
                             IF::WaterWaveLengthA => water.wave_length_a = value.max(0.5),
                             IF::WaterWaveLengthB => water.wave_length_b = value.max(0.5),
                             IF::WaterWaveSpeed => water.wave_speed = value.max(0.0),
@@ -2764,6 +2997,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostIso
                         | IF::PostAoRadius
                         | IF::PostAoIntensity
+                        | IF::PostFsrSharpness
                         | IF::PostCasSharpness
                         | IF::PostCasStrength
                         | IF::PostMotionBlurShutter
@@ -2780,6 +3014,12 @@ impl<G: GameApp> Engine<G> {
                         | IF::PostVignetteStrength
                         | IF::PostCaStrength
                         | IF::PostIblIntensity
+                        | IF::PostCacheIntensity
+                        | IF::PostCacheCell
+                        | IF::PostSpecRough
+                        | IF::PostPathBounces
+                        | IF::PostProbeIntensity
+                        | IF::PostShaftIntensity
                 ) {
                     if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                         match field {
@@ -2808,6 +3048,7 @@ impl<G: GameApp> Engine<G> {
                             IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
                             IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
                             IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
+                            IF::PostFsrSharpness => pp.fsr_sharpness = value.clamp(0.0, 1.0),
                             IF::PostCasSharpness => pp.cas_sharpness = value.clamp(0.0, 1.0),
                             IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
                             IF::PostMotionBlurShutter => {
@@ -2822,6 +3063,14 @@ impl<G: GameApp> Engine<G> {
                             IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
                             IF::PostCaStrength => pp.ca_strength = value.max(0.0),
                             IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
+                            IF::PostCacheIntensity => pp.cache_intensity = value.max(0.0),
+                            IF::PostCacheCell => pp.cache_cell_size = value.clamp(0.25, 32.0),
+                            IF::PostSpecRough => pp.spec_roughness = value.clamp(0.0, 1.0),
+                            IF::PostPathBounces => {
+                                pp.path_bounces = value.round().clamp(1.0, 8.0) as u32;
+                            }
+                            IF::PostProbeIntensity => pp.probe_intensity = value.max(0.0),
+                            IF::PostShaftIntensity => pp.shaft_intensity = value.max(0.0),
                             _ => unreachable!(),
                         }
                     }
@@ -2839,6 +3088,7 @@ impl<G: GameApp> Engine<G> {
                         | IF::TerrainWetness
                         | IF::TerrainMacroStrength
                         | IF::TerrainDebugView
+                        | IF::TerrainMorphStart
                 ) {
                     if field == IF::TerrainPaintLayer {
                         self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(
@@ -2889,9 +3139,22 @@ impl<G: GameApp> Engine<G> {
                         return;
                     }
                     if field == IF::TerrainDebugView {
-                        self.terrain_debug_view = value.round().clamp(0.0, 23.0);
+                        self.terrain_debug_view = value.round().clamp(0.0, 31.0);
                         if let Some(r) = self.renderer.as_mut() {
                             r.shading_debug = self.terrain_debug_view;
+                        }
+                        return;
+                    }
+                    if field == IF::TerrainMorphStart {
+                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
+                            return;
+                        };
+                        if let Some(t) = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.terrain_mut(tc.terrain_id))
+                        {
+                            t.lod_morph_start = value.clamp(0.0, 1.0);
                         }
                         return;
                     }
@@ -2924,6 +3187,9 @@ impl<G: GameApp> Engine<G> {
                         | IF::FoliageScaleMin
                         | IF::FoliageScaleMax
                         | IF::FoliageShadowDistance
+                        | IF::FoliageCullDistance
+                        | IF::FoliageLodDistance
+                        | IF::FoliageImpostorDistance
                 ) {
                     // Phase 17F: these edit the brush, not a scatter. Foliage
                     // is painted now, so the settings that matter are the ones
@@ -2950,6 +3216,27 @@ impl<G: GameApp> Engine<G> {
                                 }
                             }
                         }
+                        IF::FoliageCullDistance => {
+                            if let Some(e) = self.selected_entity {
+                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
+                                    f.cull_distance = value.clamp(0.0, 4000.0);
+                                }
+                            }
+                        }
+                        IF::FoliageLodDistance => {
+                            if let Some(e) = self.selected_entity {
+                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
+                                    f.lod_distance = value.clamp(0.0, 4000.0);
+                                }
+                            }
+                        }
+                        IF::FoliageImpostorDistance => {
+                            if let Some(e) = self.selected_entity {
+                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
+                                    f.impostor_distance = value.clamp(0.0, 4000.0);
+                                }
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     return;
@@ -2967,6 +3254,9 @@ impl<G: GameApp> Engine<G> {
                         | IF::LightColorB
                         | IF::LightColorTemperature
                         | IF::LightMoonIntensity
+                        | IF::LightSourceRadius
+                        | IF::LightAreaWidth
+                        | IF::LightAreaHeight
                 ) {
                     if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
                         let mut new_light = old_light;
@@ -2995,6 +3285,15 @@ impl<G: GameApp> Engine<G> {
                             }
                             IF::LightMoonIntensity => {
                                 new_light.moon_intensity = value.max(0.0);
+                            }
+                            IF::LightSourceRadius => {
+                                new_light.source_radius = value.max(0.0);
+                            }
+                            IF::LightAreaWidth => {
+                                new_light.area_width = value.max(0.05);
+                            }
+                            IF::LightAreaHeight => {
+                                new_light.area_height = value.max(0.05);
                             }
                             _ => unreachable!(),
                         }
@@ -3274,12 +3573,44 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::ToggleTerrainMorph => {
+                if let Some(tc) = self.selected_terrain() {
+                    if let Some(r) = &mut self.renderer {
+                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
+                            t.lod_morph = !t.lod_morph;
+                            info!(
+                                "Terrain LOD morph: {}",
+                                if t.lod_morph { "on" } else { "off" }
+                            );
+                        }
+                    }
+                }
+            }
+
             EditorEvent::SetCameraSpeed(normalized) => {
                 self.camera_speed_norm = normalized.clamp(0.0, 1.0);
                 let speed = crate::camera_speed_from_normalized(self.camera_speed_norm);
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_camera_speed(self.camera_speed_norm, speed);
                 }
+            }
+
+            EditorEvent::SetViewportResolution(idx) => {
+                self.viewport_resolution = idx as usize;
+                let w = self.viewport_size.0.max(1.0) as u32;
+                let h = self.viewport_size.1.max(1.0) as u32;
+                let (sw, sh) =
+                    somnium_renderer::scene_size_for_preset(w, h, self.viewport_resolution);
+                if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx)
+                    && r.scene_extent() != (sw, sh)
+                {
+                    r.resize(c, sw, sh);
+                }
+                let label = somnium_renderer::VIEWPORT_RESOLUTION_LABELS
+                    .get(self.viewport_resolution)
+                    .copied()
+                    .unwrap_or("Native");
+                info!("Viewport 3D {label} ({sw}×{sh})");
             }
 
             EditorEvent::PlaySimulation => {
@@ -3539,6 +3870,14 @@ impl<G: GameApp> Engine<G> {
                             pp.restir_gi_enabled = !pp.restir_gi_enabled;
                             pp.restir_gi_enabled
                         }
+                        PostFxToggle::RtReflect => {
+                            pp.rt_reflect_enabled = !pp.rt_reflect_enabled;
+                            pp.rt_reflect_enabled
+                        }
+                        PostFxToggle::RtRefract => {
+                            pp.rt_refract_enabled = !pp.rt_refract_enabled;
+                            pp.rt_refract_enabled
+                        }
                         PostFxToggle::Restir => {
                             pp.restir_enabled = !pp.restir_enabled;
                             pp.restir_enabled
@@ -3559,6 +3898,34 @@ impl<G: GameApp> Engine<G> {
                             pp.contact_shadows_enabled = !pp.contact_shadows_enabled;
                             pp.contact_shadows_enabled
                         }
+                        PostFxToggle::WorldCache => {
+                            pp.world_cache = !pp.world_cache;
+                            pp.world_cache
+                        }
+                        PostFxToggle::SpecularGi => {
+                            pp.specular_gi = !pp.specular_gi;
+                            pp.specular_gi
+                        }
+                        PostFxToggle::PathTracer => {
+                            pp.path_tracer = !pp.path_tracer;
+                            pp.path_tracer
+                        }
+                        PostFxToggle::MeshSdf => {
+                            pp.mesh_sdf = !pp.mesh_sdf;
+                            pp.mesh_sdf
+                        }
+                        PostFxToggle::Probes => {
+                            pp.probes = !pp.probes;
+                            pp.probes
+                        }
+                        PostFxToggle::AnalyticGrad => {
+                            pp.analytic_grad = !pp.analytic_grad;
+                            pp.analytic_grad
+                        }
+                        PostFxToggle::Fsr => {
+                            pp.fsr_enabled = !pp.fsr_enabled;
+                            pp.fsr_enabled
+                        }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });
                 }
@@ -3568,6 +3935,34 @@ impl<G: GameApp> Engine<G> {
 }
 
 // ─── Gizmo picking / drag math ────────────────────────────────────────────────
+
+/// Place a newly created entity a few metres in front of the camera.
+///
+/// Origin is usually underground on the default landscape, so Create → Disc /
+/// Tube / Cube at (0,0,0) looks like the feature never spawned. `look` is the
+/// camera forward (the direction a disc/spot/rect should emit); `right` is the
+/// camera's horizontal axis (a tube's length so it reads as a line in view).
+fn camera_spawn_basis(
+    renderer: Option<&SomniumRenderer>,
+    distance: f32,
+) -> (glam::Vec3, glam::Vec3, glam::Vec3) {
+    let Some(r) = renderer else {
+        return (glam::Vec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::X);
+    };
+    let look_pt = r
+        .view_proj
+        .inverse()
+        .project_point3(glam::Vec3::new(0.0, 0.0, 0.35));
+    let mut look = (look_pt - r.camera_pos).normalize_or_zero();
+    if look == glam::Vec3::ZERO {
+        look = glam::Vec3::NEG_Z;
+    }
+    let mut right = look.cross(glam::Vec3::Y).normalize_or_zero();
+    if right == glam::Vec3::ZERO {
+        right = glam::Vec3::X;
+    }
+    (r.camera_pos + look * distance, look, right)
+}
 
 /// Unproject a screen position to a world-space point (at mid-depth).
 fn ndc_to_world(cx: f32, cy: f32, vw: f32, vh: f32, inv_vp: &glam::Mat4) -> glam::Vec3 {

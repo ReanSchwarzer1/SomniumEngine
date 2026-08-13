@@ -29,6 +29,10 @@ pub struct ShadingPass {
     volumetric_view: wgpu::TextureView,
     volumetric_sampler: wgpu::Sampler,
     volumetric_range: wgpu::Buffer,
+    lighting_aux_view: wgpu::TextureView,
+    world_volume_view: wgpu::TextureView,
+    lighting_extra: wgpu::Buffer,
+    sh_probes: wgpu::Buffer,
 }
 
 impl ShadingPass {
@@ -47,6 +51,9 @@ impl ShadingPass {
         restir_gi_view: &wgpu::TextureView,
         volumetric_view: &wgpu::TextureView,
         volumetric_sampler: &wgpu::Sampler,
+        lighting_aux_view: &wgpu::TextureView,
+        world_volume_view: &wgpu::TextureView,
+        sh_probes: &wgpu::Buffer,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shading Pass Bind Group Layout"),
@@ -179,6 +186,46 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -213,6 +260,13 @@ impl ShadingPass {
             mapped_at_creation: false,
         });
 
+        let lighting_extra = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lighting extra params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let bind_group = Self::make_bind_group(
             device,
             &bind_group_layout,
@@ -229,6 +283,10 @@ impl ShadingPass {
             volumetric_view,
             volumetric_sampler,
             &volumetric_range,
+            lighting_aux_view,
+            world_volume_view,
+            &lighting_extra,
+            sh_probes,
         );
 
         let shader_source = format!(
@@ -311,6 +369,10 @@ impl ShadingPass {
             volumetric_view: volumetric_view.clone(),
             volumetric_sampler: volumetric_sampler.clone(),
             volumetric_range,
+            lighting_aux_view: lighting_aux_view.clone(),
+            world_volume_view: world_volume_view.clone(),
+            lighting_extra,
+            sh_probes: sh_probes.clone(),
         }
     }
 
@@ -330,6 +392,10 @@ impl ShadingPass {
         volumetric_view: &wgpu::TextureView,
         volumetric_sampler: &wgpu::Sampler,
         volumetric_range: &wgpu::Buffer,
+        lighting_aux_view: &wgpu::TextureView,
+        world_volume_view: &wgpu::TextureView,
+        lighting_extra: &wgpu::Buffer,
+        sh_probes: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -387,6 +453,22 @@ impl ShadingPass {
                     binding: 11,
                     resource: volumetric_range.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(lighting_aux_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(world_volume_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: lighting_extra.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: sh_probes.as_entire_binding(),
+                },
             ],
         })
     }
@@ -414,11 +496,15 @@ impl ShadingPass {
         depth_view: &wgpu::TextureView,
         restir_view: &wgpu::TextureView,
         restir_gi_view: &wgpu::TextureView,
+        lighting_aux_view: &wgpu::TextureView,
+        world_volume_view: &wgpu::TextureView,
     ) {
         self.gtao_view = gtao_view.clone();
         self.depth_view = depth_view.clone();
         self.restir_view = restir_view.clone();
         self.restir_gi_view = restir_gi_view.clone();
+        self.lighting_aux_view = lighting_aux_view.clone();
+        self.world_volume_view = world_volume_view.clone();
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,
@@ -435,6 +521,10 @@ impl ShadingPass {
             &self.volumetric_view,
             &self.volumetric_sampler,
             &self.volumetric_range,
+            &self.lighting_aux_view,
+            &self.world_volume_view,
+            &self.lighting_extra,
+            &self.sh_probes,
         );
     }
 
@@ -445,5 +535,9 @@ impl ShadingPass {
             0,
             bytemuck::bytes_of(&[range, 0.0, 0.0, 0.0]),
         );
+    }
+
+    pub fn set_lighting_extra(&self, queue: &wgpu::Queue, params: [f32; 4]) {
+        queue.write_buffer(&self.lighting_extra, 0, bytemuck::bytes_of(&params));
     }
 }

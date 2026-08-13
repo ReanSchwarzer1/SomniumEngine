@@ -16,7 +16,12 @@ The engine is organized around three deliberate commitments:
 
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn — see [`context.md`](context.md) for the current phase
-> and the full phase history.
+> and the full phase history. **Start-here:**
+> [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
+> (learn the architecture, then audit Halcyon→HEAD). Next phase plan:
+> [`dev records/phase_DF.md`](dev%20records/phase_DF.md) (Daggerfall — terrain
+> clipmaps). Halcyon VV-A–H is in the tree; remaining Halcyon work is live
+> evidence captures, not a re-implementation.
 
 ## Screenshots
 
@@ -46,7 +51,9 @@ The engine is organized around three deliberate commitments:
 - Clustered forward lighting for point/spot lights (froxel binning)
 - HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
 - Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps,
-  temporal foam, Beer's-law transport, and a shoreline SDF
+  temporal foam, Beer's-law transport, and a shoreline SDF. Reflections blend
+  screen-space tracing, half-res hardware ray tracing, and the environment cube
+  (`SOMNIUM_RT_REFLECT=0` restores SSR + sky cube)
 - GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters,
   and a Hi-Z depth pyramid driving two-phase occlusion culling
 - Cutout foliage support: sidecar alpha masks, alpha-weighted mip generation, and
@@ -71,20 +78,20 @@ The engine is organized around three deliberate commitments:
 - Jolt physics integration; Kira audio scaffolding
 - CPU particle system with GPU billboard instancing
 
-### In progress — Phase 24: Advanced Lighting
+### Lighting and water reflections
 
-The materials are physically based; the *lighting* is not yet. The sun is an arbitrary
-multiplier, the sky is a hardcoded gradient that does not respond to it (so turning the
-sun down cannot produce night), and indirect light is a constant ambient term. Phase 24
-addresses that end to end across 22 sub-phases: photometric light units and
-auto-exposure, AgX tonemapping, a Hillaire atmosphere driving both sky and IBL, TAA plus
-specular anti-aliasing, PCSS and contact shadows, GTAO, then ray-traced direct and
-indirect lighting (ReSTIR DI/GI with a world radiance cache) on wgpu's acceleration
-structures — with a reference path tracer to check the real-time result against, mesh
-distance fields and baked probes as fallback tiers for hardware without ray query, and
-area lights, transmission/SSS and volumetric fog to finish.
+Phase 24 lighting largely ships: photometric units and auto-exposure, AgX, a
+Hillaire atmosphere driving sky and IBL, TAA, PCSS and contact shadows, GTAO,
+and ReSTIR DI/GI on wgpu acceleration structures. Parked rows (world cache,
+general specular GI, path tracer, software RT, probes, area lights) stay in
+[`context.md` §22](context.md). Water specular reflections are **Phase VV —
+Halcyon** (VV-A–H in tree), not 24N.
 
-Full plan and ordering: [`context.md` §22](context.md).
+Kill switch: `SOMNIUM_RT_REFLECT=0`. **Start-here:**
+[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
+(learn the architecture, then audit Halcyon→HEAD). Halcyon history:
+[`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
+Next phase plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md).
 
 For the complete, continuously updated architecture reference, read
 [`context.md`](context.md).
@@ -101,10 +108,11 @@ cargo build --workspace
 cargo run -p hello_engine        # runnable editor demo
 ```
 
-Optional environment flag:
+Optional environment flags:
 
 ```sh
 SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap terrain
+SOMNIUM_RT_REFLECT=0 cargo run -p hello_engine  # SSR + sky cube only (no traced water reflections)
 ```
 
 ### Editor controls (demo)
@@ -113,7 +121,7 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **RMB + scroll wheel** — adjust fly speed (0.5–500 m/s), or drag the **Camera Speed** slider above the viewport
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
 - **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
-- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
+- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay or exit immersive play
 - **Ctrl+Space** — show or hide the docked Content Drawer · **Ctrl+P** — command palette
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
 - **F10** — A/B GPU frustum culling (a correct cull is invisible)
@@ -124,9 +132,12 @@ SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap t
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
   pick Raise / Lower / Smooth / Flatten / Noise / Paint, `[` / `]` size, `-` / `=` strength
 
-Metaphor editor chrome (26-A–I) is in the tree, but **the UI phase is not
-over**. Later engine features will keep needing new inspector fields, panels,
-and Help pages.
+Metaphor editor chrome (26-A–I, plus immersive play and ComboBox overlay) is in
+the tree, but **the UI phase is not over**. Later engine features will keep
+needing new inspector fields, panels, and Help pages. Water Help is
+[`docs/editor/water.md`](docs/editor/water.md). Halcyon (VV-A–H) is in the tree;
+remaining GPU work on that track is evidence captures. **Start-here:**
+[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
 
 ## Repository layout
 

@@ -277,6 +277,9 @@ pub struct GpuProfiler {
     enable_request: bool,
     results: Vec<ScopeResult>,
     smoother: Smoother,
+    cpu_open: Vec<(&'static str, std::time::Instant, u8)>,
+    cpu_acc: Vec<ScopeResult>,
+    cpu_results: Vec<ScopeResult>,
     /// The frame most recently collected, for the "is this stale" question the
     /// overlay would otherwise have to guess at.
     collected: u64,
@@ -338,9 +341,12 @@ impl GpuProfiler {
             period_ns: queue.get_timestamp_period(),
             available,
             enabled: false,
-            enable_request: enabled && available,
+            enable_request: enabled,
             results: Vec::new(),
             smoother: Smoother::default(),
+            cpu_open: Vec::new(),
+            cpu_acc: Vec::new(),
+            cpu_results: Vec::new(),
             collected: 0,
             frame_index: 0,
             counters: FrameCounters::default(),
@@ -368,7 +374,7 @@ impl GpuProfiler {
 
     /// Request a state change, applied at the next frame boundary.
     pub fn set_enabled(&mut self, on: bool) {
-        self.enable_request = on && self.available;
+        self.enable_request = on;
     }
 
     pub fn toggle(&mut self) {
@@ -378,6 +384,42 @@ impl GpuProfiler {
     /// Smoothed results from the most recently collected frame.
     pub fn results(&self) -> &[ScopeResult] {
         &self.results
+    }
+
+    /// CPU scopes from the last completed frame (Phase 29).
+    pub fn cpu_results(&self) -> &[ScopeResult] {
+        &self.cpu_results
+    }
+
+    /// Open a CPU-timed zone. Pairs with [`GpuProfiler::cpu_end`].
+    pub fn cpu_begin(&mut self, name: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        let depth = u8::try_from(self.cpu_open.len()).unwrap_or(u8::MAX);
+        self.cpu_open.push((name, std::time::Instant::now(), depth));
+    }
+
+    /// Close the innermost CPU zone.
+    pub fn cpu_end(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let Some((name, t0, depth)) = self.cpu_open.pop() else {
+            return;
+        };
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        let prev = self
+            .cpu_results
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.ms)
+            .unwrap_or(ms);
+        self.cpu_acc.push(ScopeResult {
+            name,
+            depth,
+            ms: prev * 0.8 + ms * 0.2,
+        });
     }
 
     /// Total of the top-level scopes — the GPU frame, without double-counting
@@ -469,6 +511,16 @@ impl GpuProfiler {
     /// Resolve this frame's queries into the ring. Call once, after every scope
     /// has closed and before the encoder is submitted.
     pub fn end_frame(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.enabled {
+            if !self.cpu_open.is_empty() {
+                tracing::warn!(
+                    "profiler: {} CPU scope(s) left open this frame",
+                    self.cpu_open.len()
+                );
+                self.cpu_open.clear();
+            }
+            self.cpu_results = std::mem::take(&mut self.cpu_acc);
+        }
         if !self.recording() {
             return;
         }
@@ -587,6 +639,23 @@ impl GpuProfiler {
                 "unattributed",
                 self.unattributed_ms()
             ));
+        }
+        if !self.cpu_results.is_empty() {
+            out.push("CPU".to_string());
+            for r in &self.cpu_results {
+                let indent = "  ".repeat(r.depth as usize);
+                out.push(format!("{indent}{:<26} {:>7.3} ms", r.name, r.ms));
+            }
+        }
+        let graph = self
+            .results
+            .iter()
+            .filter(|s| s.depth <= 1)
+            .map(|s| s.name)
+            .collect::<Vec<_>>()
+            .join(" → ");
+        if !graph.is_empty() {
+            out.push(format!("graph                      {graph}"));
         }
         let c = self.last_counters;
         out.push(format!(

@@ -39,6 +39,11 @@ A couple of conventions keep this codebase coherent — please follow them:
    [`context.md`](context.md) (and `ATTRIBUTION.md` if a new reference was used).
    New authoring UI also needs a [`docs/editor/`](docs/editor/) Help page or
    section — Metaphor chrome is not closed; it grows with the engine.
+   Phase VV (Halcyon) VV-A–H is in the tree. **Start-here:**
+   [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
+   (architecture first, then audit Halcyon→HEAD). Next phase:
+   [`dev records/phase_DF.md`](dev%20records/phase_DF.md). Do not re-implement
+   VV-A–H.
 4. **Match the surrounding style.** New code should read like the code around it —
    naming, comment density, and idiom.
 

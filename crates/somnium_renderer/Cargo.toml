@@ -20,6 +20,9 @@ somnium_asset = { workspace = true }
 # Phase 25K: decoding the packed terrain layer PNGs at load.
 image        = { workspace = true }
 exr          = { workspace = true }
+# AMD FSR 3 temporal upscaler (MIT). Shaders are precompiled SPIR-V in
+# wgpu-ffx-shaders-spv — no glslc at build time.
+wgpu-ffx     = { path = "../../third_party/wgpu-ffx" }
 
 [dev-dependencies]
 # Shader compilation happens at device-creation time, so a WGSL mistake used to

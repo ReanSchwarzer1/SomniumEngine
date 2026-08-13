@@ -8,6 +8,9 @@ pub enum CreateKind {
     DirectionalLight,
     PointLight,
     SpotLight,
+    RectLight,
+    DiscLight,
+    TubeLight,
     Particle,
     Terrain,
     VoxelTerrain,
@@ -23,6 +26,9 @@ impl CreateKind {
             Self::DirectionalLight => "Directional Light",
             Self::PointLight => "Point Light",
             Self::SpotLight => "Spot Light",
+            Self::RectLight => "Area Light",
+            Self::DiscLight => "Disc Light",
+            Self::TubeLight => "Tube Light",
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
@@ -58,6 +64,9 @@ pub enum InspectorField {
     LightColorTemperature,
     /// Directional moonlight illuminance in lux (Phase 25M-2).
     LightMoonIntensity,
+    LightSourceRadius,
+    LightAreaWidth,
+    LightAreaHeight,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
@@ -104,6 +113,12 @@ pub enum InspectorField {
     /// Strength of the traced indirect diffuse (Phase 24L). Every other effect
     /// has an amount dial; this one was the odd toggle out.
     PostGiIntensity,
+    PostCacheIntensity,
+    PostCacheCell,
+    PostSpecRough,
+    PostPathBounces,
+    PostProbeIntensity,
+    PostShaftIntensity,
     /// Physical camera (Phase 24A). Only meaningful with
     /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
     /// is why aperture matters even when exposure is manual.
@@ -116,6 +131,8 @@ pub enum InspectorField {
     /// darkening or as a broad dirty smear.
     PostAoRadius,
     PostAoIntensity,
+    /// FSR RCAS sharpness, 0..=1.
+    PostFsrSharpness,
     // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
     /// Which splat layer the paint brush writes, 0..=31.
     TerrainPaintLayer,
@@ -130,6 +147,8 @@ pub enum InspectorField {
     TerrainMacroStrength,
     /// Debug visualisation code (same numbers as `SOMNIUM_SHADOW_DEBUG`).
     TerrainDebugView,
+    /// CDLOD morph start as a 0..1 fraction of the LOD range (Phase 25C).
+    TerrainMorphStart,
     // First-class lake body settings (Phase IV-C).
     WaterSurface,
     WaterMaxDepth,
@@ -137,6 +156,8 @@ pub enum InspectorField {
     WaterAmplitude,
     WaterRoughness,
     WaterSsrStrength,
+    WaterRtReflect,
+    WaterReflectDebug,
     WaterWaveLengthA,
     WaterWaveLengthB,
     WaterWaveSpeed,
@@ -166,6 +187,9 @@ pub enum InspectorField {
     /// Metres from the camera past which foliage stops casting shadows
     /// (Phase 24AE). Nearer than the draw distance on purpose.
     FoliageShadowDistance,
+    FoliageCullDistance,
+    FoliageLodDistance,
+    FoliageImpostorDistance,
     WaterWaveDirAX,
     WaterWaveDirAZ,
     WaterWaveDirBX,
@@ -225,6 +249,24 @@ pub enum PostFxToggle {
     Pcss,
     /// Screen-space contact shadows. Default on.
     ContactShadows,
+    /// Ray-traced water reflections (Phase VV — Halcyon).
+    RtReflect,
+    /// Ray-traced water refraction (Phase VV+1). Default off.
+    RtRefract,
+    /// World-space radiance cache (Phase 24M). Default off.
+    WorldCache,
+    /// Scene-wide ray-traced specular (Phase 24N). Default off.
+    SpecularGi,
+    /// Offline path tracer (Phase 24O). Default off.
+    PathTracer,
+    /// Mesh-SDF cone trace (Phase 24P). Default off.
+    MeshSdf,
+    /// Probe/env fallback into the world cache (Phase 24Q). Default off.
+    Probes,
+    /// Analytic UV gradients (Phase 25N). Default on.
+    AnalyticGrad,
+    /// AMD FSR 3 temporal upscale. Default on; owns AA while enabled.
+    Fsr,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -271,6 +313,8 @@ pub enum EditorEvent {
     ToggleTerrainPaint,
     /// Hex anti-tiling on the selected terrain. Default on.
     ToggleTerrainHex,
+    /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default off.
+    ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
     /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).
@@ -290,6 +334,10 @@ pub enum EditorEvent {
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
     /// (the engine maps it exponentially to a world speed).
     SetCameraSpeed(f32),
+    /// Internal 3D resolution preset (0 Native, 1 1440p, 2 1080p, 3 900p, 4 720p).
+    /// The swapchain and UI stay at the window size; scene passes render smaller
+    /// and upscale.
+    SetViewportResolution(u8),
     /// Show or hide the profiler overlay (Phase 29). Also starts and stops the
     /// GPU timestamp collection, because a profiler nobody is looking at should
     /// not be spending queries.

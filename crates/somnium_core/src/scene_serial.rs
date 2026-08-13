@@ -64,12 +64,18 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                         LightType::Directional => "Directional",
                         LightType::Point       => "Point",
                         LightType::Spot        => "Spot",
+                        LightType::Rect        => "Rect",
+                        LightType::Disc        => "Disc",
+                        LightType::Tube        => "Tube",
                     },
                     "color":       lc.color.to_array(),
                     "intensity":   lc.intensity,
                     "range":       lc.range,
                     "inner_angle": lc.inner_angle,
                     "outer_angle": lc.outer_angle,
+                    "source_radius": lc.source_radius,
+                    "area_width": lc.area_width,
+                    "area_height": lc.area_height,
                 })
             });
 
@@ -130,6 +136,8 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                     "roughness": water.roughness,
                     "anisotropy": water.anisotropy,
                     "ssr_strength": water.ssr_strength,
+                    "rt_reflect_strength": water.rt_reflect_strength,
+                    "reflect_debug": water.reflect_debug,
                     "spectrum_blend": water.spectrum_blend,
                     "wind_speed": water.wind_speed,
                     "foam_decay": water.foam_decay,

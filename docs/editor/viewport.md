@@ -17,4 +17,8 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 
 ## Viewport toolbar
 
-Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings over the scene. Camera speed is the slider next to the m/s readout.
+Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings, a pass-order **Graph**, and CPU zones over the scene (including Water prepass / reflection / shade). Camera speed is the slider next to the m/s readout. **Resolution** caps the 3D target (Native, 2560×1440, 1920×1080, 1600×900, 1280×720) while the window and UI stay at display pixels — pick **1920×1080** for fullscreen on a 2K panel. **FSR** (Post Processing, default on) temporally reconstructs that internal target to the window; it replaces TAA and the bilinear blit while enabled. Frame generation is not in the engine. `SOMNIUM_FSR=0` kills it at startup. Water and other transparents have no reactive mask yet, so they can ghost under camera motion.
+
+Lighting extras (world cache, scene specular, path tracer): see Help → **Lighting**. World cache is off by default; it adds bounce light, not frame-rate.
+
+Water reflections: see Help → **Water**. Short version — Details on a water body has **SSR**, **RT Reflect**, and **Reflect Debug**; the Post Processing entity has **RT Reflections** and **RT Refraction** (off by default). `SOMNIUM_RT_REFLECT=0` restores SSR + sky cube.

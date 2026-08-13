@@ -300,6 +300,12 @@ pub struct TerrainData {
     /// the same code, the same parameters, opposite verdict, decided by the
     /// content. `SOMNIUM_HEXTILE=0` turns it off.
     pub hex_tiling: bool,
+    /// Phase 25C: morph chunk vertices toward the coarser LOD across the last
+    /// fraction of each range so ridge lines do not pop. Default off;
+    /// `SOMNIUM_LOD_MORPH=1` turns it on.
+    pub lod_morph: bool,
+    /// 0..1 fraction of the LOD range where morphing starts. 0.7 is the last 30%.
+    pub lod_morph_start: f32,
     /// Phase 25D: the macro tier's blend against the detail composite.
     pub macro_mode: macro_map::MacroBlendMode,
     /// Phase 25D. `SOMNIUM_TERRAIN_MACRO=0` sets this to zero, which is the
@@ -453,6 +459,8 @@ impl TerrainData {
             material_id: 0,
             terrain_index: 0,
             hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
+            lod_morph: std::env::var("SOMNIUM_LOD_MORPH").as_deref() == Ok("1"),
+            lod_morph_start: 0.7,
             macro_mode: macro_map::MacroBlendMode::Lerp,
             macro_strength: if std::env::var("SOMNIUM_TERRAIN_MACRO").as_deref() == Ok("0") {
                 0.0

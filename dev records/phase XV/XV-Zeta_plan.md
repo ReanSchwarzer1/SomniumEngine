@@ -28,6 +28,8 @@ BC7 encoder + local packs + visual A/B:
 
 Do **not** reintroduce a per-pixel `close` / `use_maps` / `layer_budget` sample
 branch. That compiled three paths into one shader and made walking 20→27 ms.
+The 1.10 ms shading miss is **Phase DF (Daggerfall)** — nested material
+clipmaps — not a sample-count LOD. Plan: [`phase_DF.md`](../phase_DF.md).
 
 Runtime inspection of the default Great Lakes landscape after XV-A–I: close-up
 photogrammetry is present; from the preset camera the land reads as one

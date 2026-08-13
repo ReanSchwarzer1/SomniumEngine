@@ -1,11 +1,12 @@
 # Somnium Engine — Post–Phase IV Context Handoff
 
-> **Purpose:** start-here history for Phase XV after Phase IV closed.  
-> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-J are **complete**. 1.10 ms shading remains an exception. BC7 encoder + local packs recorded.  
+> **Purpose:** IV/XV history after Phase IV closed. **Not the current start-here.**  
+> **Current start-here:** [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Halcyon history: [`halcyon_context_handoff.md`](halcyon_context_handoff.md).  
+> **Snapshot date:** 2026-08-13 (original); **current as of 2026-08-13 evening:** XV-A through XV-J are **complete**. 1.10 ms shading remains an exception. BC7 encoder + local packs recorded. Metaphor 26-A–I plus evening chrome (immersive play, ComboBox overlay, drawer tiles) are in the tree.  
 > **Branch at audit:** `dev`  
 > **Phase IV closed at:** `b5e6052` (`Phase IV completion + Phase VV Research`) and subsequent boat/Iris docs commits  
-> **Audited HEAD:** `2dec6bd` (`color picker phase plan`)  
-> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI as later features land; 26-J not started); Phase VV (Halcyon) **planned only**
+> **Audited HEAD:** `2dec6bd` (`color picker phase plan`) — later HEAD is on the Halcyon handoff  
+> **Implementation status:** Phase IV **complete**; Phase XV **A–J complete** (1.10 ms exception recorded; BC7 encoder + local packs); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI as later features land; 26-J not started); Phase VV (Halcyon) **VV-A–H in tree** (live SSR miss-rate capture still open) — start at the Halcyon handoff
 
 **Current live contract** (supersedes “research-complete / not implemented”
 below): 32 global layers, sidecar v4, 1664-byte `GpuTerrainMaterial`, unique
@@ -14,14 +15,14 @@ off > 80 m above ground. Canonical: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Z
 Do not reintroduce a per-pixel terrain sample-count LOD. Do not retune
 `WaterComponent::great_lakes`.
 
-This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) as the **start-here** file for a Phase XV implementation session. Keep the 25M-2 handoff for historical Phase IV A–J detail and the post-25M-2 shadow/night corrections; do not treat it as the current XV entry point.
+This document supersedes [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) as the **IV/XV history** file. For a new session, start at [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Keep the 25M-2 handoff for historical Phase IV A–J detail and the post-25M-2 shadow/night corrections.
 
 
 ---
 
 ## 1. Read this first
 
-The next session should read these files **in order**:
+The next session that still needs IV/XV history should read these files **in order**. A new model starts at [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) instead.
 
 1. [`context.md`](../context.md) — living architecture (XV-A–Zeta in engine; §20 is still Phase 14).
 2. [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference/adaptation boundaries (§1.5 Metaphor chrome / colour picker; §1.6 XV A–Zeta).
@@ -33,7 +34,7 @@ The next session should read these files **in order**:
 Optional depth (do not skip (1)–(5) for these):
 
 - [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — Phase IV A–J narrative and asset license conflict notes.
-- [`phase_26.md`](phase_26.md) (Metaphor) / [`phase_VV.md`](phase_VV.md) — parallel tracks; **do not implement inside an XV session** unless the user redirects.
+- [`phase_26.md`](phase_26.md) (Metaphor) / [`phase_VV.md`](phase_VV.md) — parallel tracks. Current start-here: [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md).
 
 The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completion_report.md`](phase_25m2_completion_report.md) only if you need the 25M-2 boundary; it is not required to begin XV-A.
 
@@ -62,14 +63,17 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 |---|---|---|---|
 | **XV** | Appalachia | **A–J complete** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
 | **26** | Metaphor | **26-A–I shipped**; chrome stays open as later features need UI. 26-J not started. | [`phase_26.md`](phase_26.md) |
-| **VV** | Halcyon | Planned RT water reflections | [`phase_VV.md`](phase_VV.md) |
+| **VV** | Halcyon | **VV-A–H in tree** (2026-08-13). SSR + half-res RT + env cube. Kill switch `SOMNIUM_RT_REFLECT=0`. Evidence PNGs / §11 timings still open. | [`phase_VV.md`](phase_VV.md) · audit: [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) |
+| **DF** | Daggerfall | **Plan only** (2026-08-14). Nested material clipmaps. | [`phase_DF.md`](phase_DF.md) |
 
 **Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; XV-J GPU PNGs are in `phase XV/evidence/`.
 
 ### Session estimate
 
-XV-A–J are done. Next planned tracks are **Phase 26 (Metaphor) remaining
-chrome** (the shell shipped; the phase is not closed) and **Phase VV (Halcyon)**.
+XV-A–J are done. **Phase VV (Halcyon) VV-A–H is in the tree.** Do not
+re-implement A–H. Remaining Halcyon work is live captures and profiler
+timings. Metaphor remains open as living chrome (do not rebuild 26-A).
+Start-here: [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md).
 
 ---
 
@@ -138,15 +142,20 @@ Full plan-vs-code list: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codeba
 ### 5.1 Phase 26 — Metaphor
 
 26-A–I plus the 2026-08-13 UX polish shipped (Nocturne shell, docked Content
-Drawer, Iris 26-F, custom title bar, F1 Help). **The UI phase is not over:**
-new engine features keep needing inspector fields, menus, drawers, and
-`docs/editor/` pages. Do not restart at 26-A. Queued: 26-J (only if
-requested), 26-H SDF, 26-D2 drag-drop. Contract: [`phase_26.md`](phase_26.md).
-**Independent** of XV.
+Drawer, Iris 26-F, custom title bar, F1 Help, immersive play, ComboBox overlay).
+**The UI phase is not over:** new engine features keep needing inspector fields,
+menus, drawers, and `docs/editor/` pages. Do not restart at 26-A. Queued: 26-J
+(only if requested), 26-H SDF, 26-D2 drag-drop. Contract: [`phase_26.md`](phase_26.md).
+**Independent** of XV and of Halcyon except where a VV stage needs a debug toggle.
 
 ### 5.2 Phase VV — Halcyon
 
-Ray-traced specular water reflections replacing SSR→env-cube as the primary path. Depends on IV-K + existing TLAS/ReSTIR infra. **Independent** of XV; largest remaining *water* fidelity gap. Plan: [`phase_VV.md`](phase_VV.md).
+Ray-traced specular water reflections **shipped as VV-A–H** (2026-08-13):
+SSR near-field + half-res RT + env cube on confidence. Kill switch
+`SOMNIUM_RT_REFLECT=0`. Water/transparents stay out of the TLAS. Remaining:
+live miss-rate PNGs and [`phase_VV.md`](phase_VV.md) §11 timings. Do not
+re-implement A–H. Start-here: [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md).
+VV history: [`halcyon_context_handoff.md`](halcyon_context_handoff.md).
 
 An XV session that starts changing water reflection architecture or Metaphor UI widgets without user direction is out of scope.
 
@@ -289,41 +298,36 @@ Do **not** silently expand XV to fix these (`context.md` remains authoritative f
 
 ---
 
-## 10. Next-session start checklist (Phase 26 Metaphor / VV)
+## 10. Next-session start checklist
 
-XV-A–J are done. Next authorized work is **Metaphor remaining chrome**
-(new UI/UX as features land — do not rebuild 26-A) or Halcyon
-reflections unless the user reopens terrain.
-BC7: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
-See [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+XV-A–J are done. Metaphor 26-A–I plus evening chrome are in the tree (phase
+open, do not rebuild). **Halcyon VV-A–H is in the tree.**
 
-**If the session is Metaphor**, ignore the old XV numbered steps below and
-follow [`phase_26.md`](phase_26.md) §13.2 (shipped vs still open):
+A **new model** starts at [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)
+(entire `context.md`, entire `ATTRIBUTION.md`, every markdown under `dev records/`).
+VV-A–H history is [`halcyon_context_handoff.md`](halcyon_context_handoff.md):
 
-1. Confirm branch `dev`. Read `phase_26.md` status + §3, §13.2, §14.
-2. Then `context.md` §8, `theme.rs`, `editor_event.rs`, `numeric_field.rs`.
-3. `cargo check --workspace` before edits.
-4. User must have **authorized implementation**. Research-only → stop after docs.
-5. **Do not restart at 26-A.** Extend chrome for the feature in hand (inspector,
-   menu, drawer type, Help page). 26-J only if explicitly requested.
-6. UI/UX only. Do not retune `WaterComponent::great_lakes`. Do not rewrite
-   `context.md` §20. Do not copy Unreal/Atlus art.
-7. Keep every §14 must-not-break behaviour. `EditorEvent` stays the seam.
-8. `cargo fmt` / tests green. Evidence under `dev records/phase 26/`.
+1. Confirm branch `dev`. Read that handoff, then [`phase_VV.md`](phase_VV.md) §4.4, §6 shipped notes, §11, §13.
+2. Do **not** re-implement VV-A–H.
+3. Remaining authorized Halcyon work: live captures into `dev records/phase VV/` (after tonemap; do not invent PNGs) and filling §11 from the profiler.
+4. Frozen: `WaterComponent::great_lakes` (especially `wave_speed` **0.85**).
+5. Living chrome only if a later feature needs a new inspector field. 26-J only if requested.
 
-**If the session is still Halcyon (VV):** read [`phase_VV.md`](phase_VV.md);
-do not fold Metaphor widgets into it.
+**If the session is Metaphor instead**, follow [`phase_26.md`](phase_26.md) §13.2
+(shipped vs still open) and do not fold water reflections into it.
 
 Historical XV notes (phase complete): do not download Quixel/Megascans or
 generate materials with AI; do not retune `WaterComponent::great_lakes`
 `wave_speed` away from 0.85 without an explicit buoyancy plan. Full XV
-research record remains in [`phase_XV.md`](phase_XV.md).
+contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). BC7:
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
+Research record: [`phase_XV.md`](phase_XV.md).
 
 ---
 
 ## 11. Accuracy rule
 
-Implementation and tests are truth; docs follow. This handoff is a snapshot at HEAD `2dec6bd` plus the 2026-08-13 XV research expansion.
+Implementation and tests are truth; docs follow. This handoff is a snapshot at HEAD `2dec6bd` plus the 2026-08-13 XV research expansion. Current start-here is [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md).
 
 - Phase IV claims are **implemented** (with K-1 deferred, K-6 abandoned, K-7 skipped — stated, not implied).
 - Phase XV **A–J are complete**; 1.10 ms shading remains a recorded exception (2026-08-13). BC7 encoder + local packs: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).

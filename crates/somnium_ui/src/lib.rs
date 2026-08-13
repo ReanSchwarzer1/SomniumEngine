@@ -99,6 +99,11 @@ struct InspectorHandles {
     /// Row container for directional-only moonlight intensity field (Phase 25M-2).
     light_moon_row: NodeHandle,
     light_moon_int: NodeHandle,
+    light_radius: NodeHandle,
+    light_width_row: NodeHandle,
+    light_width: NodeHandle,
+    light_height_row: NodeHandle,
+    light_height: NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section: NodeHandle,
@@ -121,6 +126,9 @@ struct InspectorHandles {
     terrain_paint_label: NodeHandle,
     terrain_hex_toggle: NodeHandle,
     terrain_hex_label: NodeHandle,
+    terrain_morph_toggle: NodeHandle,
+    terrain_morph_label: NodeHandle,
+    terrain_morph_start: NodeHandle,
     terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
     terrain_palette: [NodeHandle; 32],
@@ -137,6 +145,8 @@ struct InspectorHandles {
     water_amplitude: NodeHandle,
     water_roughness: NodeHandle,
     water_ssr: NodeHandle,
+    water_rt_reflect: NodeHandle,
+    water_reflect_debug: NodeHandle,
     water_wave_a: NodeHandle,
     water_wave_b: NodeHandle,
     water_speed: NodeHandle,
@@ -191,6 +201,9 @@ struct InspectorHandles {
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
     foliage_shadow: NodeHandle,
+    foliage_cull: NodeHandle,
+    foliage_lod: NodeHandle,
+    foliage_impostor: NodeHandle,
     /// Text label inside each toggle button, so the tick can be redrawn.
     post_vig_label: NodeHandle,
     post_ca_label: NodeHandle,
@@ -198,12 +211,19 @@ struct InspectorHandles {
     post_fxaa_label: NodeHandle,
     post_cel_toggle: NodeHandle,
     post_cel_label: NodeHandle,
+    post_fsr_toggle: NodeHandle,
+    post_fsr_label: NodeHandle,
+    post_fsr_sharp: NodeHandle,
     post_taa_toggle: NodeHandle,
     post_taa_label: NodeHandle,
     post_gtao_toggle: NodeHandle,
     post_gtao_label: NodeHandle,
     post_restir_toggle: NodeHandle,
     post_restir_gi_toggle: NodeHandle,
+    post_rt_reflect_toggle: NodeHandle,
+    post_rt_reflect_label: NodeHandle,
+    post_rt_refract_toggle: NodeHandle,
+    post_rt_refract_label: NodeHandle,
     post_cas_toggle: NodeHandle,
     post_mb_toggle: NodeHandle,
     post_mb_label: NodeHandle,
@@ -246,6 +266,24 @@ struct InspectorHandles {
     post_fog_density: NodeHandle,
     post_fog_height: NodeHandle,
     post_fog_asym: NodeHandle,
+    post_world_cache_toggle: NodeHandle,
+    post_world_cache_label: NodeHandle,
+    post_cache_intensity: NodeHandle,
+    post_cache_cell: NodeHandle,
+    post_specular_toggle: NodeHandle,
+    post_specular_label: NodeHandle,
+    post_spec_rough: NodeHandle,
+    post_path_toggle: NodeHandle,
+    post_path_label: NodeHandle,
+    post_path_bounces: NodeHandle,
+    post_sdf_toggle: NodeHandle,
+    post_sdf_label: NodeHandle,
+    post_probes_toggle: NodeHandle,
+    post_probes_label: NodeHandle,
+    post_probe_intensity: NodeHandle,
+    post_analytic_toggle: NodeHandle,
+    post_analytic_label: NodeHandle,
+    post_shaft_amt: NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -262,6 +300,10 @@ pub struct PostInspectorState {
     pub restir: bool,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi: bool,
+    /// Phase VV: ray-traced water reflections.
+    pub rt_reflect: bool,
+    /// Phase VV+1: ray-traced water refraction. Default off.
+    pub rt_refract: bool,
     /// Percentage-closer soft shadows. Default on.
     pub pcss: bool,
     /// Screen-space contact shadows. Default on.
@@ -277,6 +319,20 @@ pub struct PostInspectorState {
     pub shafts: bool,
     /// Exposure comes from aperture/shutter/ISO rather than the EV row.
     pub physical_camera: bool,
+    pub world_cache: bool,
+    pub specular_gi: bool,
+    pub path_tracer: bool,
+    pub mesh_sdf: bool,
+    pub probes: bool,
+    pub analytic_grad: bool,
+    pub fsr: bool,
+    pub fsr_sharpness: f32,
+    pub cache_intensity: f32,
+    pub cache_cell: f32,
+    pub spec_rough: f32,
+    pub path_bounces: f32,
+    pub probe_intensity: f32,
+    pub shaft_intensity: f32,
     /// `[bloom_intensity, focus_distance, temperature, contrast, saturation,
     /// grain, fog_density, fog_height, fog_asymmetry, tint, lift, gamma, gain,
     /// aperture_f_stops, shutter_denominator, iso, ao_radius, ao_intensity]`.
@@ -301,6 +357,8 @@ pub struct TerrainInspectorState {
     pub terrain_paint: bool,
     pub foliage_paint: bool,
     pub hex_tiling: bool,
+    pub lod_morph: bool,
+    pub morph_start: f32,
 }
 
 /// One line of the profiler overlay (Phase 29).
@@ -317,7 +375,7 @@ pub struct ProfilerRow {
 }
 
 /// Rows the overlay can show before it starts dropping them.
-pub const PROFILER_ROWS: usize = 20;
+pub const PROFILER_ROWS: usize = 40;
 
 /// Names shown in the foliage picker (Phase 17F).
 ///
@@ -333,6 +391,8 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
 ];
 
 const TONEMAP_NAMES: [&str; 3] = ["AgX", "ACES", "Reinhard"];
+const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
+    ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
 /// Short paint-palette labels (Phase XV-I / XV-Zeta). Indices match the renderer roster.
 const TERRAIN_LAYER_SHORT: [&str; 32] = [
@@ -344,7 +404,18 @@ const TERRAIN_LAYER_SHORT: [&str; 32] = [
 
 const TERRAIN_BRUSH_NAMES: [&str; 6] = ["Raise", "Lower", "Smooth", "Flatten", "Noise", "Paint"];
 
-pub type LightInspectorValues = [f32; 8];
+pub type LightInspectorValues = [f32; 11];
+
+/// Light Details rows. Visibility depends on the selected fixture, not a single
+/// "is rect" flag — disc hides width/height, tube shows Half W as half-length.
+pub struct LightInspectorState {
+    pub values: LightInspectorValues,
+    pub kelvin: f32,
+    pub directional: bool,
+    pub show_cone: bool,
+    pub show_width: bool,
+    pub show_height: bool,
+}
 
 // ── Layout build result ───────────────────────────────────────────────────────
 
@@ -363,6 +434,7 @@ struct EditorLayout {
     file_save_item: NodeHandle,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    viewport_res_combo: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
     immersive_button: NodeHandle,
@@ -428,6 +500,7 @@ struct EditorLayout {
     post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
     post_tonemap_popup: NodeHandle,
+    viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -484,6 +557,7 @@ pub struct UiManager {
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    viewport_res_combo: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
     immersive_button: NodeHandle,
@@ -559,6 +633,7 @@ pub struct UiManager {
     post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
     post_tonemap_popup: NodeHandle,
+    viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -681,6 +756,7 @@ impl UiManager {
             file_save_item: layout.file_save_item,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
+            viewport_res_combo: layout.viewport_res_combo,
             play_button: layout.play_button,
             play_label: layout.play_label,
             immersive_button: layout.immersive_button,
@@ -748,6 +824,7 @@ impl UiManager {
             post_tonemap_combo: layout.post_tonemap_combo,
             foliage_kind_popup: layout.foliage_kind_popup,
             post_tonemap_popup: layout.post_tonemap_popup,
+            viewport_res_popup: layout.viewport_res_popup,
             save_button: layout.save_button,
             palette_popup: layout.palette_popup,
             palette_widget: layout.palette_widget,
@@ -1113,14 +1190,19 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
+    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 3] {
+        [
+            (self.foliage_kind_combo, self.foliage_kind_popup),
+            (self.post_tonemap_combo, self.post_tonemap_popup),
+            (self.viewport_res_combo, self.viewport_res_popup),
+        ]
+    }
+
     fn close_combo_dropdowns(&mut self) {
         if self.open_combo_popup.is_none() {
             return;
         }
-        for (combo, popup) in [
-            (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.post_tonemap_combo, self.post_tonemap_popup),
-        ] {
+        for (combo, popup) in self.combo_entries() {
             self.native_ui.send(UiMessage::new(
                 popup,
                 MessageDirection::ToWidget,
@@ -1133,17 +1215,17 @@ impl UiManager {
     }
 
     fn combo_popup_for(&self, combo: NodeHandle) -> Option<NodeHandle> {
-        if combo == self.foliage_kind_combo
-            || combo == self.inspector_handles.foliage_kind_button
-        {
-            Some(self.foliage_kind_popup)
-        } else if combo == self.post_tonemap_combo
-            || combo == self.inspector_handles.post_tonemap_button
-        {
-            Some(self.post_tonemap_popup)
-        } else {
-            None
-        }
+        self.combo_entries()
+            .into_iter()
+            .find(|(c, _)| *c == combo)
+            .map(|(_, p)| p)
+    }
+
+    fn combo_for_popup(&self, popup: NodeHandle) -> Option<NodeHandle> {
+        self.combo_entries()
+            .into_iter()
+            .find(|(_, p)| *p == popup)
+            .map(|(c, _)| c)
     }
 
     fn close_top_overlay(&mut self) -> bool {
@@ -1457,16 +1539,15 @@ impl UiManager {
             }
         }
         if self.open_combo_popup.is_some() {
-            let (popup, anchor) = if self.open_combo_popup == self.foliage_kind_popup {
-                (self.foliage_kind_popup, self.foliage_kind_combo)
-            } else {
-                (self.post_tonemap_popup, self.post_tonemap_combo)
-            };
-            self.native_ui.send(UiMessage::new(
-                popup,
-                MessageDirection::ToWidget,
-                PopupMessage::SetAnchor(anchor),
-            ));
+            for (anchor, popup) in self.combo_entries() {
+                if self.open_combo_popup == popup {
+                    self.native_ui.send(UiMessage::new(
+                        popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::SetAnchor(anchor),
+                    ));
+                }
+            }
         }
         let outgoing = self.native_ui.update();
         let _ = outgoing;
@@ -1771,10 +1852,7 @@ impl UiManager {
 
     /// Show or hide the inspector's Light section and refresh it
     /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
-    ///
-    /// `values` is `[intensity, range, inner_deg, outer_deg, r, g, b, moon_intensity]`, paired
-    /// with whether the light is directional.
-    pub fn update_light_inspector(&mut self, values: Option<(LightInspectorValues, bool, f32)>) {
+    pub fn update_light_inspector(&mut self, values: Option<LightInspectorState>) {
         let h = &self.inspector_handles;
         let (section, intensity, range, inner, outer) = (
             h.light_section,
@@ -1793,7 +1871,14 @@ impl UiManager {
             h.light_moon_int,
         );
         match values {
-            Some(([i, r, ia, oa, cr, cg, cb, moon_i], directional, kelvin)) => {
+            Some(LightInspectorState {
+                values: [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
+                kelvin,
+                directional,
+                show_cone,
+                show_width,
+                show_height,
+            }) => {
                 self.native_ui.set_visibility(section, true);
                 self.native_ui
                     .send(NumericFieldMessage::set_value(intensity, i));
@@ -1817,10 +1902,19 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(light_temp, kelvin));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(moon_int, moon_i));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_radius, radius));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_width, width));
+                self.native_ui
+                    .send(NumericFieldMessage::set_value(h.light_height, height));
                 self.native_ui.set_visibility(range_row, !directional);
-                self.native_ui.set_visibility(inner_row, !directional);
-                self.native_ui.set_visibility(outer_row, !directional);
+                self.native_ui.set_visibility(inner_row, show_cone);
+                self.native_ui.set_visibility(outer_row, show_cone);
                 self.native_ui.set_visibility(moon_row, directional);
+                self.native_ui.set_visibility(h.light_width_row, show_width);
+                self.native_ui
+                    .set_visibility(h.light_height_row, show_height);
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -1905,6 +1999,8 @@ impl UiManager {
                     (gtao_toggle, v.gtao),
                     (restir_toggle, v.restir),
                     (restir_gi_toggle, v.restir_gi),
+                    (h.post_rt_reflect_toggle, v.rt_reflect),
+                    (h.post_rt_refract_toggle, v.rt_refract),
                     (pcss_toggle, v.pcss),
                     (contact_toggle, v.contact_shadows),
                     (cas_toggle, v.cas),
@@ -1914,6 +2010,13 @@ impl UiManager {
                     (vol_toggle, v.volumetrics),
                     (shafts_toggle, v.shafts),
                     (phys_toggle, v.physical_camera),
+                    (h.post_world_cache_toggle, v.world_cache),
+                    (h.post_specular_toggle, v.specular_gi),
+                    (h.post_path_toggle, v.path_tracer),
+                    (h.post_sdf_toggle, v.mesh_sdf),
+                    (h.post_probes_toggle, v.probes),
+                    (h.post_analytic_toggle, v.analytic_grad),
+                    (h.post_fsr_toggle, v.fsr),
                 ] {
                     tick(&mut self.native_ui, handle, on);
                 }
@@ -1940,6 +2043,13 @@ impl UiManager {
                     (h.post_cas_strength, v.extras[19]),
                     (h.post_mb_shutter, v.extras[20]),
                     (h.post_gi_intensity, v.extras[21]),
+                    (h.post_cache_intensity, v.cache_intensity),
+                    (h.post_cache_cell, v.cache_cell),
+                    (h.post_spec_rough, v.spec_rough),
+                    (h.post_path_bounces, v.path_bounces),
+                    (h.post_probe_intensity, v.probe_intensity),
+                    (h.post_shaft_amt, v.shaft_intensity),
+                    (h.post_fsr_sharp, v.fsr_sharpness),
                 ] {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(field, value));
@@ -2013,6 +2123,10 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(macro_s, v.macro_strength));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(debug, v.debug_view));
+                self.native_ui.send(NumericFieldMessage::set_value(
+                    h.terrain_morph_start,
+                    v.morph_start,
+                ));
                 let paint =
                     (v.paint_layer.round().max(0.0) as usize).min(TERRAIN_LAYER_SHORT.len() - 1);
                 let brush = (v.brush as usize).min(TERRAIN_BRUSH_NAMES.len() - 1);
@@ -2035,6 +2149,10 @@ impl UiManager {
                     h.terrain_hex_toggle,
                     v.hex_tiling,
                 ));
+                self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_morph_toggle,
+                    v.lod_morph,
+                ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
                     self.native_ui.send(TextMessage::set_text(
                         *label,
@@ -2042,10 +2160,8 @@ impl UiManager {
                     ));
                 }
                 for (i, &btn) in h.terrain_palette.iter().enumerate() {
-                    self.native_ui.send(ButtonMessage::set_selected(
-                        btn,
-                        i == paint,
-                    ));
+                    self.native_ui
+                        .send(ButtonMessage::set_selected(btn, i == paint));
                 }
                 let active_brush = if v.terrain_edit { Some(brush) } else { None };
                 for &(btn, lbl, tool) in &h.terrain_brush_items {
@@ -2072,7 +2188,7 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 17]>) {
+    pub fn update_water_inspector(&mut self, values: Option<[f32; 19]>) {
         let h = &self.inspector_handles;
         match values {
             Some(values) => {
@@ -2084,6 +2200,8 @@ impl UiManager {
                     h.water_amplitude,
                     h.water_roughness,
                     h.water_ssr,
+                    h.water_rt_reflect,
+                    h.water_reflect_debug,
                     h.water_wave_a,
                     h.water_wave_b,
                     h.water_speed,
@@ -2220,7 +2338,7 @@ impl UiManager {
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
     /// plus the enable flag.
-    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 7], [bool; 4])>) {
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 10], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
         let fields = [
@@ -2231,6 +2349,9 @@ impl UiManager {
             h.foliage_smin,
             h.foliage_smax,
             h.foliage_shadow,
+            h.foliage_cull,
+            h.foliage_lod,
+            h.foliage_impostor,
         ];
         match values {
             Some((v, flags)) => {
@@ -2310,6 +2431,9 @@ impl UiManager {
             (h.light_col_b, IF::LightColorB),
             (h.light_temp_k, IF::LightColorTemperature),
             (h.light_moon_int, IF::LightMoonIntensity),
+            (h.light_radius, IF::LightSourceRadius),
+            (h.light_width, IF::LightAreaWidth),
+            (h.light_height, IF::LightAreaHeight),
             (h.post_exposure, IF::PostExposure),
             (h.post_exp_comp, IF::PostExposureCompensation),
             (h.post_bloom_amt, IF::PostBloomIntensity),
@@ -2330,10 +2454,17 @@ impl UiManager {
             (h.post_iso, IF::PostIso),
             (h.post_ao_radius, IF::PostAoRadius),
             (h.post_ao_intensity, IF::PostAoIntensity),
+            (h.post_fsr_sharp, IF::PostFsrSharpness),
             (h.post_cas_sharp, IF::PostCasSharpness),
             (h.post_cas_strength, IF::PostCasStrength),
             (h.post_mb_shutter, IF::PostMotionBlurShutter),
             (h.post_gi_intensity, IF::PostGiIntensity),
+            (h.post_cache_intensity, IF::PostCacheIntensity),
+            (h.post_cache_cell, IF::PostCacheCell),
+            (h.post_spec_rough, IF::PostSpecRough),
+            (h.post_path_bounces, IF::PostPathBounces),
+            (h.post_probe_intensity, IF::PostProbeIntensity),
+            (h.post_shaft_amt, IF::PostShaftIntensity),
             (h.post_vig_str, IF::PostVignetteStrength),
             (h.post_ca_str, IF::PostCaStrength),
             (h.post_ibl, IF::PostIblIntensity),
@@ -2343,12 +2474,15 @@ impl UiManager {
             (h.terrain_wetness, IF::TerrainWetness),
             (h.terrain_macro, IF::TerrainMacroStrength),
             (h.terrain_debug, IF::TerrainDebugView),
+            (h.terrain_morph_start, IF::TerrainMorphStart),
             (h.water_surface, IF::WaterSurface),
             (h.water_depth, IF::WaterMaxDepth),
             (h.water_clarity, IF::WaterClarity),
             (h.water_amplitude, IF::WaterAmplitude),
             (h.water_roughness, IF::WaterRoughness),
             (h.water_ssr, IF::WaterSsrStrength),
+            (h.water_rt_reflect, IF::WaterRtReflect),
+            (h.water_reflect_debug, IF::WaterReflectDebug),
             (h.water_wave_a, IF::WaterWaveLengthA),
             (h.water_wave_b, IF::WaterWaveLengthB),
             (h.water_speed, IF::WaterWaveSpeed),
@@ -2379,6 +2513,9 @@ impl UiManager {
             (h.foliage_smin, IF::FoliageScaleMin),
             (h.foliage_smax, IF::FoliageScaleMax),
             (h.foliage_shadow, IF::FoliageShadowDistance),
+            (h.foliage_cull, IF::FoliageCullDistance),
+            (h.foliage_lod, IF::FoliageLodDistance),
+            (h.foliage_impostor, IF::FoliageImpostorDistance),
         ];
 
         let color_map: &[(NodeHandle, crate::ColorField)] = &[
@@ -2575,6 +2712,14 @@ impl UiManager {
                         self.inspector_handles.post_restir_gi_toggle,
                         PostFxToggle::RestirGi,
                     ),
+                    (
+                        self.inspector_handles.post_rt_reflect_toggle,
+                        PostFxToggle::RtReflect,
+                    ),
+                    (
+                        self.inspector_handles.post_rt_refract_toggle,
+                        PostFxToggle::RtRefract,
+                    ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
                         self.inspector_handles.post_contact_toggle,
@@ -2605,6 +2750,31 @@ impl UiManager {
                         self.inspector_handles.post_phys_toggle,
                         PostFxToggle::PhysicalCamera,
                     ),
+                    (
+                        self.inspector_handles.post_world_cache_toggle,
+                        PostFxToggle::WorldCache,
+                    ),
+                    (
+                        self.inspector_handles.post_specular_toggle,
+                        PostFxToggle::SpecularGi,
+                    ),
+                    (
+                        self.inspector_handles.post_path_toggle,
+                        PostFxToggle::PathTracer,
+                    ),
+                    (
+                        self.inspector_handles.post_sdf_toggle,
+                        PostFxToggle::MeshSdf,
+                    ),
+                    (
+                        self.inspector_handles.post_probes_toggle,
+                        PostFxToggle::Probes,
+                    ),
+                    (
+                        self.inspector_handles.post_analytic_toggle,
+                        PostFxToggle::AnalyticGrad,
+                    ),
+                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
                 ] {
                     if msg.destination == handle {
                         self.editor_events
@@ -2670,6 +2840,11 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_morph_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainMorph);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
@@ -2914,16 +3089,8 @@ impl UiManager {
                 if msg.destination == self.help_overlay {
                     self.help_open = false;
                 }
-                if msg.destination == self.foliage_kind_popup
-                    || msg.destination == self.post_tonemap_popup
-                {
-                    if let Some(combo) = if msg.destination == self.foliage_kind_popup {
-                        Some(self.foliage_kind_combo)
-                    } else {
-                        Some(self.post_tonemap_combo)
-                    } {
-                        self.native_ui.send(ComboBoxMessage::close(combo));
-                    }
+                if let Some(combo) = self.combo_for_popup(msg.destination) {
+                    self.native_ui.send(ComboBoxMessage::close(combo));
                     self.open_combo_popup = NodeHandle::NONE;
                     self.native_ui.invalidate_ancestors(msg.destination);
                 }
@@ -2967,6 +3134,11 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_morph_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainMorph);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleFoliageErase);
@@ -2998,6 +3170,14 @@ impl UiManager {
                         self.inspector_handles.post_restir_gi_toggle,
                         PostFxToggle::RestirGi,
                     ),
+                    (
+                        self.inspector_handles.post_rt_reflect_toggle,
+                        PostFxToggle::RtReflect,
+                    ),
+                    (
+                        self.inspector_handles.post_rt_refract_toggle,
+                        PostFxToggle::RtRefract,
+                    ),
                     (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
                     (
                         self.inspector_handles.post_contact_toggle,
@@ -3028,6 +3208,31 @@ impl UiManager {
                         self.inspector_handles.post_phys_toggle,
                         PostFxToggle::PhysicalCamera,
                     ),
+                    (
+                        self.inspector_handles.post_world_cache_toggle,
+                        PostFxToggle::WorldCache,
+                    ),
+                    (
+                        self.inspector_handles.post_specular_toggle,
+                        PostFxToggle::SpecularGi,
+                    ),
+                    (
+                        self.inspector_handles.post_path_toggle,
+                        PostFxToggle::PathTracer,
+                    ),
+                    (
+                        self.inspector_handles.post_sdf_toggle,
+                        PostFxToggle::MeshSdf,
+                    ),
+                    (
+                        self.inspector_handles.post_probes_toggle,
+                        PostFxToggle::Probes,
+                    ),
+                    (
+                        self.inspector_handles.post_analytic_toggle,
+                        PostFxToggle::AnalyticGrad,
+                    ),
+                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
                 ] {
                     if msg.destination == handle {
                         self.editor_events
@@ -3051,25 +3256,25 @@ impl UiManager {
                         .push_back(EditorEvent::SelectFoliageKind(*i as u8));
                     continue;
                 }
+                if msg.destination == self.viewport_res_combo {
+                    self.editor_events
+                        .push_back(EditorEvent::SetViewportResolution(*i as u8));
+                    continue;
+                }
             } else if let Some(ComboBoxMessage::Open) = msg.data::<ComboBoxMessage>() {
                 self.close_all_menus();
                 if let Some(popup) = self.combo_popup_for(msg.destination) {
                     if self.open_combo_popup.is_some() && self.open_combo_popup != popup {
                         let other = self.open_combo_popup;
-                        if other == self.foliage_kind_popup {
-                            self.native_ui.send(ComboBoxMessage::close(self.foliage_kind_combo));
-                            self.native_ui.send(UiMessage::new(
-                                self.foliage_kind_popup,
-                                MessageDirection::ToWidget,
-                                PopupMessage::Close,
-                            ));
-                        } else if other == self.post_tonemap_popup {
-                            self.native_ui.send(ComboBoxMessage::close(self.post_tonemap_combo));
-                            self.native_ui.send(UiMessage::new(
-                                self.post_tonemap_popup,
-                                MessageDirection::ToWidget,
-                                PopupMessage::Close,
-                            ));
+                        for (combo, p) in self.combo_entries() {
+                            if p == other {
+                                self.native_ui.send(ComboBoxMessage::close(combo));
+                                self.native_ui.send(UiMessage::new(
+                                    p,
+                                    MessageDirection::ToWidget,
+                                    PopupMessage::Close,
+                                ));
+                            }
                         }
                     }
                     self.open_combo_popup = popup;
@@ -3468,6 +3673,35 @@ fn build_editor_layout(
         font_id,
         22.0,
     );
+
+    let res_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 14.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_text("Resolution")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_SECONDARY)
+    .build();
+    ui.add_node(res_lbl, vp_stack_h);
+
+    let viewport_res_combo_node = ComboBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_width(118.0)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 2.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_items(VIEWPORT_RESOLUTION_NAMES)
+    .with_selected(0)
+    .with_font_id(font_id)
+    .build();
+    let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
 
     let hint = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 4.0,
@@ -4201,6 +4435,8 @@ fn build_editor_layout(
     let foliage_kind_popup =
         attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
     let post_tonemap_popup = attach_combo_popup(ui, post_tonemap_combo, &TONEMAP_NAMES, font_id);
+    let viewport_res_popup =
+        attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
 
     EditorLayout {
         outliner_scroll,
@@ -4217,6 +4453,7 @@ fn build_editor_layout(
         file_save_item,
         camera_speed_slider,
         camera_speed_label,
+        viewport_res_combo,
         play_button,
         play_label,
         immersive_button,
@@ -4281,6 +4518,7 @@ fn build_editor_layout(
         post_tonemap_combo,
         foliage_kind_popup,
         post_tonemap_popup,
+        viewport_res_popup,
         save_button,
         palette_popup,
         palette_widget,
@@ -4445,6 +4683,13 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
     let (light_moon_row, light_moon_int) =
         make_row_rw(ui, "Moon", 34.0, font_id, light_section, 0.005);
+    let light_radius = make_row_step(ui, "Radius", 34.0, font_id, light_section, 0.01);
+    let (light_width_row, light_width) =
+        make_row_rw(ui, "Half W", 34.0, font_id, light_section, 0.05);
+    let (light_height_row, light_height) =
+        make_row_rw(ui, "Half H", 34.0, font_id, light_section, 0.05);
+    ui.set_visibility(light_width_row, false);
+    ui.set_visibility(light_height_row, false);
     ui.set_visibility(light_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -4503,9 +4748,14 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let post_mb_shutter = make_row_step(ui, "Shutter", 34.0, font_id, post_section, 0.01);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
 
+    // FSR 3 temporal reconstruct. Default on; owns AA (and RCAS) while enabled.
+    let (post_fsr_toggle, post_fsr_label) = make_toggle(ui, "FSR", font_id, post_section);
+    let post_fsr_sharp = make_row_step(ui, "FSR Sharp", 34.0, font_id, post_section, 0.01);
+
     // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
     // list reads as a pipeline rather than an unsorted pile of switches.
-    let (post_taa_toggle, post_taa_label) = make_toggle(ui, "TAA", font_id, post_section);
+    let (post_taa_toggle, post_taa_label) =
+        make_toggle(ui, "TAA (FSR owns AA)", font_id, post_section);
     let (post_gtao_toggle, post_gtao_label) = make_toggle(ui, "GTAO", font_id, post_section);
     // Radius is in metres and is the control that decides whether AO reads as
     // contact darkening under an object or as a broad smear across a hillside.
@@ -4517,6 +4767,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // other half of the same traced solution and they read as a pair.
     let (post_restir_gi_toggle, post_restir_gi_label) =
         make_toggle(ui, "RT Indirect (GI)", font_id, post_section);
+    let (post_rt_reflect_toggle, post_rt_reflect_label) =
+        make_toggle(ui, "RT Reflections", font_id, post_section);
+    let (post_rt_refract_toggle, post_rt_refract_label) =
+        make_toggle(ui, "RT Refraction", font_id, post_section);
     // Phase 24L. Directly under its toggle, matching every other effect that
     // pairs a switch with an amount.
     let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
@@ -4547,12 +4801,27 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_vol_toggle, post_vol_label) = make_toggle(ui, "Volumetrics", font_id, post_section);
     let (post_shafts_toggle, post_shafts_label) =
         make_toggle(ui, "Light Shafts", font_id, post_section);
+    let post_shaft_amt = make_row_step(ui, "Shaft Amt", 34.0, font_id, post_section, 0.05);
     // Fog density is tiny — a visible haze is ~1e-3 per metre — so the scrub
     // rate has to be far finer than the other rows or one pixel of drag takes
     // the scene from clear to opaque.
     let post_fog_density = make_row_step(ui, "Fog", 34.0, font_id, post_section, 0.00005);
     let post_fog_height = make_row_step(ui, "FogH", 34.0, font_id, post_section, 1.0);
     let post_fog_asym = make_row_step(ui, "FogG", 34.0, font_id, post_section, 0.01);
+    let (post_world_cache_toggle, post_world_cache_label) =
+        make_toggle(ui, "World Cache", font_id, post_section);
+    let post_cache_intensity = make_row_step(ui, "Cache Amt", 34.0, font_id, post_section, 0.02);
+    let post_cache_cell = make_row_step(ui, "Cell m", 34.0, font_id, post_section, 0.05);
+    let (post_specular_toggle, post_specular_label) =
+        make_toggle(ui, "RT Specular", font_id, post_section);
+    let post_spec_rough = make_row_step(ui, "Spec Rgh", 34.0, font_id, post_section, 0.01);
+    let (post_path_toggle, post_path_label) = make_toggle(ui, "Path Tracer", font_id, post_section);
+    let post_path_bounces = make_row_step(ui, "Bounces", 34.0, font_id, post_section, 1.0);
+    let (post_sdf_toggle, post_sdf_label) = make_toggle(ui, "Mesh SDF", font_id, post_section);
+    let (post_probes_toggle, post_probes_label) = make_toggle(ui, "Probes", font_id, post_section);
+    let post_probe_intensity = make_row_step(ui, "Probe Amt", 34.0, font_id, post_section, 0.02);
+    let (post_analytic_toggle, post_analytic_label) =
+        make_toggle(ui, "Analytic Mips", font_id, post_section);
     ui.set_visibility(post_section, false);
 
     // ── Foliage (Phase 17C) ──────────────────────────────────────────────────
@@ -4595,6 +4864,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // how much of the shadow pass a grass field is allowed to cost, and the
     // profiler's `shadow casters` row is the readout for it.
     let foliage_shadow = make_row_step(ui, "Sh Dst", 34.0, font_id, foliage_section, 1.0);
+    let foliage_cull = make_row_step(ui, "Cull", 34.0, font_id, foliage_section, 1.0);
+    let foliage_lod = make_row_step(ui, "LOD", 34.0, font_id, foliage_section, 1.0);
+    let foliage_impostor = make_row_step(ui, "Impostor", 34.0, font_id, foliage_section, 1.0);
     ui.set_visibility(foliage_section, false);
 
     // ── Terrain layers (Phase 17C) ───────────────────────────────────────────
@@ -4622,6 +4894,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
     let (terrain_hex_toggle, terrain_hex_label) =
         make_toggle(ui, "Hex Tiling", font_id, terrain_section);
+    let (terrain_morph_toggle, terrain_morph_label) =
+        make_toggle(ui, "LOD Morph", font_id, terrain_section);
+    let terrain_morph_start = make_row_step(ui, "Morph", 34.0, font_id, terrain_section, 0.02);
     let mut terrain_brush_items = Vec::with_capacity(6);
     for row in 0..2 {
         let row_panel =
@@ -4676,6 +4951,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let water_amplitude = make_row_step(ui, "Waves", 34.0, font_id, water_section, 0.01);
     let water_roughness = make_row_step(ui, "Rough", 34.0, font_id, water_section, 0.01);
     let water_ssr = make_row_step(ui, "SSR", 34.0, font_id, water_section, 0.01);
+    let water_rt_reflect = make_row_step(ui, "RT Reflect", 34.0, font_id, water_section, 0.01);
+    let water_reflect_debug = make_row_step(ui, "Reflect Debug", 34.0, font_id, water_section, 1.0);
     let water_wave_a = make_row_step(ui, "Wave A", 34.0, font_id, water_section, 0.25);
     let water_wave_b = make_row_step(ui, "Wave B", 34.0, font_id, water_section, 0.25);
     let water_speed = make_row_step(ui, "Speed", 34.0, font_id, water_section, 0.05);
@@ -4765,12 +5042,20 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_outer_row,
         light_moon_row,
         light_moon_int,
+        light_radius,
+        light_width_row,
+        light_width,
+        light_height_row,
+        light_height,
         terrain_section,
         terrain_mode_label,
         terrain_paint_toggle,
         terrain_paint_label,
         terrain_hex_toggle,
         terrain_hex_label,
+        terrain_morph_toggle,
+        terrain_morph_label,
+        terrain_morph_start,
         terrain_brush_items,
         terrain_layer,
         terrain_palette,
@@ -4787,6 +5072,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         water_amplitude,
         water_roughness,
         water_ssr,
+        water_rt_reflect,
+        water_reflect_debug,
         water_wave_a,
         water_wave_b,
         water_speed,
@@ -4840,6 +5127,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         foliage_smin,
         foliage_smax,
         foliage_shadow,
+        foliage_cull,
+        foliage_lod,
+        foliage_impostor,
         post_section,
         post_exposure,
         post_exp_comp,
@@ -4856,6 +5146,9 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_ca_label,
         post_cel_toggle,
         post_cel_label,
+        post_fsr_toggle,
+        post_fsr_label,
+        post_fsr_sharp,
         post_taa_toggle,
         post_taa_label,
         post_gtao_toggle,
@@ -4865,6 +5158,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_bloom_toggle,
         post_bloom_label,
         post_restir_gi_toggle,
+        post_rt_reflect_toggle,
+        post_rt_reflect_label,
+        post_rt_refract_toggle,
+        post_rt_refract_label,
         post_restir_gi_label,
         post_pcss_toggle,
         post_pcss_label,
@@ -4886,6 +5183,24 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_fog_density,
         post_fog_height,
         post_fog_asym,
+        post_world_cache_toggle,
+        post_world_cache_label,
+        post_cache_intensity,
+        post_cache_cell,
+        post_specular_toggle,
+        post_specular_label,
+        post_spec_rough,
+        post_path_toggle,
+        post_path_label,
+        post_path_bounces,
+        post_sdf_toggle,
+        post_sdf_label,
+        post_probes_toggle,
+        post_probes_label,
+        post_probe_intensity,
+        post_analytic_toggle,
+        post_analytic_label,
+        post_shaft_amt,
         post_phys_toggle,
         post_phys_label,
         post_aperture,
@@ -5460,6 +5775,9 @@ fn build_create_popup(
         CreateKind::DirectionalLight,
         CreateKind::PointLight,
         CreateKind::SpotLight,
+        CreateKind::RectLight,
+        CreateKind::DiscLight,
+        CreateKind::TubeLight,
         CreateKind::Particle,
         CreateKind::Terrain,
         CreateKind::VoxelTerrain,

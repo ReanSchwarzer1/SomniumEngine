@@ -11,7 +11,7 @@ section. Suggested captures:
 | `terrain.png` | Heightmap terrain with splatmap painting / sculpted hills |
 | `voxel.png` | The voxel world streaming around the camera |
 | `shadows.png` | Cascaded shadows + PBR materials on the glTF scene |
-| `demo.gif` | A short clip of sculpting or flying the camera |
+| `water.png` | Great Lakes water with RT reflections (Help → Water) |
 
 Tips:
 - PNG for stills, GIF (or MP4 linked, not embedded) for motion.

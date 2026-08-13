@@ -1,8 +1,9 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-13  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open** (new UI/UX as later features land; 26-J not started); Phase VV (Halcyon) planned  
-> **Toolchain:** Rust 1.85, wgpu 29, winit 0.30  
+> **Last updated:** 2026-08-14  
+> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open**; Phase VV (Halcyon) **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off. **Next:** Phase DF (Daggerfall) plan only.  
+> **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
+> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
 > Phase IV-K, the ocean fidelity pass against
 > [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), closed on
@@ -25,17 +26,21 @@
 > `SOMNIUM_TERRAIN_FORCE_RGBA8=1` for A/B. Canonical write-up:
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
-> Planned next (independent tracks):
-> - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish are in
->   the tree (Nocturne shell, docked Content Drawer, Iris, Help, custom title
->   bar). **The UI phase is not closed:** later engine work keeps needing
->   inspector fields, menus, drawers, and Help pages. Queued: 26-J reflection
->   inspector (only if requested), 26-H SDF text, 26-D2 drag-drop. Contract:
->   `dev records/phase_26.md`.
-> - **Phase VV — Halcyon** — ray-traced water reflections. Plan:
->   `dev records/phase_VV.md`. Reflections are currently a 28-step screen-space
->   march with an environment-cube fallback, which is the largest remaining
->   fidelity gap for a low camera over open water.
+> Remaining work (independent tracks):
+> - **Audit (other model):** `dev records/post_halcyon_audit_handoff.md` — read
+>   all of `context.md`, `ATTRIBUTION.md`, and `dev records/**/*.md` first.
+> - **Phase DF — Daggerfall** — terrain material clipmaps (plan:
+>   `dev records/phase_DF.md`). Do not reintroduce per-pixel sample-count LOD.
+> - **Phase VV — Halcyon** — VV-A–H in tree (ray-traced water reflections).
+>   History: `dev records/halcyon_context_handoff.md`. Plan:
+>   `dev records/phase_VV.md`. Kill switch `SOMNIUM_RT_REFLECT=0`. Live SSR
+>   miss-rate capture still open. Do not re-implement A–H.
+> - **Phase 26 — Metaphor** — 26-A–I plus the 2026-08-13 UX polish (including
+>   immersive play, ComboBox overlay, 80 px drawer tiles) are in the tree.
+>   **The UI phase is not closed:** later engine work keeps needing inspector
+>   fields, menus, drawers, and Help pages. Queued: 26-J reflection inspector
+>   (only if requested), 26-H SDF text, 26-D2 drag-drop. Contract:
+>   `dev records/phase_26.md`. Do not restart at 26-A inside a Halcyon session.
 
 ---
 
@@ -544,7 +549,7 @@ OS Window (HWND, undecorated)  ← wgpu 3D scene, then UI overlay
               ├──────────────────────────────────────────────┤  Row 1  menu
               │ File Edit Create View Window Help            │
               ├──────────────────────────────────────────────┤  Row 2  toolbar
-              │ Save  Select Landscape Foliage  ▶ ❚❚ ■       │
+              │ Save  Select Landscape Foliage  ▶ ⛶ ❚❚ ■       │
               ├──────────────────────────────────────────────┤  Row 3  26 px  viewport bar
               ├────────┬──────────────────────┬──────────────┤  Row 4  *  main
               │ Sculpt │  3D Viewport         │ Outliner     │
@@ -588,7 +593,7 @@ All widgets port the Fyrox UI architecture (see ATTRIBUTION §13.13–13.17):
 | `ToastHost` | `widgets/toast.rs` | Transient status toasts (26-I) |
 | `Splitter` | `widgets/splitter.rs` | Two-pane resizable container (Phase 26-A) |
 | `CheckBox` | `widgets/check_box.rs` | Real checkbox; replaces `[x]`/`[ ]` buttons (26-B) |
-| `ComboBox` | `widgets/combo_box.rs` | Dropdown; replaces foliage/tonemapper cyclers (26-B) |
+| `ComboBox` | `widgets/combo_box.rs` | Header in the inspector; list is a root `Popup` + `ComboDropdown` (26-B, overlay fix 2026-08-13 evening). Replaces foliage/tonemapper cyclers |
 | `TreeView` | `widgets/tree_view.rs` | Hierarchical outliner / content tree (26-B/E) |
 | `TabControl` | `widgets/tab_control.rs` | Header strip + one visible page (26-B) |
 | `Image` / `Icon` | `widgets/image.rs` | Icon-atlas textured quad (26-A) |
@@ -611,14 +616,15 @@ FPS is written every frame via `UiManager::set_fps`.
 **Metaphor is not closed.** 26-A–I plus the 2026-08-13 UX polish are the
 baseline shell. Later features (animation, cooking, 25J terrain material UI,
 networking debug, …) must add inspector sections, menus, drawer types, and
-`docs/editor/*.md` pages rather than one-off panels. 26-J (reflection
+`docs/editor/*.md` pages rather than one-off panels. Help includes **Water**
+(`docs/editor/water.md`: SSR / RT Reflect / Reflect Debug). 26-J (reflection
 inspector) is still out unless requested.
 
 ```
 outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 status)
 ├── title bar — EngineMark, “Somnium Engine”, fps, Minimize / Maximize / Close
 ├── menu_bar — File/Edit/Create/View/Window/Help
-├── main toolbar — Save, Select, Landscape, Foliage, Play/Pause/Stop (selected fill, no tooltips)
+├── main toolbar — Save, Select, Landscape, Foliage, Play, Immersive play, Pause/Stop (selected fill)
 ├── viewport toolbar — camera speed, profiler
 ├── tools_split | content_split | details_split (resizable, persisted)
 │     ├── left Sculpt (named Raise/Lower/Smooth/Flatten/Noise/Paint, selected fill)
@@ -629,14 +635,15 @@ outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 
 ```
 
 Overlays (root children): compact File/Edit/Create/View/Window/Help menus,
-F1 Help (`docs/editor/*.md`, wrapped + TOC), command palette (Ctrl+P),
-unsaved-changes modal, colour picker, toasts. Click-away closes those
-transients; it does **not** close the docked drawer. Evidence PNGs were not
-invented — capture from a live session into `dev records/phase 26/` if needed.
+F1 Help (`docs/editor/*.md`, wrapped + TOC including **Water**), command palette (Ctrl+P),
+unsaved-changes modal, colour picker, toasts, **ComboBox dropdowns** (Type /
+Tonemap). Click-away closes those transients; it does **not** close the docked
+drawer. Evidence PNGs were not invented — capture from a live session into
+`dev records/phase 26/` if needed.
 
 **Keyboard:** F1 Help, Ctrl+Space toggles the docked Drawer, Esc closes the
-top overlay then falls through to quit. RMB over chrome can hit the UI; RMB
-over the viewport is still fly-cam.
+top overlay **or exits immersive play**, then falls through to quit. RMB over
+chrome can hit the UI; RMB over the viewport is still fly-cam.
 
 **UI event routing** (`app.rs::window_event`):
 1. `ui_consumed = ui.process_os_event(&event)` — routes mouse/keyboard to widget tree
@@ -795,6 +802,9 @@ Every frame, `about_to_wait()` runs in this exact sequence:
       ├── [Visibility Pass]   write R32Uint vis_buffer
       ├── [Shading Pass]      read vis_buffer + shadow_atlas → PBR+PCF → Rgba16Float HDR
       ├── [Grid Overlay]      fullscreen ray march → XZ plane grid → Rgba16Float HDR (if enabled)
+      ├── [Water prepass]     G-buffer (normal / roughness / coverage) → HDR MRT
+      ├── [Water reflection]  half-res RT compute (skipped if no ray query / SOMNIUM_RT_REFLECT=0)
+      ├── [Water shade]       SSR + RT + env cube on confidence → HDR
       ├── [PostProcess Pass]  ACES tone map + vignette → swapchain (Rgba16Float → sRGB)
       ├── [Gizmo Pass]        procedural arrow/ring/cube axes → swapchain (if entity selected)
       ├── [Light Gizmo Pass]  batched world-space LineList light bounds → swapchain (Phase 13E, if enabled)
@@ -988,6 +998,25 @@ Pipeline:
 ```
 
 Enabled only when `renderer.grid_enabled == true`. Toggle via `"toggle_grid"` IPC or `G` key.
+
+### Pass 3.6: Water — prepass, reflection, shade (Phase IV + VV Halcyon)
+
+Water is **not** in the visibility buffer. After opaque shading (and the HDR
+scene copy used for refraction/SSR), the pass splits:
+
+```
+Water prepass   water.wgsl::fs_prepass   G-buffer: normal, roughness, coverage, velocity
+Water reflection  water_reflection.wgsl  half-res compute: GGX/mirror ray query via rt_hit.wgsl
+Water shade     water.wgsl::fs_main      SSR (trace_ssr) + RT texture + env cube on confidence
+```
+
+Profiler scopes: `"Water prepass"`, `"Water reflection"`, `"Water shade"`.
+Kill switch `SOMNIUM_RT_REFLECT=0` (or no `EXPERIMENTAL_RAY_QUERY`) skips the
+compute pass and restores SSR + sky cube. Water and transparents stay out of
+the TLAS. FFT displacement cascades are vertex-only so the reflection sampled
+texture fits `max_sampled_textures_per_shader_stage` (16). Inspector: **SSR**,
+**RT Reflect**, **Reflect Debug**; Post FX **RT Reflections**. Help:
+`docs/editor/water.md`. Plan: `dev records/phase_VV.md`.
 
 ### Pass 4: PostProcess — HDR → swapchain (Phase 11.5K)
 
@@ -1248,7 +1277,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24Y | ✅ Complete | **Colour grading.** White balance on the orange–blue and green–magenta axes, ASC CDL (slope / offset / power — the standard film grades with), contrast pivoting around middle grey rather than black, and saturation. Applied **after** tone mapping, in display space: grading beforehand fights the curve, whose job is to fit scene luminance into a display's range. Exposure and the tone curve decide how bright the image is and how it rolls off; grading decides what it *feels* like, and no amount of the former substitutes. **File-based 3-D LUTs are not included** — that needs a `.cube` loader and an asset path, and is worth its own sub-phase rather than a stub here; the controls are the part that is usable today. |
 | 24Z | ✅ Complete | **Lens realism: depth of field, film grain, dithering.** DoF is driven by the *same* aperture the exposure model already uses, because in a real camera they are one number — opening to f/1.4 both brightens the frame and throws the background out; a renderer that separates them tells a small lie in every shot. Thin-lens circle of confusion against a 36 mm sensor, gathered on a per-pixel-rotated Vogel disk, with a **neighbour test** that only accepts a sample blurred enough to reach this pixel — without it a sharp foreground bleeds over blurred background, the classic tell of a gather-based DoF. Runs **before** bloom so out-of-focus highlights bloom as discs. Grain scales with darkness, because sensor noise lives in shadows and flat grain reads as dirt on the lens. **Dithering is not cosmetic now that exposure is physical**: smooth dark gradients band visibly at 8 bits, and half a bit of noise costs nothing to hide it. **Motion blur landed with 24AD's velocity buffer** — Jimenez's depth and spread weights, Wicked's cheap configuration, before TAA and on HDR. See §17.12. |
 | 24AA | ⏸ Deferred | **Cloud shadows.** A scrolling noise mask over the sun's contribution. Cheap, and one of the strongest cues that an outdoor scene is a place rather than a render, because it puts the sky in motion without any volumetric cost. Reference: Spartan's `cloud_shadow.hlsl`. |
-| 24AB | ⏸ Deferred | **Lighting debug views.** Per-light-type heatmaps, cluster occupancy, exposure histogram readout, a luminance false-colour view. GI is nearly impossible to debug by eye, and every engine surveyed ships these. Reference: O3DE's `LightCullingHeatmap.azsl`, UE's Lumen visualisation modes. |
+| 24AB | 🟡 Started | **Lighting debug views.** Modes 24–31 on the terrain **Dbg** row (luminance, GI, cluster occupancy, world cache, specular aux, SDF, analytic mips, path-tracer aux). GPU profiler remains Phase 29. |
 | 24AC | ✅ Complete | **FidelityFX SPD and CAS.** Single-pass downsample for the Hi-Z pyramid and bloom chain (one dispatch instead of a pass per mip), and contrast-adaptive sharpening to recover the softness TAA introduces. Reference: Spartan's `spd.hlsl`, `cas.hlsl`. |
 | 24E | ✅ Complete | **Sun as a physical disc.** 0.53° angular diameter drives `evaluate_brdf_area`, which widens the specular lobe by the source's angular radius and normalises its energy (Karis' sphere-light approximation). A point source gives a one-pixel highlight on anything smooth, which is among the clearest tells that an image is rendered. The correction is **specular-only** — a first attempt scaled the whole BRDF and would have darkened every lit surface, since diffuse does not care how large a source is. Lights also gained **colour temperature in Kelvin**, one physically meaningful dial replacing three coupled RGB channels; the Planckian fit is sRGB and is decoded to linear before use, which left warm lights far too saturated when skipped. `sun_angular_radius` rides in the light buffer's remaining padding. |
 | 24F | ✅ Complete | **Temporal anti-aliasing + specular AA** (absorbs the old Phase 18). Halton-jittered projection; depth-based reprojection; 9-tap Catmull-Rom history sampling (bilinear compounds and goes visibly soft over ~100 frames); Playdead `clip_aabb` neighbourhood clipping with Salvi variance clipping. Blending happens in a **tone-mapped space** — averaging HDR directly lets one bright sample dominate, so a glint flickers rather than resolving, which is the artefact the pass exists to remove. History buffers ping-pong because wgpu forbids binding one texture as both read and write. **Limitation:** reprojection is depth-based, so it handles camera motion exactly but objects that move while the camera is still will ghost until a velocity buffer exists (24AD). Specular AA folds Toksvig normal-map variance back into roughness so mipped detail widens the lobe rather than aliasing. |
@@ -1259,15 +1288,15 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 24K | ✅ Complete | **ReSTIR DI — resampled direct lighting.** The shadow ray from 24J plus the thing that makes rays affordable: *resampling*. Eight unshadowed candidates are drawn across the sun's disc, one is kept in proportion to its contribution by weighted reservoir sampling, and the single expensive ray confirms only that one — the estimator stays unbiased because the kept sample carries the weight of everyone it beat. **Temporal reuse** then combines each pixel's reservoir with its own history, capped at `M_CAP` so a reservoir keeps responding to change rather than fossilising (an uncapped `m` keeps a switched-off light visible for as long as the history has been accumulating). Sampling across the sun's angular disc gives a **real penumbra** rather than PCSS's filtered approximation of one, with no cascades, no depth bias and no peter-panning. Enabled by `SOMNIUM_RESTIR=1`; shading prefers the traced result and falls back to the shadow map when alpha is 0, which is also what an unsupported device produces since wgpu zero-fills the target. **Remaining: spatial reuse** (neighbour reservoirs) and a **multi-light set** — the target function currently evaluates only the sun, where a full implementation would weigh every light's intensity and falloff. **On by default.** Verified against the shadow map on a cube over a plane: 3.0 against 3.1 in shadow, 110.9 lit either way. It was switched off for a while on the reading that it "returned lit" and erased shadows — that was wrong. The missing shadows were the `GpuMaterial` layout bug, which zeroed the sun term so nothing could darken whether traced or mapped. **Remaining, moved to 24L's scope:** spatial reuse and a multi-light target function. **Known limit:** it shadows only visibility-buffer geometry, because terrain and water write depth in their own later passes — Phase 25A/25B closes that. |
 | 24L | ✅ Complete | **ReSTIR GI — ray-traced indirect diffuse.** The feature that makes indirect light look like Lumen rather than a constant ambient term: real coloured bounce, contact darkening and light leaking through openings, all fully dynamic with no bake. Reference: `bevy_solari/src/realtime/restir_gi.wgsl`. |
 | 24AE | ✅ Complete | **Shadow caster culling.** The shadow pass issued every draw four times, once per cascade: 24.5 ms of a 42 ms frame, nearly all of it grass whose shadow is a sub-pixel speckle. Two independent cuts. Unreal's `r.Shadow.RadiusThreshold` (`ShadowSetup.cpp`) culls a caster when its **projected screen radius** falls below a threshold — a *size* test, not a distance cut, and measured from the camera rather than the light, so a tree keeps casting at 200 m where a tuft stops at 30. And an authored `FoliageComponent::foliage_shadow_distance` (**Sh Dst** in the Foliage inspector, default 40 m), because the size test only rescues you once the camera is far from the grass, which is not how anyone plays. **Measured** at eye level: casters 7 166 → 1 873, Shadows **23.769 → 6.158 ms**, frame 26.893 → 9.545 ms, with every other pass unchanged to the third decimal. See §17.9. |
-| 24M | ⬜ Planned | **World-space radiance cache for multi-bounce.** A hashed/clipmapped world cache that rays terminate into, so a single traced bounce still resolves to many bounces of energy across frames, and distant geometry costs a lookup instead of a long trace. Reference: `bevy_solari/src/realtime/world_cache_{query,update,compact}.wgsl`; UE's equivalent is `LumenRadianceCache.usf`. |
-| 24N | ⬜ Planned | **Ray-traced reflections with a denoiser.** Specular GI proper: screen-space trace first, ray traced where the screen has no answer, radiance cache beyond that, then spatial + temporal denoising — one bounce per pixel is far too noisy raw. Finally gives water something better than a single planar reflection. Reference: `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/`. |
-| 24O | ⬜ Planned | **Offline path tracer for validation.** A slow, unbiased, accumulate-over-many-frames reference renderer sharing the 24J scene bindings. Not shipped in the frame loop — its whole job is to be *ground truth*, so “does the real-time GI actually converge to the right answer” becomes a comparison rather than an opinion. Bevy ships exactly this alongside Solari and it is the single best idea taken from studying it. Reference: `bevy_solari/src/pathtracer/`. |
-| 24P | ⏸ Deferred | **Software fallback: mesh SDFs + global distance-field clipmap.** For GPUs without ray query. Bake a signed distance field per mesh at upload and composite into a camera-centred clipmap, then cone-trace it for GI and AO. This is Lumen's software path (`LumenMeshSDFCulling.usf`, `LumenSoftwareRayTracing.ush`) and is the more portable but substantially larger implementation. **Deliberately sequenced after the hardware path**, not before it — see §22.2. |
-| 24Q | ⏸ Deferred | **Baked light probes: irradiance volumes and reflection probes.** The cheapest fallback tier and still the right answer for static scenes on weak hardware: a grid of SH irradiance probes plus localised reflection cubemaps, blended per object. Reference: `bevy_pbr/src/light_probe/{irradiance_volume,environment_map}.rs`. |
-| 24R | ⬜ Planned | **Area lights (LTC).** Rect, disc and tube lights via Linearly Transformed Cosines — analytic, no sampling noise, correct soft shadows and elongated highlights. Softboxes, windows and strip lights are most of what makes an interior read as photographed rather than rendered, and no amount of point-light tuning substitutes. Reference: `bevy_pbr/src/ltc/`, `bevy_light/src/rect_light.rs`. |
+| 24M | 🟡 Started | **World-space radiance cache for multi-bounce.** 64³ camera clipmap. **Default off** — this is extra GPU work on top of ReSTIR GI, not a speedup. `SOMNIUM_WORLD_CACHE=1` or Post FX **World Cache**. Reference: `bevy_solari/src/realtime/world_cache_{query,update,compact}.wgsl`; UE's equivalent is `LumenRadianceCache.usf`. |
+| 24N | 🟡 Started | **Ray-traced reflections with a denoiser** (general specular GI, not water). Half-res SSR then `rt_trace`, temporal mix. Default off (`SOMNIUM_SPECULAR_GI=1` or **RT Specular**). **Water** already has this blend as **Phase VV Halcyon**. |
+| 24O | 🟡 Started | **Offline path tracer for validation.** 1 spp, N bounces, accumulates while the camera is still. Default off (`SOMNIUM_PATH_TRACER=1` or **Path Tracer**). Replaces the raster image while on. |
+| 24P | 🟡 Started | **Software fallback: mesh SDFs + global distance-field clipmap.** Static meshes bake a packed 16³ unsigned triangle SDF at upload; `fill_sdf` splats those bricks (AABB fallback) into the 64³ volume alpha, then cone-traced in shading. Default off (`SOMNIUM_MESH_SDF=1`). Shares volume alpha with 24M — leave World Cache off while testing SDF. |
+| 24Q | 🟡 Started | **Baked SH probes.** 4×4×4 L2 irradiance grid from the env cube (plus world cache when that is on). **Probes** / **Probe Amt**. Default off (`SOMNIUM_PROBES=1`). |
+| 24R | 🟡 Started | **Area lights (LTC).** Rect / disc / tube. Create → **Area Light** / **Disc Light** / **Tube Light**. Half W/H, Radius, and tube half-length in Details. |
 | 24S | ✅ Complete | **Transmission and subsurface scattering.** Frostbite's approximation (Barré-Brisebois & Bouchard) rather than a real subsurface solve: light leaving the *far* side of a thin surface, spread by scattering, brightest looking almost straight into the source through the material. **This is what the foliage was missing all along.** Leaves lit only by reflection stay flat and dark regardless of how correct the albedo is — the symptom the grass has shown since Phase 17, and which no amount of albedo or occlusion work could have fixed. Transmitted light is tinted by albedo, which is why backlit foliage reads more saturated than the same leaf lit from the front, and it is deliberately **not** multiplied by the shadow factor: the entire point is light arriving through the surface from the side the shadow map calls dark. Materials take `transmissionFactor` from `KHR_materials_transmission` where present; foliage assets do not set it, so a sidecar cutout mask is taken as evidence of thin geometry and infers 0.5 — the same convention-over-metadata rule the alpha masks and ARM packing already use. `GpuMaterial` grew from 48 to 64 bytes (WGSL rounds the array stride to the 16-byte alignment `base_color` forces); the layout test caught this and was updated rather than deleted. |
 | 24T | ✅ Complete | **Emissive materials and physical bloom.** Materials carry `emissiveFactor` and an emissive texture from glTF, added to shading independently of every light in the scene — a screen is as bright in a dark room as a lit one. Bloom is **deliberately not threshold-based**: a threshold asks "which pixels count as bright?", a question with no physical answer whose meaning changes the moment exposure does — a scene metered for night would bloom everything, one metered for noon nothing. Real bloom is light scattering inside the lens, which happens to *all* light in proportion to how much there is. So a progressive 13-tap downsample builds a mip chain and a 9-tap tent upsample sums it back additively (Jimenez, SIGGRAPH 2014); bright regions dominate naturally because they carry more energy. Added **before** exposure and tone mapping, since it is scattering on the way to the sensor rather than a filter over the picture, and built **after** TAA, because a blur of unstable input broadcasts that instability everywhere it reaches. `GpuMaterial` grew 64 → 80 bytes; the layout test was updated again. |
-| 24U | ✅ Complete (shafts still unseen) | **Volumetric fog, aerial perspective and light shafts.** A froxel volume accumulating in-scattering per depth slice, fed by 24C's aerial-perspective LUT so distant hills desaturate correctly and the sun throws real shafts through the canopy. Among the highest perceived-realism-per-line-of-code in the whole phase. Reference: `bevy_pbr/src/volumetric_fog/`. |
+| 24U | ✅ Complete | **Volumetric fog, aerial perspective and light shafts.** Atmosphere in-scatter is now shadow-tested; **Shaft Amt** on Post FX boosts the sun term. `SOMNIUM_VOLUMETRICS=0` remains the A/B. |
 | 24V | ✅ Complete | **Local lights in physical units, with source radius.** The photometric half landed with 24A-1 — point and spot lights carry lumens converted to candela, and `smooth_distance_attenuation` already divides by distance squared, so illuminance was correct. What was missing is that they were still **point** sources. Lights now carry a `source_radius` in metres (distinct from `range`, which is reach): a 5 cm bulb a metre away subtends a real angle, and feeding that through `evaluate_brdf_area` is what stops its highlight being a single pixel on anything polished. **IES profiles are not included** — that is an asset-pipeline job and is better as its own sub-phase than half-done here. |
 | 15F | ✅ Complete | **Meshlet rendering path.** A draw is now one indirect argument per **cluster**, so frustum, Hi-Z and backface tests all work at 128-triangle granularity instead of per object — 530 cull units where there were 35. `first_vertex` carries the cluster's index offset within its mesh, because the vertex shader adds `instance.index_offset` itself; `first_instance` carries the owning instance, which is also what the cull shader now reads to find the model matrix, since the draw index no longer *is* the instance index. Meshes with no clusters (voxel chunks) stay a single whole-mesh argument, so one pipeline serves both. **The subtle break:** the fragment shader keyed the visibility buffer on `@builtin(primitive_index)`, which restarts at 0 every draw call. Splitting a mesh across many draws would have sent the shading pass to the wrong triangle in every cluster after the first. The triangle id now comes from `vertex_index / 3` in the vertex shader — `vertex_index` includes `first_vertex`, so it is mesh-relative, and all three vertices of a triangle divide to the same value. Cone culling rejects a whole cluster when every triangle in it faces away; it is only sound because the visibility pass culls back faces, and it is skipped for mirroring transforms whose negative determinant would flip the stored axis. **Measured** on the imported car at a fixed viewpoint: whole-mesh draws submitted 21 782 triangles, clusters **16 220** — 25.5% fewer — with opaque geometry pixel-identical (0.00% on the car body, 0.06% on the helmet silhouette; the rest of the frame differs only where the time-animated water is). |
 | 15F-fix | ✅ Complete | **Cluster bounds use the box, not the sphere.** The first 15F measurement showed the cluster path submitting **2.1% *more*** geometry than whole-mesh draws. Cause: `push_cluster_args` culled against the bounding *sphere's* AABB, which is up to √3 wider per axis than the cluster's real box and can reach outside the parent mesh's bounds — so boundary clusters survived frustum tests their whole mesh failed, and cluster culling was not the strict refinement it should be. `Meshlet` now stores the local AABB alongside the sphere and culling uses the box. Same viewpoint, same scene: 174 clusters drawn → 127, and a 2.1% regression became a 25.5% improvement. |
@@ -1286,7 +1315,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25M-2 | 🟡 Automated complete | **Sunset & Night Sky Visual Fixes, audited 2026-08-11.** **(A)** The authoritative `PostProcessComponent` default is now `ibl_intensity = 1.0`. **(B)** CSMs include a 1 km caster-depth extension patterned after Flax's extended CSM culling range; receiver bias uses the true triangle plane, and contact-shadow thickness is compared in linear view-space metres instead of nonlinear NDC depth. **(C)** Stars use 3×3×3 neighbour evaluation, smooth angular falloff, a magnitude distribution and Milky Way concentration. **(D)** The lunar orbit has a 29.53-day synodic period and 5.14° inclination; the disc uses the real 0.2666° angular radius, tangent-plane sphere normal, phase lighting and limb darkening, with default illuminance tuned to 0.010 lux. **(E)** Palette vegetation retains its foliage/double-sided/transmission semantics, faces its geometric normal toward the viewer, uses wrapped backside transmission without an ambient albedo glow, and has a roughness floor. Moon BRDF evaluation no longer applies N·L twice, and ReSTIR GI invalidates materially changed light history, rejects unsupported emissive hits, and falls back to night IBL when sunlight is zero. Automated tests pass; night appearance is user-confirmed, while the daytime shadow correction awaits the same on-screen confirmation. |
-| 25C | ⬜ Planned | **CDLOD vertex morphing.** `terrain/mesh.rs` builds discrete per-LOD index topology with edge stitching, so an LOD switch swaps geometry in one frame and pops — most visible exactly where it is least wanted, on a ridge line against the sky. CDLOD morphs vertices toward the coarser level's positions across the last part of each range, so the transition is continuous and the switch happens when the two meshes already agree. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh` — `morphVertex`, `g_morphConsts`. |
+| 25C | 🟡 Started | **CDLOD vertex morphing.** Packed in instance `_padding`; **LOD Morph** + **Morph** on the terrain inspector (default off, start 0.7). `SOMNIUM_LOD_MORPH=1` forces it on. Reference: `CDLOD-master/source/BasicCDLOD/Shaders/CDLODTerrain.vsh`. |
 | 25D | ✅ Complete (macro tier + detail budget; no toroidal clipmap — see §25.13) | **Macro + detail clipmaps.** One splatmap over the whole terrain sets a hard ceiling on texture detail: enough resolution close up means an impossible texture far away. O3DE's answer is two tiers — a *macro* clipmap covering the entire terrain at low frequency for colour and large-scale variation, and a *detail* clipmap of a few rings centred on the camera carrying full-rate PBR, composited per pixel. Detail cost then scales with screen area rather than world area. Reference: `TerrainMacroClipmapGenerationPass.azsl`, `TerrainDetailClipmapGenerationPass.azsl`, `ClipmapComputeHelpers.azsli`. |
 | 25E | ✅ Complete | **Height-weighted material blending.** The current shader sharpens splat weights, which is halfway there. O3DE's `AppendHeightToWeight` adds each material's own height map into its weight before normalising, so gravel settles *into* the cracks of rock instead of being averaged across it — the difference between two textures cross-faded and two materials meeting. Reference: `TerrainDetailHelpers.azsli`. |
 | 25F | ✅ Complete | **Stochastic hex-tiling.** **On by default since 25K.** Shipped off at first because against procedural layers there was no repetition to remove and it only showed its own lattice; with photographed layers it removes the banding outright. Ported from `bgfx-master/examples/49-hextile/fs_hextile.sc` into `shaders/hextile.wgsl` — simplex grid, hashed per-vertex offsets, three `textureSampleGrad` taps with per-tap derivatives, luminance-modulated sharp weights — plus one thing the reference does not need: **counter-rotating each tap's tangent-space normal**, since a normal map stores its vector in the texture's UV frame and each tap read that frame rotated. Rendered side by side, the plain path shows *no findable grid* while the hex-tiled one shows its own lattice faintly: the four layers are procedural, tileable, low-contrast noise, so there is no repetition to remove. Re-judge once **25D**/**25J** bring photographed layers. Two traps recorded: naga's SPIR-V backend **segfaults** if a texture is pulled out of a binding array and passed across a function boundary, and the reference's own default rotation strength is **0** — at 1.0 the lattice showed as hard triangular seams. See §25.3e. |
@@ -1294,11 +1323,13 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25I | ✅ Complete | **Aerial perspective on terrain.** 24C builds the LUT and terrain does not sample it, so distant hills stay saturated while everything else desaturates correctly — which reads as a matte painting behind a rendered scene. Cheap once 25A has terrain in the shared shading path. |
 | 25J | ⬜ Planned | **Terrain material UI and colliders** (absorbs the old Phase 17 remainder). Per-layer tiling, tint, roughness and height-blend strength in the inspector, plus a collider built from the committed heightmap so gameplay and physics agree with what is drawn. |
 | 25M | 🟡 Mostly complete | **Night, twilight and the sun below the horizon.** Rotating the sun below the horizon turns the terrain red with black blotches and bleaches the foliage. Confirmed cause: `ray_intersects_ground` exists nowhere in the engine, so a sun below the horizon still samples the transmittance LUT and clamps to its reddest row instead of switching off. Port the guard from `bevy_pbr/src/atmosphere/functions.wgsl`, gate the direct term on `max(mu_sun, 0)`, add a twilight ramp, then re-check exposure and ReSTIR fireflies against measurement. Also gives 24U the low-sun scene its light shafts have never been verified in. See §25.14.
-| 25N | ⬜ Planned | **Analytic gradients for visibility-buffer shading.** Foliage is blurry and aliased at once because `shading.wgsl` samples mesh textures with `textureSample`, whose implicit derivatives are taken across a 2×2 quad that routinely straddles different triangles and instances — so the mip level is arbitrary per pixel. Terrain escapes it by already using `textureSampleGrad`. Fix: evaluate the triangle’s barycentric at the neighbouring pixels analytically and difference the UVs, as Wicked’s `surfaceHF.hlsli` does with `bary_quad_x`/`bary_quad_y`. See §25.14.
-| 25P | ⬜ Planned | **Foliage instancing and LOD.** A scene with trees and grass submits **9 047 draws / 90.9 M triangles**, with Visibility (phase 1) at 9.25 ms and Shading at 7.44 ms of a 23.5 ms frame. `submit_foliage` pushes one draw per part per instance and there is no foliage LOD at all. Batch identical parts into instanced draws first (a submission change, no shaders), then mesh LODs by projected screen radius reusing 24AE’s ratio test, then impostors. See §25.14.
+| 25N | 🟡 Started | **Analytic gradients for visibility-buffer shading.** `textureSampleGrad` when shading_mode bit 3 is set (**Analytic Mips**, default on). See §25.14. |
+| 25P | 🟡 Started / LOD signed off 2026-08-14 | **Foliage instancing and LOD.** **LOD** drops leaf/cutout parts; **Impostor** keeps solid parts (the dummy billboard was deleted — it was a black triangle). Distances are **horizontal**. GPU: no `instance_count>1` collapse; two-sided cone cull off. **Do not retune** unless asked. See §25.14. |
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX (inspector, menus, drawers, Help). 26-J reflection inspector not started. Contract: `dev records/phase_26.md`. |
-| VV | ⬜ Planned | **Phase VV — Halcyon: ray-traced water reflections.** Water reflects through a 28-step screen-space march with the environment cube as fallback, so anything off-screen, behind the camera, or below the horizon cannot be reflected at all — which is most of what a low camera over water is looking at. The engine already builds a per-frame TLAS and queries it from ReSTIR DI and GI, but every existing ray-tracing path resolves a *diffuse* signal and none resolves a specular one. The phase splits the water pass into a G-buffer prepass and a shading pass so reflections can be traced in compute at reduced resolution and temporally accumulated, extracts a shared ray-hit shading module from `gi_trace()`, and blends the traced result with screen-space tracing on confidence rather than switching between them. Screen-space tracing stays as the designed degrade path, and hardware without `EXPERIMENTAL_RAY_QUERY` must render identically to today. Plan: `dev records/phase_VV.md`. |
+| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
+| VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
+| FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
+| DF | 📋 Plan | **Phase DF — Daggerfall:** nested material clipmaps (O3DE-style) so 32+ layers do not cost strongest-four×hex×POM on every pixel. Near-ground fidelity is a hard gate. **No per-pixel sample-count LOD.** Plan: `dev records/phase_DF.md`. |
 
 ---
 
@@ -2249,9 +2280,13 @@ popups and the cycler that replaced them in 17G. References: Flax
 `Engine/UI/UICanvas` and `GUI/`, Wicked `wiGUI` / `wiFont`, Stride `Stride.UI`,
 rbfx's Urho-derived UI.
 
-> **Shipped (2026-08-13):** 26-A–I plus UX polish are in the tree. **The UI
-> phase is not over** — later features still need chrome. 26-J is out unless
-> requested; 26-H SDF remains slipped. Contract:
+> **Shipped (2026-08-13):** 26-A–I plus UX polish (immersive play, ComboBox
+> overlay, 80 px drawer tiles) are in the tree. **The UI phase is not over** —
+> later features still need chrome. 26-J is out unless requested; 26-H SDF
+> remains slipped. Phase VV (Halcyon) VV-A–H is in the tree; remaining Halcyon
+> work is evidence captures, not a UI rebuild. **Start-here:**
+> [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
+> Contract:
 > [`dev records/phase_26.md`](dev%20records/phase_26.md). The paragraph
 > above is the original gap statement; do not treat it as the implementation
 > order, and do not restart at 26-A.
@@ -2271,13 +2306,10 @@ hashing, a runtime streaming budget with LOD residency, and hot reload.
 References: Flax `Content` / `ContentImporters` / `Streaming`, Stride
 `Stride.Assets`.
 
-**Phase 29 — Profiler and debug tooling. ✅ Complete (GPU half; see §29.1).** There is no way to answer "why is
+**Phase 29 — Profiler and debug tooling. 🟡 Started (GPU timestamps + CPU zones + frame-graph view).** There is no way to answer "why is
 this frame slow" beyond guessing. That cost real time in 17G, where a 51x
-draw-call regression was found by reasoning rather than measurement. Needs CPU
-zones, GPU timestamp queries per pass, a frame graph view, and counters for
-draws, triangles, instances and memory. **Absorbs 24AB** (lighting debug views),
-which belongs in a tooling phase rather than a lighting one. References: Flax
-`Profiler`, Wicked `wiProfiler`, Esoterica's debug views.
+draw-call regression was found by reasoning rather than measurement. GPU timestamp queries per pass shipped; CPU zones (instances, cluster cull, foliage, lighting extra), GPU/CPU headers, and a **Graph** pass-order row are on the overlay. Lighting debug views moved to 24AB (Dbg 24–31).
+References: Flax `Profiler`, Wicked `wiProfiler`, Esoterica's debug views.
 
 **Phase 30 — Navigation and AI.** Navmesh generation from level geometry,
 A* with funnel smoothing, agent steering and avoidance, off-mesh links.
@@ -3106,6 +3138,15 @@ decides whether an instance exists, not how detailed it is.
 comparison from the Phase 29 profiler for each step, since each of the three is
 independently measurable.
 
+**Shipped (2026-08-14, user signed off — do not retune).** The dummy camera-facing
+quad was a black triangle and was deleted. **LOD** (horizontal, default 45 m)
+drops leaf/cutout parts (`FoliagePart.is_leaf`); **Impostor** (horizontal,
+default 90 m) keeps solid bark/branches only — it is not a billboard. **Cull**
+is 120 m horizontal. GPU: two-sided vis pipeline is `cull_mode: None`, so
+meshlet normal-cone cull is disabled (`cone.w = 2`); do not fold copies into
+`instance_count > 1` (the cull shader used to smash N→0/1). Hi-Z skips
+occlusion when screen AABB area > 0.25. Help: `docs/editor/terrain.md`.
+
 ---
 
 **Sequencing.** 25M first — it is a correctness bug, it is small, and it unblocks
@@ -3478,7 +3519,9 @@ while preserving opaque depth reprojection elsewhere.
 Surface optics now use validated screen-space refraction, reconstructed
 Beer–Lambert path length, RGB absorption and single scattering, dielectric
 `F0 = 0.02037`, GGX sun/moon/environment lighting, bounded SSR with environment
-fallback, and SDF shoreline foam. Complete normal/ORM mip chains plus
+fallback, and SDF shoreline foam. **Phase VV (Halcyon, 2026-08-13)** later
+blends that SSR with half-res hardware ray tracing and the environment cube
+(`SOMNIUM_RT_REFLECT=0` restores this IV-D/E fallback). Complete normal/ORM mip chains plus
 pixel-footprint slope filtering prevent distant sparkle and Gerstner
 cross-hatching. Wave and optical authoring values persist through ECS scene
 serialization and their primary controls are available in the Water inspector.
@@ -3606,8 +3649,9 @@ contract (32 layers, sidecar v4, 1664-byte GPU material, unique colour from
 splat, biome v3, aerial hex/POM LOD, frozen Great Lakes water):
 `dev records/phase XV/XV-Zeta_plan.md`. Verification record:
 `dev records/phase XV/evidence/XV-J_compile_gate.md`. Plan:
-`dev records/phase_XV.md`. Start-here history:
-`dev records/post_IV_context_handoff.md`. §20 below is still the Phase 14
+`dev records/phase_XV.md`. IV/XV history:
+`dev records/post_IV_context_handoff.md`. **Start-here:**
+`dev records/post_halcyon_audit_handoff.md`. §20 below is still the Phase 14
 heightmap record — do not treat it as the XV API. Explicit exceptions: 1.10 ms
 shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
@@ -3615,9 +3659,24 @@ artifacts — `dev records/phase XV/evidence/XV-BC7_visual_check.md`).
 
 **Phase 26 — Metaphor (26-A–I shipped 2026-08-13; phase remains open).**
 Nocturne editor chrome, docked Content Drawer, Iris colour pickers (26-F),
-custom title bar, F1 Help. Later engine features keep needing new UI/UX.
-26-J (reflection inspector) not started. Contract: `dev records/phase_26.md`.
-Independent of Phase VV.
+custom title bar, F1 Help, immersive play, ComboBox overlay. Later engine
+features keep needing new UI/UX. 26-J (reflection inspector) not started.
+Contract: `dev records/phase_26.md`. Independent of Phase VV except living
+chrome for debug views.
+
+**Phase VV — Halcyon (VV-A–H in tree, 2026-08-13).** Water G-buffer prepass,
+half-res reflection compute (`pass/water_reflection.rs`, `shaders/water_reflection.wgsl`),
+shared `rt_hit.wgsl` (GI wraps `rt_trace`), SSR/RT/env blend on confidence.
+TLAS cap 8192; water and transparents stay out of the TLAS. Inspector: water
+**RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. Help:
+`docs/editor/water.md`. History: `dev records/halcyon_context_handoff.md`.
+**Start-here:** `dev records/post_halcyon_audit_handoff.md`. Plan: `dev records/phase_VV.md`.
+Kill switch: `SOMNIUM_RT_REFLECT=0`. Live SSR miss-rate capture still open.
+
+**Phase DF — Daggerfall (plan only, 2026-08-14).** Nested material clipmaps so
+32+ layers do not cost strongest-four × hex × POM on every pixel. Near-ground
+fidelity is a hard gate. No per-pixel sample-count LOD. Plan:
+`dev records/phase_DF.md`. Do not start this phase inside an audit session.
 
 ## 18. Known Issues & Active Bugs
 

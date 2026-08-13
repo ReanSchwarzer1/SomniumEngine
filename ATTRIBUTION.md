@@ -104,9 +104,9 @@
 ### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor)
 
 **Status:** 26-A through 26-I plus the 2026-08-13 UX polish (custom title bar,
-docked drawer, wrapped Help, button states, scrollbars, tile browser)
-implemented 2026-08-13. 26-H SDF/cosmic-text slipped (bitmap Inter, supersampled).
-26-J not started.
+docked drawer, wrapped Help, button states, scrollbars, tile browser,
+immersive play, ComboBox overlay) implemented 2026-08-13. 26-H SDF/cosmic-text
+slipped (bitmap Inter, supersampled). 26-J not started.
 
 **This phase is not closed.** New renderer, terrain, animation, and gameplay
 features will keep needing inspector sections, menus, drawers, and Help
@@ -187,6 +187,61 @@ without packs still drops both banks to 1024 (341 MiB) unless
 `GpuTerrainMaterial` is **1664** bytes. Snow cap is
 `relief * 0.48`. `WaterComponent::great_lakes` is frozen. Release overview
 shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
+
+### 1.7 Ray-traced water reflections (Phase VV — Halcyon)
+
+**Status:** VV-A–H in tree (2026-08-13). VV+1 refraction in tree, **default off**
+(Post FX **RT Refraction**). Kill switch: `SOMNIUM_RT_REFLECT=0` (reflections),
+`SOMNIUM_RT_REFRACT=0` (refraction).
+History: [`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
+**Current start-here:** [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
+Plan: [`dev records/phase_VV.md`](dev%20records/phase_VV.md).
+
+The codename is thematic. No third-party source was copied. Files cited as used:
+
+| Reference | Pattern studied | Somnium (shipped) |
+|---|---|---|
+| Existing `gi_trace()` / `restir_gi.wgsl` | Hit resolution: instance → barycentrics → albedo | Extracted `rt_hit.wgsl`; GI wraps `rt_trace` |
+| Wright et al., ReSTIR GI (NVIDIA 2021) | Diffuse reservoirs already in-tree | Not used for specular; temporal mix + disocclusion instead (VV-F) |
+| Stachowiak, Stochastic SSR (SIGGRAPH 2015) | Screen-space march as near-field | `trace_ssr` kept; blend on confidence (VV-G) |
+| Karis, Real Shading in UE4 (SIGGRAPH 2013) | GGX importance sampling | `sample_ggx_h` in `water_reflection.wgsl` (VV-E) |
+| wgpu 29 `EXPERIMENTAL_RAY_QUERY` | Inline ray query in compute | Same gate as ReSTIR; skipped without the feature |
+| NVIDIA *Ray Tracing Gems* (reflection denoising chapters) | Temporal reuse / upsample | Water-velocity reprojection + 2×2 bilateral upsample; not a copy of any listed filter |
+| Bevy Solari `specular_gi.wgsl` / `raytracing_scene_bindings.wgsl` | `trace_ray` / hit-resolve split | Architecture reference only |
+| Bevy Solari world cache / path tracer | Clipmap splat + accumulate-over-frames | `lighting_extra.wgsl` is original WGSL; layout studied only |
+| Wicked Engine `surfaceHF.hlsli` | Analytic barycentric UV gradients | `vis_barycentric` in `shading.wgsl` is original |
+| CDLOD `CDLODTerrain.vsh` | Vertex morph toward coarser LOD | Packed morph in vis-buffer instance data; original WGSL |
+| Heitz et al., LTC (JCGT 2016) | Polygon irradiance for area lights | `ltc_quad_diffuse` in `shading.wgsl` is original |
+| Wicked Engine `wiOcean` | Ocean pass placement | Already cited for Phase IV; not used for RT reflections |
+
+**Files:** `pass/water_reflection.rs`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl`, water prepass/shade split in `pass/water.rs` + `shaders/water.wgsl`. Array layer 1 is VV+1 refraction (Snell `refract()`, IOR 1.333, default off).
+
+**Boundary:** GodotOceanWaves informed IV-K water shading, not this reflection
+architecture. Hardware without ray query must look identical to today.
+
+### 1.8 Terrain material clipmaps (Phase DF — Daggerfall)
+
+**Status:** PLAN only (2026-08-14). Do not implement inside an audit session.
+Plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md). Start-here:
+[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
+
+Cite the rows below **as they are used**. No UE / O3DE / Frostbite source is
+copied. Nested clipmaps are the intended spine; AVT / CoD Super Terrain are
+DF-H research when the map grows past ~1 km.
+
+| Reference | Pattern to study | Intended Somnium use |
+|---|---|---|
+| O3DE `TerrainClipmapManager.h` / World Renderer clipmap docs (Apache-2.0 OR MIT) | Nested macro + detail stacks, camera-centred, toroidal update, blend once into the cache | Generate compute + uniforms; original WGSL |
+| UE5 Runtime Virtual Texturing docs; `VirtualTextureMaterial.usf` (EULA — **study only**) | Cache camera-independent blend; keep view-dependent relief near the camera | POM marches **baked clipmap height**, not four packed arrays |
+| Widmark, *Terrain in Battlefield 3*, GDC 2012 | VT composite ~32 texels/m + detail splat 50–100 m at 500–1000 texels/m | Near-ground fidelity gate; do not drop hex at feet |
+| Andersson, Frostbite procedural splatting, SIGGRAPH 2007 | Sparse mask quad-tree; compute instead of store | Already closest to XV splat; not a new mesh |
+| Chen, Far Cry 4 Adaptive Virtual Texture, GDC 2015 | Distance-scaled mips per 64 m sector | DF-H only |
+| Hooker / Etienne, CoD Super Terrain 2021–2023 | VT for blend; distant one-ID-per-vertex | Do **not** one-ID at the player’s feet |
+| Tanner et al., *The Clipmap*, SIGGRAPH 1998 | Nested windows, toroidal | Addressing math |
+| Losasso & Hoppe, *Geometry Clipmaps*, SIGGRAPH 2004 | Nested height grids | **Out of v1** (chunk mesh + 25C stay) |
+
+**Boundary:** no per-pixel sample-count LOD in `terrain_material.wgsl` (XV-Zeta).
+Foliage LOD is signed off and is not this phase.
 
 ---
 
@@ -271,6 +326,13 @@ shading 3.951 ms XV-J / 3.794 ms BC7 (1.10 ms budget not met).
 | Partially bound arrays | Not all 1024 texture slots need valid descriptors | `wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY` required at device creation |
 
 **Specific pattern:** O3DE's Atom renderer avoids per-material bind group rebinding by allocating all descriptors into a single global array and indexing dynamically in the shader. Somnium's `GlobalResourcePool` implements exactly this: `binding_array<texture_2d<f32>>(1024)` filled with a dummy 1×1 white texture, replaced with real textures as assets load.
+
+### 4.2 Terrain clipmaps (Phase DF — Daggerfall, plan)
+
+O3DE `TerrainClipmapManager` (nested macro + detail stacks, toroidal update)
+is the **intended spine** for Daggerfall. Citations and the no-copy boundary
+live in **§1.8**. Plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md).
+Not implemented as of 2026-08-14.
 
 **Feature requirements set at device creation:**
 
@@ -996,6 +1058,18 @@ engine is only the shape of the solution.
 | `cas.hlsl` (no `CAS_BETTER_DIAGONALS` / `CAS_SLOW`) | AMD default: cross-only contrast, green weight for all channels | same configuration |
 | `APrxLoRcpF1` / `APrxLoSqrtF1` | Deliberately **not** ported: approximations for slow-rcp hardware; exact forms are AMD’s own `CAS_GO_SLOWER` | exact `sqrt` and division, plus a `max(mx, 1e-5)` NaN guard |
 
+### 13B.8 AMD FidelityFX FSR 3 via wgpu-ffx
+
+**Copyright:** AMD FidelityFX Super Resolution 3 (MIT); wgpu-ffx (c) Connor Fitzgerald and contributors, MIT.
+**Source:** vendored `third_party/wgpu-ffx` and `third_party/wgpu-ffx-shaders-spv` from https://github.com/cwfitzgerald/wgpu-ffx (precompiled SPIR-V; no `glslc` at build).
+
+| Source | Pattern studied | Somnium implementation |
+|---|---|---|
+| FSR 3 upscaler (no frame gen) | Temporal reconstruct from render-res HDR + depth + motion vectors + Halton jitter to display res; RCAS sharpen | `pass/fsr.rs` wrapping `wgpu_ffx::FsrContext` |
+| `get_jitter_offset` / `get_jitter_phase_count` | Halton (bases 2, 3) in pixel units `[-0.5, 0.5]` | applied to the projection like TAA (`* 2 / resolution`) |
+| Frame interpolation / optical flow / swapchain proxy | **Not ported.** Needs DX12/Vulkan swapchain replace; wgpu/winit cannot host it | — |
+| `GenerateReactive` | **Unimplemented** in wgpu-ffx | water/transparents may ghost; documented, not a water retune |
+
 ### 13B.4 O3DE — terrain material blending (Phases 25D, 25E)
 
 **Source:** `example_repo/o3de-development/.../Gems/Terrain/`
@@ -1083,7 +1157,11 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/water_body.rs` | Renderer-owned water resources following Somnium's existing `TerrainData` handle pattern; ECS/render split cross-checked against bevy_water (Phase IV-C) |
 | `somnium_renderer/src/water_body.rs` (IV-D) | GPU Gems Ch. 1 Gerstner displacement/analytic derivatives plus bevy_water's CPU/GPU query-parity pattern; Somnium's finite wet-cell mesh, baked mask/depth/SDF sampling, registry API, and Rust implementation are original |
 | `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (IV-D/E) | Wicked Engine ocean resource/query ownership and pre-water composition ordering; GPU Gems water math; established Beer–Lambert, Henyey–Greenstein, Fresnel, and GGX models. WGSL bindings, finite-body MRT, validated refraction, SSR fallback, filtering, and integration are original |
+| `somnium_renderer/src/pass/water.rs`, `shaders/water.wgsl` (VV-B) | Prepass (`fs_prepass`) / shade (`fs_main`) split so compute reflections can consume normal, roughness, and coverage; FFT displacement cascades are VERTEX-only (fragment sampled-texture limit 16) |
+| `somnium_renderer/src/pass/water_reflection.rs`, `shaders/water_reflection.wgsl` (VV-C–G) | Half-res compute reflections: GGX/mirror rays, temporal mix, 2×2 upsample, SSR/RT/env blend. Architecture studied from existing `gi_trace`, Karis GGX, Stachowiak SSR; original WGSL. See §1.7 |
+| `somnium_renderer/src/shaders/rt_hit.wgsl` (VV-D) | Shared hit resolve extracted from `restir_gi.wgsl` `gi_trace`; GI wraps `rt_trace`. Hit lighting is `evaluate_brdf` sun + IBL with cascade shadow sample, not a second ray |
 | `somnium_renderer/src/pass/taa.rs`, `shaders/taa.wgsl` (IV-D) | Existing Somnium TAA retained for opaque pixels; water-only motion-vector selection and surface coverage target are original integration work |
+| `somnium_renderer/src/pass/fsr.rs` | AMD FidelityFX FSR 3 via wgpu-ffx (temporal upscale, no frame gen) |
 | `somnium_core/src/editor_commands.rs` (`CreateLandscapeCmd`) | Original composite terrain/child-water transaction built on the existing command and hierarchy system (Phase IV-C) |
 | `somnium_renderer/src/pass/water_spectrum.rs`, `shaders/water_spectrum.wgsl` (IV-F) | Tessendorf wind-spectrum/deep-water-dispersion model plus Wicked Engine's persistent displacement/gradient/folding resource split; Somnium's deterministic spectrum generation, radix-2 wgpu scheduling, two finite-lake scales, WGSL, and temporal foam integration are original |
 | `somnium_renderer/src/pass/underwater.rs`, `shaders/underwater.wgsl` (IV-G) | Wicked Engine's HDR underwater composition ordering and finite-medium concerns were studied; Somnium's ray-segment mask, RGB medium, caustics, and transition WGSL are original and deliberately exclude Wicked's Shadertoy-cited Brown–Conrady/god-ray helpers |
@@ -1183,7 +1261,7 @@ Modules that Phase 24 draws on:
 | 24K ReSTIR DI | `bevy_solari/src/realtime/{restir_di.wgsl,presample_light_tiles.wgsl}` |
 | 24L ReSTIR GI | `bevy_solari/src/realtime/restir_gi.wgsl` |
 | 24M world radiance cache | `bevy_solari/src/realtime/world_cache_*.wgsl` |
-| 24N specular GI / SSR | `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/` |
+| 24N specular GI / SSR | `bevy_solari/src/realtime/specular_gi.wgsl`, `bevy_pbr/src/ssr/` — **water** reflections shipped as Phase VV (§1.7); this row is still the scene-wide path |
 | 24O reference path tracer | `bevy_solari/src/pathtracer/` |
 | 24Q light probes | `bevy_pbr/src/light_probe/` |
 | 24R area lights (LTC) | `bevy_pbr/src/ltc/` |

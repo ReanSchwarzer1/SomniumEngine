@@ -1547,11 +1547,18 @@ impl GameApp for HelloGame {
                                 );
                                 renderer.set_moon_intensity(light.moon_intensity);
                             }
-                            LightType::Point | LightType::Spot => {
-                                let l_type = if light.light_type == LightType::Point {
-                                    0
-                                } else {
-                                    1
+                            LightType::Point
+                            | LightType::Spot
+                            | LightType::Rect
+                            | LightType::Disc
+                            | LightType::Tube => {
+                                let l_type = match light.light_type {
+                                    LightType::Point => 0,
+                                    LightType::Spot => 1,
+                                    LightType::Rect => 2,
+                                    LightType::Disc => 3,
+                                    LightType::Tube => 4,
+                                    LightType::Directional => 0,
                                 };
                                 renderer.submit_local_light(
                                     somnium_renderer::cluster::GpuLocalLight {
@@ -1559,12 +1566,12 @@ impl GameApp for HelloGame {
                                         range: light.range,
                                         color: light.photometric_color().to_array(),
                                         light_type: l_type,
-                                        // Spot axis = travel direction. Unused for point lights.
+                                        // Spot/rect axis = travel direction. Unused for point lights.
                                         direction_ws: forward.to_array(),
                                         spot_cos_outer: light.outer_angle.cos(),
                                         spot_cos_inner: light.inner_angle.cos(),
                                         radius: light.source_radius,
-                                        _pad: [0.0; 2],
+                                        _pad: [light.area_width, light.area_height],
                                     },
                                 );
                             }
@@ -1818,8 +1825,8 @@ impl GameApp for HelloGame {
                             volume_params: [
                                 water.caustic_strength,
                                 f32::from(u8::from(water.underwater_enabled)),
-                                0.0,
-                                0.0,
+                                water.rt_reflect_strength,
+                                water.reflect_debug,
                             ],
                             wake_origin_direction,
                             wake_params: if water.water_id

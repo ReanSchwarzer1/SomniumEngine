@@ -162,6 +162,7 @@ impl IndirectDrawBuffer {
 pub fn push_cluster_args(
     instance_index: u32,
     index_count: u32,
+    instance_count: u32,
     meshlets: Option<&[Meshlet]>,
     fallback_bounds: Option<([f32; 3], [f32; 3])>,
     args: &mut Vec<DrawIndirectArgs>,
@@ -172,7 +173,7 @@ pub fn push_cluster_args(
             for m in list {
                 args.push(DrawIndirectArgs {
                     vertex_count: m.index_count(),
-                    instance_count: 1,
+                    instance_count,
                     first_vertex: m.index_offset(),
                     first_instance: instance_index,
                 });
@@ -196,13 +197,14 @@ pub fn push_cluster_args(
         _ => {
             args.push(DrawIndirectArgs {
                 vertex_count: index_count,
-                instance_count: 1,
+                instance_count,
                 first_vertex: 0,
                 first_instance: instance_index,
             });
-            bounds.push(match fallback_bounds {
-                Some((min, max)) => GpuCullAabb::from_aabb(min, max),
-                None => GpuCullAabb::never_culled(),
+            bounds.push(match (instance_count, fallback_bounds) {
+                (n, _) if n > 1 => GpuCullAabb::never_culled(),
+                (_, Some((min, max))) => GpuCullAabb::from_aabb(min, max),
+                (_, None) => GpuCullAabb::never_culled(),
             });
         }
     }
@@ -287,7 +289,7 @@ mod tests {
     fn each_cluster_becomes_its_own_draw() {
         let (mut args, mut bounds) = (Vec::new(), Vec::new());
         let list = [meshlet(0, 128), meshlet(128, 128), meshlet(256, 44)];
-        push_cluster_args(7, 900, Some(&list), None, &mut args, &mut bounds);
+        push_cluster_args(7, 900, 1, Some(&list), None, &mut args, &mut bounds);
 
         assert_eq!(args.len(), 3);
         assert_eq!(bounds.len(), 3, "bounds must stay parallel to args");
@@ -307,7 +309,7 @@ mod tests {
     fn clusters_cover_the_whole_mesh_exactly_once() {
         let (mut args, mut bounds) = (Vec::new(), Vec::new());
         let list = [meshlet(0, 128), meshlet(128, 128), meshlet(256, 44)];
-        push_cluster_args(0, 900, Some(&list), None, &mut args, &mut bounds);
+        push_cluster_args(0, 900, 1, Some(&list), None, &mut args, &mut bounds);
         // No gaps and no overlap, or triangles would be dropped or drawn twice.
         let mut next = 0;
         for a in &args {
@@ -323,6 +325,7 @@ mod tests {
         push_cluster_args(
             3,
             600,
+            1,
             None,
             Some(([-1.0; 3], [1.0; 3])),
             &mut args,
@@ -339,7 +342,7 @@ mod tests {
     #[test]
     fn an_empty_cluster_list_falls_back_to_a_whole_mesh_draw() {
         let (mut args, mut bounds) = (Vec::new(), Vec::new());
-        push_cluster_args(0, 300, Some(&[]), None, &mut args, &mut bounds);
+        push_cluster_args(0, 300, 1, Some(&[]), None, &mut args, &mut bounds);
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].vertex_count, 300);
         assert_eq!(bounds[0].min[0], f32::MIN, "unknown bounds must never cull");
@@ -351,7 +354,7 @@ mod tests {
         let mut m = meshlet(0, 10);
         m.aabb_min = [2.0, -5.0, -2.0];
         m.aabb_max = [8.0, 1.0, 4.0];
-        push_cluster_args(0, 30, Some(&[m]), None, &mut args, &mut bounds);
+        push_cluster_args(0, 30, 1, Some(&[m]), None, &mut args, &mut bounds);
         assert_eq!(bounds[0].min[0], 2.0);
         assert_eq!(bounds[0].max[0], 8.0);
         assert_eq!(bounds[0].min[1], -5.0);
