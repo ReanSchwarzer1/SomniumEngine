@@ -232,7 +232,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let origin = world + n * 0.05;
             let hit = rt_trace(origin, dir, 0.05, 4000.0);
             if hit.hit {
-                reflect_result = vec4<f32>(shade_hit(hit, -dir), 1.0);
+                let lit = shade_hit(hit, -dir);
+                if all(lit == lit) {
+                    reflect_result = vec4<f32>(max(lit, vec3<f32>(0.0)), 1.0);
+                } else {
+                    reflect_result = vec4<f32>(
+                        textureSampleLevel(env_cube, env_sampler, dir, roughness * ENV_MAX_MIP).rgb
+                            * light.ibl_intensity,
+                        0.0,
+                    );
+                }
             } else {
                 reflect_result = vec4<f32>(
                     textureSampleLevel(env_cube, env_sampler, dir, roughness * ENV_MAX_MIP).rgb
@@ -258,7 +267,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let rorigin = world - n * 0.05;
             let rhit = rt_trace(rorigin, rdir, 0.05, 4000.0);
             if rhit.hit {
-                refract_result = vec4<f32>(shade_hit(rhit, -rdir), 1.0);
+                let lit = shade_hit(rhit, -rdir);
+                if all(lit == lit) {
+                    refract_result = vec4<f32>(max(lit, vec3<f32>(0.0)), 1.0);
+                }
             }
             refract_result = accumulate(
                 uv, load_coord, full_dims, view_depth, roughness, 1, refract_result,

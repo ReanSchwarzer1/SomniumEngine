@@ -386,6 +386,8 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
 ];
 
 const TONEMAP_NAMES: [&str; 3] = ["AgX", "ACES", "Reinhard"];
+const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
+    ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
 /// Short paint-palette labels (Phase XV-I / XV-Zeta). Indices match the renderer roster.
 const TERRAIN_LAYER_SHORT: [&str; 32] = [
@@ -427,6 +429,7 @@ struct EditorLayout {
     file_save_item: NodeHandle,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    viewport_res_combo: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
     immersive_button: NodeHandle,
@@ -492,6 +495,7 @@ struct EditorLayout {
     post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
     post_tonemap_popup: NodeHandle,
+    viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -548,6 +552,7 @@ pub struct UiManager {
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
+    viewport_res_combo: NodeHandle,
     play_button: NodeHandle,
     play_label: NodeHandle,
     immersive_button: NodeHandle,
@@ -623,6 +628,7 @@ pub struct UiManager {
     post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
     post_tonemap_popup: NodeHandle,
+    viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
@@ -745,6 +751,7 @@ impl UiManager {
             file_save_item: layout.file_save_item,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
+            viewport_res_combo: layout.viewport_res_combo,
             play_button: layout.play_button,
             play_label: layout.play_label,
             immersive_button: layout.immersive_button,
@@ -812,6 +819,7 @@ impl UiManager {
             post_tonemap_combo: layout.post_tonemap_combo,
             foliage_kind_popup: layout.foliage_kind_popup,
             post_tonemap_popup: layout.post_tonemap_popup,
+            viewport_res_popup: layout.viewport_res_popup,
             save_button: layout.save_button,
             palette_popup: layout.palette_popup,
             palette_widget: layout.palette_widget,
@@ -1177,14 +1185,19 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
+    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 3] {
+        [
+            (self.foliage_kind_combo, self.foliage_kind_popup),
+            (self.post_tonemap_combo, self.post_tonemap_popup),
+            (self.viewport_res_combo, self.viewport_res_popup),
+        ]
+    }
+
     fn close_combo_dropdowns(&mut self) {
         if self.open_combo_popup.is_none() {
             return;
         }
-        for (combo, popup) in [
-            (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.post_tonemap_combo, self.post_tonemap_popup),
-        ] {
+        for (combo, popup) in self.combo_entries() {
             self.native_ui.send(UiMessage::new(
                 popup,
                 MessageDirection::ToWidget,
@@ -1197,15 +1210,17 @@ impl UiManager {
     }
 
     fn combo_popup_for(&self, combo: NodeHandle) -> Option<NodeHandle> {
-        if combo == self.foliage_kind_combo || combo == self.inspector_handles.foliage_kind_button {
-            Some(self.foliage_kind_popup)
-        } else if combo == self.post_tonemap_combo
-            || combo == self.inspector_handles.post_tonemap_button
-        {
-            Some(self.post_tonemap_popup)
-        } else {
-            None
-        }
+        self.combo_entries()
+            .into_iter()
+            .find(|(c, _)| *c == combo)
+            .map(|(_, p)| p)
+    }
+
+    fn combo_for_popup(&self, popup: NodeHandle) -> Option<NodeHandle> {
+        self.combo_entries()
+            .into_iter()
+            .find(|(_, p)| *p == popup)
+            .map(|(c, _)| c)
     }
 
     fn close_top_overlay(&mut self) -> bool {
@@ -1519,16 +1534,15 @@ impl UiManager {
             }
         }
         if self.open_combo_popup.is_some() {
-            let (popup, anchor) = if self.open_combo_popup == self.foliage_kind_popup {
-                (self.foliage_kind_popup, self.foliage_kind_combo)
-            } else {
-                (self.post_tonemap_popup, self.post_tonemap_combo)
-            };
-            self.native_ui.send(UiMessage::new(
-                popup,
-                MessageDirection::ToWidget,
-                PopupMessage::SetAnchor(anchor),
-            ));
+            for (anchor, popup) in self.combo_entries() {
+                if self.open_combo_popup == popup {
+                    self.native_ui.send(UiMessage::new(
+                        popup,
+                        MessageDirection::ToWidget,
+                        PopupMessage::SetAnchor(anchor),
+                    ));
+                }
+            }
         }
         let outgoing = self.native_ui.update();
         let _ = outgoing;
@@ -3066,16 +3080,8 @@ impl UiManager {
                 if msg.destination == self.help_overlay {
                     self.help_open = false;
                 }
-                if msg.destination == self.foliage_kind_popup
-                    || msg.destination == self.post_tonemap_popup
-                {
-                    if let Some(combo) = if msg.destination == self.foliage_kind_popup {
-                        Some(self.foliage_kind_combo)
-                    } else {
-                        Some(self.post_tonemap_combo)
-                    } {
-                        self.native_ui.send(ComboBoxMessage::close(combo));
-                    }
+                if let Some(combo) = self.combo_for_popup(msg.destination) {
+                    self.native_ui.send(ComboBoxMessage::close(combo));
                     self.open_combo_popup = NodeHandle::NONE;
                     self.native_ui.invalidate_ancestors(msg.destination);
                 }
@@ -3240,27 +3246,25 @@ impl UiManager {
                         .push_back(EditorEvent::SelectFoliageKind(*i as u8));
                     continue;
                 }
+                if msg.destination == self.viewport_res_combo {
+                    self.editor_events
+                        .push_back(EditorEvent::SetViewportResolution(*i as u8));
+                    continue;
+                }
             } else if let Some(ComboBoxMessage::Open) = msg.data::<ComboBoxMessage>() {
                 self.close_all_menus();
                 if let Some(popup) = self.combo_popup_for(msg.destination) {
                     if self.open_combo_popup.is_some() && self.open_combo_popup != popup {
                         let other = self.open_combo_popup;
-                        if other == self.foliage_kind_popup {
-                            self.native_ui
-                                .send(ComboBoxMessage::close(self.foliage_kind_combo));
-                            self.native_ui.send(UiMessage::new(
-                                self.foliage_kind_popup,
-                                MessageDirection::ToWidget,
-                                PopupMessage::Close,
-                            ));
-                        } else if other == self.post_tonemap_popup {
-                            self.native_ui
-                                .send(ComboBoxMessage::close(self.post_tonemap_combo));
-                            self.native_ui.send(UiMessage::new(
-                                self.post_tonemap_popup,
-                                MessageDirection::ToWidget,
-                                PopupMessage::Close,
-                            ));
+                        for (combo, p) in self.combo_entries() {
+                            if p == other {
+                                self.native_ui.send(ComboBoxMessage::close(combo));
+                                self.native_ui.send(UiMessage::new(
+                                    p,
+                                    MessageDirection::ToWidget,
+                                    PopupMessage::Close,
+                                ));
+                            }
                         }
                     }
                     self.open_combo_popup = popup;
@@ -3659,6 +3663,35 @@ fn build_editor_layout(
         font_id,
         22.0,
     );
+
+    let res_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 14.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_text("Resolution")
+    .with_font_size(11.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_SECONDARY)
+    .build();
+    ui.add_node(res_lbl, vp_stack_h);
+
+    let viewport_res_combo_node = ComboBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_width(118.0)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 2.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_items(VIEWPORT_RESOLUTION_NAMES)
+    .with_selected(0)
+    .with_font_id(font_id)
+    .build();
+    let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
 
     let hint = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 4.0,
@@ -4392,6 +4425,8 @@ fn build_editor_layout(
     let foliage_kind_popup =
         attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
     let post_tonemap_popup = attach_combo_popup(ui, post_tonemap_combo, &TONEMAP_NAMES, font_id);
+    let viewport_res_popup =
+        attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
 
     EditorLayout {
         outliner_scroll,
@@ -4408,6 +4443,7 @@ fn build_editor_layout(
         file_save_item,
         camera_speed_slider,
         camera_speed_label,
+        viewport_res_combo,
         play_button,
         play_label,
         immersive_button,
@@ -4472,6 +4508,7 @@ fn build_editor_layout(
         post_tonemap_combo,
         foliage_kind_popup,
         post_tonemap_popup,
+        viewport_res_popup,
         save_button,
         palette_popup,
         palette_widget,

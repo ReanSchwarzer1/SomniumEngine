@@ -15,6 +15,9 @@ struct RtHit {
     emissive: vec3<f32>,
     roughness: f32,
     metallic: f32,
+    /// Ray `t` of this intersection. 0 on a true miss. A cutout reject keeps
+    /// the card's `t` so `rt_trace` can continue through the hole.
+    t: f32,
 }
 
 fn rt_miss(origin: vec3<f32>) -> RtHit {
@@ -26,6 +29,7 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
     out.emissive = vec3<f32>(0.0);
     out.roughness = 1.0;
     out.metallic = 0.0;
+    out.t = 0.0;
     return out;
 }
 
@@ -88,6 +92,7 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
     );
 
     out.hit = true;
+    out.t = isect.t;
     out.pos = origin + dir * isect.t;
     out.normal = normalize((inst.model * vec4<f32>(n_local, 0.0)).xyz);
     if dot(out.normal, dir) > 0.0 {
@@ -107,7 +112,23 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
             let uv = vec2<f32>(v0.u, v0.v) * b.x
                    + vec2<f32>(v1.u, v1.v) * b.y
                    + vec2<f32>(v2.u, v2.v) * b.z;
-            albedo *= textureSampleLevel(textures[mat.albedo_map], default_sampler, uv, 4.0).rgb;
+            // MASK cards keep blade colour only where the atlas is opaque;
+            // the rest is near-black. Closest-hit without an any-hit shader
+            // would shade that background as a solid surface, which reads as
+            // pinpricks on water when RT reflections are on.
+            if mat.alpha_cutoff > 0.0 {
+                let texel = textureSampleLevel(
+                    textures[mat.albedo_map], default_sampler, uv, 0.0);
+                if texel.a < mat.alpha_cutoff {
+                    var skip = rt_miss(origin);
+                    skip.t = isect.t;
+                    return skip;
+                }
+                albedo *= texel.rgb;
+            } else {
+                albedo *= textureSampleLevel(
+                    textures[mat.albedo_map], default_sampler, uv, 4.0).rgb;
+            }
         }
         out.albedo = albedo;
     }
@@ -115,8 +136,21 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
 }
 
 fn rt_trace(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, t_max: f32) -> RtHit {
-    var rq: ray_query;
-    rayQueryInitialize(&rq, accel, RayDesc(0u, 0xffu, t_min, t_max, origin, dir));
-    rayQueryProceed(&rq);
-    return rt_resolve(origin, dir, rayQueryGetCommittedIntersection(&rq));
+    var t = t_min;
+    for (var hop = 0u; hop < 4u; hop++) {
+        var rq: ray_query;
+        rayQueryInitialize(&rq, accel, RayDesc(0u, 0xffu, t, t_max, origin, dir));
+        rayQueryProceed(&rq);
+        let hit = rt_resolve(origin, dir, rayQueryGetCommittedIntersection(&rq));
+        if hit.hit {
+            return hit;
+        }
+        // True miss has t = 0. A cutout reject keeps the card's t so the
+        // next hop can see whatever is behind the hole.
+        if hit.t <= t + 1e-4 {
+            return rt_miss(origin);
+        }
+        t = hit.t + 0.002;
+    }
+    return rt_miss(origin);
 }

@@ -211,6 +211,8 @@ pub struct Engine<G: GameApp> {
     /// Phase 20B: editor camera speed as a normalized 0..1 slider position.
     /// Game code reads the mapped speed via `EngineContext::camera_speed`.
     camera_speed_norm: f32,
+    /// Viewport toolbar 3D resolution preset. 0 = Native (window pixels).
+    viewport_resolution: usize,
     /// UE-style editor transport state and deterministic gameplay time.
     simulation_clock: SimulationClock,
     /// True from Play until Stop, including while a play session is paused.
@@ -291,6 +293,7 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
+            viewport_resolution: 0,
             simulation_clock: SimulationClock::default(),
             play_session_active: false,
             simulation_accumulator: 0.0,
@@ -450,7 +453,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 r_ctx.resize(size.width, size.height);
             }
             if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx) {
-                r.resize(c, size.width, size.height);
+                let (sw, sh) = somnium_renderer::scene_size_for_preset(
+                    size.width,
+                    size.height,
+                    self.viewport_resolution,
+                );
+                r.resize(c, sw, sh);
             }
             if let (Some(ui), Some(window)) = (&mut self.ui_manager, &self.window) {
                 ui.reposition_panels(window);
@@ -3602,6 +3610,24 @@ impl<G: GameApp> Engine<G> {
                 if let Some(ui) = &mut self.ui_manager {
                     ui.update_camera_speed(self.camera_speed_norm, speed);
                 }
+            }
+
+            EditorEvent::SetViewportResolution(idx) => {
+                self.viewport_resolution = idx as usize;
+                let w = self.viewport_size.0.max(1.0) as u32;
+                let h = self.viewport_size.1.max(1.0) as u32;
+                let (sw, sh) =
+                    somnium_renderer::scene_size_for_preset(w, h, self.viewport_resolution);
+                if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx)
+                    && r.scene_extent() != (sw, sh)
+                {
+                    r.resize(c, sw, sh);
+                }
+                let label = somnium_renderer::VIEWPORT_RESOLUTION_LABELS
+                    .get(self.viewport_resolution)
+                    .copied()
+                    .unwrap_or("Native");
+                info!("Viewport 3D {label} ({sw}×{sh})");
             }
 
             EditorEvent::PlaySimulation => {

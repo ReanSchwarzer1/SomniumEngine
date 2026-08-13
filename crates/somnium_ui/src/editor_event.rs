@@ -309,7 +309,7 @@ pub enum EditorEvent {
     ToggleTerrainPaint,
     /// Hex anti-tiling on the selected terrain. Default on.
     ToggleTerrainHex,
-    /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default on.
+    /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default off.
     ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
@@ -330,6 +330,10 @@ pub enum EditorEvent {
     /// Viewport toolbar camera-speed slider moved. Value is normalized `0..=1`
     /// (the engine maps it exponentially to a world speed).
     SetCameraSpeed(f32),
+    /// Internal 3D resolution preset (0 Native, 1 1440p, 2 1080p, 3 900p, 4 720p).
+    /// The swapchain and UI stay at the window size; scene passes render smaller
+    /// and upscale.
+    SetViewportResolution(u8),
     /// Show or hide the profiler overlay (Phase 29). Also starts and stops the
     /// GPU timestamp collection, because a profiler nobody is looking at should
     /// not be spending queries.

@@ -20,6 +20,7 @@ const SPD: &str = include_str!("../src/shaders/spd.wgsl");
 const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
 const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
 const CAS: &str = include_str!("../src/shaders/cas.wgsl");
+const PRESENT: &str = include_str!("../src/shaders/present.wgsl");
 const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
 const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
 const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
@@ -165,6 +166,7 @@ fn the_standalone_post_modules_validate() {
     check("velocity", VELOCITY);
     check("motion_blur", MOTION_BLUR);
     check("cas", CAS);
+    check("present", PRESENT);
 }
 
 #[test]

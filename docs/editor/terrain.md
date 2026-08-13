@@ -19,7 +19,7 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 ## LOD morph
 
-**LOD Morph** (default on) and **Morph** (0–1, start of the blend) remove the ridge pop between clipmap LODs. `SOMNIUM_LOD_MORPH=0` kills it.
+**LOD Morph** (default off) and **Morph** (0–1, start of the blend) remove the ridge pop between clipmap LODs. `SOMNIUM_LOD_MORPH=1` turns it on.
 
 ## Debug views
 

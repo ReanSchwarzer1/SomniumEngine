@@ -42,7 +42,7 @@ Terrain **Dbg** 24–31: luminance, GI, cluster occupancy, world cache, specular
 
 ## Terrain LOD morph (25C)
 
-On a terrain: **LOD Morph** (default on) and **Morph** (0–1, start of the blend; 0.7 is the last 30% of each LOD range). `SOMNIUM_LOD_MORPH=0` kills it.
+On a terrain: **LOD Morph** (default off) and **Morph** (0–1, start of the blend; 0.7 is the last 30% of each LOD range). `SOMNIUM_LOD_MORPH=1` turns it on.
 
 ## Foliage LOD (25P)
 
