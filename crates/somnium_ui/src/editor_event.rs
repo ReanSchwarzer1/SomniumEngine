@@ -201,6 +201,10 @@ pub enum PostFxToggle {
     /// Drive exposure from aperture/shutter/ISO instead of a raw EV100
     /// (Phase 24A). With this off the three camera rows do nothing.
     PhysicalCamera,
+    /// Percentage-closer soft shadows in the shading pass. Default on.
+    Pcss,
+    /// Screen-space contact shadows. Default on.
+    ContactShadows,
 }
 
 /// High-level editor commands produced by the native UI layer.
@@ -239,6 +243,8 @@ pub enum EditorEvent {
     SetTerrainPaintLayer(u8),
     /// Arm or disarm terrain layer paint from the inspector (XV-Zeta).
     ToggleTerrainPaint,
+    /// Hex anti-tiling on the selected terrain. Default on.
+    ToggleTerrainHex,
     /// Toggle whether painted foliage is shown (Phase 17C).
     ToggleFoliage,
     /// Arm the foliage brush, so dragging in the viewport paints (Phase 17F).

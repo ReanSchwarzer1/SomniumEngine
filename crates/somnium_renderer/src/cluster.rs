@@ -88,7 +88,7 @@ pub struct GpuClusterParams {
     pub tile_size: u32,
     pub near: f32,
     pub far: f32,
-    /// `0` = PBR, `1` = Cel.
+    /// Packed shading flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows.
     pub shading_mode: u32,
     pub num_local_lights: u32,
 }

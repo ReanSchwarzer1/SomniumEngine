@@ -324,6 +324,13 @@ fn sample_shadow_cascade(
     let rotation = interleaved_gradient_noise(pixel, u32(light.shadow_map_size) % 64u)
         * 6.28318530;
 
+    // Bit 1 of shading_mode: PCSS. Off is a single comparison so shadows still
+    // exist without the 16+24 tap filter.
+    if (cluster_params.shading_mode & 2u) == 0u {
+        return textureSampleCompare(
+            shadow_atlas, shadow_sampler, atlas_coord, compare_depth);
+    }
+
     // Search radius scales with the sun's angular size: a larger source casts
     // wider penumbrae, so it has to look further for blockers.
     let search_radius = max(light.sun_angular_radius * 40.0, 2.0) * texel_size;
@@ -473,7 +480,10 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
     // Contact shadows only ever darken. The shadow map is authoritative for
     // everything at its own scale; this fills in below that scale.
-    shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
+    // Bit 2 of shading_mode: contact march. Default on.
+    if (cluster_params.shading_mode & 4u) != 0u {
+        shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
+    }
 
     // Blend over the last 10% of the cascade's range.
     //
@@ -864,14 +874,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let traced = textureLoad(restir_vis, pixel_coords, 0);
     // Bias follows the actual triangle plane, not interpolated vertex data, a
     // normal map, or a foliage card's synthetic curvature.
-    var shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy);
-    // Phase 25H: the relief's own shadow, from the parallax march. Multiplied
-    // into the shadow factor rather than added anywhere else, because that is
-    // exactly what it is — a second occluder between this point and the sun,
-    // one too small for the shadow map to have ever resolved.
-    shadow_factor = shadow_factor * terrain_parallax_shadow_factor;
+    //
+    // When ReSTIR DI wrote a result, that *is* the sun visibility — PCSS was
+    // previously still evaluated and then discarded, which also threw away
+    // POM self-shadow. Skip the filter and keep the relief term.
+    var shadow_factor: f32;
     if traced.a > 0.5 {
-        shadow_factor = traced.r;
+        shadow_factor = traced.r * terrain_parallax_shadow_factor;
+    } else {
+        shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy)
+            * terrain_parallax_shadow_factor;
     }
 
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
@@ -1014,7 +1026,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ── Shading ───────────────────────────────────────────────────────────────
     var result: vec3<f32>;
 
-    if cluster_params.shading_mode == 1u {
+    if (cluster_params.shading_mode & 1u) == 1u {
         // ── Cel-shading path ─────────────────────────────────────────────────
         let NdotL = max(dot(surface.normal, normalize(light.direction)), 0.0);
 

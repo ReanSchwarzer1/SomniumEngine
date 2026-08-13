@@ -92,6 +92,8 @@ struct InspectorHandles {
     terrain_mode_label: NodeHandle,
     terrain_paint_toggle: NodeHandle,
     terrain_paint_label: NodeHandle,
+    terrain_hex_toggle: NodeHandle,
+    terrain_hex_label: NodeHandle,
     terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
     terrain_palette: [NodeHandle; 32],
@@ -168,6 +170,10 @@ struct InspectorHandles {
     post_cas_strength: NodeHandle,
     post_restir_gi_label: NodeHandle,
     post_restir_label: NodeHandle,
+    post_pcss_toggle: NodeHandle,
+    post_pcss_label: NodeHandle,
+    post_contact_toggle: NodeHandle,
+    post_contact_label: NodeHandle,
     post_bloom_toggle: NodeHandle,
     post_bloom_label: NodeHandle,
     post_bloom_amt: NodeHandle,
@@ -212,6 +218,10 @@ pub struct PostInspectorState {
     pub restir: bool,
     /// Phase 24L: ray-traced indirect diffuse.
     pub restir_gi: bool,
+    /// Percentage-closer soft shadows. Default on.
+    pub pcss: bool,
+    /// Screen-space contact shadows. Default on.
+    pub contact_shadows: bool,
     /// Phase 24AC.
     pub cas: bool,
     /// Phase 24Z.
@@ -246,6 +256,7 @@ pub struct TerrainInspectorState {
     /// True when terrain edit is on and the brush is Paint.
     pub terrain_paint: bool,
     pub foliage_paint: bool,
+    pub hex_tiling: bool,
 }
 
 /// One line of the profiler overlay (Phase 29).
@@ -800,6 +811,8 @@ impl UiManager {
                     (h.post_gtao_label, v.gtao, "GTAO"),
                     (h.post_restir_label, v.restir, "RT Direct Light"),
                     (h.post_restir_gi_label, v.restir_gi, "RT Indirect (GI)"),
+                    (h.post_pcss_label, v.pcss, "Soft Shadows"),
+                    (h.post_contact_label, v.contact_shadows, "Contact Shadows"),
                     (h.post_cas_label, v.cas, "Sharpen (CAS)"),
                     (h.post_mb_label, v.motion_blur, "Motion Blur"),
                     (h.post_bloom_label, v.bloom, "Bloom"),
@@ -929,6 +942,11 @@ impl UiManager {
                 self.native_ui.send(TextMessage::set_text(
                     paint_label,
                     format!("{tick} Terrain Paint"),
+                ));
+                let hex_tick = if v.hex_tiling { "[x]" } else { "[ ]" };
+                self.native_ui.send(TextMessage::set_text(
+                    h.terrain_hex_label,
+                    format!("{hex_tick} Hex Tiling"),
                 ));
                 for (i, label) in h.terrain_palette_labels.iter().enumerate() {
                     let mark = if i == paint { ">" } else { " " };
@@ -1240,6 +1258,11 @@ impl UiManager {
                         self.inspector_handles.post_restir_gi_toggle,
                         PostFxToggle::RestirGi,
                     ),
+                    (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
+                    (
+                        self.inspector_handles.post_contact_toggle,
+                        PostFxToggle::ContactShadows,
+                    ),
                     (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
                     (
                         self.inspector_handles.post_mb_toggle,
@@ -1309,6 +1332,11 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.terrain_paint_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainPaint);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_hex_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_erase_toggle {
@@ -2327,6 +2355,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // Phase 24L. Directly under its toggle, matching every other effect that
     // pairs a switch with an amount.
     let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
+    let (post_pcss_toggle, post_pcss_label) =
+        make_toggle(ui, "Soft Shadows", font_id, post_section);
+    let (post_contact_toggle, post_contact_label) =
+        make_toggle(ui, "Contact Shadows", font_id, post_section);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
     let post_bloom_amt = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
     let (post_dof_toggle, post_dof_label) =
@@ -2421,6 +2453,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let terrain_mode_label = ui.add_node(terrain_mode_label, terrain_section);
     let (terrain_paint_toggle, terrain_paint_label) =
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
+    let (terrain_hex_toggle, terrain_hex_label) =
+        make_toggle(ui, "Hex Tiling", font_id, terrain_section);
     let mut terrain_brush_items = Vec::with_capacity(6);
     for row in 0..2 {
         let row_panel =
@@ -2530,6 +2564,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         terrain_mode_label,
         terrain_paint_toggle,
         terrain_paint_label,
+        terrain_hex_toggle,
+        terrain_hex_label,
         terrain_brush_items,
         terrain_layer,
         terrain_palette,
@@ -2608,6 +2644,10 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         post_bloom_label,
         post_restir_gi_toggle,
         post_restir_gi_label,
+        post_pcss_toggle,
+        post_pcss_label,
+        post_contact_toggle,
+        post_contact_label,
         post_gi_intensity,
         post_bloom_amt,
         post_dof_toggle,

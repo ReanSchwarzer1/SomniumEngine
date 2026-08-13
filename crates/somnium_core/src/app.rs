@@ -918,6 +918,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     gtao: pp.gtao_enabled,
                     restir: pp.restir_enabled,
                     restir_gi: pp.restir_gi_enabled,
+                    pcss: pp.pcss_enabled,
+                    contact_shadows: pp.contact_shadows_enabled,
                     cas: pp.cas_enabled,
                     motion_blur: pp.motion_blur_enabled,
                     bloom: pp.bloom_enabled,
@@ -983,6 +985,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     terrain_paint: self.terrain_edit_active
                         && self.terrain_brush.mode == BrushMode::Paint,
                     foliage_paint: self.foliage_paint_active,
+                    hex_tiling: t.hex_tiling,
                 })
             });
             let brush = self.foliage_brush;
@@ -1687,7 +1690,9 @@ impl<G: GameApp> Engine<G> {
             r.frame_delta_time = self.time.delta_time().as_secs_f32();
             r.tonemapper = pp.tonemapper.as_index();
             r.exposure_compensation = pp.exposure_compensation;
-            r.shading_mode = u32::from(pp.cel_shading);
+            r.shading_mode = u32::from(pp.cel_shading)
+                | if pp.pcss_enabled { 2 } else { 0 }
+                | if pp.contact_shadows_enabled { 4 } else { 0 };
             r.taa_pass.set_enabled(pp.taa_enabled);
             r.gtao_pass.enabled = pp.gtao_enabled;
             r.bloom_pass.enabled = pp.bloom_enabled;
@@ -2389,10 +2394,10 @@ impl<G: GameApp> Engine<G> {
                     return;
                 }
                 if let Some(r) = &mut self.renderer {
-                    r.shading_mode = if r.shading_mode == 0 { 1 } else { 0 };
+                    r.shading_mode ^= 1;
                     info!(
                         "Shading mode toggled to: {}",
-                        if r.shading_mode == 1 {
+                        if (r.shading_mode & 1) == 1 {
                             "Cel-Shading"
                         } else {
                             "PBR"
@@ -2989,6 +2994,20 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::ToggleTerrainHex => {
+                if let Some(tc) = self.selected_terrain() {
+                    if let Some(r) = &mut self.renderer {
+                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
+                            t.hex_tiling = !t.hex_tiling;
+                            info!(
+                                "Terrain hex tiling: {}",
+                                if t.hex_tiling { "on" } else { "off" }
+                            );
+                        }
+                    }
+                }
+            }
+
             EditorEvent::SetCameraSpeed(normalized) => {
                 self.camera_speed_norm = normalized.clamp(0.0, 1.0);
                 let speed = crate::camera_speed_from_normalized(self.camera_speed_norm);
@@ -3172,6 +3191,14 @@ impl<G: GameApp> Engine<G> {
                         PostFxToggle::DepthOfField => {
                             pp.dof_enabled = !pp.dof_enabled;
                             pp.dof_enabled
+                        }
+                        PostFxToggle::Pcss => {
+                            pp.pcss_enabled = !pp.pcss_enabled;
+                            pp.pcss_enabled
+                        }
+                        PostFxToggle::ContactShadows => {
+                            pp.contact_shadows_enabled = !pp.contact_shadows_enabled;
+                            pp.contact_shadows_enabled
                         }
                     };
                     info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });

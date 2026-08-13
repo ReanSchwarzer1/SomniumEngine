@@ -626,7 +626,11 @@ fn evaluate_terrain_material(
     let view_distance = distance(world_pos, view.camera_pos);
     let fade = terrain_detail_fade(tm, view_distance);
     let epsilon = mix(LAYER_WEIGHT_EPSILON, FAR_LAYER_EPSILON, fade);
-    let hex = tm.hex_tiling != 0u;
+    // Hex stays on at walking distance. Past ~80% of the detail fade (about
+    // 330 m with the default 60–400 m window) a pixel already covers many
+    // tiles and the unique-colour macro owns the hue — three rotated taps
+    // buy nothing the eye can resolve.
+    let hex = tm.hex_tiling != 0u && fade < 0.8;
 
     let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
     let bitangent = cross(geo_normal, tangent);
@@ -640,7 +644,9 @@ fn evaluate_terrain_material(
     var parallax_shadow = 1.0;
     var march_xz = vec2<f32>(0.0);
     let parallax_steps = f32(tm.parallax_steps) * (1.0 - fade);
-    if allow_pom && parallax_steps >= 1.0 {
+    // Fewer than four remaining steps is a mip-0 march for relief the pixel
+    // cannot resolve. Near ground keeps the full 24-step count.
+    if allow_pom && parallax_steps >= 4.0 {
         var dominant = selected[0];
         var best = -1.0;
         for (var s = 0u; s < 4u; s = s + 1u) {

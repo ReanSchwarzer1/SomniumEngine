@@ -101,7 +101,7 @@ pub struct SomniumRenderer {
     /// When true, the shading pass tints pixels by cascade index (debug overlay).
     cascade_debug: bool,
 
-    /// Phase 13D: 0 = PBR, 1 = Cel-shading.
+    /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact.
     pub shading_mode: u32,
     /// Phase 13C: Accumulated local lights for the frame.
     local_lights: Vec<crate::cluster::GpuLocalLight>,
@@ -555,7 +555,7 @@ impl SomniumRenderer {
             light_color: default_color,
             moon_intensity: 0.010,
             cascade_debug: false,
-            shading_mode: 0,
+            shading_mode: 2 | 4,
             local_lights: Vec::new(),
             grid_pass,
             grid_enabled: false,
