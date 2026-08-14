@@ -252,6 +252,15 @@ pub fn auto_splat(terrain: &mut TerrainData, snow_height: f32) {
     );
 }
 
+/// Island map: hero bank only (layers 0–15). GPU format stays 32 slots.
+pub fn auto_splat_island(terrain: &mut TerrainData, snow_height: f32) {
+    super::biome::apply_biome(
+        terrain,
+        &super::biome::BiomePreset::island(snow_height),
+        false,
+    );
+}
+
 /// Deterministic per-vertex hash noise in [0, 1] for the Noise brush.
 fn noise2(xi: u32, zi: u32) -> f32 {
     let mut h = xi.wrapping_mul(0x85EB_CA6B) ^ zi.wrapping_mul(0xC2B2_AE35);

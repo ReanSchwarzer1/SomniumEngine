@@ -305,7 +305,10 @@ impl TerrainClipmap {
 
     pub fn detail_layer(&self, ring: u32) -> (&wgpu::TextureView, &wgpu::TextureView) {
         let i = (ring as usize).min(self.detail_albedo_layers.len() - 1);
-        (&self.detail_albedo_layers[i], &self.detail_surface_layers[i])
+        (
+            &self.detail_albedo_layers[i],
+            &self.detail_surface_layers[i],
+        )
     }
 
     pub fn macro_layer(&self, ring: u32) -> (&wgpu::TextureView, &wgpu::TextureView) {
@@ -714,10 +717,7 @@ pub fn focus_xz(camera_pos: [f32; 3], camera_forward: [f32; 3]) -> [f32; 2] {
     const SNAP_M: f32 = 0.5;
     let x = camera_pos[0] + camera_forward[0] / horiz * xz_dist;
     let z = camera_pos[2] + camera_forward[2] / horiz * xz_dist;
-    [
-        (x / SNAP_M).round() * SNAP_M,
-        (z / SNAP_M).round() * SNAP_M,
-    ]
+    [(x / SNAP_M).round() * SNAP_M, (z / SNAP_M).round() * SNAP_M]
 }
 
 /// Finest ring radius in metres (half the world coverage of ring 0).

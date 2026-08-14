@@ -22,10 +22,10 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    BuoyantVessel, Children, Component, ComponentId, ComponentSet, Engine, EngineConfig,
-    EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, Transform, WorldTransform,
-    propagate_transforms,
+    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet, Engine,
+    EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent,
+    LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
+    SimulationState, Transform, WorldTransform, camera_view_from_world, propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -160,6 +160,15 @@ impl EditorCamera {
         )
     }
 
+    /// Scene Camera actor pose: local `-Z` is the look direction.
+    fn to_transform(&self) -> Transform {
+        Transform {
+            translation: self.position,
+            rotation: somnium_core::look_rotation_neg_z(self.forward_vector()),
+            scale: Vec3::ONE,
+        }
+    }
+
     fn look_at(&mut self, target: Vec3) {
         let d = target - self.position;
         if d.length_squared() < 1e-8 {
@@ -169,6 +178,30 @@ impl EditorCamera {
         let horiz = (d.x * d.x + d.z * d.z).sqrt();
         self.pitch = d.y.atan2(horiz).to_degrees().clamp(-89.0, 89.0);
     }
+}
+
+fn play_session(ctx: &EngineContext) -> bool {
+    ctx.simulation.state != SimulationState::Editing
+}
+
+/// World matrix of the Outliner Camera actor, if one exists.
+fn scene_camera_world(world: &somnium_ecs::World) -> Option<glam::Mat4> {
+    world.entities().find_map(|e| {
+        world.get::<CameraSettingsComponent>(e)?;
+        world
+            .get::<WorldTransform>(e)
+            .map(|wt| wt.0)
+            .or_else(|| world.get::<Transform>(e).map(Transform::to_matrix))
+    })
+}
+
+fn active_view(ctx: &EngineContext, editor: &EditorCamera) -> (glam::Mat4, Vec3) {
+    if play_session(ctx) {
+        if let Some(world) = scene_camera_world(ctx.world) {
+            return camera_view_from_world(world);
+        }
+    }
+    (editor.view_matrix(), editor.position)
 }
 
 fn parse_vec3(s: &str) -> Option<Vec3> {
@@ -556,10 +589,20 @@ impl HelloGame {
             tracing::warn!("Gislinge Viking Boat contains no renderable mesh");
             return;
         }
-        let preferred_xz = glam::Vec2::new(
-            water.bounds[0] + (water.bounds[2] - water.bounds[0]) * 0.397,
-            water.bounds[1] + (water.bounds[3] - water.bounds[1]) * 0.716,
-        );
+        let width = water.bounds[2] - water.bounds[0];
+        let depth = water.bounds[3] - water.bounds[1];
+        let preferred_xz = if width <= 640.0 {
+            // Island: south of the landmass, in the surrounding ocean.
+            glam::Vec2::new(
+                water.bounds[0] + width * 0.5,
+                water.bounds[1] + depth * 0.5 + width * 0.22,
+            )
+        } else {
+            glam::Vec2::new(
+                water.bounds[0] + width * 0.397,
+                water.bounds[1] + depth * 0.716,
+            )
+        };
         let local_xz = if renderer
             .query_water_surface(water.water_id, preferred_xz, 0.0)
             .is_some()
@@ -646,6 +689,89 @@ impl HelloGame {
             "Default vessel spawned: Gislinge Viking Boat (29,035 triangles, CC BY 4.0) at {:?}",
             initial_position
         );
+    }
+
+    fn apply_loaded_map(&mut self, ctx: &mut EngineContext, result: &MapLoadResult) {
+        if let Some(boat) = self.boat.take() {
+            ctx.physics.destroy_body(boat.body);
+            // LoadScene already despawned every entity; the old handle may now
+            // name Terrain/Sun/Camera. Only despawn if this is still the boat.
+            if ctx
+                .world
+                .get::<PhysicsBody>(boat.entity)
+                .is_some_and(|p| p.id == boat.body)
+            {
+                ctx.world.despawn(boat.entity);
+            }
+        }
+        self.camera.position = result.camera_position;
+        self.camera.yaw = result.camera_yaw_degrees;
+        self.camera.pitch = result.camera_pitch_degrees;
+        if let (Ok(viewpoint), Some(water_component)) =
+            (std::env::var("SOMNIUM_WATER_VIEW"), result.water)
+        {
+            if let Some(renderer) = ctx.renderer.as_mut() {
+                if let Some((local_xz, depth)) =
+                    renderer.deepest_water_point(water_component.water_id)
+                {
+                    let surface = renderer
+                        .query_water_surface(water_component.water_id, local_xz, 0.0)
+                        .map_or(water_component.surface_level, |sample| sample.height);
+                    let eye_y = match viewpoint.as_str() {
+                        "underwater" => surface - (depth * 0.22).clamp(1.5, 4.0),
+                        "waterline" => surface,
+                        _ => surface + 2.0,
+                    };
+                    self.camera.position = Vec3::new(
+                        result.preset.terrain_translation.x + local_xz.x,
+                        result.preset.terrain_translation.y + eye_y,
+                        result.preset.terrain_translation.z + local_xz.y,
+                    );
+                    self.camera.yaw = std::env::var("SOMNIUM_WATER_YAW")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(-35.0);
+                    self.camera.pitch = std::env::var("SOMNIUM_WATER_PITCH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(if viewpoint == "underwater" { 5.0 } else { 0.0 });
+                    info!(%viewpoint, depth, "Deterministic water validation viewpoint active");
+                }
+            }
+        }
+        if matches!(result.kind, MapKind::Coastal | MapKind::Island) {
+            if let (Some(renderer), Some(render_ctx), Some(water_component)) =
+                (ctx.renderer.as_mut(), ctx.render_ctx.as_ref(), result.water)
+            {
+                self.spawn_default_vessel(
+                    renderer,
+                    render_ctx,
+                    ctx.world,
+                    ctx.physics,
+                    result.preset,
+                    water_component,
+                );
+            }
+        }
+        info!("Map {:?} preset v{} active", result.kind, result.preset.version);
+        apply_capture_camera_overrides(
+            &mut self.camera,
+            result
+                .terrain_id
+                .and_then(|id| ctx.renderer.as_ref().and_then(|r| r.terrain(id))),
+            result.terrain_origin,
+        );
+        let pose = self.camera.to_transform();
+        let camera_entity = ctx.world.entities().find(|&e| {
+            ctx.world
+                .get::<Name>(e)
+                .is_some_and(|n| n.as_str() == "Camera")
+        });
+        if let Some(entity) = camera_entity {
+            if let Some(transform) = ctx.world.get_mut::<Transform>(entity) {
+                *transform = pose;
+            }
+        }
     }
 
     /// Keep the voxel streaming driver in sync with the ECS.
@@ -824,9 +950,9 @@ impl GameApp for HelloGame {
         // not to render even though that one did.
         // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
         // now selects a variant rather than enabling it:
-        //   unset / "flat" — the editor's own **Create > Terrain** geometry: the
-        //       default 16x16-chunk descriptor at y = 0, with the sixteen-layer
-        //       Appalachia biome (the only default landscape).
+        //   unset / "flat" — load `assets/Maps/Coastal.somnium` (Great Lakes +
+        //       32-layer Appalachia). Double-click Island in the Content Drawer
+        //       for the 512 m / 16-material map.
         //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
         //       is what exercises the brush paths without editor input.
         //   "0" / "none"   — no terrain, for isolating everything else.
@@ -836,84 +962,15 @@ impl GameApp for HelloGame {
         // turned out not to render at all even though that one did.
         let terrain_mode = std::env::var("SOMNIUM_TERRAIN").unwrap_or_default();
         let flat_terrain = terrain_mode != "1";
+        let mut loaded_map: Option<MapLoadResult> = None;
         if terrain_mode != "0" && terrain_mode != "none" {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                 if flat_terrain {
-                    match somnium_core::create_default_landscape(renderer, render_ctx) {
-                        Ok(built) => {
-                            let preset = built.preset;
-                            let water_component = built.water.water;
-                            let terrain_id = built.terrain.terrain.as_ref().map(|t| t.terrain_id);
-                            let origin = preset.terrain_translation;
-                            let terrain = built.terrain.respawn(&mut ctx.world);
-                            let mut water_snapshot = built.water;
-                            water_snapshot.parent = Some(Parent { entity: terrain });
-                            let water = water_snapshot.respawn(&mut ctx.world);
-                            ctx.world.get_mut::<Children>(terrain).unwrap().push(water);
-                            self.camera.position = preset.camera_position;
-                            self.camera.yaw = preset.camera_yaw_degrees;
-                            self.camera.pitch = preset.camera_pitch_degrees;
-                            if let (Ok(viewpoint), Some(water_component)) =
-                                (std::env::var("SOMNIUM_WATER_VIEW"), water_component)
-                            {
-                                if let Some((local_xz, depth)) =
-                                    renderer.deepest_water_point(water_component.water_id)
-                                {
-                                    let surface = renderer
-                                        .query_water_surface(
-                                            water_component.water_id,
-                                            local_xz,
-                                            0.0,
-                                        )
-                                        .map_or(water_component.surface_level, |sample| {
-                                            sample.height
-                                        });
-                                    let eye_y = match viewpoint.as_str() {
-                                        "underwater" => surface - (depth * 0.22).clamp(1.5, 4.0),
-                                        "waterline" => surface,
-                                        _ => surface + 2.0,
-                                    };
-                                    self.camera.position = Vec3::new(
-                                        preset.terrain_translation.x + local_xz.x,
-                                        preset.terrain_translation.y + eye_y,
-                                        preset.terrain_translation.z + local_xz.y,
-                                    );
-                                    // The deepest point of a lake is not
-                                    // necessarily surrounded by open water, so
-                                    // the validation heading is overridable.
-                                    self.camera.yaw = std::env::var("SOMNIUM_WATER_YAW")
-                                        .ok()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(-35.0);
-                                    self.camera.pitch = std::env::var("SOMNIUM_WATER_PITCH")
-                                        .ok()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(if viewpoint == "underwater" {
-                                            5.0
-                                        } else {
-                                            0.0
-                                        });
-                                    info!(%viewpoint, depth, "Deterministic water validation viewpoint active");
-                                }
-                            }
-                            if let Some(water_component) = water_component {
-                                self.spawn_default_vessel(
-                                    renderer,
-                                    render_ctx,
-                                    ctx.world,
-                                    ctx.physics,
-                                    preset,
-                                    water_component,
-                                );
-                            }
-                            info!("Default landscape preset v{} active", preset.version);
-                            apply_capture_camera_overrides(
-                                &mut self.camera,
-                                terrain_id.and_then(|id| renderer.terrain(id)),
-                                origin,
-                            );
-                        }
-                        Err(error) => tracing::warn!("Default landscape creation failed: {error}"),
+                    let kind = somnium_core::parse_map_file(somnium_core::DEFAULT_MAP_PATH)
+                        .unwrap_or(MapKind::Coastal);
+                    match somnium_core::spawn_map(ctx.world, renderer, render_ctx, kind) {
+                        Ok(result) => loaded_map = Some(result),
+                        Err(error) => tracing::warn!("Default map spawn failed: {error}"),
                     }
                 } else {
                     use somnium_renderer::terrain::{TerrainDescriptor, brush};
@@ -1080,6 +1137,10 @@ impl GameApp for HelloGame {
                 }
             }
         }
+        let map_actors_spawned = loaded_map.is_some();
+        if let Some(result) = loaded_map {
+            self.apply_loaded_map(ctx, &result);
+        }
 
         // Phase 11A: Spawn the directional light entity.
         //
@@ -1089,32 +1150,34 @@ impl GameApp for HelloGame {
         // hand is not a test — this makes dusk and night a capture like any
         // other. It is also the only way to give 24U's light shafts the low sun
         // behind a ridge they have never been verified against.
-        let elevation = std::env::var("SOMNIUM_SUN_ELEVATION")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(35.0);
-        let azimuth = std::env::var("SOMNIUM_SUN_AZIMUTH")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(-30.0);
-        // Pitch is negated: the light's forward is -Z, so a *positive* elevation
-        // has to tilt the forward vector downward for `to_light` to point up.
-        let light_rot = glam::Quat::from_euler(
-            glam::EulerRot::YXZ,
-            azimuth.to_radians(),
-            -elevation.to_radians(),
-            0.0,
-        );
-        ctx.world.spawn((
-            Transform {
-                translation: Vec3::ZERO,
-                rotation: light_rot,
-                scale: Vec3::ONE,
-            },
-            LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT),
-            Name::new("SunLight"),
-            WorldTransform::identity(),
-        ));
+        if !map_actors_spawned {
+            let elevation = std::env::var("SOMNIUM_SUN_ELEVATION")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(35.0);
+            let azimuth = std::env::var("SOMNIUM_SUN_AZIMUTH")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(-30.0);
+            // Pitch is negated: the light's forward is -Z, so a *positive* elevation
+            // has to tilt the forward vector downward for `to_light` to point up.
+            let light_rot = glam::Quat::from_euler(
+                glam::EulerRot::YXZ,
+                azimuth.to_radians(),
+                -elevation.to_radians(),
+                0.0,
+            );
+            ctx.world.spawn((
+                Transform {
+                    translation: Vec3::ZERO,
+                    rotation: light_rot,
+                    scale: Vec3::ONE,
+                },
+                LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT),
+                Name::new("SunLight"),
+                WorldTransform::identity(),
+            ));
+        }
 
         // Phase 13C/13E: a point and a spot light so clustered local lighting is
         // visible in the demo — and so the light gizmos (L) have something to
@@ -1177,12 +1240,21 @@ impl GameApp for HelloGame {
         // Phase 15A1: scene-wide post-processing settings, selectable in the
         // outliner. All effects start off — the viewport shows the raw image
         // until a look is dialled in.
-        ctx.world.spawn((
-            Transform::from_translation(Vec3::ZERO),
-            Name::new("Post Processing"),
-            WorldTransform::identity(),
-            somnium_core::DefaultLandscapePreset::current().post_process,
-        ));
+        if !map_actors_spawned {
+            ctx.world.spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Name::new("Post Processing"),
+                WorldTransform::identity(),
+                somnium_core::DefaultLandscapePreset::current().post_process,
+            ));
+
+            ctx.world.spawn((
+                self.camera.to_transform(),
+                Name::new("Camera"),
+                WorldTransform::identity(),
+                somnium_core::CameraSettingsComponent::from_env(),
+            ));
+        }
 
         ctx.physics.optimize_broad_phase();
 
@@ -1258,6 +1330,7 @@ impl GameApp for HelloGame {
                     }
                     // F10: A/B GPU frustum culling (Phase 15B). A correct cull
                     // is invisible — if geometry pops, the cull is wrong.
+                    // CPU Frustum Cull is the Camera Details toggle (Phase CR-C).
                     KeyCode::F10 if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {
                             let on = renderer.toggle_culling();
@@ -1295,7 +1368,7 @@ impl GameApp for HelloGame {
             }
 
             EngineEvent::MouseMotion { delta_x, delta_y } => {
-                if self.camera.is_rmb_down {
+                if self.camera.is_rmb_down && !play_session(ctx) {
                     self.camera.yaw += delta_x * self.camera.sensitivity;
                     self.camera.pitch -= delta_y * self.camera.sensitivity;
                     self.camera.pitch = self.camera.pitch.clamp(-89.0, 89.0);
@@ -1456,17 +1529,20 @@ impl GameApp for HelloGame {
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
 
-        self.camera.update(dt, ctx.camera_speed);
+        if !play_session(ctx) {
+            self.camera.update(dt, ctx.camera_speed);
+        }
         self.log_timer += dt;
 
         // Phase 14: create/destroy the voxel driver to match the ECS, then
         // stream chunks around the camera (async generation; finished meshes
         // are uploaded here, freed allocations recycled).
         self.sync_voxel_terrain(ctx);
+        let eye = active_view(ctx, &self.camera).1;
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
-            vt.update(self.camera.position, renderer, render_ctx);
+            vt.update(eye, renderer, render_ctx);
         }
 
         // Handle mesh-creating IPC commands that require renderer access.
@@ -1501,11 +1577,12 @@ impl GameApp for HelloGame {
                     [speed, wake_strength, 110.0, 3.0],
                 )
             });
-        if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
-            let aspect = render_ctx.config.width as f32 / render_ctx.config.height as f32;
-            let view_mat = self.camera.view_matrix();
+        let (view_mat, eye) = active_view(ctx, &self.camera);
+        if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+            let (rw, rh) = renderer.scene_extent();
+            let aspect = rw as f32 / rh.max(1) as f32;
             let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
-            renderer.set_view(view_mat, proj, self.camera.position);
+            renderer.set_view(view_mat, proj, eye);
 
             // Sync the lights from ECS LightComponent.
             {
@@ -1932,6 +2009,10 @@ impl GameApp for HelloGame {
 
     fn on_shutdown(&mut self) {
         info!("HelloGame shutting down — goodbye!");
+    }
+
+    fn on_map_loaded(&mut self, ctx: &mut EngineContext, result: &MapLoadResult) {
+        self.apply_loaded_map(ctx, result);
     }
 }
 

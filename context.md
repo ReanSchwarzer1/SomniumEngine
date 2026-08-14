@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-14  
-> **Current phase:** Phase DF (Daggerfall) **in engine** (2026-08-14) — clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
+> **Current phase:** Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
 > **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
@@ -1333,6 +1333,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 | FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
 | DF | 🔧 In engine; **audit required** | **Phase DF — Daggerfall:** nested material clipmaps. Fragment generate; shade taps the cache; POM **not** on clipmap height. Default **off**. Walk luminance gate not passed. **Next:** audit (`phase_DF.md` §12), then remeasure DF-E at maximized Native. `SOMNIUM_TERRAIN_CLIPMAP=1` to enable. |
+| CR | ✅ In engine | **Phase CR — Crysis:** CPU AABB frustum early-out for terrain vis (default on, Camera Details **Frustum Cull**, `SOMNIUM_CPU_FRUSTUM=0`). GPU 15B stays F10. Off-screen casters keep shadowing via cascade volumes (`shadow_only_queue`). Rayon job helper above 512 chunks (256-chunk default stays serial — CR-A GPU-bound). Record: `dev records/phase_CR.md`. |
 
 ---
 
@@ -3683,6 +3684,15 @@ stay live. Inspector **Clipmap** default off. **Audit required** before
 default-on (`dev records/phase_DF.md` §12). `SOMNIUM_TERRAIN_CLIPMAP=1` / `=0`.
 `GpuTerrainMaterial` is **2032** bytes (XV-Zeta 1664 body plus clipmap addressing
 and ready masks).
+
+**Phase CR — Crysis (in engine, 2026-08-14).** CPU frustum early-out for
+terrain vis draws (Camera **Frustum Cull**, default on). GPU 15B remains F10.
+Off-screen casters still shadow into view (cascade volumes, not camera).
+Job pool: rayon above 512 independent items; the default 16×16 tile stays
+serial because CR-A occupancy is GPU-bound (~50 ms shading vs ~1.5% CPU).
+`SOMNIUM_CPU_FRUSTUM=0` / `SOMNIUM_CASCADE_CULL=0`. Record:
+`dev records/phase_CR.md`. Occupancy:
+`dev records/phase CR/CR-A_occupancy.md`.
 
 ## 18. Known Issues & Active Bugs
 

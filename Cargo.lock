@@ -3521,6 +3521,7 @@ dependencies = [
  "intel_tex_2",
  "naga",
  "pollster 0.3.0",
+ "rayon",
  "somnium_asset",
  "somnium_ecs",
  "somnium_ui",

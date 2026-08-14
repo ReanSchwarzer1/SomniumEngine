@@ -240,6 +240,21 @@ DF-H research when the map grows past ~1 km.
 **Boundary:** no per-pixel sample-count LOD in `terrain_material.wgsl` (XV-Zeta).
 Foliage LOD is signed off and is not this phase.
 
+### 1.9 CPU occupancy and frustum early-out (Phase CR — Crysis)
+
+**Status:** used in engine (Phase CR, 2026-08-14). CPU frustum **default on**.
+GPU 15B stays on F10. No source copied.
+
+| Reference | Pattern studied | Somnium use |
+|---|---|---|
+| UE5 `InstanceCullingDefinitions.h` (already §13.12 / 15B) | GPU instance frustum; `instance_count` as cull flag | Unchanged. CR adds the CPU half so a rejected chunk never becomes a draw. |
+| UE5 Landscape **component** bounds (`LandscapeCulling.h` / `ULandscapeComponent` primitive bounds — EULA, **study only**) | Each landscape component has its own AABB; the render thread can skip mesh-draw setup for fully out-of-frustum components, while GPUScene / Nanite still cull at GPU | `chunk_in_frustum` in `culling.rs` + early-out in `renderer.rs` before `draw_queue`. Conservative AABB (straddle = keep). |
+| Andersson, *Parallel Graphics in Frostbite*, SIGGRAPH 2009; O’Donnell, *FrameGraph*, GDC | Jobs overlap GPU time; pass culling is not a RDG rewrite | `jobs.rs` rayon threshold 512. Default 256-chunk tile stays serial (CR-A: GPU-bound). |
+| O3DE/Atom culling jobs | CPU jobs for visibility classify | Same `jobs.rs` helper; no wgpu record from workers. |
+| wgpu single-queue (gfx-rs#8551; WebGPU has no multi-queue) | One `queue.submit` | Parallel CPU + sequential submit. No unsafe multi-queue. |
+
+**Boundary:** do not camera-frustum-cull shadow casters. Off-screen ground that overlaps a cascade still occupies `shadow_only_queue`. CR-E tests cascade volumes only. Do not inflate RAM or Task Manager % without shortening the frame.
+
 ---
 
 ## 2. The Forge Framework
@@ -1179,9 +1194,11 @@ Cross-reference: which Somnium file implements which reference pattern.
 | `somnium_renderer/src/shaders/fxaa.wgsl` | FXAA 3.11 edge detect + directional blur, adapted to `textureSampleLevel` for WGSL uniformity (Phase 15A2) |
 | `somnium_renderer/src/pass/ibl.rs`, `shaders/ibl_gen.wgsl` | Karis split-sum prefiltered environment map; Hammersley/GGX importance sampling (Phase 19) |
 | `somnium_renderer/src/shaders/shading.wgsl` (`evaluate_ibl`) | Karis split-sum IBL + Lazarov analytic env-BRDF fit (Phase 19) |
-| `somnium_renderer/src/culling.rs` | Gribb–Hartmann frustum-plane extraction (near = `row2` for wgpu `z ∈ [0,1]`); UE5 `InstanceCullingDefinitions.h` flag-in-place shape (Phase 15B) |
+| `somnium_renderer/src/culling.rs` | Gribb–Hartmann frustum-plane extraction (near = `row2` for wgpu `z ∈ [0,1]`); UE5 `InstanceCullingDefinitions.h` flag-in-place shape (Phase 15B); CPU `chunk_in_frustum` / `aabb_in_any_frustum` (Phase CR) |
 | `somnium_renderer/src/pass/cull.rs`, `shaders/cull.wgsl` | UE5 instance-culling pass — verdict written as each draw's `instance_count` (Phase 15B) |
 | `somnium_renderer/src/indirect.rs` | UE5 `InstanceCullingDefinitions.h` — GPU-resident draw args, `instance_count` as the cull flag (Phase 15A) |
+| `somnium_renderer/src/jobs.rs` | Frostbite/Atom job shape: rayon only above 512 items; wgpu stays single-queue (Phase CR-D) |
+| `somnium_renderer/src/renderer.rs` (CPU frustum + `shadow_only_queue`) | UE Landscape component-bounds early-out for vis; cascade-volume caster cull (Phase CR-B/E). Original Rust. |
 | `somnium_renderer/src/shaders/light_gizmo.wgsl` | Original — world-space unlit line shader (no model matrix), mirrors `gizmo.wgsl` (Phase 13E) |
 
 ---

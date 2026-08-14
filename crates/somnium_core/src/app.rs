@@ -27,9 +27,10 @@ use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
-    BuoyantVessel, FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent,
-    MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent, Transform,
-    WaterComponent, WorldTransform, simulate_particles,
+    BuoyantVessel, CameraSettingsComponent, FoliageComponent, LightComponent, LightType,
+    MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
+    PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
+    look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -88,6 +89,9 @@ pub trait GameApp {
 
     /// Called just before the engine shuts down.
     fn on_shutdown(&mut self) {}
+
+    /// Called after a version-2 map factory finishes (drawer double-click or tests).
+    fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +231,8 @@ pub struct Engine<G: GameApp> {
     scene_dirty: bool,
     /// Title-bar close requested a shutdown.
     ui_wants_exit: bool,
+    /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
+    pending_map_load: Option<crate::MapLoadResult>,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -305,6 +311,7 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_accumulator: 0.0,
             scene_dirty: false,
             ui_wants_exit: false,
+            pending_map_load: None,
         };
 
         event_loop
@@ -973,6 +980,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_t = self
                 .selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
+            let sel_camera = self
+                .selected_entity
+                .and_then(|e| self.world.get::<CameraSettingsComponent>(e).copied())
+                .map(|c| c.frustum_cull);
             // Phase 15A1: post-processing settings for the inspector.
             let sel_post = self
                 .selected_entity
@@ -1077,6 +1088,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         && self.terrain_brush.mode == BrushMode::Paint,
                     foliage_paint: self.foliage_paint_active,
                     hex_tiling: t.hex_tiling,
+                    parallax: t.parallax_scale > 0.0,
                     clipmap: r
                         .clipmaps
                         .get(tc.terrain_id as usize)
@@ -1189,6 +1201,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ui.update_inspector(None, None, None, None);
                 }
                 ui.update_light_inspector(sel_light);
+                ui.update_camera_inspector(sel_camera);
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_water_inspector(sel_water);
@@ -1307,6 +1320,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         }));
                     }
                     let c = p.last_counters;
+                    let frustum_tag = if SomniumRenderer::cpu_frustum_env_off() {
+                        " [forced-off]"
+                    } else if !r.cpu_frustum_active() {
+                        " [off]"
+                    } else {
+                        ""
+                    };
                     rows.push(somnium_ui::ProfilerRow {
                         label: "draws".to_string(),
                         value: c.draw_calls.to_string(),
@@ -1319,7 +1339,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     });
                     rows.push(somnium_ui::ProfilerRow {
                         label: "terrain chunks".to_string(),
-                        value: c.terrain_chunks.to_string(),
+                        value: format!(
+                            "{} vis / {} cpu-cull{frustum_tag}",
+                            c.terrain_chunks, c.terrain_cpu_culled
+                        ),
                         depth: 0,
                     });
                     rows.push(somnium_ui::ProfilerRow {
@@ -1406,6 +1429,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Post-processing settings (Phase 15A1) ────────────────────────────
         self.apply_post_process();
+        self.apply_camera_settings();
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -1428,6 +1452,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
             for ev in events {
                 self.handle_editor_event(ev);
+            }
+            if let Some(result) = self.pending_map_load.take() {
+                let mut ctx = EngineContext::new(
+                    &self.time,
+                    &self.config,
+                    &mut self.world,
+                    self.physics.as_mut().unwrap(),
+                    self.audio.as_mut().unwrap(),
+                    self.render_ctx.as_ref(),
+                    self.renderer.as_mut(),
+                    &mut self.selected_entity,
+                    self.ui_manager.as_mut().unwrap(),
+                    crate::camera_speed_from_normalized(self.camera_speed_norm),
+                    self.simulation_clock,
+                );
+                self.game.on_map_loaded(&mut ctx, &result);
             }
         }
         if self.ui_wants_exit {
@@ -1962,6 +2002,17 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Push CPU frustum settings from the Camera entity (Phase CR-C).
+    fn apply_camera_settings(&mut self) {
+        let settings = self
+            .world
+            .entities()
+            .find_map(|e| self.world.get::<CameraSettingsComponent>(e).copied());
+        if let (Some(cam), Some(r)) = (settings, self.renderer.as_mut()) {
+            r.set_cpu_frustum(cam.frustum_cull);
+        }
+    }
+
     /// Keep a static heightfield collider in step with every terrain
     /// (Phase 17B).
     ///
@@ -1993,7 +2044,7 @@ impl<G: GameApp> Engine<G> {
         for id in stale {
             if let Some((_, body)) = self.terrain_colliders.remove(&id) {
                 if let Some(p) = self.physics.as_mut() {
-                    p.remove_body(body);
+                    p.destroy_body(body);
                 }
             }
         }
@@ -2024,7 +2075,7 @@ impl<G: GameApp> Engine<G> {
             // fight over every contact.
             if let Some((_, old)) = self.terrain_colliders.remove(&terrain_id) {
                 if let Some(p) = self.physics.as_mut() {
-                    p.remove_body(old);
+                    p.destroy_body(old);
                 }
             }
 
@@ -3119,6 +3170,9 @@ impl<G: GameApp> Engine<G> {
                             .and_then(|r| r.terrain_mut(tc.terrain_id))
                         {
                             t.parallax_scale = value.clamp(0.0, 4.0);
+                            if t.parallax_scale > 0.0 {
+                                t.parallax_held = t.parallax_scale;
+                            }
                         }
                         return;
                     }
@@ -3477,6 +3531,16 @@ impl<G: GameApp> Engine<G> {
                     Name::new("SunLight"),
                     WorldTransform::identity(),
                 ));
+                self.world.spawn((
+                    Transform {
+                        translation: glam::Vec3::new(0.0, 2.0, 8.0),
+                        rotation: look_rotation_neg_z(glam::Vec3::NEG_Z),
+                        scale: glam::Vec3::ONE,
+                    },
+                    Name::new("Camera"),
+                    WorldTransform::identity(),
+                    CameraSettingsComponent::from_env(),
+                ));
                 self.undo_stack = UndoStack::new(128);
                 self.scene_dirty = false;
             }
@@ -3541,9 +3605,29 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::LoadScene(_path) => {
-                // TODO: Load scene from file (requires GPU mesh reconstruction)
-                info!("LoadScene not yet fully implemented");
+            EditorEvent::LoadScene(path) => {
+                let Some((renderer, render_ctx)) =
+                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
+                else {
+                    return;
+                };
+                for (_, (_, body)) in self.terrain_colliders.drain() {
+                    if let Some(p) = self.physics.as_mut() {
+                        p.destroy_body(body);
+                    }
+                }
+                match crate::load_map(&mut self.world, renderer, render_ctx, &path) {
+                    Ok(result) => {
+                        info!("Loaded map {path} ({:?})", result.kind);
+                        self.selected_entity = None;
+                        self.undo_stack = UndoStack::new(128);
+                        self.scene_dirty = false;
+                        self.terrain_edit_active = false;
+                        self.terrain_stroke = None;
+                        self.pending_map_load = Some(result);
+                    }
+                    Err(error) => warn!("LoadScene failed: {error}"),
+                }
             }
 
             EditorEvent::SetTerrainTool(tool) => {
@@ -3583,6 +3667,20 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::ToggleTerrainParallax => {
+                if let Some(tc) = self.selected_terrain() {
+                    if let Some(r) = &mut self.renderer {
+                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
+                            t.toggle_parallax();
+                            info!(
+                                "Terrain parallax: {}",
+                                if t.parallax_scale > 0.0 { "on" } else { "off" }
+                            );
+                        }
+                    }
+                }
+            }
+
             EditorEvent::ToggleTerrainClipmap => {
                 if let Some(tc) = self.selected_terrain() {
                     if somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off() {
@@ -3596,6 +3694,29 @@ impl<G: GameApp> Engine<G> {
                             info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
                         }
                     }
+                }
+            }
+
+            EditorEvent::SetCpuFrustum(on) => {
+                if SomniumRenderer::cpu_frustum_env_off() {
+                    info!("CPU frustum cull: forced off (SOMNIUM_CPU_FRUSTUM=0)");
+                    if let Some(r) = &mut self.renderer {
+                        r.set_cpu_frustum(false);
+                    }
+                } else {
+                    let target = self
+                        .world
+                        .entities()
+                        .find(|e| self.world.get::<CameraSettingsComponent>(*e).is_some());
+                    if let Some(e) = target {
+                        if let Some(cam) = self.world.get_mut::<CameraSettingsComponent>(e) {
+                            cam.frustum_cull = on;
+                        }
+                    }
+                    if let Some(r) = &mut self.renderer {
+                        r.set_cpu_frustum(on);
+                    }
+                    info!("CPU frustum cull: {}", if on { "on" } else { "off" });
                 }
             }
 

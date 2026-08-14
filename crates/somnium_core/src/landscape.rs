@@ -57,6 +57,30 @@ impl DefaultLandscapePreset {
             post_process: PostProcessComponent::default(),
         }
     }
+
+    /// 512 m ocean tile with a compact FBM island. Same water look as Coastal.
+    pub fn island() -> Self {
+        let mut terrain = somnium_renderer::terrain::TerrainDescriptor::default();
+        terrain.grid_size = [8, 8];
+        let [width, depth] = terrain.world_size();
+        let relief = 18.0;
+        Self {
+            version: DEFAULT_LANDSCAPE_VERSION,
+            terrain,
+            relief_metres: relief,
+            auto_splat_height: 72.0,
+            terrain_translation: glam::Vec3::new(-width * 0.5, 0.0, -depth * 0.5),
+            water_local_translation: glam::Vec3::new(
+                width * 0.5,
+                somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES,
+                depth * 0.5,
+            ),
+            camera_position: glam::Vec3::new(0.0, 28.0, 115.0),
+            camera_yaw_degrees: -90.0,
+            camera_pitch_degrees: -16.0,
+            post_process: PostProcessComponent::default(),
+        }
+    }
 }
 
 /// GPU allocations and the two snapshots consumed by either startup or the
@@ -84,6 +108,40 @@ pub fn create_default_landscape(
     let [width, depth] = preset.terrain.world_size();
     let water_id = renderer.allocate_water_body_id();
     let water = WaterComponent::great_lakes(water_id, terrain_id, [0.0, 0.0, width, depth]);
+    renderer.ensure_water_body(render_ctx, water.descriptor())?;
+    let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
+    let (terrain, water_snapshot) = landscape_snapshots(
+        preset,
+        terrain_id,
+        water,
+        MeshComponent {
+            vertex_offset: allocation.vertex_offset,
+            index_offset: allocation.index_offset,
+            index_count: allocation.index_count,
+        },
+    );
+    Ok(BuiltLandscape {
+        preset,
+        terrain,
+        water: water_snapshot,
+    })
+}
+
+/// Allocate a 512 m ocean tile with a compact FBM island and hero-bank splat.
+pub fn create_island_landscape(
+    renderer: &mut somnium_renderer::SomniumRenderer,
+    render_ctx: &somnium_renderer::RenderContext,
+) -> Result<BuiltLandscape, String> {
+    let preset = DefaultLandscapePreset::island();
+    let terrain_id = renderer.create_terrain_hero_bank(render_ctx, preset.terrain);
+    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+        terrain.apply_hero_bank_gpu_budget();
+        terrain.generate_island_relief(1337, preset.relief_metres);
+        somnium_renderer::terrain::brush::auto_splat_island(terrain, preset.auto_splat_height);
+    }
+    let [width, depth] = preset.terrain.world_size();
+    let water_id = renderer.allocate_water_body_id();
+    let water = WaterComponent::ocean(water_id, terrain_id, [0.0, 0.0, width, depth]);
     renderer.ensure_water_body(render_ctx, water.descriptor())?;
     let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
     let (terrain, water_snapshot) = landscape_snapshots(
@@ -214,5 +272,33 @@ mod tests {
         );
         assert_eq!(startup.0.children.unwrap().count, 0);
         assert!(startup.1.parent.is_none());
+    }
+
+    #[test]
+    fn island_recipe_is_512m_with_the_same_water_datum() {
+        let preset = DefaultLandscapePreset::island();
+        let [width, depth] = preset.terrain.world_size();
+        assert_eq!(preset.terrain.grid_size, [8, 8]);
+        assert_eq!((width, depth), (512.0, 512.0));
+        assert_eq!(
+            preset.water_local_translation.y,
+            somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES
+        );
+        assert!(preset.camera_position.z > 0.0 && preset.camera_position.z < depth * 0.4);
+    }
+
+    #[test]
+    fn hero_bank_unbind_matches_the_island_gpu_budget() {
+        let mut ids = somnium_renderer::terrain::TerrainTextureIds {
+            splat_maps: [1, 2, 3, 4, 5, 6, 7, 8],
+            macro_map: 0,
+            albedo: [1; 32],
+            surface: [1; 32],
+        };
+        ids.unbind_extra_bank();
+        assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
+        assert!(ids.albedo[16..].iter().all(|&id| id < 0));
+        assert!(ids.surface[16..].iter().all(|&id| id < 0));
+        assert_eq!(&ids.splat_maps[..4], &[1, 2, 3, 4]);
     }
 }

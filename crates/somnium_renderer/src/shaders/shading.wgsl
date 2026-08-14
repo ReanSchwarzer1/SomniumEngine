@@ -40,6 +40,14 @@
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
 
+// Pipeline overrides. The compact PSO (Island, hex/POM off, ReSTIR sun)
+// sets these false so DXC deletes PCSS/contact/clipmap/debug from the
+// shader. Runtime `shading_mode` bits cannot do that.
+override enable_pcss: bool = true;
+override enable_contact: bool = true;
+override enable_clipmap: bool = true;
+override enable_debug: bool = true;
+
 /// Scale applied to image-based ambient (Phase 25M-2).
 ///
 /// Set to 1.0 (physically correct). Screen-space ambient occlusion (GTAO),
@@ -483,8 +491,9 @@ fn sample_shadow_cascade(
         * 6.28318530;
 
     // Bit 1 of shading_mode: PCSS. Off is a single comparison so shadows still
-    // exist without the 16+24 tap filter.
-    if (cluster_params.shading_mode & 2u) == 0u {
+    // exist without the 16+24 tap filter. `enable_pcss` is the compile-time
+    // kill: a runtime bit still leaves the loops in the shader.
+    if !enable_pcss || (cluster_params.shading_mode & 2u) == 0u {
         return textureSampleCompare(
             shadow_atlas, shadow_sampler, atlas_coord, compare_depth);
     }
@@ -639,7 +648,7 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
     // Contact shadows only ever darken. The shadow map is authoritative for
     // everything at its own scale; this fills in below that scale.
     // Bit 2 of shading_mode: contact march. Default on.
-    if (cluster_params.shading_mode & 4u) != 0u {
+    if enable_contact && (cluster_params.shading_mode & 4u) != 0u {
         shadow = min(shadow, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
     }
 
@@ -760,15 +769,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Phase 25N: analytic UV gradients. Implicit dpdx across a vis-buffer
     // 2×2 quad straddles unrelated triangles, so foliage mips jump per pixel.
     // Evaluate this triangle's barycentric at the neighbouring pixels instead.
-    let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
-    let bary_x = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
-    let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
-    var uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
-    var uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+    //
+    // The neighbour reconstructs used to run even when Analytic Mips was off
+    // (the result was then zeroed). That is two extra vis-buffer barycentrics
+    // on every terrain pixel for a feature terrain does not use.
+    var uv_ddx = vec2<f32>(0.0);
+    var uv_ddy = vec2<f32>(0.0);
     let analytic_grad = (cluster_params.shading_mode & 8u) != 0u;
-    if !analytic_grad {
-        uv_ddx = vec2<f32>(0.0);
-        uv_ddy = vec2<f32>(0.0);
+    if analytic_grad {
+        let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
+        let bary_x = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
+        let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
+        uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
+        uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
     }
 
     let normal_interp = normalize(
@@ -1022,7 +1035,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let world_ddy = dpdy(hit_point.xz);
         let tm_idx = u32(material.terrain_index);
         var terrain: TerrainSurface;
-        if terrain_materials[tm_idx].clipmap_enabled != 0u {
+        if enable_clipmap && terrain_materials[tm_idx].clipmap_enabled != 0u {
             terrain = evaluate_clipmap_material(
                 terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else {
@@ -1059,15 +1072,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Phase 24K: prefer the traced result where it exists. It has no cascades,
     // no depth bias and no peter-panning, and its penumbra comes from the sun's
     // actual angular size rather than from a filter chosen to look about right.
-    let traced = textureLoad(restir_vis, pixel_coords, 0);
-    // Bias follows the actual triangle plane, not interpolated vertex data, a
-    // normal map, or a foliage card's synthetic curvature.
     //
-    // When ReSTIR DI wrote a result, that *is* the sun visibility — PCSS was
-    // previously still evaluated and then discarded, which also threw away
-    // POM self-shadow. Skip the filter and keep the relief term.
+    // Bit 4 is a *uniform* "ReSTIR wrote this frame". Branching on
+    // `textureLoad(restir_vis).a` instead compiled both paths into every
+    // wavefront: DXC flattens varying texture-alpha tests, so PCSS's 16
+    // blocker loads + 24 compares (and the 12-step contact march inside
+    // `sample_shadow`) still ran on every terrain pixel. That is why turning
+    // hex/POM off did not move Shading ms — those were not the 40 ms.
+    let traced = textureLoad(restir_vis, pixel_coords, 0);
     var shadow_factor: f32;
-    if traced.a > 0.5 {
+    if (cluster_params.shading_mode & 16u) != 0u {
         shadow_factor = traced.r * terrain_parallax_shadow_factor;
     } else {
         shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy)
@@ -1077,13 +1091,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
     // Material-path probes: a surface that renders black is either unlit or
     // untextured, and only looking at the channels separately tells which.
-    if light._pad2_z > 8.5 && light._pad2_z < 9.5 {
+    let dbg = select(0.0, light._pad2_z, enable_debug);
+    if dbg > 8.5 && dbg < 9.5 {
         return vec4<f32>(surface.albedo, 1.0);
     }
-    if light._pad2_z > 9.5 && light._pad2_z < 10.5 {
+    if dbg > 9.5 && dbg < 10.5 {
         return vec4<f32>(surface.normal * 0.5 + 0.5, 1.0);
     }
-    if light._pad2_z > 10.5 && light._pad2_z < 11.5 {
+    if dbg > 10.5 && dbg < 11.5 {
         if material.terrain_index >= 0 {
             return vec4<f32>(0.0, 1.0, 0.0, 1.0);
         }
@@ -1096,7 +1111,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ambient-only view read exactly zero there, which is what an occlusion of
     // 0 produces, and only a direct look at the term could say whether that was
     // GTAO's answer or a texture nobody had written.
-    if light._pad2_z > 7.5 && light._pad2_z < 8.5 {
+    if dbg > 7.5 && dbg < 8.5 {
         return vec4<f32>(vec3<f32>(surface.occlusion), 1.0);
     }
 
@@ -1105,22 +1120,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // capture harness's mean terrain luminance times TERRAIN_MAX_TAPS *is* the
     // mean taps per pixel — which is how the detail budget gets a number
     // instead of a claim.
-    if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
+    if dbg > 11.5 && dbg < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
     }
     // 32 = clipmap albedo (Phase DF). Same as mode 9 on terrain when the
     // cache is on; black on non-terrain so a missed bind is obvious.
-    if light._pad2_z > 31.5 && light._pad2_z < 32.5 {
+    if dbg > 31.5 && dbg < 32.5 {
         return vec4<f32>(surface.albedo, 1.0);
     }
     // 33 = clipmap ring index, 0 = finest.
-    if light._pad2_z > 32.5 && light._pad2_z < 33.5 {
+    if dbg > 32.5 && dbg < 33.5 {
         return vec4<f32>(vec3<f32>(terrain_clipmap_ring), 1.0);
     }
 
     // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only
     // while this debug view is active; zero means a non-terrain instance.
-    if light._pad2_z > 12.5 && light._pad2_z < 13.5 {
+    if dbg > 12.5 && dbg < 13.5 {
         let lod = instance._padding;
         if lod == 0u { return vec4<f32>(0.08, 0.08, 0.08, 1.0); }
         let palette = array<vec3<f32>, 5>(
@@ -1131,61 +1146,61 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(palette[min(lod - 1u, 4u)] * 4.0, 1.0);
     }
     // 14 = analytic triangle edges reconstructed from visibility barycentrics.
-    if light._pad2_z > 13.5 && light._pad2_z < 14.5 {
+    if dbg > 13.5 && dbg < 14.5 {
         let edge = 1.0 - smoothstep(0.005, 0.025, min(bary.x, min(bary.y, bary.z)));
         return vec4<f32>(vec3<f32>(edge * 4.0), 1.0);
     }
     // 15/16 = interpolated geometric normal / actual receiver-bias normal.
-    if light._pad2_z > 14.5 && light._pad2_z < 15.5 {
+    if dbg > 14.5 && dbg < 15.5 {
         return vec4<f32>(geo_normal * 0.5 + 0.5, 1.0);
     }
-    if light._pad2_z > 15.5 && light._pad2_z < 16.5 {
+    if dbg > 15.5 && dbg < 16.5 {
         return vec4<f32>(shadow_normal * 0.5 + 0.5, 1.0);
     }
     // 17 = screen-space contact-shadow factor before cascade composition.
-    if light._pad2_z > 16.5 && light._pad2_z < 17.5 {
+    if dbg > 16.5 && dbg < 17.5 {
         let contact = contact_shadow(hit_point, shadow_normal, normalize(light.direction), in.clip_pos.xy);
         return vec4<f32>(vec3<f32>(contact), 1.0);
     }
     // 18 = splat weight discarded by strongest-four (XV-D).
-    if light._pad2_z > 17.5 && light._pad2_z < 18.5 {
+    if dbg > 17.5 && dbg < 18.5 {
         return vec4<f32>(vec3<f32>(terrain_discarded * 4.0), 1.0);
     }
     // 19 = first three selected layer indices, 0..1 over layers 0–15.
-    if light._pad2_z > 18.5 && light._pad2_z < 19.5 {
+    if dbg > 18.5 && dbg < 19.5 {
         return vec4<f32>(terrain_selected_rgb, 1.0);
     }
     // 20 = raw strongest-four weights of the first three selected layers.
-    if light._pad2_z > 19.5 && light._pad2_z < 20.5 {
+    if dbg > 19.5 && dbg < 20.5 {
         return vec4<f32>(terrain_weight_rgb, 1.0);
     }
     // 21 = dominant selected-layer albedo (solo).
-    if light._pad2_z > 20.5 && light._pad2_z < 21.5 {
+    if dbg > 20.5 && dbg < 21.5 {
         return vec4<f32>(terrain_dominant_albedo, 1.0);
     }
     // 22 = cliff projection blend.
-    if light._pad2_z > 21.5 && light._pad2_z < 22.5 {
+    if dbg > 21.5 && dbg < 22.5 {
         return vec4<f32>(vec3<f32>(terrain_cliff_blend_dbg), 1.0);
     }
     // 23 = wetness factor (moisture affinity × global wetness).
-    if light._pad2_z > 22.5 && light._pad2_z < 23.5 {
+    if dbg > 22.5 && dbg < 23.5 {
         return vec4<f32>(vec3<f32>(terrain_wetness_factor), 1.0);
     }
 
     // Lighting debug (SOMNIUM_SHADOW_DEBUG): 1 = shadow factor.
-    if light._pad2_z > 0.5 && light._pad2_z < 1.5 {
+    if dbg > 0.5 && dbg < 1.5 {
         return vec4<f32>(vec3<f32>(shadow_factor), 1.0);
     }
     // 6 = final shadow_factor in hue, immune to exposure.
     //   green = shadowed (< 0.5), red = lit (>= 0.5)
-    if light._pad2_z > 5.5 && light._pad2_z < 6.5 {
+    if dbg > 5.5 && dbg < 6.5 {
         if shadow_factor < 0.5 { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
         return vec4<f32>(4.0, 0.0, 0.0, 1.0);
     }
     // 5 = blocker_search verdict at this fragment, in hue.
     //   red   = search found no blocker (PCSS early-returns lit)
     //   green = search found one (a shadow should appear here)
-    if light._pad2_z > 4.5 && light._pad2_z < 5.5 {
+    if dbg > 4.5 && dbg < 5.5 {
         let c = get_cascade_index(view_depth);
         let lc = light.view_proj[c] * vec4<f32>(hit_point, 1.0);
         let nd = lc.xyz / lc.w;
@@ -1204,7 +1219,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //   red   = cascade uv outside [0,1] or compare_depth > 1 (early-out to lit)
     //   green = in range, and the atlas holds a nearer depth (should be shadow)
     //   blue  = in range, nothing nearer (correctly lit)
-    if light._pad2_z > 3.5 && light._pad2_z < 4.5 {
+    if dbg > 3.5 && dbg < 4.5 {
         let c = get_cascade_index(view_depth);
         let lc = light.view_proj[c] * vec4<f32>(hit_point, 1.0);
         let nd = lc.xyz / lc.w;
@@ -1458,7 +1473,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // 7 = which term actually lights this fragment, in hue.
         //   green = sun dominates, red = ambient dominates
         //   blue  = the surface reads as metallic (kD would be ~0)
-        if light._pad2_z > 6.5 && light._pad2_z < 7.5 {
+        if dbg > 6.5 && dbg < 7.5 {
             let ld = dot(direct_light, vec3<f32>(0.2126, 0.7152, 0.0722));
             let la = dot(ambient, vec3<f32>(0.2126, 0.7152, 0.0722));
             if surface.metallic > 0.5 { return vec4<f32>(0.0, 0.0, 4.0, 1.0); }
@@ -1468,9 +1483,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // 2 = sun only, 3 = ambient only. Isolates which term a surface's
         // brightness actually comes from.
-        if light._pad2_z > 1.5 && light._pad2_z < 2.5 {
+        if dbg > 1.5 && dbg < 2.5 {
             result = direct_light;
-        } else if light._pad2_z > 2.5 && light._pad2_z < 3.5 {
+        } else if dbg > 2.5 && dbg < 3.5 {
             result = ambient;
         }
     }
@@ -1528,17 +1543,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Phase 24AB: lighting debug views (24–31). 0–23 remain the existing
     // material / terrain / shadow probes.
-    if light._pad2_z > 23.5 && light._pad2_z < 31.5 {
+    if dbg > 23.5 && dbg < 31.5 {
         let luma = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));
-        if light._pad2_z < 24.5 {
+        if dbg < 24.5 {
             let t = saturate(log2(luma + 1.0) / 10.0);
             return vec4<f32>(t, 0.2 * (1.0 - t), 1.0 - t, 1.0) * 4.0;
         }
-        if light._pad2_z < 25.5 {
+        if dbg < 25.5 {
             let gi = textureLoad(restir_gi, pixel_coords, 0);
             return vec4<f32>(gi.rgb * 4.0, 1.0);
         }
-        if light._pad2_z < 26.5 {
+        if dbg < 26.5 {
             let tile = vec2<u32>(in.clip_pos.xy) / vec2(cluster_params.tile_size);
             let slice = compute_depth_slice(view_depth);
             let idx = tile.x + tile.y * cluster_params.grid_width
@@ -1546,20 +1561,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let n = f32(cluster_offsets[idx].count) / 8.0;
             return vec4<f32>(n, 0.15, 1.0 - saturate(n), 1.0) * 4.0;
         }
-        if light._pad2_z < 27.5 {
+        if dbg < 27.5 {
             let vol_dbg = textureSampleLevel(
                 world_volume, volumetric_sampler, world_volume_uvw(hit_point), 0.0);
             return vec4<f32>(vol_dbg.rgb * 4.0, 1.0);
         }
-        if light._pad2_z < 28.5 {
+        if dbg < 28.5 {
             return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0).rgb * 4.0, 1.0);
         }
-        if light._pad2_z < 29.5 {
+        if dbg < 29.5 {
             let vol_dbg = textureSampleLevel(
                 world_volume, volumetric_sampler, world_volume_uvw(hit_point), 0.0);
             return vec4<f32>(vec3<f32>(vol_dbg.a * 0.1), 1.0);
         }
-        if light._pad2_z < 30.5 {
+        if dbg < 30.5 {
             let mip = length(uv_ddx) * 64.0;
             return vec4<f32>(mip, mip * 0.4, 0.1, 1.0) * 4.0;
         }

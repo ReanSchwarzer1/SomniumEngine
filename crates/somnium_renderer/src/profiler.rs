@@ -80,8 +80,10 @@ pub struct FrameCounters {
     pub triangles: u32,
     /// Instances that survived culling and reached the draw queue.
     pub instances: u32,
-    /// Terrain chunks submitted this frame.
+    /// Terrain chunks submitted this frame (camera-visible; in `draw_queue`).
     pub terrain_chunks: u32,
+    /// Terrain chunks rejected by the CPU camera frustum (Phase CR-B).
+    pub terrain_cpu_culled: u32,
     /// Instances in the ray-tracing top-level acceleration structure.
     pub tlas_instances: u32,
     /// Draws that survived shadow-caster culling (Phase 24AE). Next to
@@ -665,8 +667,8 @@ impl GpuProfiler {
             "geometry", c.draw_calls, c.triangles
         ));
         out.push(format!(
-            "{:<26} {} inst / {} chunks / {} tlas",
-            "scene", c.instances, c.terrain_chunks, c.tlas_instances
+            "{:<26} {} inst / {} chunks / {} cpu-cull / {} tlas",
+            "scene", c.instances, c.terrain_chunks, c.terrain_cpu_culled, c.tlas_instances
         ));
         // Phase 24AE. Beside the draw count on purpose: the ratio is the whole
         // story of the shadow pass, and a `Shadows` row that suddenly costs

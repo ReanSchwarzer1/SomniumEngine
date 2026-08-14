@@ -11,7 +11,7 @@ pub const GREAT_LAKES_SHORE_SDF: &str = "assets/terrain/great_lakes/shore_sdf.pn
 pub struct WaterBodyDescriptor {
     pub water_id: u32,
     pub terrain_id: u32,
-    /// 1 = Great Lakes lake preset. Reserved values allow ocean/river later.
+    /// 1 = Great Lakes lake preset. 2 = full-coverage ocean (procedural mask).
     pub preset: u32,
     pub surface_level: f32,
     pub max_depth: f32,
@@ -53,6 +53,19 @@ pub struct WaterBodyData {
 fn load_assets(
     descriptor: WaterBodyDescriptor,
 ) -> Result<([u32; 2], Vec<u8>, Vec<u16>, Vec<u16>), String> {
+    if descriptor.preset == 2 {
+        // Open ocean: fully wet rectangle. Terrain depth owns the island shore
+        // (water.wgsl under-terrain guard). Same optical/Gerstner numbers live
+        // on the ECS component; this is only coverage.
+        let size = [256u32, 256u32];
+        let n = (size[0] * size[1]) as usize;
+        return Ok((
+            size,
+            vec![255u8; n],
+            vec![u16::MAX; n],
+            vec![u16::MAX; n],
+        ));
+    }
     if descriptor.preset != 1 {
         return Err(format!("unsupported water preset {}", descriptor.preset));
     }
@@ -456,6 +469,12 @@ impl WaterBodyRegistry {
         id
     }
 
+    /// Drop every body and reuse ids from zero. Map load rebuilds water from a factory.
+    pub fn clear(&mut self) {
+        self.bodies.clear();
+        self.next_id = 0;
+    }
+
     pub fn contains(&self, id: u32) -> bool {
         self.bodies.get(id as usize).is_some_and(Option::is_some)
     }
@@ -557,6 +576,31 @@ mod tests {
         assert!(mask.iter().any(|&v| v == 0) && mask.iter().any(|&v| v != 0));
         assert!(depth.iter().any(|&v| v > 0));
         assert!(depth.iter().zip(&mask).all(|(&d, &m)| m != 0 || d == 0));
+    }
+
+    #[test]
+    fn ocean_preset_is_fully_wet() {
+        let descriptor = WaterBodyDescriptor {
+            water_id: 0,
+            terrain_id: 0,
+            preset: 2,
+            surface_level: 16.1,
+            max_depth: 18.6,
+            bounds: [0.0, 0.0, 512.0, 512.0],
+            amplitude: 0.57,
+            wave_dir_a: [1.0, 0.35],
+            wave_dir_b: [-0.25, 1.0],
+            wave_length_a: 18.0,
+            wave_length_b: 7.0,
+            wave_speed: 0.85,
+            wave_steepness: 0.42,
+        };
+        let (size, mask, depth, sdf) = load_assets(descriptor).expect("ocean assets");
+        assert_eq!(size, [256, 256]);
+        assert!(mask.iter().all(|&v| v == 255));
+        assert_eq!(mask.len(), depth.len());
+        assert_eq!(mask.len(), sdf.len());
+        assert!(depth.iter().all(|&v| v == u16::MAX));
     }
 
     #[test]

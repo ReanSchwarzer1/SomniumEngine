@@ -112,7 +112,8 @@ struct ClusterParams {
     tile_size: u32,
     near: f32,
     far: f32,
-    // Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows, bit 3 = analytic UV grads.
+    // Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows, bit 3 = analytic UV grads,
+    // bit 4 = ReSTIR DI wrote sun visibility this frame (skip the shadow map).
     shading_mode: u32,
     num_local_lights: u32,
 }

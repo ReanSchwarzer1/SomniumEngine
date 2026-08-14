@@ -34,7 +34,7 @@ pub mod textures;
 use std::collections::HashMap;
 
 use mesh::{EDGE_EAST, EDGE_NORTH, EDGE_SOUTH, EDGE_WEST, MAX_TERRAIN_LOD};
-use textures::{LAYER_NAMES, Splatmap, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
+use textures::{LAYER_NAMES, Splatmap, TERRAIN_HERO_LAYERS, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
 
 /// Static terrain configuration (Phase 14A-1). The matching ECS component
 /// `somnium_core::TerrainComponent` stores a copy of these plus the terrain id.
@@ -269,6 +269,20 @@ impl Default for TerrainTextureIds {
     }
 }
 
+impl TerrainTextureIds {
+    /// Leave extra-bank splat maps (layers 16–31) and layer views unbound.
+    pub fn unbind_extra_bank(&mut self) {
+        for id in self.splat_maps.iter_mut().skip(4) {
+            *id = -1;
+        }
+        let hero = TERRAIN_HERO_LAYERS as usize;
+        for i in hero..TERRAIN_LAYER_COUNT as usize {
+            self.albedo[i] = -1;
+            self.surface[i] = -1;
+        }
+    }
+}
+
 /// CPU + GPU state for one terrain (Phase 14A-2 `TerrainData`).
 ///
 /// Owned by the renderer (like `GeometryPool`); the ECS only stores the
@@ -309,6 +323,8 @@ pub struct TerrainData {
     pub material_id: u32,
     /// This terrain's slot in the terrain-material storage buffer.
     pub terrain_index: u32,
+    /// When true, only layers 0–15 are bound; extra-bank splat maps stay -1.
+    pub hero_bank_only: bool,
 
     /// Phase 25F: break the layer maps' visible repetition by hex-tiling them.
     ///
@@ -353,6 +369,8 @@ pub struct TerrainData {
     /// Phase 25H. Multiplies every layer's authored relief depth; 0 disables
     /// parallax entirely, which is the A/B.
     pub parallax_scale: f32,
+    /// Last non-zero scale, so the Details Parallax toggle can restore Relief.
+    pub parallax_held: f32,
     /// Steps the view march takes at its closest. Falls to 0 with distance.
     pub parallax_steps: u32,
     /// Steps of the march toward the sun that gives the relief self-shadowing.
@@ -478,6 +496,7 @@ impl TerrainData {
             texture_ids: TerrainTextureIds::default(),
             material_id: 0,
             terrain_index: 0,
+            hero_bank_only: false,
             hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
             lod_morph: std::env::var("SOMNIUM_LOD_MORPH").as_deref() == Ok("1"),
             lod_morph_start: 0.7,
@@ -509,6 +528,7 @@ impl TerrainData {
             } else {
                 1.0
             },
+            parallax_held: 1.0,
             parallax_steps: 24,
             parallax_shadow_steps: 8,
             projection_sharpness: std::env::var("SOMNIUM_TERRAIN_PROJECTION_SHARPNESS")
@@ -535,6 +555,27 @@ impl TerrainData {
         let capacity = self.chunk_vertex_capacity;
         for chunk in &mut self.chunks {
             chunk.vertex_offset = pool.reserve_vertices(capacity).unwrap_or(UNALLOCATED);
+        }
+    }
+
+    /// Island GPU budget: no hex, no POM, extra-bank ids stay unbound.
+    ///
+    /// Coastal keeps the 32-slot close-up path. Editor checkboxes can still
+    /// turn hex/POM back on after this.
+    pub fn apply_hero_bank_gpu_budget(&mut self) {
+        self.hero_bank_only = true;
+        self.hex_tiling = false;
+        self.parallax_scale = 0.0;
+        self.texture_ids.unbind_extra_bank();
+    }
+
+    /// Flip POM on the selected terrain. Off stores the current Relief scale.
+    pub fn toggle_parallax(&mut self) {
+        if self.parallax_scale > 0.0 {
+            self.parallax_held = self.parallax_scale;
+            self.parallax_scale = 0.0;
+        } else {
+            self.parallax_scale = self.parallax_held.max(1.0);
         }
     }
 
@@ -597,7 +638,11 @@ impl TerrainData {
             } else {
                 0
             },
-            parallax_shadow_steps: self.parallax_shadow_steps,
+            parallax_shadow_steps: if self.parallax_scale > 0.0 {
+                self.parallax_shadow_steps
+            } else {
+                0
+            },
             projection_sharpness: self.projection_sharpness,
             projection_mode: self.projection_mode,
             layer_moisture: textures::LAYER_MOISTURE,
@@ -758,6 +803,19 @@ impl TerrainData {
         self.mark_all_dirty();
     }
 
+    /// Low rolling islet: inland peak, rim below the frozen water datum.
+    pub fn generate_island_relief(&mut self, seed: u32, peak_metres: f32) {
+        let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
+        self.heightmap = heightmap::island_relief(
+            tx,
+            tz,
+            seed,
+            peak_metres,
+            DEFAULT_WATER_LEVEL_METRES,
+        );
+        self.mark_all_dirty();
+    }
+
     /// Mark every chunk for rebuild, and bump the edit revision so foliage and
     /// the collider notice.
     pub fn mark_all_dirty(&mut self) {
@@ -887,14 +945,17 @@ impl TerrainData {
         let chunk_world = self.desc.chunk_cells as f32 * self.desc.cell_size;
 
         // 1. Distance-based LOD per chunk (Phase 14B-2 formula).
-        for chunk in &mut self.chunks {
+        // Phase CR-D: parallel once the grid is large enough that fork-join
+        // beats a serial loop. Default 16×16 stays serial (CR-A: GPU-bound).
+        let lod_base = self.desc.lod_base_range;
+        crate::jobs::for_each_mut(&mut self.chunks, |chunk| {
             let center = glam::Vec3::new(
                 (chunk.grid_pos[0] as f32 + 0.5) * chunk_world,
                 (chunk.aabb_min.y + chunk.aabb_max.y) * 0.5,
                 (chunk.grid_pos[1] as f32 + 0.5) * chunk_world,
             );
             let dist = local_camera_pos.distance(center).max(0.01);
-            let lod_f = (dist / self.desc.lod_base_range).log2().floor();
+            let lod_f = (dist / lod_base).log2().floor();
             chunk.lod = lod_f.clamp(0.0, MAX_TERRAIN_LOD as f32) as u8;
 
             // A coarser index buffer skips height vertices. Where a horizontal
@@ -907,7 +968,7 @@ impl TerrainData {
             if chunk_crosses_water_surface(chunk, chunk_world, shoreline_regions) {
                 chunk.lod = 0;
             }
-        }
+        });
 
         // 2. Relax until adjacent chunks differ by at most one level.
         let at = |chunks: &[TerrainChunk], x: i64, z: i64| -> Option<u8> {
@@ -1358,5 +1419,63 @@ mod tests {
     fn overview_camera_turns_hex_and_pom_off() {
         assert!(TerrainData::aerial_detail_off(150.75, 0.0));
         assert!(TerrainData::aerial_detail_off(80.01, 0.0));
+    }
+
+    #[test]
+    fn unbind_extra_bank_keeps_hero_maps_and_clears_layers_16_31() {
+        let mut ids = TerrainTextureIds {
+            splat_maps: [0, 1, 2, 3, 4, 5, 6, 7],
+            macro_map: 9,
+            albedo: [10; TERRAIN_LAYER_COUNT as usize],
+            surface: [11; TERRAIN_LAYER_COUNT as usize],
+        };
+        ids.unbind_extra_bank();
+        assert_eq!(&ids.splat_maps[..4], &[0, 1, 2, 3]);
+        assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
+        assert_eq!(ids.macro_map, 9);
+        let hero = TERRAIN_HERO_LAYERS as usize;
+        assert!(ids.albedo[..hero].iter().all(|&id| id == 10));
+        assert!(ids.surface[..hero].iter().all(|&id| id == 11));
+        assert!(ids.albedo[hero..].iter().all(|&id| id < 0));
+        assert!(ids.surface[hero..].iter().all(|&id| id < 0));
+    }
+
+    #[test]
+    fn hero_bank_gpu_budget_zeros_hex_and_parallax_in_the_material_layout() {
+        let hex_tiling = false;
+        let parallax_scale = 0.0;
+        let authored_steps = 24u32;
+        let mut ids = TerrainTextureIds {
+            splat_maps: [0, 1, 2, 3, 4, 5, 6, 7],
+            macro_map: -1,
+            albedo: [1; TERRAIN_LAYER_COUNT as usize],
+            surface: [1; TERRAIN_LAYER_COUNT as usize],
+        };
+        ids.unbind_extra_bank();
+        let gpu_hex = u32::from(hex_tiling);
+        let gpu_pom = if parallax_scale > 0.0 {
+            authored_steps
+        } else {
+            0
+        };
+        let gpu_pom_shadow = if parallax_scale > 0.0 { 8u32 } else { 0u32 };
+        assert_eq!(gpu_hex, 0);
+        assert_eq!(gpu_pom, 0);
+        assert_eq!(gpu_pom_shadow, 0);
+        assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
+    }
+
+    #[test]
+    fn toggle_parallax_restores_the_held_scale() {
+        let mut scale = 1.25f32;
+        let mut held = 1.0f32;
+        if scale > 0.0 {
+            held = scale;
+            scale = 0.0;
+        }
+        assert_eq!(scale, 0.0);
+        assert_eq!(held, 1.25);
+        scale = held.max(1.0);
+        assert_eq!(scale, 1.25);
     }
 }

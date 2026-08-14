@@ -12,11 +12,12 @@
 
 ## Viewport
 
-- **RMB + WASD/QE** — fly · **Shift** — faster
+- **RMB + WASD/QE** — fly (edit mode) · **Shift** — faster
+- **Play** — possess the Outliner Camera · **Stop** — restore the fly-cam
 - **RMB + scroll** — camera speed
 - **T / R / S** — move / rotate / scale
 - **L** — light gizmos
-- **F5** — shading mode · **F9 / F10** — GPU draw / frustum A/B
+- **F5** — shading mode · **F9 / F10** — GPU draw / GPU frustum A/B (15B). Camera **Frustum Cull** in Details is the CPU early-out (CR-B), independent of F10.
 
 ## Terrain and foliage
 

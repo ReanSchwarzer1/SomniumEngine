@@ -104,6 +104,10 @@ struct InspectorHandles {
     light_width: NodeHandle,
     light_height_row: NodeHandle,
     light_height: NodeHandle,
+    // Camera section (Phase CR-C) — hidden unless a Camera entity is selected.
+    camera_section: NodeHandle,
+    camera_frustum_toggle: NodeHandle,
+    camera_frustum_label: NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section: NodeHandle,
@@ -126,6 +130,8 @@ struct InspectorHandles {
     terrain_paint_label: NodeHandle,
     terrain_hex_toggle: NodeHandle,
     terrain_hex_label: NodeHandle,
+    terrain_parallax_toggle: NodeHandle,
+    terrain_parallax_label: NodeHandle,
     terrain_clipmap_toggle: NodeHandle,
     terrain_clipmap_label: NodeHandle,
     terrain_morph_toggle: NodeHandle,
@@ -359,6 +365,7 @@ pub struct TerrainInspectorState {
     pub terrain_paint: bool,
     pub foliage_paint: bool,
     pub hex_tiling: bool,
+    pub parallax: bool,
     pub clipmap: bool,
     pub lod_morph: bool,
     pub morph_start: f32,
@@ -1667,6 +1674,7 @@ impl UiManager {
         let h = &self.inspector_handles;
         let pairs = [
             (h.light_section, "light"),
+            (h.camera_section, "camera frustum cull"),
             (h.post_section, "post fx bloom exposure tonemap"),
             (h.terrain_section, "terrain paint layer hex"),
             (h.foliage_section, "foliage grass tree"),
@@ -1923,6 +1931,19 @@ impl UiManager {
         }
     }
 
+    /// Show or hide the Camera section (Phase CR-C).
+    pub fn update_camera_inspector(&mut self, frustum_cull: Option<bool>) {
+        let h = &self.inspector_handles;
+        match frustum_cull {
+            Some(on) => {
+                self.native_ui.set_visibility(h.camera_section, true);
+                self.native_ui
+                    .send(CheckBoxMessage::set_checked(h.camera_frustum_toggle, on));
+            }
+            None => self.native_ui.set_visibility(h.camera_section, false),
+        }
+    }
+
     /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
     ///
     /// `values` is `[exposure, vignette_strength, ca_strength, ibl_intensity]`
@@ -2151,6 +2172,10 @@ impl UiManager {
                 self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_hex_toggle,
                     v.hex_tiling,
+                ));
+                self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_parallax_toggle,
+                    v.parallax,
                 ));
                 self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_clipmap_toggle,
@@ -2615,6 +2640,28 @@ impl UiManager {
                 crate::layout_persist::save(self.chrome_layout);
                 continue;
             }
+            if let Some(ButtonMessage::DoubleClick) = msg.data::<ButtonMessage>() {
+                if let Some((_, entry)) = self
+                    .content_entries
+                    .iter()
+                    .find(|(bh, _)| *bh == msg.destination)
+                    .cloned()
+                {
+                    let is_map = !entry.is_dir
+                        && !entry.is_engine
+                        && entry
+                            .path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("somnium"));
+                    if is_map {
+                        self.editor_events.push_back(EditorEvent::LoadScene(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                    }
+                }
+                continue;
+            }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if msg.destination == self.file_new_item {
                     self.close_all_menus();
@@ -2847,6 +2894,11 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_parallax_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainParallax);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
@@ -3106,7 +3158,7 @@ impl UiManager {
                     self.open_combo_popup = NodeHandle::NONE;
                     self.native_ui.invalidate_ancestors(msg.destination);
                 }
-            } else if let Some(CheckBoxMessage::Check(_)) = msg.data::<CheckBoxMessage>() {
+            } else if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
                     self.refresh_content_list();
@@ -3146,9 +3198,21 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_parallax_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainParallax);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainClipmap);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.camera_frustum_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::SetCpuFrustum(*on));
+                    }
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
@@ -4709,6 +4773,17 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     ui.set_visibility(light_height_row, false);
     ui.set_visibility(light_section, false);
 
+    // ── Camera section (Phase CR-C) ──────────────────────────────────────────
+    let camera_panel =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let camera_section = ui.add_node(camera_panel, parent);
+    sec_label(ui, "Camera", font_id, camera_section);
+    let (camera_frustum_toggle, camera_frustum_label) =
+        make_toggle_checked(ui, "Frustum Cull", font_id, camera_section, true);
+    ui.set_visibility(camera_section, false);
+
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
     // The engine has no checkbox widget, so a Button whose label carries the
     // tick doubles as one: clicking flips the state and the label is rewritten.
@@ -4911,6 +4986,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
     let (terrain_hex_toggle, terrain_hex_label) =
         make_toggle(ui, "Hex Tiling", font_id, terrain_section);
+    let (terrain_parallax_toggle, terrain_parallax_label) =
+        make_toggle(ui, "Parallax", font_id, terrain_section);
     let (terrain_clipmap_toggle, terrain_clipmap_label) =
         make_toggle(ui, "Clipmap", font_id, terrain_section);
     let (terrain_morph_toggle, terrain_morph_label) =
@@ -5066,12 +5143,17 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         light_width,
         light_height_row,
         light_height,
+        camera_section,
+        camera_frustum_toggle,
+        camera_frustum_label,
         terrain_section,
         terrain_mode_label,
         terrain_paint_toggle,
         terrain_paint_label,
         terrain_hex_toggle,
         terrain_hex_label,
+        terrain_parallax_toggle,
+        terrain_parallax_label,
         terrain_clipmap_toggle,
         terrain_clipmap_label,
         terrain_morph_toggle,
@@ -5288,6 +5370,16 @@ fn make_toggle(
     font_id: u8,
     parent: NodeHandle,
 ) -> (NodeHandle, NodeHandle) {
+    make_toggle_checked(ui, text, font_id, parent, false)
+}
+
+fn make_toggle_checked(
+    ui: &mut UserInterface,
+    text: &str,
+    font_id: u8,
+    parent: NodeHandle,
+    checked: bool,
+) -> (NodeHandle, NodeHandle) {
     let cb = CheckBoxBuilder::new(
         WidgetBuilder::new()
             .with_height(22.0)
@@ -5299,6 +5391,7 @@ fn make_toggle(
             })
             .with_background(theme::TRANSPARENT),
     )
+    .with_checked(checked)
     .with_label(text)
     .with_font_id(font_id)
     .with_font_size(11.0)

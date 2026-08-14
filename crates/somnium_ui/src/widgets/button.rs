@@ -11,10 +11,14 @@ use crate::{
     widget::{Widget, WidgetBuilder},
 };
 use glam::Vec2;
+use std::time::{Duration, Instant};
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ButtonMessage {
     Click,
+    DoubleClick,
     SetSelected(bool),
 }
 
@@ -32,6 +36,7 @@ pub struct Button {
     pub is_pressed: bool,
     pub hovered: bool,
     pub selected: bool,
+    last_up: Option<Instant>,
 }
 
 impl Control for Button {
@@ -112,10 +117,19 @@ impl Control for Button {
                 WidgetMessage::MouseUp { pos, .. } => {
                     let pos = *pos;
                     if self.is_pressed && widget.screen_bounds().contains(pos) {
+                        let now = Instant::now();
+                        let double = self
+                            .last_up
+                            .is_some_and(|t| now.duration_since(t) <= DOUBLE_CLICK);
+                        self.last_up = Some(now);
                         emit.push(UiMessage::new(
                             widget.handle,
                             MessageDirection::FromWidget,
-                            ButtonMessage::Click,
+                            if double {
+                                ButtonMessage::DoubleClick
+                            } else {
+                                ButtonMessage::Click
+                            },
                         ));
                     }
                     self.is_pressed = false;
@@ -154,7 +168,61 @@ impl ButtonBuilder {
                 is_pressed: false,
                 hovered: false,
                 selected: false,
+                last_up: None,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{MouseButton, NodeHandle};
+
+    fn click(button: &mut Button, widget: &mut Widget, emit: &mut Vec<UiMessage>) {
+        let pos = Vec2::new(4.0, 4.0);
+        let mut down = UiMessage::new(
+            widget.handle,
+            MessageDirection::FromWidget,
+            WidgetMessage::MouseDown {
+                pos,
+                button: MouseButton::Left,
+            },
+        );
+        button.handle_routed_message(widget, &mut down, emit);
+        let mut up = UiMessage::new(
+            widget.handle,
+            MessageDirection::FromWidget,
+            WidgetMessage::MouseUp {
+                pos,
+                button: MouseButton::Left,
+            },
+        );
+        button.handle_routed_message(widget, &mut up, emit);
+    }
+
+    #[test]
+    fn second_click_within_400ms_emits_double_click() {
+        let mut button = Button {
+            is_pressed: false,
+            hovered: false,
+            selected: false,
+            last_up: None,
+        };
+        let mut widget = Widget::default();
+        widget.handle = NodeHandle::NONE;
+        widget.actual_local_position = Vec2::ZERO;
+        widget.actual_local_size = Vec2::new(32.0, 32.0);
+        let mut emit = Vec::new();
+        click(&mut button, &mut widget, &mut emit);
+        click(&mut button, &mut widget, &mut emit);
+        assert!(matches!(
+            emit[0].data::<ButtonMessage>(),
+            Some(ButtonMessage::Click)
+        ));
+        assert!(matches!(
+            emit[1].data::<ButtonMessage>(),
+            Some(ButtonMessage::DoubleClick)
+        ));
     }
 }

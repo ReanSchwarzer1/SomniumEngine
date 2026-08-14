@@ -30,7 +30,7 @@ impl InstancePool {
 
         Self {
             buffer,
-            instances: Vec::new(),
+            instances: Vec::with_capacity(256),
         }
     }
 

@@ -168,6 +168,32 @@ pub fn aabb_in_frustum(planes: &[[f32; 4]; 6], min: glam::Vec3, max: glam::Vec3)
     true
 }
 
+/// Conservative test against any of several frusta.
+///
+/// Used for cascade shadow casters (Phase CR-E): a box that misses the camera
+/// can still cast into view, so the test is against cascade volumes, never
+/// the camera frustum alone. Kept if it straddles any one cascade.
+pub fn aabb_in_any_frustum(frusta: &[[[f32; 4]; 6]], min: glam::Vec3, max: glam::Vec3) -> bool {
+    frusta
+        .iter()
+        .any(|planes| aabb_in_frustum(planes, min, max))
+}
+
+/// World AABB of a local box, then a conservative camera-frustum test.
+///
+/// This is the CPU early-out used for terrain chunks (Phase CR-B) before they
+/// reach `draw_queue`. Same maths as the GPU 15B shader; the point of doing it
+/// here is that a rejected chunk never becomes a draw.
+pub fn chunk_in_frustum(
+    planes: &[[f32; 4]; 6],
+    model: glam::Mat4,
+    min: glam::Vec3,
+    max: glam::Vec3,
+) -> bool {
+    let (wmin, wmax) = transform_aabb(model, min, max);
+    aabb_in_frustum(planes, wmin, wmax)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +314,98 @@ mod tests {
         assert!(
             aabb_in_frustum(&planes, wmin, wmax),
             "should be visible at origin"
+        );
+    }
+
+    #[test]
+    fn a_terrain_chunk_behind_the_camera_is_cpu_culled() {
+        let planes = frustum_planes(test_view_proj());
+        let model = glam::Mat4::IDENTITY;
+        // Default chunk is 64 m on XZ. Camera at z=+10 looking toward -Z.
+        let min = glam::Vec3::new(-32.0, 0.0, 40.0);
+        let max = glam::Vec3::new(32.0, 16.0, 104.0);
+        assert!(
+            !chunk_in_frustum(&planes, model, min, max),
+            "chunk behind the camera must not reach draw_queue"
+        );
+    }
+
+    #[test]
+    fn a_terrain_chunk_straddling_the_near_plane_is_kept() {
+        let planes = frustum_planes(test_view_proj());
+        let model = glam::Mat4::IDENTITY;
+        // Camera at z=+10; this box covers both in front and behind.
+        let min = glam::Vec3::new(-8.0, 0.0, -20.0);
+        let max = glam::Vec3::new(8.0, 16.0, 20.0);
+        assert!(
+            chunk_in_frustum(&planes, model, min, max),
+            "a straddling chunk must stay visible"
+        );
+    }
+
+    #[test]
+    fn cascade_any_keeps_a_box_inside_one_frustum() {
+        let cam = frustum_planes(test_view_proj());
+        let empty = [[0.0, 1.0, 0.0, -1.0e9]; 6];
+        let frusta = [empty, cam];
+        let (min, max) = unit_box_at(glam::Vec3::ZERO);
+        assert!(aabb_in_any_frustum(&frusta, min, max));
+        let (behind_min, behind_max) = unit_box_at(glam::Vec3::new(0.0, 0.0, 50.0));
+        assert!(!aabb_in_any_frustum(&frusta, behind_min, behind_max));
+    }
+
+    /// Same FPS camera as `hello_engine::EditorCamera`.
+    fn fps_view_proj(pos: glam::Vec3, yaw_deg: f32, pitch_deg: f32, aspect: f32) -> glam::Mat4 {
+        let yaw = yaw_deg.to_radians();
+        let pitch = pitch_deg.to_radians();
+        let forward = glam::Vec3::new(
+            yaw.cos() * pitch.cos(),
+            pitch.sin(),
+            yaw.sin() * pitch.cos(),
+        )
+        .normalize();
+        let view = glam::Mat4::look_at_rh(pos, pos + forward, glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 1000.0);
+        proj * view
+    }
+
+    /// Default 16×16×64 m landscape tile, translated so the origin is the centre.
+    fn count_landscape_chunks(view_proj: glam::Mat4) -> (u32, u32) {
+        let planes = frustum_planes(view_proj);
+        let model = glam::Mat4::from_translation(glam::Vec3::new(-512.0, 0.0, -512.0));
+        let chunk = 64.0;
+        let mut vis = 0u32;
+        let mut culled = 0u32;
+        for cz in 0..16u32 {
+            for cx in 0..16u32 {
+                let min = glam::Vec3::new(cx as f32 * chunk, 0.0, cz as f32 * chunk);
+                let max = min + glam::Vec3::new(chunk, 120.0, chunk);
+                if chunk_in_frustum(&planes, model, min, max) {
+                    vis += 1;
+                } else {
+                    culled += 1;
+                }
+            }
+        }
+        (vis, culled)
+    }
+
+    #[test]
+    fn looking_away_from_the_default_landscape_cpu_culls_chunks() {
+        // DefaultLandscapePreset camera: (0, relief*1.15+30, depth*0.45).
+        let cam = glam::Vec3::new(0.0, 150.75, 460.8);
+        // Yaw 0 looks +X. Half the 1 km tile sits at x < 0, behind the camera.
+        let (vis, culled) = count_landscape_chunks(fps_view_proj(cam, 0.0, -22.0, 16.0 / 9.0));
+        assert!(
+            culled > 0 && vis > 0,
+            "turning 90° must drop vis and raise cpu-cull (vis={vis} culled={culled})"
+        );
+        // Yaw +90 looks +Z, away from the coast. Most of the tile is behind.
+        let (vis_back, culled_back) =
+            count_landscape_chunks(fps_view_proj(cam, 90.0, 0.0, 16.0 / 9.0));
+        assert!(
+            culled_back > vis_back,
+            "looking away from the tile must cull the majority (vis={vis_back} culled={culled_back})"
         );
     }
 }

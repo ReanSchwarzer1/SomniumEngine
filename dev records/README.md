@@ -26,6 +26,8 @@ with the phase identifier and describe the validated viewpoint or render stage.
 - `phase DF/` — Daggerfall terrain-clipmap evidence. Plan + **audit brief:**
   [`phase_DF.md`](phase_DF.md) §12. Timings: [`phase DF/DF-A_timings.md`](phase%20DF/DF-A_timings.md)
   (stale vs current look). Default **off**.
+- `phase CR/` — Crysis occupancy. Plan: [`phase_CR.md`](phase_CR.md).
+  Table: [`phase CR/CR-A_occupancy.md`](phase%20CR/CR-A_occupancy.md).
 - `phase XV/` — terrain evidence (XV-A–J **complete**).
   Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
   Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
