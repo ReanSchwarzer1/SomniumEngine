@@ -81,9 +81,14 @@ fn clipmap_load4(tex: texture_2d_array<f32>, uv: vec2<f32>, ring: u32, size: f32
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
-/// Finest ring whose interior still covers `world_xz`. Rings are finest-first.
+/// Finest **ready** ring whose interior still covers `world_xz`. Unfilled
+/// rings are skipped so a blob-empty finest cannot hide a coarser ring that
+/// already painted this frame.
 fn clipmap_pick_detail_ring(tm: TerrainMaterial, world_xz: vec2<f32>) -> u32 {
     for (var r = 0u; r < tm.clipmap_rings; r = r + 1u) {
+        if (tm.clipmap_detail_ready & (1u << r)) == 0u {
+            continue;
+        }
         let tpm = tm.clipmap_tpm[r / 4u][r % 4u];
         let half = clipmap_half_extent(tm.clipmap_size, tpm);
         let c = clipmap_vec2_from_packed(tm.clipmap_center, r);
@@ -97,6 +102,9 @@ fn clipmap_pick_detail_ring(tm: TerrainMaterial, world_xz: vec2<f32>) -> u32 {
 fn clipmap_pick_macro_ring(tm: TerrainMaterial, world_xz: vec2<f32>) -> u32 {
     var ring = tm.clipmap_macro_rings;
     for (var r = 0u; r < tm.clipmap_macro_rings; r = r + 1u) {
+        if (tm.clipmap_macro_ready & (1u << r)) == 0u {
+            continue;
+        }
         let tpm = tm.clipmap_macro_tpm[r];
         let half = clipmap_half_extent(tm.clipmap_macro_size, tpm);
         let c = clipmap_macro_vec2(tm.clipmap_macro_center, r);
@@ -123,7 +131,7 @@ fn clipmap_tap_detail(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cl
     t.roughness = 0.8;
     t.occlusion = 1.0;
     t.nxy = vec2<f32>(0.0);
-    if ring >= tm.clipmap_rings {
+    if ring >= tm.clipmap_rings || (tm.clipmap_detail_ready & (1u << ring)) == 0u {
         return t;
     }
     let tpm = tm.clipmap_tpm[ring / 4u][ring % 4u];
@@ -156,7 +164,7 @@ fn clipmap_tap_macro(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cli
     t.roughness = 0.8;
     t.occlusion = 1.0;
     t.nxy = vec2<f32>(0.0);
-    if ring >= tm.clipmap_macro_rings {
+    if ring >= tm.clipmap_macro_rings || (tm.clipmap_macro_ready & (1u << ring)) == 0u {
         return t;
     }
     let tpm = tm.clipmap_macro_tpm[ring];

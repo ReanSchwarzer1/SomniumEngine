@@ -66,7 +66,8 @@ struct TerrainMaterial {
     clipmap_macro_tpm: vec4<f32>,
     clipmap_macro_rings: u32,
     clipmap_macro_size: f32,
-    _clipmap_pad: vec2<f32>,
+    clipmap_detail_ready: u32,
+    clipmap_macro_ready: u32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.

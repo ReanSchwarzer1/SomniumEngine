@@ -36,11 +36,16 @@ pub const EXTENDED_MARGIN: i32 = 2;
 /// 8 t/m still covers a ~60 m look-at (ring 6); below that unique-colour owns hue.
 pub const HEX_MIN_TEXELS_PER_M: f32 = 8.0;
 
-/// Generate at most one 1024² ring per frame. A full-stack refresh is 12
-/// rings; filling it in one shot re-runs hex on 12M texels and hitchs the
-/// editor. Walking L-strips are tens of thousands of texels.
+/// At most one 1024² ring per frame. Hex and coarse rings share this cap —
+/// filling the cheap stack in the same frame as a hex ring was 6M texels and
+/// hitchs the editor. Walking L-strips are tens of thousands of texels.
 pub const MAX_GEN_TEXELS: u32 = 1024 * 1024;
 const MAX_TAKE_JOBS: usize = 32;
+/// Ring 3 is 8 m at 64 t/m — the near slope the player actually sees. Paint
+/// it first, then sharpen inward, then distance. Finest-first left that 8 m
+/// disk empty for seven hex frames (~1.5 s).
+const DETAIL_GEN_ORDER: [usize; DETAIL_RINGS as usize] = [3, 2, 1, 0, 4, 5, 6, 7];
+const MACRO_GEN_ORDER: [usize; MACRO_RINGS as usize] = [3, 2, 1, 0];
 
 const CLIPMAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -95,6 +100,10 @@ struct ClipmapRing {
     size: u32,
     dirty: [ClipRect; 4],
     dirty_count: u8,
+    /// False until this ring has finished a full generate at the current
+    /// centre. Shade skips it so an empty finest ring cannot hide a ready
+    /// coarser one.
+    ready: bool,
 }
 
 impl ClipmapRing {
@@ -111,6 +120,7 @@ impl ClipmapRing {
                 h: 0,
             }; 4],
             dirty_count: 0,
+            ready: false,
         }
     }
 
@@ -122,6 +132,7 @@ impl ClipmapRing {
             h: self.size,
         };
         self.dirty_count = 1;
+        self.ready = false;
     }
 
     fn clear_dirty(&mut self) {
@@ -325,19 +336,31 @@ impl TerrainClipmap {
         jobs_for(&self.macro_rings, false)
     }
 
-    /// Consume dirty rectangles up to `budget` texels. Leftover stays queued
-    /// so a later frame can finish; do not call `clear_dirty` after this.
+    pub fn has_dirty(&self) -> bool {
+        self.rings.iter().any(|r| r.dirty_count > 0)
+            || self.macro_rings.iter().any(|r| r.dirty_count > 0)
+    }
+
+    /// Consume dirty rectangles up to `budget` texels, near-cover ring first.
+    /// Leftover stays queued; do not call `clear_dirty` after this.
     pub fn take_jobs(&mut self, is_detail: bool, budget: &mut u32) -> Vec<ClipmapGenJob> {
+        let order: &[usize] = if is_detail {
+            &DETAIL_GEN_ORDER
+        } else {
+            &MACRO_GEN_ORDER
+        };
         let rings = if is_detail {
             &mut self.rings[..]
         } else {
             &mut self.macro_rings[..]
         };
         let mut out = Vec::new();
-        for (ring_i, ring) in rings.iter_mut().enumerate() {
+        for &ring_i in order {
             if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
                 break;
             }
+            let ring = &mut rings[ring_i];
+            let had_dirty = ring.dirty_count > 0;
             let pending: Vec<ClipRect> = ring.dirty[..ring.dirty_count as usize].to_vec();
             ring.dirty_count = 0;
             for rect in pending {
@@ -357,6 +380,9 @@ impl TerrainClipmap {
                 if let Some(left) = rest {
                     ring.push_dirty(left);
                 }
+            }
+            if had_dirty && ring.dirty_count == 0 {
+                ring.ready = true;
             }
         }
         out
@@ -398,7 +424,8 @@ impl TerrainClipmap {
         }
         material.clipmap_macro_rings = MACRO_RINGS;
         material.clipmap_macro_size = MACRO_SIZE as f32;
-        material._clipmap_pad = [0.0; 2];
+        material.clipmap_detail_ready = ready_mask(&self.rings);
+        material.clipmap_macro_ready = ready_mask(&self.macro_rings);
     }
 
     /// GPU memory for both stacks (albedo + packed surface, no mips).
@@ -682,9 +709,14 @@ pub fn focus_xz(camera_pos: [f32; 3], camera_forward: [f32; 3]) -> [f32; 2] {
         MAX_LOOK_AHEAD_M / horiz
     };
     let xz_dist = (ray_t * horiz).min(MAX_LOOK_AHEAD_M);
+    // Snap so looking around does not retile every mouse tick (0.5 m is 32
+    // texels on the 8 m ring, above `UPDATE_MULTIPLE`).
+    const SNAP_M: f32 = 0.5;
+    let x = camera_pos[0] + camera_forward[0] / horiz * xz_dist;
+    let z = camera_pos[2] + camera_forward[2] / horiz * xz_dist;
     [
-        camera_pos[0] + camera_forward[0] / horiz * xz_dist,
-        camera_pos[2] + camera_forward[2] / horiz * xz_dist,
+        (x / SNAP_M).round() * SNAP_M,
+        (z / SNAP_M).round() * SNAP_M,
     ]
 }
 
@@ -697,6 +729,16 @@ pub fn finest_radius_metres() -> f32 {
 pub fn coarsest_detail_radius_metres() -> f32 {
     let tpm = DETAIL_FINEST_TEXELS_PER_M / CLIPMAP_SCALE_BASE.powi((DETAIL_RINGS - 1) as i32);
     (DETAIL_SIZE as f32 / tpm) * 0.5
+}
+
+fn ready_mask(rings: &[ClipmapRing]) -> u32 {
+    let mut bits = 0u32;
+    for (i, ring) in rings.iter().enumerate() {
+        if ring.ready {
+            bits |= 1 << i;
+        }
+    }
+    bits
 }
 
 /// Uniforms for one generate dispatch. Mirrors `ClipmapGenParams` in WGSL.
@@ -798,7 +840,13 @@ mod tests {
         let inv_s2 = 0.5_f32.sqrt();
         let f = focus_xz([0.0, 1.7, 0.0], [0.0, -inv_s2, -inv_s2]);
         assert!((f[0] - 0.0).abs() < 1e-3);
-        assert!((f[1] + 1.7).abs() < 0.05);
+        assert!((f[1] + 1.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn near_cover_ring_generates_before_finest() {
+        assert_eq!(DETAIL_GEN_ORDER[0], 3);
+        assert_eq!(DETAIL_GEN_ORDER[3], 0);
     }
 
     #[test]

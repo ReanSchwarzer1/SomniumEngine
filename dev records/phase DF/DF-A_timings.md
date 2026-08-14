@@ -1,6 +1,12 @@
 # DF-A — maximized-window timings (2026-08-14)
 
-**Status: MEASURED.** Clipmap default remains **off** (walk luminance gate not met).
+**Status: MEASURED** (2026-08-14, **before** fragment generate, look-at
+centring, toroidal `textureLoad`, and ready-ring skip). Clipmap default
+remains **off**.
+
+**Do not use these walk-luminance numbers as the current look.** After the
+look/hitch session, DF-E gates must be **remeasured** at maximized Native.
+A clipmap **audit** is required first (`phase_DF.md` §12).
 
 ## Adapter freeze (live wgpu)
 
@@ -63,6 +69,6 @@ PNG: `DF-A_walk_native_fsr_taps12_hdr.png`.
 | walk | 49.677 ms | **10.652 ms** | 21.4% | 2923.1 | 3963.0 | **+35.6%** |
 | ridge | 30.472 ms | **7.345 ms** | 24.1% | 6562.9 | 6788.8 | **+3.4%** |
 
-Overview hits the timing target (≤ 50% of off) and the 1% luminance gate. Walk shading is faster and must not regress — it doesn’t — but eye-level luminance is **not** within 1%, so **Clipmap stays default off** until that gate passes. Do not drop hex at the feet to chase the number; raise finest texels/m if the cache is too coarse.
+Overview hits the timing target (≤ 50% of off) and the 1% luminance gate. Walk shading is faster and must not regress — it doesn’t — but eye-level luminance on **this** capture is **not** within 1%, so **Clipmap stays default off**. These PNGs predate the fragment/look/sampling rewrite; remeasure after the §12 audit. Do not drop hex at the feet to chase the number.
 
 PNGs: `DF-A_overview_native_fsr_clipmap.png`, `DF-A_walk_native_fsr_clipmap.png`, `DF-A_ridge_native_fsr_clipmap.png`.

@@ -23,7 +23,7 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 ## Material clipmaps (Phase DF)
 
-**Clipmap** (default off until the DF-E gates pass) bakes strongest-four + hex + height-blend into nested caches centred on the ground the camera is looking at (clamped to 8 m, so walking still keeps the player inside a dense ring). Shade bilinear-loads the toroidal cache — not the anisotropic wrap sampler — and blends rings over 256 texels so ring edges do not streak. Cliffs stay live (biplanar). Generate paints the cache as a color attachment (same path as live layer sampling); shade reads that array. Toggle Clipmap off/on once after updating to rebuild; the first second fills rings incrementally. `SOMNIUM_TERRAIN_CLIPMAP=1` forces on; `=0` forces off.
+**Clipmap** (default **off** until the DF-E gates pass) bakes strongest-four + hex + height-blend into nested caches centred on the ground the camera is looking at (clamped to 8 m). Shade bilinear-loads the toroidal cache and blends rings so edges do not streak. Generate paints at most one 1024² ring per frame (the 8 m ring first); shade skips rings that have not finished a full generate. Cliffs stay live (biplanar). POM is not marched on the cache. Toggle Clipmap off/on once after updating to rebuild. `SOMNIUM_TERRAIN_CLIPMAP=1` forces on; `=0` forces off.
 
 Dbg **32** is clipmap albedo, **33** is ring index (0 = finest).
 

@@ -13,9 +13,10 @@ const MAX_JOBS: usize = 64;
 
 pub struct TerrainClipmapPass {
     pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
+    _layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
-    sampler: wgpu::Sampler,
+    _sampler: wgpu::Sampler,
+    bind: wgpu::BindGroup,
 }
 
 impl TerrainClipmapPass {
@@ -112,18 +113,39 @@ impl TerrainClipmapPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain clipmap gen"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<GpuClipmapGen>() as u64,
+                        ),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
 
         Self {
             pipeline,
-            layout,
+            _layout: layout,
             params,
-            sampler,
+            _sampler: sampler,
+            bind,
         }
     }
 
     pub fn record(
         &self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         global: &wgpu::BindGroup,
@@ -144,25 +166,6 @@ impl TerrainClipmapPass {
                 .copy_from_slice(bytemuck::bytes_of(&params));
         }
         queue.write_buffer(&self.params, 0, &bytes);
-
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Terrain clipmap gen"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.params,
-                        offset: 0,
-                        size: std::num::NonZeroU64::new(std::mem::size_of::<GpuClipmapGen>() as u64),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
 
         for (i, job) in jobs.iter().take(n).enumerate() {
             if job.rect.is_empty() {
@@ -201,7 +204,7 @@ impl TerrainClipmapPass {
                 });
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, global, &[]);
-                pass.set_bind_group(1, &bind, &[(i as u32) * PARAMS_STRIDE as u32]);
+                pass.set_bind_group(1, &self.bind, &[(i as u32) * PARAMS_STRIDE as u32]);
                 pass.set_viewport(
                     job.rect.x as f32,
                     job.rect.y as f32,

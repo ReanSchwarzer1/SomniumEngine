@@ -2376,8 +2376,7 @@ impl SomniumRenderer {
             let Some(terrain) = self.terrains.get(i) else {
                 continue;
             };
-            if self.clipmaps[i].detail_jobs().is_empty() && self.clipmaps[i].macro_jobs().is_empty()
-            {
+            if !self.clipmaps[i].has_dirty() {
                 continue;
             }
             work.push((i, terrain.terrain_index));
@@ -2387,6 +2386,19 @@ impl SomniumRenderer {
             for (i, terrain_index) in work {
                 let detail = self.clipmaps[i].take_jobs(true, &mut budget);
                 let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                if let Some(terrain) = self.terrains.get(i) {
+                    let model = self
+                        .terrain_queue
+                        .iter()
+                        .find(|t| t.0 as usize == i)
+                        .map(|t| t.1)
+                        .unwrap_or(glam::Mat4::IDENTITY);
+                    let local_cam = model.inverse().transform_point3(self.camera_pos);
+                    let mut mat = terrain.gpu_material_for_camera(local_cam);
+                    self.clipmaps[i].fill_gpu(&mut mat);
+                    self.terrain_materials
+                        .write(&ctx.queue, terrain_index, &mat);
+                }
                 self.clipmap_pass.record(
                     &ctx.device,
                     &ctx.queue,
@@ -2410,15 +2422,6 @@ impl SomniumRenderer {
             }
         }
         self.profiler.end(&mut encoder);
-
-        if let Some((da, ds, ma, ms)) = self.clipmaps.first().map(|c| {
-            let (da, ds) = c.detail_sampled();
-            let (ma, ms) = c.macro_sampled();
-            (da.clone(), ds.clone(), ma.clone(), ms.clone())
-        }) {
-            self.shading_pass
-                .set_clipmap_arrays(&ctx.device, &da, &ds, &ma, &ms);
-        }
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");

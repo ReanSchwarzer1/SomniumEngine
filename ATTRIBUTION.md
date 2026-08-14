@@ -221,14 +221,15 @@ architecture. Hardware without ray query must look identical to today.
 
 ### 1.8 Terrain material clipmaps (Phase DF — Daggerfall)
 
-**Status:** used in engine (Phase DF, 2026-08-14). Nested clipmaps are the
-intended spine; AVT / CoD Super Terrain remain DF-H research when the map grows
-past ~1 km.
+**Status:** used in engine (Phase DF, 2026-08-14). Default **off**. Nested
+clipmaps are the intended spine; **a dedicated audit is required** before
+default-on (`dev records/phase_DF.md` §12). AVT / CoD Super Terrain remain
+DF-H research when the map grows past ~1 km.
 
 | Reference | Pattern studied | Somnium use |
 |---|---|---|
-| O3DE `TerrainClipmapManager.h` / World Renderer clipmap docs (Apache-2.0 OR MIT) | Nested macro + detail stacks, camera-centred, toroidal update, blend once into the cache | `terrain/clipmap.rs` + `clipmap_gen.wgsl`; original WGSL |
-| UE5 Runtime Virtual Texturing docs; `VirtualTextureMaterial.usf` (EULA — **study only**) | Cache camera-independent blend; keep view-dependent relief near the camera | POM marches **baked clipmap height**, not four packed arrays |
+| O3DE `TerrainClipmapManager.h` / World Renderer clipmap docs (Apache-2.0 OR MIT) | Nested macro + detail stacks, toroidal update, blend once into the cache | `terrain/clipmap.rs` + fragment `clipmap_gen.wgsl` + `clipmap_shade.wgsl`; original WGSL. Stacks are **look-at**-centred (8 m clamp), not strictly camera-centred. |
+| UE5 Runtime Virtual Texturing docs; `VirtualTextureMaterial.usf` (EULA — **study only**) | Cache camera-independent blend as a **color attachment**; keep view-dependent relief near the camera | Generate is a fragment MRT (compute bindless wrote black). POM on baked height **not** shipped (smear). |
 | Widmark, *Terrain in Battlefield 3*, GDC 2012 | VT composite ~32 texels/m + detail splat 50–100 m at 500–1000 texels/m | Finest ring 512 texels/m; do not drop hex at feet |
 | Andersson, Frostbite procedural splatting, SIGGRAPH 2007 | Sparse mask quad-tree; compute instead of store | Already closest to XV splat; not a new mesh |
 | Chen, Far Cry 4 Adaptive Virtual Texture, GDC 2015 | Distance-scaled mips per 64 m sector | DF-H only |
@@ -323,12 +324,12 @@ Foliage LOD is signed off and is not this phase.
 
 **Specific pattern:** O3DE's Atom renderer avoids per-material bind group rebinding by allocating all descriptors into a single global array and indexing dynamically in the shader. Somnium's `GlobalResourcePool` implements exactly this: `binding_array<texture_2d<f32>>(1024)` filled with a dummy 1×1 white texture, replaced with real textures as assets load.
 
-### 4.2 Terrain clipmaps (Phase DF — Daggerfall, plan)
+### 4.2 Terrain clipmaps (Phase DF — Daggerfall)
 
 O3DE `TerrainClipmapManager` (nested macro + detail stacks, toroidal update)
-is the **intended spine** for Daggerfall. Citations and the no-copy boundary
-live in **§1.8**. Plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md).
-Not implemented as of 2026-08-14.
+is the spine. **In engine** (2026-08-14), default off. Citations and the
+no-copy boundary live in **§1.8**. Plan + audit brief:
+[`dev records/phase_DF.md`](dev%20records/phase_DF.md) §12.
 
 **Feature requirements set at device creation:**
 

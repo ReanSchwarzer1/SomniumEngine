@@ -304,5 +304,9 @@ mod material_flag_tests {
             offset(&m.clipmap_macro_rings as *const u32 as *const u8),
             2016
         );
+        assert_eq!(
+            offset(&m.clipmap_detail_ready as *const u32 as *const u8),
+            2024
+        );
     }
 }

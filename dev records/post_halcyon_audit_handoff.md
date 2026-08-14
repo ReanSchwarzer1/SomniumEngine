@@ -34,8 +34,8 @@ almost broken.
    skip §3–§6, §12–§14 (frame graph), §17 (roadmap), §18 (bugs), §20 (Phase 14
    heightmap history — **do not rewrite it as XV**), §21 (GPU-driven).
 3. **The entire** [`ATTRIBUTION.md`](../ATTRIBUTION.md) — reference boundaries.
-   Halcyon is §1.7; FSR is §13B.8; XV is §1.6; Daggerfall citations (plan)
-   are §1.8. **No source copies.**
+   Halcyon is §1.7; FSR is §13B.8; XV is §1.6; Daggerfall is §1.8 (in engine,
+   default off; clipmap audit is `phase_DF.md` §12). **No source copies.**
 4. **Every markdown file under** [`dev records/`](.) — start with this folder’s
    [`README.md`](README.md), then:
    - [`phase_VV.md`](phase_VV.md) and [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
@@ -43,8 +43,9 @@ almost broken.
    - [`phase_IV.md`](phase_IV.md) §14 (IV-K water freeze)
    - [`phase_XV.md`](phase_XV.md), [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md),
      [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md)
-   - [`phase_DF.md`](phase_DF.md) — **next** phase (Daggerfall); do not implement
-     it inside the audit unless the user redirects
+   - [`phase_DF.md`](phase_DF.md) — Daggerfall **in engine**, default off.
+     Clipmap **audit** is §12 (separate session, other model). Do not retune
+     clipmaps inside the Halcyon→HEAD audit unless the user redirects.
    - historical handoffs (`post_IV_context_handoff.md`, `post_25M2_context_handoff.md`,
      `phase_25m2_completion_report.md`, `phase_IV.md`, XV research/evidence)
 5. Help pages that document the live editor: [`docs/editor/`](../docs/editor/)
@@ -61,7 +62,7 @@ Optional depth after (1)–(6): `wgpu_api_gotchas.md`, `CONTRIBUTING.md`,
 | Contract | Value | Why |
 |---|---|---|
 | Water | `WaterComponent::great_lakes`: datum **16.1 m**, optical `max_depth` **18.6 m**, Gerstner `wave_speed` **0.85** | Boat buoyancy samples Gerstner only; FFT is visual |
-| Terrain look | 32 layers, strongest-four, sidecar v4, `GpuTerrainMaterial` **1664** bytes, unique colour from splat, biome v3 / landscape v4, snow `relief * 0.48`, aerial hex/POM off **> 80 m AGL** | [`XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) |
+| Terrain look | 32 layers, strongest-four, sidecar v4, unique colour from splat, biome v3 / landscape v4, snow `relief * 0.48`, aerial hex/POM off **> 80 m AGL**. `GpuTerrainMaterial` **2032** bytes (XV **1664** body + DF clipmap fields). Do not shrink it. | [`XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · [`phase_DF.md`](phase_DF.md) |
 | Terrain LOD shader | **No per-pixel** `close` / `use_maps` / `layer_budget` sample branch | Compiled three paths into one shader; walking 20→27 ms |
 | Water / transparents in TLAS | **Out** | Halcyon non-goal; reflected shore will not show water lapping |
 | `trace_ssr` | **Keep** | Degrade path and VV-G near-field |

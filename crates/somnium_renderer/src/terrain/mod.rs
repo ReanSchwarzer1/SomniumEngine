@@ -244,7 +244,8 @@ pub struct GpuTerrainMaterial {
     pub clipmap_macro_tpm: [f32; 4],
     pub clipmap_macro_rings: u32,
     pub clipmap_macro_size: f32,
-    pub _clipmap_pad: [f32; 2],
+    pub clipmap_detail_ready: u32,
+    pub clipmap_macro_ready: u32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -620,7 +621,8 @@ impl TerrainData {
             clipmap_macro_tpm: [0.0; 4],
             clipmap_macro_rings: 0,
             clipmap_macro_size: 0.0,
-            _clipmap_pad: [0.0; 2],
+            clipmap_detail_ready: 0,
+            clipmap_macro_ready: 0,
         }
     }
 
