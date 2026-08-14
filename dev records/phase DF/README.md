@@ -1,7 +1,7 @@
 # Phase DF evidence (Daggerfall)
 
-Place **tonemapped** captures here when Daggerfall implementation starts
-(DF-A measurements, then A/B vs clipmap-off at eye / overview / ridge-look).
+Place **tonemapped** captures here (DF-A measurements at **maximized Native**
+plus resolution sweep, then A/B vs clipmap-off at eye / overview / ridge-look).
 Do not invent PNGs.
 
 Plan: [`../phase_DF.md`](../phase_DF.md). **Start-here:**

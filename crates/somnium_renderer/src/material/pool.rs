@@ -254,16 +254,15 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_terrain_material_is_the_1664_byte_shader_layout() {
+    fn the_terrain_material_is_the_2032_byte_shader_layout() {
         // Must match `TerrainMaterial` in terrain_material.wgsl. Every vec4
         // member has to land on a 16-byte offset or WGSL and repr(C) disagree
         // and the shader silently decodes the wrong words — the failure mode
         // that cost a whole session when `emissive` was a vec3.
         //
-        // Phase XV-Zeta: thirty-two layers, eight splatmaps, 1664 bytes.
-        // Scalars stay packed as `array<vec4<T>, 8>`, never `array<f32, 32>`.
+        // Phase DF: clipmap addressing after the XV-Zeta 1664-byte body.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 1664);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 2032);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();
@@ -297,5 +296,13 @@ mod material_flag_tests {
         assert_eq!(offset(m.layer_moisture.as_ptr() as *const u8), 1520);
         assert_eq!(offset(&m.wetness as *const f32 as *const u8), 1648);
         assert_eq!(offset(&m.wetness_f0 as *const f32 as *const u8), 1660);
+        assert_eq!(offset(&m.clipmap_enabled as *const u32 as *const u8), 1664);
+        assert_eq!(offset(m.clipmap_albedo.as_ptr() as *const u8), 1680);
+        assert_eq!(offset(m.clipmap_center.as_ptr() as *const u8), 1744);
+        assert_eq!(offset(m.clipmap_tpm.as_ptr() as *const u8), 1872);
+        assert_eq!(
+            offset(&m.clipmap_macro_rings as *const u32 as *const u8),
+            2016
+        );
     }
 }

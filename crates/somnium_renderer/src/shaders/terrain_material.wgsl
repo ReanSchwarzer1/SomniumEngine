@@ -17,7 +17,7 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (1664 bytes, Phase XV-Zeta). Every vec4 sits
+// Mirrors `terrain::GpuTerrainMaterial` (2032 bytes, Phase DF). Every vec4 sits
 // on a 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
     layer_tiling: array<vec4<f32>, 8>,
@@ -49,6 +49,24 @@ struct TerrainMaterial {
     wetness_darken: f32,
     wetness_gloss: f32,
     wetness_f0: f32,
+    // Phase DF: nested material clipmaps. 2032 bytes total.
+    clipmap_enabled: u32,
+    clipmap_rings: u32,
+    clipmap_size: f32,
+    clipmap_debug: u32,
+    clipmap_albedo: array<vec4<i32>, 2>,
+    clipmap_surface: array<vec4<i32>, 2>,
+    clipmap_center: array<vec4<f32>, 4>,
+    clipmap_origin: array<vec4<f32>, 4>,
+    clipmap_tpm: array<vec4<f32>, 2>,
+    clipmap_macro_albedo: vec4<i32>,
+    clipmap_macro_normal: vec4<i32>,
+    clipmap_macro_center: array<vec4<f32>, 2>,
+    clipmap_macro_origin: array<vec4<f32>, 2>,
+    clipmap_macro_tpm: vec4<f32>,
+    clipmap_macro_rings: u32,
+    clipmap_macro_size: f32,
+    _clipmap_pad: vec2<f32>,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -306,6 +324,8 @@ var<private> terrain_wetness_factor: f32 = 0.0;
 var<private> terrain_cliff_blend_dbg: f32 = 0.0;
 var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
 var<private> terrain_wet_f0: f32 = 0.0;
+/// Phase DF: which detail ring the clipmap path picked (debug mode 33).
+var<private> terrain_clipmap_ring: f32 = 0.0;
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
@@ -467,11 +487,17 @@ fn terrain_macro_blend(
 ///
 /// Falls back to the blend's identity — 0.5 at zero strength — when no macro
 /// map is bound, so the branch below it needs no second path.
-fn terrain_macro_sample(tm: TerrainMaterial, splat_uv: vec2<f32>) -> vec4<f32> {
+fn terrain_macro_sample(
+    tm: TerrainMaterial,
+    splat_uv: vec2<f32>,
+    splat_ddx: vec2<f32>,
+    splat_ddy: vec2<f32>,
+) -> vec4<f32> {
     if tm.macro_map < 0 {
         return vec4<f32>(0.5, 0.5, 0.5, 0.0);
     }
-    let m = textureSample(textures[tm.macro_map], default_sampler, splat_uv);
+    let m = textureSampleGrad(
+        textures[tm.macro_map], default_sampler, splat_uv, splat_ddx, splat_ddy);
     return vec4<f32>(m.rgb, m.a * tm.macro_strength);
 }
 
@@ -588,6 +614,340 @@ fn terrain_projected_pbr(
     return out;
 }
 
+struct TerrainGenerated {
+    albedo: vec4<f32>,
+    surface: vec4<f32>,
+}
+
+fn clipmap_vec2_from_packed(v: array<vec4<f32>, 4>, ring: u32) -> vec2<f32> {
+    let packed = v[ring / 2u];
+    let o = (ring % 2u) * 2u;
+    return vec2<f32>(packed[o], packed[o + 1u]);
+}
+
+fn clipmap_macro_vec2(v: array<vec4<f32>, 2>, ring: u32) -> vec2<f32> {
+    let packed = v[ring / 2u];
+    let o = (ring % 2u) * 2u;
+    return vec2<f32>(packed[o], packed[o + 1u]);
+}
+
+fn clipmap_uv(center: vec2<f32>, origin: vec2<f32>, tpm: f32, size: f32, world_xz: vec2<f32>) -> vec2<f32> {
+    let extent = size / max(tpm, 0.0001);
+    let logical = (world_xz - center) / extent + vec2<f32>(0.5);
+    return fract(logical + origin);
+}
+
+fn clipmap_pick_detail_ring(tm: TerrainMaterial, world_xz: vec2<f32>) -> u32 {
+    var ring = tm.clipmap_rings - 1u;
+    for (var r = 0u; r < tm.clipmap_rings; r = r + 1u) {
+        let tpm = tm.clipmap_tpm[r / 4u][r % 4u];
+        let extent = tm.clipmap_size / max(tpm, 0.0001);
+        let c = clipmap_vec2_from_packed(tm.clipmap_center, r);
+        let d = abs(world_xz - c);
+        let margin = extent * 0.02;
+        if max(d.x, d.y) < extent * 0.5 - margin {
+            ring = r;
+            break;
+        }
+    }
+    return ring;
+}
+
+fn clipmap_max_parallax_depth(tm: TerrainMaterial) -> f32 {
+    var depth = 0.0;
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        depth = max(depth, terrain_parallax_depth(tm, i));
+    }
+    return depth;
+}
+
+fn clipmap_height_at(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> f32 {
+    let tpm = tm.clipmap_tpm[ring / 4u][ring % 4u];
+    let uv = clipmap_uv(
+        clipmap_vec2_from_packed(tm.clipmap_center, ring),
+        clipmap_vec2_from_packed(tm.clipmap_origin, ring),
+        tpm,
+        tm.clipmap_size,
+        world_xz,
+    );
+    let id = tm.clipmap_albedo[ring / 4u][ring % 4u];
+    return textureSampleLevel(textures[id], default_sampler, uv, 0.0).a;
+}
+
+/// POM through the baked clipmap height — one field, not four packed arrays.
+fn clipmap_parallax_offset(
+    tm: TerrainMaterial,
+    world_xz: vec2<f32>,
+    ring: u32,
+    view_ts: vec3<f32>,
+    tangent_xz: vec2<f32>,
+    bitangent_xz: vec2<f32>,
+    depth: f32,
+    steps: f32,
+) -> vec2<f32> {
+    let steepness = max(abs(view_ts.z), 0.05);
+    let layers = max(mix(steps, 1.0, steepness), 1.0);
+    let layer_depth = 1.0 / layers;
+    let step_ts = -view_ts.xy / steepness * depth * layer_depth;
+    let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
+    var offset = vec2<f32>(0.0);
+    var ray_depth = 0.0;
+    var surface = 1.0 - clipmap_height_at(tm, world_xz, ring);
+    var i = 0.0;
+    loop {
+        if surface <= ray_depth || i >= layers {
+            break;
+        }
+        offset += step_xz;
+        ray_depth += layer_depth;
+        surface = 1.0 - clipmap_height_at(tm, world_xz + offset, ring);
+        i = i + 1.0;
+    }
+    let prev_offset = offset - step_xz;
+    let after = surface - ray_depth;
+    let before = (1.0 - clipmap_height_at(tm, world_xz + prev_offset, ring))
+        - ray_depth + layer_depth;
+    let denom = after - before;
+    let weight = select(0.0, after / denom, abs(denom) > 1e-6);
+    return mix(offset, prev_offset, clamp(weight, 0.0, 1.0));
+}
+
+fn clipmap_parallax_shadow(
+    tm: TerrainMaterial,
+    world_xz: vec2<f32>,
+    ring: u32,
+    light_ts: vec3<f32>,
+    tangent_xz: vec2<f32>,
+    bitangent_xz: vec2<f32>,
+    depth: f32,
+    steps: u32,
+) -> f32 {
+    if steps == 0u || light_ts.z <= 0.05 {
+        return 1.0;
+    }
+    let start = 1.0 - clipmap_height_at(tm, world_xz, ring);
+    let step = 1.0 / f32(steps);
+    let step_ts = light_ts.xy / light_ts.z * depth * step;
+    let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
+    var occlusion = 0.0;
+    var offset = vec2<f32>(0.0);
+    var ray = start;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        offset += step_xz;
+        ray -= step;
+        let h = 1.0 - clipmap_height_at(tm, world_xz + offset, ring);
+        occlusion = max(occlusion, (ray - h) * (1.0 - f32(i) * step));
+    }
+    return saturate(1.0 - occlusion);
+}
+
+fn evaluate_clipmap_material(
+    tm: TerrainMaterial,
+    world_pos: vec3<f32>,
+    geo_normal: vec3<f32>,
+    splat_uv: vec2<f32>,
+    world_ddx: vec2<f32>,
+    world_ddy: vec2<f32>,
+) -> TerrainSurface {
+    _ = splat_uv;
+    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
+    let bitangent = cross(geo_normal, tangent);
+    let steepness = 1.0 - abs(geo_normal.y);
+    let cliff_blend = smoothstep(0.45, 0.7, steepness);
+    let allow_pom = cliff_blend < 0.05;
+    let world_xz = world_pos.xz;
+    let ring = clipmap_pick_detail_ring(tm, world_xz);
+    terrain_clipmap_ring = f32(ring) / max(f32(tm.clipmap_rings - 1u), 1.0);
+
+    var march_xz = vec2<f32>(0.0);
+    var parallax_shadow = 1.0;
+    let parallax_steps = f32(tm.parallax_steps);
+    if allow_pom && parallax_steps >= 4.0 {
+        let depth = clipmap_max_parallax_depth(tm);
+        if depth > 0.0 {
+            let v = normalize(view.camera_pos - world_pos);
+            let view_ts = vec3<f32>(dot(v, tangent), dot(v, bitangent), dot(v, geo_normal));
+            march_xz = clipmap_parallax_offset(
+                tm, world_xz, ring, view_ts, tangent.xz, bitangent.xz, depth, parallax_steps);
+            let l = normalize(light.direction);
+            let light_ts = vec3<f32>(dot(l, tangent), dot(l, bitangent), dot(l, geo_normal));
+            parallax_shadow = clipmap_parallax_shadow(
+                tm, world_xz + march_xz, ring, light_ts, tangent.xz, bitangent.xz,
+                depth, tm.parallax_shadow_steps);
+        }
+    }
+    let sample_xz = world_xz + march_xz;
+    let tpm = tm.clipmap_tpm[ring / 4u][ring % 4u];
+    let uv = clipmap_uv(
+        clipmap_vec2_from_packed(tm.clipmap_center, ring),
+        clipmap_vec2_from_packed(tm.clipmap_origin, ring),
+        tpm,
+        tm.clipmap_size,
+        sample_xz,
+    );
+    let uv_ddx = world_ddx * tpm / tm.clipmap_size;
+    let uv_ddy = world_ddy * tpm / tm.clipmap_size;
+    let albedo_id = tm.clipmap_albedo[ring / 4u][ring % 4u];
+    let surface_id = tm.clipmap_surface[ring / 4u][ring % 4u];
+    let a = textureSampleGrad(textures[albedo_id], default_sampler, uv, uv_ddx, uv_ddy);
+    let s = textureSampleGrad(textures[surface_id], default_sampler, uv, uv_ddx, uv_ddy);
+    var albedo = a.rgb;
+    var roughness = s.b;
+    var occlusion = s.a;
+    let nxy = s.rg * 2.0 - 1.0;
+    var n_ts = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
+    var surfgrad = ts_to_surfgrad(n_ts, tangent, bitangent);
+    var taps = 2u + tm.parallax_steps + tm.parallax_shadow_steps;
+
+    if cliff_blend > 0.0 {
+        let local_pos = world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y);
+        let cliff = terrain_projected_pbr(
+            tm,
+            tm.cliff_layer,
+            local_pos,
+            geo_normal,
+            terrain_layer_tiling(tm, tm.cliff_layer),
+            world_ddx,
+            world_ddy,
+        );
+        taps += select(4u, 6u, tm.projection_mode != 0u);
+        albedo = mix(albedo, cliff.albedo, cliff_blend);
+        roughness = mix(roughness, cliff.roughness, cliff_blend);
+        occlusion = mix(occlusion, cliff.occlusion, cliff_blend);
+        let cliff_grad = ts_to_surfgrad(normalize(cliff.normal_ts), tangent, bitangent);
+        surfgrad = mix(surfgrad, cliff_grad, cliff_blend);
+    }
+
+    terrain_wetness_factor = 0.0;
+    terrain_cliff_blend_dbg = cliff_blend;
+    terrain_dominant_albedo = albedo;
+    terrain_wet_f0 = 0.0;
+    terrain_discarded = 0.0;
+    terrain_selected_rgb = vec3<f32>(0.0);
+    terrain_weight_rgb = vec3<f32>(0.0);
+
+    var out: TerrainSurface;
+    out.albedo = albedo;
+    out.taps = taps;
+    out.discarded = 0.0;
+    out.selected_rgb = vec3<f32>(terrain_clipmap_ring);
+    out.weight_rgb = vec3<f32>(0.0);
+    out.parallax_shadow = parallax_shadow;
+    out.roughness = max(roughness, 0.05);
+    out.occlusion = occlusion;
+    out.normal = resolve_surfgrad(geo_normal, surfgrad);
+    return out;
+}
+
+/// Strongest-four + hex + height-blend into one texel. No POM, no view.
+/// Used by the clipmap generate compute.
+fn terrain_generate_texel(
+    terrain_index: u32,
+    world_xz: vec2<f32>,
+    world_ddx: vec2<f32>,
+    world_ddy: vec2<f32>,
+    hex: bool,
+) -> TerrainGenerated {
+    let tm = terrain_materials[terrain_index];
+    let splat_uv = (world_xz - tm.terrain_origin) * tm.inv_world_size;
+    let splat_ddx = world_ddx * tm.inv_world_size;
+    let splat_ddy = world_ddy * tm.inv_world_size;
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSampleGrad(
+            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
+    }
+    var weight = terrain_unpack_splats(splat_s);
+    let selected = terrain_strongest_four(weight);
+    var kept = 0.0;
+    var gated = array<f32, 32>();
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        gated[i] = weight[i];
+        kept += weight[i];
+    }
+    kept = max(kept, 0.0001);
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        weight[i] = gated[i] / kept;
+    }
+    let local_xz = world_xz - tm.terrain_origin;
+    let geo_normal = vec3<f32>(0.0, 1.0, 0.0);
+    let tangent = vec3<f32>(1.0, 0.0, 0.0);
+    let bitangent = vec3<f32>(0.0, 0.0, 1.0);
+    let epsilon = LAYER_WEIGHT_EPSILON;
+
+    var samples: array<TerrainLayerSample, 4>;
+    var adjusted: array<f32, 4>;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        if weight[i] < epsilon {
+            adjusted[s] = 0.0;
+            continue;
+        }
+        let tiling = terrain_layer_tiling(tm, i);
+        samples[s] = terrain_sample_layer(
+            tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
+        if tm.height_blend != 0u {
+            adjusted[s] = terrain_append_height(tm, i, weight[i], samples[s].height);
+        } else {
+            adjusted[s] = weight[i];
+        }
+    }
+    var max_w = 0.0;
+    var min_depth = -1e30;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        if weight[i] < epsilon {
+            continue;
+        }
+        max_w = max(max_w, adjusted[s]);
+        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, i));
+    }
+    var blend: array<f32, 4>;
+    var blend_sum = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        var b = 0.0;
+        let i = selected[s];
+        if weight[i] >= epsilon {
+            let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
+            b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
+        }
+        blend[s] = b;
+        blend_sum += b;
+    }
+    blend_sum = max(blend_sum, 0.0001);
+    var albedo = vec3<f32>(0.0);
+    var n_ts = vec3<f32>(0.0, 0.0, 1.0);
+    var roughness = 0.0;
+    var occlusion = 0.0;
+    var height = 0.0;
+    var moisture = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let b = blend[s] / blend_sum;
+        if b <= 0.0 {
+            continue;
+        }
+        albedo += sqrt(samples[s].albedo) * b;
+        n_ts += samples[s].normal_ts * b;
+        roughness += samples[s].roughness * b;
+        occlusion += samples[s].occlusion * b;
+        height += samples[s].height * b;
+        moisture += terrain_moisture(tm, selected[s]) * b;
+    }
+    let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
+    albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
+    albedo = albedo * albedo;
+    let wet = saturate(tm.wetness * moisture);
+    albedo *= mix(1.0, tm.wetness_darken, wet);
+    roughness = mix(roughness, roughness * tm.wetness_gloss, wet);
+    n_ts = normalize(n_ts);
+    var packed: TerrainGenerated;
+    packed.albedo = vec4<f32>(albedo, height);
+    packed.surface = vec4<f32>(n_ts.xy * 0.5 + 0.5, roughness, occlusion);
+    return packed;
+}
+
 fn evaluate_terrain_material(
     terrain_index: u32,
     world_pos: vec3<f32>,
@@ -597,11 +957,19 @@ fn evaluate_terrain_material(
     world_ddy: vec2<f32>,
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
+    // Uniform whole-terrain flag, not a per-pixel LOD. XV-Zeta forbids mixing
+    // live blend and clipmap inside one wavefront based on hit distance.
+    if tm.clipmap_enabled != 0u {
+        return evaluate_clipmap_material(tm, world_pos, geo_normal, splat_uv, world_ddx, world_ddy);
+    }
 
+    let splat_ddx = world_ddx * tm.inv_world_size;
+    let splat_ddy = world_ddy * tm.inv_world_size;
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
-        splat_s[g] = textureSample(textures[id], default_sampler, splat_uv);
+        splat_s[g] = textureSampleGrad(
+            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
     }
     var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
@@ -741,7 +1109,7 @@ fn evaluate_terrain_material(
         occlusion += samples[s].occlusion * b;
     }
 
-    let macro_c = terrain_macro_sample(tm, splat_uv);
+    let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
     albedo = albedo * albedo;
 

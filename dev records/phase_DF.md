@@ -8,7 +8,9 @@
 > on every pixel.**
 
 > **Codename:** Daggerfall, after *The Elder Scrolls II: Daggerfall*  
-> **Status:** PLAN — not implemented (2026-08-14)  
+> **Status:** IN ENGINE (2026-08-14) — DF-A harness (maximize + resolution sweep);
+> DF-B–G clipmap generate/shade/dirty/macro/cliffs/docs. Default **off** until
+> DF-E luminance/timing gates are measured at a **maximized** Native window.  
 > **Start-here for the engine:** [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)  
 > **Depends on:** Phase XV-A–J (32-layer PBR, strongest-four, unique-colour
 > macro, aerial hex/POM cut). FSR 3 is complementary (fewer shaded pixels) and
@@ -364,13 +366,13 @@ stays a uniform multiply — prefer dirty if it alters blend weights).
 
 | ID | Work | Est. | Exit |
 |---|---|---|---|
-| **DF-A** | Measure: Phase 29 timings + debug taps (mode 12) at eye / overview / ridge-look with FSR on and `SOMNIUM_FSR=0`. Freeze adapter like XV-J. | 0.5 | Table in `dev records/phase DF/` |
-| **DF-B** | `TerrainClipmap` GPU images + uniforms; CPU toroidal origin; **generate** compute using extracted `terrain_sample_layer` (no POM). Debug view: clipmap albedo. | 2 | Looks like a unique-colour-ish ground from above |
-| **DF-C** | Shading samples detail stack; POM marches clipmap height on finest ring; hex **not** in shade. **One** shader; uniform step count. Inspector **Clipmap** default **off** until DF-E. | 2 | A/B vs current at eye (luminance gate) |
-| **DF-D** | Incremental dirty rects; sculpt/paint invalidate; margin + wrap safety (O3DE extended margin). | 1 | Camera walk does not hitch / smear seams |
-| **DF-E** | Macro stack + unique colour; distance rings; default **on** if gates pass. Profiler. | 1 | Overview shading drop recorded |
-| **DF-F** | Cliff/biplanar: leave live or second generate. Optional RVT-style “decals into clipmap” — only if cheap. | 1 | Cliffs not flatter than XV-F |
-| **DF-G** | Docs, ATTRIBUTION §1.8, Help Terrain, XV-Zeta pointer, tests (origin wrap, density math). | 0.5 | `cargo test --workspace` |
+| **DF-A** | Measure at **maximized Native** + resolution sweep; FSR on/off; eye / overview / ridge-look. | 0.5 | Table in `dev records/phase DF/` |
+| **DF-B** | `TerrainClipmap` GPU images + uniforms; CPU toroidal origin; generate compute (no POM). Debug 32 albedo. | 2 | **IN ENGINE** |
+| **DF-C** | Shading samples detail stack; POM on clipmap height; hex not in shade. Inspector Clipmap default **off**. | 2 | **IN ENGINE** |
+| **DF-D** | Incremental dirty rects; sculpt/paint invalidate; extended margin wrap. | 1 | **IN ENGINE** |
+| **DF-E** | Macro stack; distance rings; profiler scope. Default on **after** maximized-window gates. | 1 | **IN ENGINE** (default still off) |
+| **DF-F** | Cliffs stay live (biplanar in shade). | 1 | **IN ENGINE** |
+| **DF-G** | Docs, ATTRIBUTION §1.8 as used, Help Terrain, tests. | 0.5 | `cargo test --workspace` **pass** |
 | **DF-H** | Research spike only: AVT sectors / world > 2 km. **No ship** unless user expands the map. | 0 | Note in this file |
 
 Kill switch: `SOMNIUM_TERRAIN_CLIPMAP=0` and inspector toggle.

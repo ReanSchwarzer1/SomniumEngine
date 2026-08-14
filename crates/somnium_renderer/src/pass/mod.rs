@@ -25,6 +25,7 @@ pub mod shading;
 pub mod shadow;
 pub mod spd;
 pub mod taa;
+pub mod terrain_clipmap;
 pub mod transparent;
 pub mod underwater;
 pub mod velocity;

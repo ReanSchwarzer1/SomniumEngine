@@ -21,6 +21,12 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 **LOD Morph** (default off) and **Morph** (0–1, start of the blend) remove the ridge pop between clipmap LODs. `SOMNIUM_LOD_MORPH=1` turns it on.
 
+## Material clipmaps (Phase DF)
+
+**Clipmap** (default off until the DF-E gates pass) bakes strongest-four + hex + height-blend into nested camera-centred caches so walking and looking along the ground do not rerun that work every vis-buffer pixel. POM still marches, but on **one baked height** rather than four packed arrays. Cliffs stay live (biplanar). `SOMNIUM_TERRAIN_CLIPMAP=1` forces on; `=0` forces off.
+
+Dbg **32** is clipmap albedo, **33** is ring index (0 = finest).
+
 ## Debug views
 
 Terrain **Dbg** 0–23 are material / shadow / splat probes. **24–31** are lighting: luminance, GI, cluster occupancy, world cache, specular aux, SDF, analytic mips, path-tracer aux.

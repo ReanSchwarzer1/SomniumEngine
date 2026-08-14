@@ -20,6 +20,7 @@
 pub mod biome;
 pub mod blend;
 pub mod brush;
+pub mod clipmap;
 pub mod collider;
 pub mod foliage;
 pub mod foliage_paint;
@@ -160,7 +161,7 @@ pub struct TerrainLayer {
 }
 
 /// Everything `shading.wgsl` needs to evaluate a terrain surface, mirrored by
-/// `TerrainMaterial` in `terrain_material.wgsl` (1664 bytes, Phase XV-Zeta).
+/// `TerrainMaterial` in `terrain_material.wgsl` (2032 bytes, Phase DF).
 ///
 /// **Every `vec4` member sits at a 16-byte offset**, which is what keeps Rust's
 /// `repr(C)` packing and WGSL's alignment rules agreeing.
@@ -226,6 +227,24 @@ pub struct GpuTerrainMaterial {
     pub wetness_gloss: f32,
     /// Extra dielectric F0 when wet.                           offset 1660
     pub wetness_f0: f32,
+    /// Phase DF: nested material clipmaps.                     offset 1664
+    pub clipmap_enabled: u32,
+    pub clipmap_rings: u32,
+    pub clipmap_size: f32,
+    pub clipmap_debug: u32,
+    pub clipmap_albedo: [i32; 8],
+    pub clipmap_surface: [i32; 8],
+    pub clipmap_center: [f32; 16],
+    pub clipmap_origin: [f32; 16],
+    pub clipmap_tpm: [f32; 8],
+    pub clipmap_macro_albedo: [i32; 4],
+    pub clipmap_macro_normal: [i32; 4],
+    pub clipmap_macro_center: [f32; 8],
+    pub clipmap_macro_origin: [f32; 8],
+    pub clipmap_macro_tpm: [f32; 4],
+    pub clipmap_macro_rings: u32,
+    pub clipmap_macro_size: f32,
+    pub _clipmap_pad: [f32; 2],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -585,6 +604,23 @@ impl TerrainData {
             wetness_darken: 0.62,
             wetness_gloss: 0.55,
             wetness_f0: 0.02,
+            clipmap_enabled: 0,
+            clipmap_rings: 0,
+            clipmap_size: 0.0,
+            clipmap_debug: 0,
+            clipmap_albedo: [-1; 8],
+            clipmap_surface: [-1; 8],
+            clipmap_center: [0.0; 16],
+            clipmap_origin: [0.0; 16],
+            clipmap_tpm: [0.0; 8],
+            clipmap_macro_albedo: [-1; 4],
+            clipmap_macro_normal: [-1; 4],
+            clipmap_macro_center: [0.0; 8],
+            clipmap_macro_origin: [0.0; 8],
+            clipmap_macro_tpm: [0.0; 4],
+            clipmap_macro_rings: 0,
+            clipmap_macro_size: 0.0,
+            _clipmap_pad: [0.0; 2],
         }
     }
 

@@ -245,6 +245,9 @@ pub struct SomniumRenderer {
     terrain_material_ids: std::collections::HashSet<u32>,
     /// All created terrains, indexed by terrain id (`TerrainComponent::terrain_id`).
     pub terrains: Vec<crate::terrain::TerrainData>,
+    /// Phase DF: one clipmap stack per terrain, same index as `terrains`.
+    pub clipmaps: Vec<crate::terrain::clipmap::TerrainClipmap>,
+    clipmap_pass: crate::pass::terrain_clipmap::TerrainClipmapPass,
     /// Terrain ids (+ model matrices) submitted for the current frame.
     terrain_queue: Vec<(u32, glam::Mat4)>,
 
@@ -391,6 +394,8 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
+        let clipmap_pass =
+            crate::pass::terrain_clipmap::TerrainClipmapPass::new(&ctx.device, &global_pool.layout);
 
         let rt_debug_pass =
             crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
@@ -699,6 +704,8 @@ impl SomniumRenderer {
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
+            clipmaps: Vec::new(),
+            clipmap_pass,
             terrain_queue: Vec::new(),
             draw_queue: Vec::new(),
 
@@ -1599,6 +1606,9 @@ impl SomniumRenderer {
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
 
+        let mut clipmap = crate::terrain::clipmap::TerrainClipmap::new(&ctx.device);
+        clipmap.register_bindless(&mut |view| self.add_texture(ctx, view));
+
         // The `GpuMaterial` itself is nearly empty: `terrain_index` is what
         // sends the shading pass down the splat path, and everything it would
         // otherwise read lives in the terrain-material entry.
@@ -1629,6 +1639,7 @@ impl SomniumRenderer {
         self.terrain_material_ids.insert(terrain.material_id);
 
         self.terrains.push(terrain);
+        self.clipmaps.push(clipmap);
         (self.terrains.len() - 1) as u32
     }
 
@@ -1833,6 +1844,24 @@ impl SomniumRenderer {
                     transform: model,
                 });
             }
+        }
+
+        for &(id, model) in &self.terrain_queue {
+            let Some(terrain) = self.terrains.get(id as usize) else {
+                continue;
+            };
+            let local_cam = model.inverse().transform_point3(self.camera_pos);
+            let mut mat = terrain.gpu_material_for_camera(local_cam);
+            let terrain_index = terrain.terrain_index;
+            let edit_revision = terrain.edit_revision;
+            if let Some(clipmap) = self.clipmaps.get_mut(id as usize) {
+                if clipmap.enabled && !crate::terrain::clipmap::TerrainClipmap::env_forced_off() {
+                    clipmap.update([self.camera_pos.x, self.camera_pos.z], edit_revision);
+                }
+                clipmap.fill_gpu(&mut mat);
+            }
+            self.terrain_materials
+                .write(&ctx.queue, terrain_index, &mat);
         }
 
         // ── 2. Sort draw queue ───────────────────────────────────────────────
@@ -2314,6 +2343,75 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
         self.shading_pass
             .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
+
+        // ── 6.95 Terrain clipmap generate (Phase DF) ─────────────────────────
+        // World XZ, no FSR jitter. Before shading samples the cache.
+        // The same GPU images are in the bindless array for shading, so this
+        // dispatch must not see them as sampled textures — wgpu treats that as
+        // RESOURCE + STORAGE_WRITE in one usage scope.
+        self.profiler.begin(&mut encoder, "Terrain clipmap");
+        let mut hide: Vec<u32> = Vec::new();
+        let mut work: Vec<(usize, u32)> = Vec::new();
+        for i in 0..self.clipmaps.len() {
+            let enabled = self.clipmaps[i].enabled
+                && !crate::terrain::clipmap::TerrainClipmap::env_forced_off();
+            if !enabled {
+                continue;
+            }
+            let Some(terrain) = self.terrains.get(i) else {
+                continue;
+            };
+            if self.clipmaps[i].detail_jobs().is_empty() && self.clipmaps[i].macro_jobs().is_empty()
+            {
+                continue;
+            }
+            hide.extend(self.clipmaps[i].bindless_ids());
+            work.push((i, terrain.terrain_index));
+        }
+        let mut restored: Vec<(usize, wgpu::TextureView)> = Vec::new();
+        if !work.is_empty() {
+            let dummy = self.texture_pool.dummy_view.clone();
+            for &id in &hide {
+                let slot = id as usize;
+                if slot < self.global_pool.texture_views.len() {
+                    restored.push((
+                        slot,
+                        std::mem::replace(&mut self.global_pool.texture_views[slot], dummy.clone()),
+                    ));
+                }
+            }
+            self.global_pool.update_textures(&ctx.device);
+            for (i, terrain_index) in work {
+                let detail = self.clipmaps[i].detail_jobs();
+                let macro_jobs = self.clipmaps[i].macro_jobs();
+                self.clipmap_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.global_pool.bind_group,
+                    &self.clipmaps[i],
+                    terrain_index,
+                    &detail,
+                    true,
+                );
+                self.clipmap_pass.record(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.global_pool.bind_group,
+                    &self.clipmaps[i],
+                    terrain_index,
+                    &macro_jobs,
+                    false,
+                );
+                self.clipmaps[i].clear_dirty();
+            }
+            for (slot, view) in restored {
+                self.global_pool.texture_views[slot] = view;
+            }
+            self.global_pool.update_textures(&ctx.device);
+        }
+        self.profiler.end(&mut encoder);
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");
@@ -2946,6 +3044,13 @@ impl SomniumRenderer {
                     tracing::info!("XV-J-PROFILE {line}");
                 }
             }
+            tracing::info!(
+                scene = ?(self.render_width, self.render_height),
+                swapchain = ?(ctx.config.width, ctx.config.height),
+                fsr = self.fsr_pass.enabled,
+                clipmap = self.clipmaps.first().map(|c| c.enabled).unwrap_or(false),
+                "DF-A-VIEWPORT"
+            );
             if let Some(t) = self.terrains.first() {
                 tracing::info!(
                     "XV-J-RESIDENCY compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} aerial_lod_m=80",

@@ -1,7 +1,7 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-14  
-> **Current phase:** Phase IV complete (IV-A through IV-K); Phase XV (Appalachia) **XV-A–J complete** (1.10 ms shading remains an explicit exception; BC7 encoder + local packs 2026-08-13); Phase 26 (Metaphor) **26-A–I shipped, phase remains open**; Phase VV (Halcyon) **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off. **Next:** Phase DF (Daggerfall) plan only.  
+> **Current phase:** Phase DF (Daggerfall) **in engine** (2026-08-14) — clipmap default off until maximized-window gates. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
 > **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
@@ -29,8 +29,7 @@
 > Remaining work (independent tracks):
 > - **Audit (other model):** `dev records/post_halcyon_audit_handoff.md` — read
 >   all of `context.md`, `ATTRIBUTION.md`, and `dev records/**/*.md` first.
-> - **Phase DF — Daggerfall** — terrain material clipmaps (plan:
->   `dev records/phase_DF.md`). Do not reintroduce per-pixel sample-count LOD.
+> - **Phase DF — Daggerfall** — terrain material clipmaps (`dev records/phase_DF.md`). Default off until DF-E. Do not reintroduce per-pixel sample-count LOD.
 > - **Phase VV — Halcyon** — VV-A–H in tree (ray-traced water reflections).
 >   History: `dev records/halcyon_context_handoff.md`. Plan:
 >   `dev records/phase_VV.md`. Kill switch `SOMNIUM_RT_REFLECT=0`. Live SSR
@@ -1329,7 +1328,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
 | VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 | FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
-| DF | 📋 Plan | **Phase DF — Daggerfall:** nested material clipmaps (O3DE-style) so 32+ layers do not cost strongest-four×hex×POM on every pixel. Near-ground fidelity is a hard gate. **No per-pixel sample-count LOD.** Plan: `dev records/phase_DF.md`. |
+| DF | 🔧 In engine | **Phase DF — Daggerfall:** nested material clipmaps. Generate = strongest-four+hex+height-blend; shade taps the cache; POM on baked height. Default **off** (`SOMNIUM_TERRAIN_CLIPMAP=1` to enable). Measure at **maximized Native**. Plan: `dev records/phase_DF.md`. |
 
 ---
 
@@ -3673,10 +3672,12 @@ TLAS cap 8192; water and transparents stay out of the TLAS. Inspector: water
 **Start-here:** `dev records/post_halcyon_audit_handoff.md`. Plan: `dev records/phase_VV.md`.
 Kill switch: `SOMNIUM_RT_REFLECT=0`. Live SSR miss-rate capture still open.
 
-**Phase DF — Daggerfall (plan only, 2026-08-14).** Nested material clipmaps so
-32+ layers do not cost strongest-four × hex × POM on every pixel. Near-ground
-fidelity is a hard gate. No per-pixel sample-count LOD. Plan:
-`dev records/phase_DF.md`. Do not start this phase inside an audit session.
+**Phase DF — Daggerfall (in engine, 2026-08-14).** Nested material clipmaps:
+generate bakes strongest-four + hex + height-blend; shading taps the cache;
+POM marches one baked height. Cliffs stay live. Inspector **Clipmap** default
+off until maximized-window DF-E gates. `SOMNIUM_TERRAIN_CLIPMAP=1` / `=0`.
+Plan: `dev records/phase_DF.md`. GpuTerrainMaterial is **2032** bytes (XV-Zeta
+1664 plus clipmap addressing).
 
 ## 18. Known Issues & Active Bugs
 

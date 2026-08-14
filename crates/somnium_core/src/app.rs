@@ -295,7 +295,11 @@ impl<G: GameApp + 'static> Engine<G> {
             terrain_stroke: None,
             terrain_restore_queue: TerrainRestoreQueue::default(),
             camera_speed_norm: crate::DEFAULT_CAMERA_SPEED_NORM,
-            viewport_resolution: 0,
+            viewport_resolution: std::env::var("SOMNIUM_VIEWPORT_RES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .min(4),
             simulation_clock: SimulationClock::default(),
             play_session_active: false,
             simulation_accumulator: 0.0,
@@ -360,6 +364,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         match event_loop.create_window(attrs) {
             Ok(window) => {
                 let window = Arc::new(window);
+                if std::env::var("SOMNIUM_MAXIMIZE").as_deref() == Ok("1") {
+                    window.set_maximized(true);
+                    info!("Window maximized (SOMNIUM_MAXIMIZE=1)");
+                }
                 self.window = Some(Arc::clone(&window));
 
                 info!("Initializing rendering subsystems...");
@@ -1069,6 +1077,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         && self.terrain_brush.mode == BrushMode::Paint,
                     foliage_paint: self.foliage_paint_active,
                     hex_tiling: t.hex_tiling,
+                    clipmap: r
+                        .clipmaps
+                        .get(tc.terrain_id as usize)
+                        .map(|c| c.enabled)
+                        .unwrap_or(false),
                     lod_morph: t.lod_morph,
                     morph_start: t.lod_morph_start,
                 })
@@ -2134,13 +2147,10 @@ impl<G: GameApp> Engine<G> {
                 // (trunk / branches). Past lod_distance drop the leaf/twig
                 // cutouts. Index-count is only the fallback when the glTF did
                 // not mark any part as foliage.
-                let keep_only = impostor_distance > 0.0
-                    && dist > impostor_distance
-                    && parts.len() > 1;
-                let drop_heavy = !keep_only
-                    && lod_distance > 0.0
-                    && dist > lod_distance
-                    && parts.len() > 1;
+                let keep_only =
+                    impostor_distance > 0.0 && dist > impostor_distance && parts.len() > 1;
+                let drop_heavy =
+                    !keep_only && lod_distance > 0.0 && dist > lod_distance && parts.len() > 1;
                 let has_leaf = parts.iter().any(|p| p.is_leaf);
                 let cheapest = parts
                     .iter()
@@ -3139,7 +3149,7 @@ impl<G: GameApp> Engine<G> {
                         return;
                     }
                     if field == IF::TerrainDebugView {
-                        self.terrain_debug_view = value.round().clamp(0.0, 31.0);
+                        self.terrain_debug_view = value.round().clamp(0.0, 34.0);
                         if let Some(r) = self.renderer.as_mut() {
                             r.shading_debug = self.terrain_debug_view;
                         }
@@ -3568,6 +3578,19 @@ impl<G: GameApp> Engine<G> {
                                 "Terrain hex tiling: {}",
                                 if t.hex_tiling { "on" } else { "off" }
                             );
+                        }
+                    }
+                }
+            }
+
+            EditorEvent::ToggleTerrainClipmap => {
+                if let Some(tc) = self.selected_terrain() {
+                    if somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off() {
+                        info!("Terrain clipmap: forced off (SOMNIUM_TERRAIN_CLIPMAP=0)");
+                    } else if let Some(r) = &mut self.renderer {
+                        if let Some(cm) = r.clipmaps.get_mut(tc.terrain_id as usize) {
+                            cm.enabled = !cm.enabled;
+                            info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
                         }
                     }
                 }

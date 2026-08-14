@@ -233,6 +233,13 @@ fn apply_kit_view(
                 "talus" => w(15) + w(26) + w(7),
                 "red_clay" => w(11),
                 "lush" => w(16) + w(24),
+                "ridge" | "ridge-look" => {
+                    if h <= water + 12.0 || slope < 0.75 {
+                        f32::NEG_INFINITY
+                    } else {
+                        h + (1.0 - slope) * 4.0
+                    }
+                }
                 _ => f32::NEG_INFINITY,
             };
             if score > best.0 {
@@ -246,6 +253,11 @@ fn apply_kit_view(
             camera.position = to_world(lx, h + 1.7, lz);
             camera.yaw = -90.0;
             camera.pitch = -8.0;
+        }
+        "ridge" | "ridge-look" => {
+            camera.position = to_world(lx, h + 1.7, lz);
+            camera.yaw = 20.0;
+            camera.pitch = -22.0;
         }
         "shore" => {
             camera.position = to_world(lx, h.max(water) + 1.8, lz);

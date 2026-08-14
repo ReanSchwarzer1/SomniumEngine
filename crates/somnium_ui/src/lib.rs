@@ -126,6 +126,8 @@ struct InspectorHandles {
     terrain_paint_label: NodeHandle,
     terrain_hex_toggle: NodeHandle,
     terrain_hex_label: NodeHandle,
+    terrain_clipmap_toggle: NodeHandle,
+    terrain_clipmap_label: NodeHandle,
     terrain_morph_toggle: NodeHandle,
     terrain_morph_label: NodeHandle,
     terrain_morph_start: NodeHandle,
@@ -357,6 +359,7 @@ pub struct TerrainInspectorState {
     pub terrain_paint: bool,
     pub foliage_paint: bool,
     pub hex_tiling: bool,
+    pub clipmap: bool,
     pub lod_morph: bool,
     pub morph_start: f32,
 }
@@ -2150,6 +2153,10 @@ impl UiManager {
                     v.hex_tiling,
                 ));
                 self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_clipmap_toggle,
+                    v.clipmap,
+                ));
+                self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_morph_toggle,
                     v.lod_morph,
                 ));
@@ -2842,6 +2849,11 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainClipmap);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainMorph);
@@ -3132,6 +3144,11 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainClipmap);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
@@ -4894,6 +4911,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
     let (terrain_hex_toggle, terrain_hex_label) =
         make_toggle(ui, "Hex Tiling", font_id, terrain_section);
+    let (terrain_clipmap_toggle, terrain_clipmap_label) =
+        make_toggle(ui, "Clipmap", font_id, terrain_section);
     let (terrain_morph_toggle, terrain_morph_label) =
         make_toggle(ui, "LOD Morph", font_id, terrain_section);
     let terrain_morph_start = make_row_step(ui, "Morph", 34.0, font_id, terrain_section, 0.02);
@@ -5053,6 +5072,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         terrain_paint_label,
         terrain_hex_toggle,
         terrain_hex_label,
+        terrain_clipmap_toggle,
+        terrain_clipmap_label,
         terrain_morph_toggle,
         terrain_morph_label,
         terrain_morph_start,

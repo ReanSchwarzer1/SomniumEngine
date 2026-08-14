@@ -1102,6 +1102,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
     }
+    // 32 = clipmap albedo (Phase DF). Same as mode 9 on terrain when the
+    // cache is on; black on non-terrain so a missed bind is obvious.
+    if light._pad2_z > 31.5 && light._pad2_z < 32.5 {
+        return vec4<f32>(surface.albedo, 1.0);
+    }
+    // 33 = clipmap ring index, 0 = finest.
+    if light._pad2_z > 32.5 && light._pad2_z < 33.5 {
+        return vec4<f32>(vec3<f32>(terrain_clipmap_ring), 1.0);
+    }
 
     // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only
     // while this debug view is active; zero means a non-terrain instance.
