@@ -54,6 +54,7 @@ pub mod event;
 pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
+pub mod map;
 pub mod scene_serial;
 pub mod sun;
 pub mod time;
@@ -71,6 +72,11 @@ pub use error::EngineError;
 pub use event::{EngineEvent, InputState};
 pub use landscape::{
     BuiltLandscape, DEFAULT_LANDSCAPE_VERSION, DefaultLandscapePreset, create_default_landscape,
+    create_island_landscape,
+};
+pub use map::{
+    DEFAULT_MAP_PATH, MapKind, MapLoadResult, load_map, parse_map_file, parse_map_kind_json,
+    spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
 pub use time::TimeState;
@@ -1382,7 +1388,7 @@ pub struct WaterComponent {
     pub water_id: u32,
     /// Renderer terrain whose local space and bathymetry this body follows.
     pub terrain_id: u32,
-    /// 0 = legacy/unset, 1 = baked Great Lakes lake preset.
+    /// 0 = legacy/unset, 1 = baked Great Lakes lake, 2 = full-coverage ocean.
     pub preset: u32,
     /// 0 = lake. Reserved for ocean and river body types.
     pub body_kind: u32,
@@ -1556,6 +1562,17 @@ impl WaterComponent {
             caustic_strength: 0.85,
             underwater_enabled: true,
             ..Self::default()
+        }
+    }
+
+    /// Open ocean filling `bounds`. Same frozen look as [`Self::great_lakes`]
+    /// (datum 16.1 / optical 18.6 / Gerstner 0.85); coverage is a wet rectangle
+    /// so the island can sit in surrounding sea instead of a lake mask.
+    pub fn ocean(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
+        Self {
+            preset: 2,
+            body_kind: 1,
+            ..Self::great_lakes(water_id, terrain_id, bounds)
         }
     }
 

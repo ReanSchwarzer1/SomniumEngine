@@ -253,6 +253,21 @@ fn load_image(path: &str) -> Result<HeightImage, String> {
     })
 }
 
+/// FBM in [0, 1] used by both procedural hills and the island.
+fn relief_fbm(u: f32, v: f32, seed: u32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut freq = 3.0;
+    let mut norm = 0.0;
+    for octave in 0..6u32 {
+        sum += value_noise(u * freq, v * freq, seed.wrapping_add(octave * 7919)) * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    (sum / norm.max(0.0001)).clamp(0.0, 1.0)
+}
+
 /// Value-noise FBM relief, for when no heightmap file is supplied.
 ///
 /// Not a substitute for real terrain data, but it gives ridges, valleys and a
@@ -263,21 +278,73 @@ pub fn fbm_relief(tx: u32, tz: u32, seed: u32, amplitude: f32) -> Vec<f32> {
     for z in 0..tz {
         for x in 0..tx {
             let (u, v) = (x as f32 / tx as f32, z as f32 / tz as f32);
-            let mut sum = 0.0;
-            let mut amp = 0.5;
-            let mut freq = 3.0;
-            let mut norm = 0.0;
-            for octave in 0..6u32 {
-                sum += value_noise(u * freq, v * freq, seed.wrapping_add(octave * 7919)) * amp;
-                norm += amp;
-                amp *= 0.5;
-                freq *= 2.0;
-            }
-            // Squared, so valleys are broad and flat and peaks are sharp —
-            // linear FBM gives a uniformly lumpy field that reads as noise
-            // rather than as landscape.
-            let h = (sum / norm).clamp(0.0, 1.0);
+            let h = relief_fbm(u, v, seed);
             out[(z * tx + x) as usize] = h * h * amplitude;
+        }
+    }
+    out
+}
+
+fn island_smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Low rolling islet: beach, coastal plain, gentle FBM hills. Rim below water.
+///
+/// `peak_metres` is clamped — a 40 m recipe on a ~130 m footprint is a sea stack.
+pub fn island_relief(
+    tx: u32,
+    tz: u32,
+    seed: u32,
+    peak_metres: f32,
+    water_level: f32,
+) -> Vec<f32> {
+    let rise = (peak_metres - water_level).clamp(7.0, 13.0);
+    let half = 256.0;
+    let mut out = vec![0.0f32; (tx * tz) as usize];
+    for z in 0..tz {
+        for x in 0..tx {
+            let u = if tx > 1 {
+                x as f32 / (tx - 1) as f32
+            } else {
+                0.5
+            };
+            let v = if tz > 1 {
+                z as f32 / (tz - 1) as f32
+            } else {
+                0.5
+            };
+            let nx = u * 2.0 - 1.0;
+            let nz = v * 2.0 - 1.0;
+            let r = (nx * nx + nz * nz).sqrt();
+            let theta = nz.atan2(nx);
+            let (ca, sa) = (theta.cos(), theta.sin());
+            let n_coast = relief_fbm(0.5 + ca * 0.32, 0.5 + sa * 0.32, seed.wrapping_add(3));
+            let n_bay = relief_fbm(0.5 + ca * 0.7, 0.5 + sa * 0.7, seed.wrapping_add(11));
+            // ~130 m across; mild bays, not a sawtooth coast.
+            let coast_r = (0.26 + (n_coast - 0.5) * 0.04 + (n_bay - 0.5) * 0.025).clamp(0.21, 0.33);
+            let inland_m = (coast_r - r) * half;
+            let offshore_m = (r - coast_r) * half;
+            // Wide beach so ~13 m of rise cannot become a cliff.
+            let land = island_smoothstep(-14.0, 42.0, inland_m);
+            let t = (r / coast_r.max(0.2)).clamp(0.0, 1.0);
+            // Inner plateau of grass; outer ring is the beach.
+            let plateau = 1.0 - island_smoothstep(0.30, 0.88, t);
+            let ocean_h = water_level - 0.9 - island_smoothstep(3.0, 80.0, offshore_m) * 6.8;
+
+            let wu = u + (relief_fbm(u * 1.8, v * 1.8, seed.wrapping_add(5)) - 0.5) * 0.05;
+            let wv = v + (relief_fbm(u * 1.8, v * 1.8, seed.wrapping_add(7)) - 0.5) * 0.05;
+            let rolling = relief_fbm(wu * 2.6, wv * 2.6, seed);
+            let bumps = relief_fbm(wu * 6.5, wv * 6.5, seed.wrapping_add(19));
+            let inland_h = water_level
+                + 0.4
+                + (1.0 - plateau) * 1.6
+                + plateau
+                    * (5.5
+                        + rolling * rise * 0.55
+                        + (bumps - 0.5) * 1.6);
+            out[(z * tx + x) as usize] = ocean_h + land * (inland_h - ocean_h);
         }
     }
     out
@@ -466,6 +533,47 @@ mod tests {
         assert!(
             max - min > 5.0,
             "relief is too flat to judge anything against"
+        );
+    }
+
+    #[test]
+    fn island_relief_peaks_above_water_and_rim_is_submerged() {
+        let water = 16.1;
+        let h = island_relief(65, 65, 9, 55.0, water);
+        assert!(h.iter().any(|&x| x > water), "inland must break the surface");
+        let above = h.iter().filter(|&&x| x > water).count();
+        assert!(
+            above < h.len() / 4,
+            "land should be a compact island, not the whole tile ({above}/{})",
+            h.len()
+        );
+        let tx = 65u32;
+        let tz = 65u32;
+        for z in 0..tz {
+            for x in 0..tx {
+                if x == 0 || z == 0 || x + 1 == tx || z + 1 == tz {
+                    let v = h[(z * tx + x) as usize];
+                    assert!(
+                        v < water,
+                        "edge ({x},{z}) should sit below the datum ({v} >= {water})"
+                    );
+                }
+            }
+        }
+        let land: Vec<f32> = h.iter().copied().filter(|&x| x > water).collect();
+        let min_land = land.iter().copied().fold(f32::MAX, f32::min);
+        let max_land = land.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            max_land - min_land > 4.0,
+            "inland should roll, not sit flat ({min_land}..{max_land})"
+        );
+        assert!(
+            max_land < water + 22.0,
+            "island should be a low hill, not a sea stack ({max_land})"
+        );
+        assert!(
+            min_land < water + 4.0,
+            "some shore should sit close to the datum ({min_land})"
         );
     }
 

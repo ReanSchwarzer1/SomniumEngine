@@ -44,7 +44,9 @@ fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
-        splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
+        if id >= 0 {
+            splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
+        }
     }
     let weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);

@@ -5,7 +5,7 @@
 //! locks survive a rebuild when `preserve_overrides` is set.
 
 use super::splat::enforce_four_nonzero;
-use super::textures::{SplatTexel, TERRAIN_LAYER_COUNT};
+use super::textures::{SplatTexel, TERRAIN_HERO_LAYERS, TERRAIN_LAYER_COUNT};
 use super::{DEFAULT_WATER_LEVEL_METRES, TerrainData};
 
 /// Versioned Appalachia landscape kit. Bump when default rules change.
@@ -18,6 +18,8 @@ pub struct BiomePreset {
     pub snow_height: f32,
     pub seed_a: u32,
     pub seed_b: u32,
+    /// When true, layers 16–31 are folded onto 0–15 and then zeroed.
+    pub hero_only: bool,
 }
 
 impl BiomePreset {
@@ -28,7 +30,46 @@ impl BiomePreset {
             snow_height,
             seed_a: 4242,
             seed_b: 991,
+            hero_only: false,
         }
+    }
+
+    /// Compact rolling islet. Snow stays off unless the caller sculpts a mountain.
+    pub fn island(snow_height: f32) -> Self {
+        Self {
+            hero_only: true,
+            snow_height: snow_height.max(72.0),
+            ..Self::appalachia(snow_height)
+        }
+    }
+}
+
+/// Fold extra-bank weights onto layers 0–15 and zero 16–31.
+pub fn collapse_to_hero_bank(weights: &mut [f32; TERRAIN_LAYER_COUNT as usize]) {
+    let hero = TERRAIN_HERO_LAYERS as usize;
+    for i in 0..hero {
+        weights[i] += weights[i + hero];
+        weights[i + hero] = 0.0;
+    }
+}
+
+/// Fold extra-bank weights onto *matching* hero materials.
+///
+/// Index-wise `i → i+16` maps wildgrass onto dry sand and granite onto dry
+/// earth, which is why the island read as a tan cone. This keeps grass on
+/// grass and rock on rock.
+pub fn collapse_island_hero_bank(weights: &mut [f32; TERRAIN_LAYER_COUNT as usize]) {
+    weights[0] += weights[16];
+    weights[1] += weights[17] + weights[23] + weights[29];
+    weights[2] += weights[18] + weights[21] + weights[26];
+    weights[4] += weights[24] + weights[20] * 0.55;
+    weights[5] += weights[22] + weights[25];
+    weights[7] += weights[30];
+    weights[8] += weights[27];
+    weights[13] += weights[20] * 0.45 + weights[28];
+    weights[14] += weights[19];
+    for w in weights.iter_mut().skip(TERRAIN_HERO_LAYERS as usize) {
+        *w = 0.0;
     }
 }
 
@@ -66,6 +107,9 @@ pub fn weights_at(
     n3: f32,
     preset: &BiomePreset,
 ) -> [f32; TERRAIN_LAYER_COUNT as usize] {
+    if preset.hero_only {
+        return island_layer_weights(height, slope_deg, n, n2, preset);
+    }
     let water = preset.water_level;
     let above = height - water;
     let steep = smoothstep(38.0, 58.0, slope_deg);
@@ -200,6 +244,37 @@ pub fn weights_at(
     w
 }
 
+/// Beach / grass / rock only, written to the hero bank. Appalachia's dry-earth
+/// and extra-bank fold turned a low islet into a sand pile.
+fn island_layer_weights(
+    height: f32,
+    slope_deg: f32,
+    n: f32,
+    n2: f32,
+    preset: &BiomePreset,
+) -> [f32; TERRAIN_LAYER_COUNT as usize] {
+    let above = height - preset.water_level;
+    let steep = smoothstep(28.0, 46.0, slope_deg);
+    let cliff = smoothstep(42.0, 62.0, slope_deg);
+    let beach = (1.0 - steep) * (1.0 - smoothstep(3.0, 7.0, above));
+    let damp = beach * (1.0 - smoothstep(0.35, 2.2, above));
+    let dry_sand = (beach * (1.0 - damp)).max(0.0);
+    let grass = (1.0 - steep) * (1.0 - cliff) * smoothstep(3.5, 7.5, above);
+    let mut w = [0.0f32; TERRAIN_LAYER_COUNT as usize];
+    w[9] = damp;
+    w[8] = dry_sand * 0.72;
+    w[6] = dry_sand * 0.28;
+    w[0] = grass * (0.42 + 0.22 * (1.0 - n));
+    w[4] = grass * (0.28 + 0.22 * n);
+    w[1] = grass * 0.18 * n2;
+    w[12] = grass * 0.12 * (1.0 - n2);
+    w[2] = steep * (1.0 - cliff) * 0.55;
+    w[13] = steep * (1.0 - cliff) * 0.25;
+    w[14] = cliff;
+    w[15] = steep * 0.2;
+    w
+}
+
 /// Bake biome weights into the splatmap. Locked texels are left alone when
 /// `preserve_overrides` is true.
 pub fn apply_biome(terrain: &mut TerrainData, preset: &BiomePreset, preserve_overrides: bool) {
@@ -245,7 +320,10 @@ pub fn apply_biome(terrain: &mut TerrainData, preset: &BiomePreset, preserve_ove
             let n = biome_fbm(wx * 0.012, wz * 0.012, preset.seed_a);
             let n2 = biome_fbm(wx * 0.027, wz * 0.027, preset.seed_b);
             let n3 = biome_fbm(px * 0.055, pz * 0.055, preset.seed_a.wrapping_add(1109));
-            let weights = weights_at(h, slope_deg, curvature, n, n2, n3, preset);
+            let mut weights = weights_at(h, slope_deg, curvature, n, n2, n3, preset);
+            if preset.hero_only {
+                collapse_island_hero_bank(&mut weights);
+            }
             let sum: f32 = weights.iter().sum::<f32>().max(0.001);
             let mut texel: SplatTexel =
                 std::array::from_fn(|i| (weights[i] / sum * 255.0).round() as u8);
@@ -328,5 +406,28 @@ mod tests {
         let a = weights_at(20.0, 12.0, 0.05, 0.3, 0.7, 0.4, &p);
         let b = weights_at(20.0, 12.0, 0.05, 0.3, 0.7, 0.4, &p);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn island_biome_writes_only_hero_layers() {
+        let p = BiomePreset::island(50.0);
+        assert!(p.hero_only);
+        let mut w = weights_at(p.water_level + 12.0, 8.0, 0.0, 0.35, 0.45, 0.4, &p);
+        collapse_island_hero_bank(&mut w);
+        assert!(
+            w[16..].iter().all(|&x| x == 0.0),
+            "extra bank must be empty: {:?}",
+            &w[16..]
+        );
+        assert!(
+            w[..16].iter().any(|&x| x > 0.0),
+            "hero bank must keep coverage"
+        );
+        let green = w[0] + w[1] + w[4] + w[12];
+        let sand = w[8] + w[9] + w[6];
+        assert!(
+            green > sand,
+            "inland island should stay green, not collapse onto beach (green {green} sand {sand})"
+        );
     }
 }

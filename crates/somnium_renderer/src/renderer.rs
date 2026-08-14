@@ -1586,6 +1586,26 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
+        self.create_terrain_inner(ctx, desc, false)
+    }
+
+    /// Same as [`Self::create_terrain`], but extra-bank layers 16–31 and splat
+    /// maps 4–7 stay unbound. Island uses this so 16 authored materials is a
+    /// real GPU budget, not only a CPU splat constraint.
+    pub fn create_terrain_hero_bank(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+    ) -> u32 {
+        self.create_terrain_inner(ctx, desc, true)
+    }
+
+    fn create_terrain_inner(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+        hero_bank_only: bool,
+    ) -> u32 {
         let mut terrain = crate::terrain::TerrainData::new(
             &ctx.device,
             &ctx.queue,
@@ -1593,6 +1613,9 @@ impl SomniumRenderer {
             ctx.supports_bc_compression(),
         );
         terrain.reserve_pool_spans(&mut self.geometry);
+        if hero_bank_only {
+            terrain.apply_hero_bank_gpu_budget();
+        }
 
         // The layer maps are `texture_2d_array`s and the bindless array is
         // `texture_2d`, so each layer is published as its own single-layer view
@@ -1608,7 +1631,11 @@ impl SomniumRenderer {
         };
         let mut ids = crate::terrain::TerrainTextureIds::default();
         ids.splat_maps = std::array::from_fn(|i| {
-            self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+            if hero_bank_only && i >= 4 {
+                -1
+            } else {
+                self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+            }
         });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
@@ -1631,24 +1658,26 @@ impl SomniumRenderer {
                 ),
             ) as i32;
         }
-        for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
-            let i = (hero + layer) as usize;
-            ids.albedo[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.albedo_extra,
-                    layer,
-                    "Terrain Layer Albedo+Height Extra",
-                ),
-            ) as i32;
-            ids.surface[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.surface_extra,
-                    layer,
-                    "Terrain Layer Surface Extra",
-                ),
-            ) as i32;
+        if !hero_bank_only {
+            for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
+                let i = (hero + layer) as usize;
+                ids.albedo[i] = self.add_texture(
+                    ctx,
+                    layer_view(
+                        &terrain.layer_textures.albedo_extra,
+                        layer,
+                        "Terrain Layer Albedo+Height Extra",
+                    ),
+                ) as i32;
+                ids.surface[i] = self.add_texture(
+                    ctx,
+                    layer_view(
+                        &terrain.layer_textures.surface_extra,
+                        layer,
+                        "Terrain Layer Surface Extra",
+                    ),
+                ) as i32;
+            }
         }
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
@@ -1703,6 +1732,24 @@ impl SomniumRenderer {
         if (terrain_id as usize) < self.terrains.len() {
             self.terrain_queue.push((terrain_id, model));
         }
+    }
+
+    /// Wait until in-flight GPU work that still references scene textures is done.
+    pub fn wait_gpu(&self, ctx: &RenderContext) {
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// Drop GPU terrains, clipmaps, and water so a map load does not leak slots.
+    pub fn reset_scene_gpu(&mut self) {
+        self.terrains.clear();
+        self.clipmaps.clear();
+        self.terrain_queue.clear();
+        self.terrain_material_ids.clear();
+        self.terrain_materials.reset();
+        self.water_bodies.clear();
+        self.underwater_body = None;
+        self.underwater_pass.invalidate();
+        self.clear_gizmo();
     }
 
     /// Mutable access to a terrain (sculpting, painting, raycasts).

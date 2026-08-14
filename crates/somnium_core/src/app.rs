@@ -89,6 +89,9 @@ pub trait GameApp {
 
     /// Called just before the engine shuts down.
     fn on_shutdown(&mut self) {}
+
+    /// Called after a version-2 map factory finishes (drawer double-click or tests).
+    fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +231,8 @@ pub struct Engine<G: GameApp> {
     scene_dirty: bool,
     /// Title-bar close requested a shutdown.
     ui_wants_exit: bool,
+    /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
+    pending_map_load: Option<crate::MapLoadResult>,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -306,6 +311,7 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_accumulator: 0.0,
             scene_dirty: false,
             ui_wants_exit: false,
+            pending_map_load: None,
         };
 
         event_loop
@@ -1446,6 +1452,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             for ev in events {
                 self.handle_editor_event(ev);
             }
+            if let Some(result) = self.pending_map_load.take() {
+                let mut ctx = EngineContext::new(
+                    &self.time,
+                    &self.config,
+                    &mut self.world,
+                    self.physics.as_mut().unwrap(),
+                    self.audio.as_mut().unwrap(),
+                    self.render_ctx.as_ref(),
+                    self.renderer.as_mut(),
+                    &mut self.selected_entity,
+                    self.ui_manager.as_mut().unwrap(),
+                    crate::camera_speed_from_normalized(self.camera_speed_norm),
+                    self.simulation_clock,
+                );
+                self.game.on_map_loaded(&mut ctx, &result);
+            }
         }
         if self.ui_wants_exit {
             self.initiate_shutdown(event_loop);
@@ -2021,7 +2043,7 @@ impl<G: GameApp> Engine<G> {
         for id in stale {
             if let Some((_, body)) = self.terrain_colliders.remove(&id) {
                 if let Some(p) = self.physics.as_mut() {
-                    p.remove_body(body);
+                    p.destroy_body(body);
                 }
             }
         }
@@ -2052,7 +2074,7 @@ impl<G: GameApp> Engine<G> {
             // fight over every contact.
             if let Some((_, old)) = self.terrain_colliders.remove(&terrain_id) {
                 if let Some(p) = self.physics.as_mut() {
-                    p.remove_body(old);
+                    p.destroy_body(old);
                 }
             }
 
@@ -3579,9 +3601,29 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::LoadScene(_path) => {
-                // TODO: Load scene from file (requires GPU mesh reconstruction)
-                info!("LoadScene not yet fully implemented");
+            EditorEvent::LoadScene(path) => {
+                let Some((renderer, render_ctx)) =
+                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
+                else {
+                    return;
+                };
+                for (_, (_, body)) in self.terrain_colliders.drain() {
+                    if let Some(p) = self.physics.as_mut() {
+                        p.destroy_body(body);
+                    }
+                }
+                match crate::load_map(&mut self.world, renderer, render_ctx, &path) {
+                    Ok(result) => {
+                        info!("Loaded map {path} ({:?})", result.kind);
+                        self.selected_entity = None;
+                        self.undo_stack = UndoStack::new(128);
+                        self.scene_dirty = false;
+                        self.terrain_edit_active = false;
+                        self.terrain_stroke = None;
+                        self.pending_map_load = Some(result);
+                    }
+                    Err(error) => warn!("LoadScene failed: {error}"),
+                }
             }
 
             EditorEvent::SetTerrainTool(tool) => {

@@ -71,9 +71,13 @@ impl PhysicsWorld {
         }
     }
 
-    /// Destroy a body.
+    /// Remove a body from the broadphase and free it.
+    ///
+    /// Jolt asserts (`IsInBroadPhase` / `IsActive`) if `DestroyBody` runs while
+    /// the body is still in the world — that shows up as Windows `0x80000003`.
     pub fn destroy_body(&mut self, id: BodyId) {
         unsafe {
+            jph_body_interface_remove_body(self.system, id.0);
             jph_body_interface_destroy_body(self.system, id.0);
         }
     }

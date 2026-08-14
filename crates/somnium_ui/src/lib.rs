@@ -2633,6 +2633,28 @@ impl UiManager {
                 crate::layout_persist::save(self.chrome_layout);
                 continue;
             }
+            if let Some(ButtonMessage::DoubleClick) = msg.data::<ButtonMessage>() {
+                if let Some((_, entry)) = self
+                    .content_entries
+                    .iter()
+                    .find(|(bh, _)| *bh == msg.destination)
+                    .cloned()
+                {
+                    let is_map = !entry.is_dir
+                        && !entry.is_engine
+                        && entry
+                            .path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("somnium"));
+                    if is_map {
+                        self.editor_events.push_back(EditorEvent::LoadScene(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                    }
+                }
+                continue;
+            }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if msg.destination == self.file_new_item {
                     self.close_all_menus();

@@ -34,7 +34,7 @@ pub mod textures;
 use std::collections::HashMap;
 
 use mesh::{EDGE_EAST, EDGE_NORTH, EDGE_SOUTH, EDGE_WEST, MAX_TERRAIN_LOD};
-use textures::{LAYER_NAMES, Splatmap, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
+use textures::{LAYER_NAMES, Splatmap, TERRAIN_HERO_LAYERS, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
 
 /// Static terrain configuration (Phase 14A-1). The matching ECS component
 /// `somnium_core::TerrainComponent` stores a copy of these plus the terrain id.
@@ -269,6 +269,20 @@ impl Default for TerrainTextureIds {
     }
 }
 
+impl TerrainTextureIds {
+    /// Leave extra-bank splat maps (layers 16–31) and layer views unbound.
+    pub fn unbind_extra_bank(&mut self) {
+        for id in self.splat_maps.iter_mut().skip(4) {
+            *id = -1;
+        }
+        let hero = TERRAIN_HERO_LAYERS as usize;
+        for i in hero..TERRAIN_LAYER_COUNT as usize {
+            self.albedo[i] = -1;
+            self.surface[i] = -1;
+        }
+    }
+}
+
 /// CPU + GPU state for one terrain (Phase 14A-2 `TerrainData`).
 ///
 /// Owned by the renderer (like `GeometryPool`); the ECS only stores the
@@ -309,6 +323,8 @@ pub struct TerrainData {
     pub material_id: u32,
     /// This terrain's slot in the terrain-material storage buffer.
     pub terrain_index: u32,
+    /// When true, only layers 0–15 are bound; extra-bank splat maps stay -1.
+    pub hero_bank_only: bool,
 
     /// Phase 25F: break the layer maps' visible repetition by hex-tiling them.
     ///
@@ -478,6 +494,7 @@ impl TerrainData {
             texture_ids: TerrainTextureIds::default(),
             material_id: 0,
             terrain_index: 0,
+            hero_bank_only: false,
             hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
             lod_morph: std::env::var("SOMNIUM_LOD_MORPH").as_deref() == Ok("1"),
             lod_morph_start: 0.7,
@@ -536,6 +553,17 @@ impl TerrainData {
         for chunk in &mut self.chunks {
             chunk.vertex_offset = pool.reserve_vertices(capacity).unwrap_or(UNALLOCATED);
         }
+    }
+
+    /// Island GPU budget: no hex, no POM, extra-bank ids stay unbound.
+    ///
+    /// Coastal keeps the 32-slot close-up path. Editor checkboxes can still
+    /// turn hex/POM back on after this.
+    pub fn apply_hero_bank_gpu_budget(&mut self) {
+        self.hero_bank_only = true;
+        self.hex_tiling = false;
+        self.parallax_scale = 0.0;
+        self.texture_ids.unbind_extra_bank();
     }
 
     /// Metres of camera height above the ground at which hex and POM turn off
@@ -755,6 +783,19 @@ impl TerrainData {
     pub fn generate_relief(&mut self, seed: u32, amplitude: f32) {
         let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
         self.heightmap = heightmap::fbm_relief(tx, tz, seed, amplitude);
+        self.mark_all_dirty();
+    }
+
+    /// Low rolling islet: inland peak, rim below the frozen water datum.
+    pub fn generate_island_relief(&mut self, seed: u32, peak_metres: f32) {
+        let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
+        self.heightmap = heightmap::island_relief(
+            tx,
+            tz,
+            seed,
+            peak_metres,
+            DEFAULT_WATER_LEVEL_METRES,
+        );
         self.mark_all_dirty();
     }
 
@@ -1361,5 +1402,47 @@ mod tests {
     fn overview_camera_turns_hex_and_pom_off() {
         assert!(TerrainData::aerial_detail_off(150.75, 0.0));
         assert!(TerrainData::aerial_detail_off(80.01, 0.0));
+    }
+
+    #[test]
+    fn unbind_extra_bank_keeps_hero_maps_and_clears_layers_16_31() {
+        let mut ids = TerrainTextureIds {
+            splat_maps: [0, 1, 2, 3, 4, 5, 6, 7],
+            macro_map: 9,
+            albedo: [10; TERRAIN_LAYER_COUNT as usize],
+            surface: [11; TERRAIN_LAYER_COUNT as usize],
+        };
+        ids.unbind_extra_bank();
+        assert_eq!(&ids.splat_maps[..4], &[0, 1, 2, 3]);
+        assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
+        assert_eq!(ids.macro_map, 9);
+        let hero = TERRAIN_HERO_LAYERS as usize;
+        assert!(ids.albedo[..hero].iter().all(|&id| id == 10));
+        assert!(ids.surface[..hero].iter().all(|&id| id == 11));
+        assert!(ids.albedo[hero..].iter().all(|&id| id < 0));
+        assert!(ids.surface[hero..].iter().all(|&id| id < 0));
+    }
+
+    #[test]
+    fn hero_bank_gpu_budget_zeros_hex_and_parallax_in_the_material_layout() {
+        let hex_tiling = false;
+        let parallax_scale = 0.0;
+        let authored_steps = 24u32;
+        let mut ids = TerrainTextureIds {
+            splat_maps: [0, 1, 2, 3, 4, 5, 6, 7],
+            macro_map: -1,
+            albedo: [1; TERRAIN_LAYER_COUNT as usize],
+            surface: [1; TERRAIN_LAYER_COUNT as usize],
+        };
+        ids.unbind_extra_bank();
+        let gpu_hex = u32::from(hex_tiling);
+        let gpu_pom = if parallax_scale > 0.0 {
+            authored_steps
+        } else {
+            0
+        };
+        assert_eq!(gpu_hex, 0);
+        assert_eq!(gpu_pom, 0);
+        assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
     }
 }

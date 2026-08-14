@@ -145,6 +145,11 @@ impl TerrainMaterialPool {
         Self { buffer, count: 0 }
     }
 
+    /// Reclaim every slot. Map load creates a new terrain that allocates from zero.
+    pub fn reset(&mut self) {
+        self.count = 0;
+    }
+
     /// Claim the next slot, or `None` when the buffer is full.
     pub fn allocate(&mut self) -> Option<u32> {
         if self.count >= Self::CAPACITY {

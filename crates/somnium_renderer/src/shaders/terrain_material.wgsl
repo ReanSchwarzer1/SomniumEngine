@@ -620,6 +620,23 @@ struct TerrainGenerated {
     surface: vec4<f32>,
 }
 
+fn terrain_fetch_splats(
+    tm: TerrainMaterial,
+    splat_uv: vec2<f32>,
+    splat_ddx: vec2<f32>,
+    splat_ddy: vec2<f32>,
+) -> array<vec4<f32>, 8> {
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        if id >= 0 {
+            splat_s[g] = textureSampleGrad(
+                textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
+        }
+    }
+    return splat_s;
+}
+
 fn terrain_generate_texel(
     terrain_index: u32,
     world_xz: vec2<f32>,
@@ -631,12 +648,7 @@ fn terrain_generate_texel(
     let splat_uv = (world_xz - tm.terrain_origin) * tm.inv_world_size;
     let splat_ddx = world_ddx * tm.inv_world_size;
     let splat_ddy = world_ddy * tm.inv_world_size;
-    var splat_s = array<vec4<f32>, 8>();
-    for (var g = 0u; g < 8u; g = g + 1u) {
-        let id = tm.splat_maps[g / 4u][g % 4u];
-        splat_s[g] = textureSampleGrad(
-            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
-    }
+    var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
     var kept = 0.0;
@@ -738,12 +750,7 @@ fn evaluate_terrain_material(
     let tm = terrain_materials[terrain_index];
     let splat_ddx = world_ddx * tm.inv_world_size;
     let splat_ddy = world_ddy * tm.inv_world_size;
-    var splat_s = array<vec4<f32>, 8>();
-    for (var g = 0u; g < 8u; g = g + 1u) {
-        let id = tm.splat_maps[g / 4u][g % 4u];
-        splat_s[g] = textureSampleGrad(
-            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
-    }
+    var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
     var kept = 0.0;
