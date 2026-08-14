@@ -1606,8 +1606,7 @@ impl SomniumRenderer {
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
 
-        let mut clipmap = crate::terrain::clipmap::TerrainClipmap::new(&ctx.device);
-        clipmap.register_bindless(&mut |view| self.add_texture(ctx, view));
+        let clipmap = crate::terrain::clipmap::TerrainClipmap::new(&ctx.device);
 
         // The `GpuMaterial` itself is nearly empty: `terrain_index` is what
         // sends the shading pass down the splat path, and everything it would
@@ -1640,6 +1639,15 @@ impl SomniumRenderer {
 
         self.terrains.push(terrain);
         self.clipmaps.push(clipmap);
+        let last = self.clipmaps.len() - 1;
+        let (detail_a, detail_s) = self.clipmaps[last].detail_sampled();
+        let (macro_a, macro_s) = self.clipmaps[last].macro_sampled();
+        let detail_a = detail_a.clone();
+        let detail_s = detail_s.clone();
+        let macro_a = macro_a.clone();
+        let macro_s = macro_s.clone();
+        self.shading_pass
+            .set_clipmap_arrays(&ctx.device, &detail_a, &detail_s, &macro_a, &macro_s);
         (self.terrains.len() - 1) as u32
     }
 
@@ -1856,7 +1864,17 @@ impl SomniumRenderer {
             let edit_revision = terrain.edit_revision;
             if let Some(clipmap) = self.clipmaps.get_mut(id as usize) {
                 if clipmap.enabled && !crate::terrain::clipmap::TerrainClipmap::env_forced_off() {
-                    clipmap.update([self.camera_pos.x, self.camera_pos.z], edit_revision);
+                    let forward = self
+                        .view_matrix
+                        .inverse()
+                        .transform_vector3(glam::Vec3::NEG_Z);
+                    clipmap.update(
+                        crate::terrain::clipmap::focus_xz(
+                            self.camera_pos.to_array(),
+                            forward.to_array(),
+                        ),
+                        edit_revision,
+                    );
                 }
                 clipmap.fill_gpu(&mut mat);
             }
@@ -2345,12 +2363,9 @@ impl SomniumRenderer {
             .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
 
         // ── 6.95 Terrain clipmap generate (Phase DF) ─────────────────────────
-        // World XZ, no FSR jitter. Before shading samples the cache.
-        // The same GPU images are in the bindless array for shading, so this
-        // dispatch must not see them as sampled textures — wgpu treats that as
-        // RESOURCE + STORAGE_WRITE in one usage scope.
+        // World XZ, no FSR jitter. Generate paints array layers as color
+        // attachments; shade samples the same images (group 2).
         self.profiler.begin(&mut encoder, "Terrain clipmap");
-        let mut hide: Vec<u32> = Vec::new();
         let mut work: Vec<(usize, u32)> = Vec::new();
         for i in 0..self.clipmaps.len() {
             let enabled = self.clipmaps[i].enabled
@@ -2365,25 +2380,13 @@ impl SomniumRenderer {
             {
                 continue;
             }
-            hide.extend(self.clipmaps[i].bindless_ids());
             work.push((i, terrain.terrain_index));
         }
-        let mut restored: Vec<(usize, wgpu::TextureView)> = Vec::new();
         if !work.is_empty() {
-            let dummy = self.texture_pool.dummy_view.clone();
-            for &id in &hide {
-                let slot = id as usize;
-                if slot < self.global_pool.texture_views.len() {
-                    restored.push((
-                        slot,
-                        std::mem::replace(&mut self.global_pool.texture_views[slot], dummy.clone()),
-                    ));
-                }
-            }
-            self.global_pool.update_textures(&ctx.device);
+            let mut budget = crate::terrain::clipmap::MAX_GEN_TEXELS;
             for (i, terrain_index) in work {
-                let detail = self.clipmaps[i].detail_jobs();
-                let macro_jobs = self.clipmaps[i].macro_jobs();
+                let detail = self.clipmaps[i].take_jobs(true, &mut budget);
+                let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
                 self.clipmap_pass.record(
                     &ctx.device,
                     &ctx.queue,
@@ -2404,14 +2407,18 @@ impl SomniumRenderer {
                     &macro_jobs,
                     false,
                 );
-                self.clipmaps[i].clear_dirty();
             }
-            for (slot, view) in restored {
-                self.global_pool.texture_views[slot] = view;
-            }
-            self.global_pool.update_textures(&ctx.device);
         }
         self.profiler.end(&mut encoder);
+
+        if let Some((da, ds, ma, ms)) = self.clipmaps.first().map(|c| {
+            let (da, ds) = c.detail_sampled();
+            let (ma, ms) = c.macro_sampled();
+            (da.clone(), ds.clone(), ma.clone(), ms.clone())
+        }) {
+            self.shading_pass
+                .set_clipmap_arrays(&ctx.device, &da, &ds, &ma, &ms);
+        }
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");
@@ -2436,6 +2443,7 @@ impl SomniumRenderer {
             rpass.set_pipeline(&self.shading_pass.pipeline);
             rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
             rpass.set_bind_group(1, &self.shading_pass.bind_group, &[]);
+            rpass.set_bind_group(2, &self.shading_pass.clipmap_bind_group, &[]);
             rpass.draw(0..3, 0..1);
         }
         self.profiler.end(&mut encoder);

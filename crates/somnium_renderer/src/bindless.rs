@@ -49,6 +49,7 @@ pub struct GlobalResourcePool {
 
     // Storage for views to recreate bind group
     pub texture_views: Vec<wgpu::TextureView>,
+    dummy_view: wgpu::TextureView,
 }
 
 impl GlobalResourcePool {
@@ -296,16 +297,19 @@ impl GlobalResourcePool {
             light_buffer: light_buffer.clone(),
             terrain_material_buffer: terrain_material_buffer.clone(),
             cluster_grid,
+            dummy_view: dummy_view.clone(),
             texture_views: (0..MAX_BINDLESS_TEXTURES)
                 .map(|_| dummy_view.clone())
                 .collect(),
         }
     }
 
-    pub fn update_textures(&mut self, device: &wgpu::Device) {
-        let views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
-
-        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    fn rebuild_bind_group(
+        &self,
+        device: &wgpu::Device,
+        views: &[&wgpu::TextureView],
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GlobalResourcePool_BindGroup"),
             layout: &self.layout,
             entries: &[
@@ -327,7 +331,7 @@ impl GlobalResourcePool {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureViewArray(&views),
+                    resource: wgpu::BindingResource::TextureViewArray(views),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -358,6 +362,24 @@ impl GlobalResourcePool {
                     resource: self.terrain_material_buffer.as_entire_binding(),
                 },
             ],
-        });
+        })
+    }
+
+    pub fn update_textures(&mut self, device: &wgpu::Device) {
+        let views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
+        self.bind_group = self.rebuild_bind_group(device, &views);
+    }
+
+    /// Bind group whose listed slots are the dummy view, so a compute dispatch
+    /// can write those GPU images as storage without a sampled+storage clash.
+    pub fn bind_group_hiding_slots(&self, device: &wgpu::Device, hide: &[u32]) -> wgpu::BindGroup {
+        let mut views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
+        for &id in hide {
+            let slot = id as usize;
+            if slot < views.len() {
+                views[slot] = &self.dummy_view;
+            }
+        }
+        self.rebuild_bind_group(device, &views)
     }
 }

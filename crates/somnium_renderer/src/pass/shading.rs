@@ -33,6 +33,12 @@ pub struct ShadingPass {
     world_volume_view: wgpu::TextureView,
     lighting_extra: wgpu::Buffer,
     sh_probes: wgpu::Buffer,
+    /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
+    /// 1×1 until `set_clipmap_arrays` after a terrain is created.
+    clipmap_layout: wgpu::BindGroupLayout,
+    pub clipmap_bind_group: wgpu::BindGroup,
+    _clipmap_dummy_detail: wgpu::Texture,
+    _clipmap_dummy_macro: wgpu::Texture,
 }
 
 impl ShadingPass {
@@ -290,7 +296,7 @@ impl ShadingPass {
         );
 
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             // Phase 24L: the scene bindings, shared with the GI pass so a
             // traced surface and a rasterised one resolve identically.
             include_str!("../shaders/global_pool.wgsl"),
@@ -306,6 +312,7 @@ impl ShadingPass {
             // Phase 25A-2: terrain's splat/triplanar material, which is all
             // that survives of the separate terrain pass.
             include_str!("../shaders/terrain_material.wgsl"),
+            include_str!("../shaders/clipmap_shade.wgsl"),
             include_str!("../shaders/shading.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -313,9 +320,25 @@ impl ShadingPass {
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
+        let clipmap_layout = Self::clipmap_bind_group_layout(device);
+        let (dummy_detail, dummy_detail_view) = Self::dummy_clipmap_array(device, 8);
+        let (dummy_macro, dummy_macro_view) = Self::dummy_clipmap_array(device, 4);
+        let clipmap_bind_group = Self::make_clipmap_bind_group(
+            device,
+            &clipmap_layout,
+            &dummy_detail_view,
+            &dummy_detail_view,
+            &dummy_macro_view,
+            &dummy_macro_view,
+        );
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shading Pipeline Layout"),
-            bind_group_layouts: &[Some(global_bind_group_layout), Some(&bind_group_layout)],
+            bind_group_layouts: &[
+                Some(global_bind_group_layout),
+                Some(&bind_group_layout),
+                Some(&clipmap_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -373,6 +396,10 @@ impl ShadingPass {
             world_volume_view: world_volume_view.clone(),
             lighting_extra,
             sh_probes: sh_probes.clone(),
+            clipmap_layout,
+            clipmap_bind_group,
+            _clipmap_dummy_detail: dummy_detail,
+            _clipmap_dummy_macro: dummy_macro,
         }
     }
 
@@ -471,6 +498,101 @@ impl ShadingPass {
                 },
             ],
         })
+    }
+
+    fn clipmap_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let array_tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shading clipmap arrays"),
+            entries: &[array_tex(0), array_tex(1), array_tex(2), array_tex(3)],
+        })
+    }
+
+    fn dummy_clipmap_array(
+        device: &wgpu::Device,
+        layers: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shading clipmap dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Shading clipmap dummy view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        (texture, view)
+    }
+
+    fn make_clipmap_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        detail_albedo: &wgpu::TextureView,
+        detail_surface: &wgpu::TextureView,
+        macro_albedo: &wgpu::TextureView,
+        macro_normal: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shading clipmap arrays"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(detail_albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(detail_surface),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(macro_albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(macro_normal),
+                },
+            ],
+        })
+    }
+
+    /// Bind shade group 2 to the clipmap 2D-array views. Generate paints the
+    /// same images as color attachments.
+    pub fn set_clipmap_arrays(
+        &mut self,
+        device: &wgpu::Device,
+        detail_albedo: &wgpu::TextureView,
+        detail_surface: &wgpu::TextureView,
+        macro_albedo: &wgpu::TextureView,
+        macro_normal: &wgpu::TextureView,
+    ) {
+        self.clipmap_bind_group = Self::make_clipmap_bind_group(
+            device,
+            &self.clipmap_layout,
+            detail_albedo,
+            detail_surface,
+            macro_albedo,
+            macro_normal,
+        );
     }
 
     /// Rebuild the bind group after a resize.

@@ -1020,9 +1020,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // that is where the terrain UVs are derived from.
         let world_ddx = dpdx(hit_point.xz);
         let world_ddy = dpdy(hit_point.xz);
-        let terrain = evaluate_terrain_material(
-            u32(material.terrain_index), hit_point, geo_normal, uv,
-            world_ddx, world_ddy);
+        let tm_idx = u32(material.terrain_index);
+        var terrain: TerrainSurface;
+        if terrain_materials[tm_idx].clipmap_enabled != 0u {
+            terrain = evaluate_clipmap_material(
+                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+        } else {
+            terrain = evaluate_terrain_material(
+                tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
+        }
         surface.albedo = terrain.albedo;
         surface.roughness = terrain.roughness;
         surface.metallic = 0.0;

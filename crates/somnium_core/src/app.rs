@@ -3590,6 +3590,9 @@ impl<G: GameApp> Engine<G> {
                     } else if let Some(r) = &mut self.renderer {
                         if let Some(cm) = r.clipmaps.get_mut(tc.terrain_id as usize) {
                             cm.enabled = !cm.enabled;
+                            if cm.enabled {
+                                cm.invalidate();
+                            }
                             info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
                         }
                     }

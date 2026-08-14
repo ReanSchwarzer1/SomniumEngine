@@ -1,6 +1,6 @@
 //! Nested material clipmaps (Phase DF — Daggerfall).
 //!
-//! Camera-centred stacks of RGBA caches. Generate runs strongest-four + hex +
+//! Look-at-centred stacks of RGBA caches. Generate runs strongest-four + hex +
 //! height-blend **once per dirty texel** in world XZ; shading taps the cache
 //! instead of repeating that work per vis-buffer pixel. Architecture studied
 //! from O3DE `TerrainClipmapManager` (Apache-2.0 OR MIT) — original WGSL/Rust,
@@ -25,13 +25,22 @@ pub const MACRO_RINGS: u32 = 4;
 pub const MACRO_FINEST_TEXELS_PER_M: f32 = 4.0;
 
 /// Do not retile until the camera has moved this many texels (O3DE `updateMultiple`).
-pub const UPDATE_MULTIPLE: i32 = 4;
+/// 16 texels at 512 t/m is ~3 cm — walking no longer retile-every-frame on the
+/// finest ring while still catching real motion.
+pub const UPDATE_MULTIPLE: i32 = 16;
 /// Extra texels generated past a dirty edge so bilinear wrap does not sample
 /// a stale neighbour (O3DE extended margin).
 pub const EXTENDED_MARGIN: i32 = 2;
 
 /// Hex in generate when the ring is dense enough to resolve a tile.
+/// 8 t/m still covers a ~60 m look-at (ring 6); below that unique-colour owns hue.
 pub const HEX_MIN_TEXELS_PER_M: f32 = 8.0;
+
+/// Generate at most one 1024² ring per frame. A full-stack refresh is 12
+/// rings; filling it in one shot re-runs hex on 12M texels and hitchs the
+/// editor. Walking L-strips are tens of thousands of texels.
+pub const MAX_GEN_TEXELS: u32 = 1024 * 1024;
+const MAX_TAKE_JOBS: usize = 32;
 
 const CLIPMAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -58,10 +67,14 @@ pub struct TerrainClipmap {
     detail_surface: wgpu::Texture,
     macro_albedo: wgpu::Texture,
     macro_normal: wgpu::Texture,
-    detail_albedo_storage: wgpu::TextureView,
-    detail_surface_storage: wgpu::TextureView,
-    macro_albedo_storage: wgpu::TextureView,
-    macro_normal_storage: wgpu::TextureView,
+    detail_albedo_sampled: wgpu::TextureView,
+    detail_surface_sampled: wgpu::TextureView,
+    macro_albedo_sampled: wgpu::TextureView,
+    macro_normal_sampled: wgpu::TextureView,
+    detail_albedo_layers: [wgpu::TextureView; DETAIL_RINGS as usize],
+    detail_surface_layers: [wgpu::TextureView; DETAIL_RINGS as usize],
+    macro_albedo_layers: [wgpu::TextureView; MACRO_RINGS as usize],
+    macro_normal_layers: [wgpu::TextureView; MACRO_RINGS as usize],
     pub detail_albedo_ids: [i32; DETAIL_RINGS as usize],
     pub detail_surface_ids: [i32; DETAIL_RINGS as usize],
     pub macro_albedo_ids: [i32; MACRO_RINGS as usize],
@@ -158,6 +171,11 @@ impl TerrainClipmap {
         )
     }
 
+    /// Next `update` regenerates every ring (inspector enable, hex toggle).
+    pub fn invalidate(&mut self) {
+        self.initialized = false;
+    }
+
     pub fn new(device: &wgpu::Device) -> Self {
         let make = |label: &str, size: u32, layers: u32| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -171,16 +189,26 @@ impl TerrainClipmap {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: CLIPMAP_FORMAT,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
         };
-        let storage = |tex: &wgpu::Texture, label: &str| {
+        let sampled = |tex: &wgpu::Texture, label: &str| {
             tex.create_view(&wgpu::TextureViewDescriptor {
                 label: Some(label),
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
+                usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+                ..Default::default()
+            })
+        };
+        let layer = |tex: &wgpu::Texture, i: u32| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                label: None,
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i,
+                array_layer_count: Some(1),
+                usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
                 ..Default::default()
             })
         };
@@ -201,13 +229,17 @@ impl TerrainClipmap {
 
         Self {
             enabled: Self::env_default_enabled(),
-            detail_albedo_storage: storage(&detail_albedo, "Terrain clipmap detail albedo storage"),
-            detail_surface_storage: storage(
+            detail_albedo_sampled: sampled(&detail_albedo, "Terrain clipmap detail albedo sampled"),
+            detail_surface_sampled: sampled(
                 &detail_surface,
-                "Terrain clipmap detail surface storage",
+                "Terrain clipmap detail surface sampled",
             ),
-            macro_albedo_storage: storage(&macro_albedo, "Terrain clipmap macro albedo storage"),
-            macro_normal_storage: storage(&macro_normal, "Terrain clipmap macro normal storage"),
+            macro_albedo_sampled: sampled(&macro_albedo, "Terrain clipmap macro albedo sampled"),
+            macro_normal_sampled: sampled(&macro_normal, "Terrain clipmap macro normal sampled"),
+            detail_albedo_layers: std::array::from_fn(|i| layer(&detail_albedo, i as u32)),
+            detail_surface_layers: std::array::from_fn(|i| layer(&detail_surface, i as u32)),
+            macro_albedo_layers: std::array::from_fn(|i| layer(&macro_albedo, i as u32)),
+            macro_normal_layers: std::array::from_fn(|i| layer(&macro_normal, i as u32)),
             detail_albedo,
             detail_surface,
             macro_albedo,
@@ -252,15 +284,25 @@ impl TerrainClipmap {
         }
     }
 
-    pub fn detail_storage(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
-        (&self.detail_albedo_storage, &self.detail_surface_storage)
+    pub fn detail_sampled(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
+        (&self.detail_albedo_sampled, &self.detail_surface_sampled)
     }
 
-    pub fn macro_storage(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
-        (&self.macro_albedo_storage, &self.macro_normal_storage)
+    pub fn macro_sampled(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
+        (&self.macro_albedo_sampled, &self.macro_normal_sampled)
     }
 
-    /// Recentre rings on `camera_xz` and collect dirty rectangles.
+    pub fn detail_layer(&self, ring: u32) -> (&wgpu::TextureView, &wgpu::TextureView) {
+        let i = (ring as usize).min(self.detail_albedo_layers.len() - 1);
+        (&self.detail_albedo_layers[i], &self.detail_surface_layers[i])
+    }
+
+    pub fn macro_layer(&self, ring: u32) -> (&wgpu::TextureView, &wgpu::TextureView) {
+        let i = (ring as usize).min(self.macro_albedo_layers.len() - 1);
+        (&self.macro_albedo_layers[i], &self.macro_normal_layers[i])
+    }
+
+    /// Recentre rings on the look-at (see [`focus_xz`]) and collect dirty rectangles.
     ///
     /// A sculpt/paint that bumps `edit_revision` forces a full refresh.
     pub fn update(&mut self, camera_xz: [f32; 2], edit_revision: u64) {
@@ -281,6 +323,43 @@ impl TerrainClipmap {
 
     pub fn macro_jobs(&self) -> Vec<ClipmapGenJob> {
         jobs_for(&self.macro_rings, false)
+    }
+
+    /// Consume dirty rectangles up to `budget` texels. Leftover stays queued
+    /// so a later frame can finish; do not call `clear_dirty` after this.
+    pub fn take_jobs(&mut self, is_detail: bool, budget: &mut u32) -> Vec<ClipmapGenJob> {
+        let rings = if is_detail {
+            &mut self.rings[..]
+        } else {
+            &mut self.macro_rings[..]
+        };
+        let mut out = Vec::new();
+        for (ring_i, ring) in rings.iter_mut().enumerate() {
+            if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
+                break;
+            }
+            let pending: Vec<ClipRect> = ring.dirty[..ring.dirty_count as usize].to_vec();
+            ring.dirty_count = 0;
+            for rect in pending {
+                if rect.is_empty() {
+                    continue;
+                }
+                if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
+                    ring.push_dirty(rect);
+                    continue;
+                }
+                let (now, rest) = split_rect(rect, *budget);
+                let used = now.w.saturating_mul(now.h);
+                *budget = budget.saturating_sub(used);
+                if !now.is_empty() {
+                    out.push(job_from_ring(ring, ring_i as u32, now, is_detail));
+                }
+                if let Some(left) = rest {
+                    ring.push_dirty(left);
+                }
+            }
+        }
+        out
     }
 
     pub fn clear_dirty(&mut self) {
@@ -355,6 +434,52 @@ pub struct ClipmapGenJob {
     pub is_detail: bool,
 }
 
+fn job_from_ring(
+    ring: &ClipmapRing,
+    ring_i: u32,
+    rect: ClipRect,
+    is_detail: bool,
+) -> ClipmapGenJob {
+    ClipmapGenJob {
+        ring: ring_i,
+        rect,
+        center: ring.center,
+        origin_uv: [
+            ring.origin[0] as f32 / ring.size as f32,
+            ring.origin[1] as f32 / ring.size as f32,
+        ],
+        texels_per_m: ring.texels_per_m,
+        clipmap_size: ring.size as f32,
+        hex: u32::from(ring.texels_per_m >= HEX_MIN_TEXELS_PER_M),
+        is_detail,
+    }
+}
+
+fn split_rect(rect: ClipRect, budget: u32) -> (ClipRect, Option<ClipRect>) {
+    let texels = rect.w.saturating_mul(rect.h);
+    if texels == 0 || texels <= budget {
+        return (rect, None);
+    }
+    let rows = (budget / rect.w.max(1)).max(1);
+    if rows >= rect.h {
+        return (rect, None);
+    }
+    (
+        ClipRect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rows,
+        },
+        Some(ClipRect {
+            x: rect.x,
+            y: rect.y + rows,
+            w: rect.w,
+            h: rect.h - rows,
+        }),
+    )
+}
+
 fn jobs_for(rings: &[ClipmapRing], is_detail: bool) -> Vec<ClipmapGenJob> {
     let mut out = Vec::new();
     for (ring_i, ring) in rings.iter().enumerate() {
@@ -383,7 +508,6 @@ fn jobs_for(rings: &[ClipmapRing], is_detail: bool) -> Vec<ClipmapGenJob> {
 }
 
 fn update_ring(ring: &mut ClipmapRing, camera_xz: [f32; 2], force_full: bool) {
-    ring.clear_dirty();
     let texel_m = 1.0 / ring.texels_per_m;
     let snap = |v: f32| (v / texel_m).round() * texel_m;
     let new_center = [snap(camera_xz[0]), snap(camera_xz[1])];
@@ -396,6 +520,11 @@ fn update_ring(ring: &mut ClipmapRing, camera_xz: [f32; 2], force_full: bool) {
     let dx_tex = ((new_center[0] - ring.center[0]) * ring.texels_per_m).round() as i32;
     let dy_tex = ((new_center[1] - ring.center[1]) * ring.texels_per_m).round() as i32;
     if dx_tex.abs() < UPDATE_MULTIPLE && dy_tex.abs() < UPDATE_MULTIPLE {
+        return;
+    }
+    // Leftover dirty rectangles are in the current origin's texel space.
+    // Sliding first would make them write the wrong world XZ.
+    if ring.dirty_count > 0 {
         return;
     }
     let size = ring.size as i32;
@@ -531,6 +660,34 @@ fn expand_and_wrap(rect: ClipRect, size: i32, margin: i32) -> Vec<ClipRect> {
     )
 }
 
+/// Ground XZ the clipmap should sit on.
+///
+/// Ring 0 is only [`finest_radius_metres`] across (1 m at 512 t/m). Centering
+/// on the camera leaves the visible near slope on a coarser ring. Intersect the
+/// view ray with a plane 1.7 m below the camera and clamp to 8 m so the player
+/// still sits inside ring 3 (64 t/m) while the look-at gets the dense rings.
+/// Looking straight down keeps the centre under the camera.
+pub fn focus_xz(camera_pos: [f32; 3], camera_forward: [f32; 3]) -> [f32; 2] {
+    const MAX_LOOK_AHEAD_M: f32 = 8.0;
+    const EYE_HEIGHT_M: f32 = 1.7;
+    let horiz =
+        (camera_forward[0] * camera_forward[0] + camera_forward[2] * camera_forward[2]).sqrt();
+    if horiz < 1e-4 {
+        return [camera_pos[0], camera_pos[2]];
+    }
+    let down = (-camera_forward[1]).max(0.0);
+    let ray_t = if down > 0.08 {
+        EYE_HEIGHT_M / down
+    } else {
+        MAX_LOOK_AHEAD_M / horiz
+    };
+    let xz_dist = (ray_t * horiz).min(MAX_LOOK_AHEAD_M);
+    [
+        camera_pos[0] + camera_forward[0] / horiz * xz_dist,
+        camera_pos[2] + camera_forward[2] / horiz * xz_dist,
+    ]
+}
+
 /// Finest ring radius in metres (half the world coverage of ring 0).
 pub fn finest_radius_metres() -> f32 {
     (DETAIL_SIZE as f32 / DETAIL_FINEST_TEXELS_PER_M) * 0.5
@@ -623,8 +780,46 @@ mod tests {
     }
 
     #[test]
+    fn focus_stays_under_the_camera_when_looking_down() {
+        let p = [10.0, 5.0, 20.0];
+        assert_eq!(focus_xz(p, [0.0, -1.0, 0.0]), [10.0, 20.0]);
+    }
+
+    #[test]
+    fn focus_moves_forward_when_looking_along_the_ground() {
+        let p = [0.0, 1.7, 0.0];
+        let f = focus_xz(p, [0.0, 0.0, -1.0]);
+        assert!((f[0] - 0.0).abs() < 1e-4);
+        assert!((f[1] + 8.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn focus_at_forty_five_degrees_hits_eye_height_ahead() {
+        let inv_s2 = 0.5_f32.sqrt();
+        let f = focus_xz([0.0, 1.7, 0.0], [0.0, -inv_s2, -inv_s2]);
+        assert!((f[0] - 0.0).abs() < 1e-3);
+        assert!((f[1] + 1.7).abs() < 0.05);
+    }
+
+    #[test]
     fn gen_params_are_64_byte_aligned() {
         assert_eq!(std::mem::size_of::<GpuClipmapGen>(), 64);
         assert_eq!(std::mem::size_of::<GpuClipmapGen>() % 16, 0);
+    }
+
+    #[test]
+    fn split_rect_keeps_the_remainder() {
+        let (now, rest) = split_rect(
+            ClipRect {
+                x: 0,
+                y: 0,
+                w: 1024,
+                h: 1024,
+            },
+            1024 * 256,
+        );
+        assert_eq!(now.h, 256);
+        assert_eq!(rest.unwrap().h, 768);
+        assert_eq!(rest.unwrap().y, 256);
     }
 }

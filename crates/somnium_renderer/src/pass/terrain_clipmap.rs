@@ -1,8 +1,9 @@
-//! Terrain clipmap generate compute (Phase DF).
+//! Terrain clipmap generate (Phase DF).
 //!
-//! Records before shading. Each dirty rectangle of each ring is one dispatch
-//! into the matching storage array. Group 0 is the global pool (bindless
-//! sources + `terrain_materials`); group 1 is the destination + params.
+//! Fragment pass, recorded before shading. Each dirty rectangle of each ring is
+//! one draw into that array layer (color attachments). Group 0 is the global
+//! pool; group 1 is params + sampler. Compute storage writes sampled as black
+//! on this Vulkan path (Dbg 32).
 
 use crate::terrain::clipmap::{ClipmapGenJob, GpuClipmapGen, TerrainClipmap};
 
@@ -11,7 +12,7 @@ const PARAMS_STRIDE: u64 = 256;
 const MAX_JOBS: usize = 64;
 
 pub struct TerrainClipmapPass {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
     sampler: wgpu::Sampler,
@@ -24,27 +25,7 @@ impl TerrainClipmapPass {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -55,8 +36,8 @@ impl TerrainClipmapPass {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -79,12 +60,38 @@ impl TerrainClipmapPass {
             bind_group_layouts: &[Some(global_layout), Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let target = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Terrain clipmap generate"),
             layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("clipmap_generate"),
-            compilation_options: Default::default(),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("clipmap_vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("clipmap_generate"),
+                targets: &[target.clone(), target],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
             cache: None,
         });
 
@@ -93,6 +100,9 @@ impl TerrainClipmapPass {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
 
@@ -125,41 +135,6 @@ impl TerrainClipmapPass {
         if jobs.is_empty() {
             return;
         }
-        let (albedo, surface) = if is_detail {
-            clipmap.detail_storage()
-        } else {
-            clipmap.macro_storage()
-        };
-        let bind =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Terrain clipmap gen"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(albedo),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(surface),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.params,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(
-                                std::mem::size_of::<GpuClipmapGen>() as u64
-                            ),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-
         let n = jobs.len().min(MAX_JOBS);
         let mut bytes = vec![0u8; PARAMS_STRIDE as usize * n];
         for (i, job) in jobs.iter().take(n).enumerate() {
@@ -170,15 +145,74 @@ impl TerrainClipmapPass {
         }
         queue.write_buffer(&self.params, 0, &bytes);
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Terrain clipmap generate"),
-            timestamp_writes: None,
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain clipmap gen"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.params,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<GpuClipmapGen>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
         });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, global, &[]);
+
         for (i, job) in jobs.iter().take(n).enumerate() {
-            pass.set_bind_group(1, &bind, &[(i as u32) * PARAMS_STRIDE as u32]);
-            pass.dispatch_workgroups((job.rect.w + 7) / 8, (job.rect.h + 7) / 8, 1);
+            if job.rect.is_empty() {
+                continue;
+            }
+            let (albedo, surface) = if is_detail {
+                clipmap.detail_layer(job.ring)
+            } else {
+                clipmap.macro_layer(job.ring)
+            };
+            let load = wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            };
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Terrain clipmap generate"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: albedo,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: load,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: surface,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: load,
+                        }),
+                    ],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, global, &[]);
+                pass.set_bind_group(1, &bind, &[(i as u32) * PARAMS_STRIDE as u32]);
+                pass.set_viewport(
+                    job.rect.x as f32,
+                    job.rect.y as f32,
+                    job.rect.w as f32,
+                    job.rect.h as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(job.rect.x, job.rect.y, job.rect.w, job.rect.h);
+                pass.draw(0..3, 0..1);
+            }
         }
     }
 }

@@ -28,6 +28,7 @@ const ATMOSPHERE_VOL: &str = include_str!("../src/shaders/volumetric.wgsl");
 const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
 const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
 const CLIPMAP_GEN: &str = include_str!("../src/shaders/clipmap_gen.wgsl");
+const CLIPMAP_SHADE: &str = include_str!("../src/shaders/clipmap_shade.wgsl");
 const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
 const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
 const SHADOW: &str = include_str!("../src/shaders/shadow.wgsl");
@@ -61,7 +62,7 @@ fn the_shading_module_validates() {
     check(
         "shading",
         &format!(
-            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
         ),
     );
 }
@@ -99,7 +100,7 @@ fn the_volumetric_module_validates() {
 #[test]
 fn the_terrain_material_struct_matches_the_rust_layout() {
     let source = format!(
-        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
     );
     let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
 

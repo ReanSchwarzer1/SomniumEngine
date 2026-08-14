@@ -1,10 +1,11 @@
 // Somnium Engine — Terrain clipmap generate (Phase DF).
 //
-// Writes one dirty rectangle of one ring. Concatenated after `global_pool`,
-// `hextile`, and `terrain_material`, which supply `textures`, the splat blend,
-// and `terrain_generate_texel`. `default_sampler` is this group's binding 3
-// so the same hex / layer path the fragment shader uses can run in compute
-// with explicit derivatives (the texel size of this ring).
+// Fragment pass, not compute. Live shading already samples bindless layers in
+// the fragment stage; compute `textureSampleGrad` on that array wrote black
+// (Dbg 32 silhouettes) even after copying the storage images. UE5 RVT and
+// this engine's other caches (water HDR copy, G-buffer) are color attachments
+// for the same reason. Concatenated after `global_pool`, `hextile`, and
+// `terrain_material`. Group 1 is params + `default_sampler`.
 //
 // World XZ only — no view vector, no POM. Shading marches the baked height.
 
@@ -22,16 +23,31 @@ struct ClipmapGenParams {
     _pad2: vec2<u32>,
 }
 
-@group(1) @binding(0) var clipmap_albedo_out: texture_storage_2d_array<rgba8unorm, write>;
-@group(1) @binding(1) var clipmap_surface_out: texture_storage_2d_array<rgba8unorm, write>;
-@group(1) @binding(2) var<uniform> clipmap_gen: ClipmapGenParams;
-@group(1) @binding(3) var default_sampler: sampler;
+@group(1) @binding(0) var<uniform> clipmap_gen: ClipmapGenParams;
+@group(1) @binding(1) var default_sampler: sampler;
 
-@compute @workgroup_size(8, 8, 1)
-fn clipmap_generate(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let tex = clipmap_gen.rect_min + gid.xy;
-    if tex.x >= clipmap_gen.rect_max.x || tex.y >= clipmap_gen.rect_max.y {
-        return;
+struct ClipmapFsOut {
+    @location(0) albedo: vec4<f32>,
+    @location(1) surface: vec4<f32>,
+}
+
+@vertex
+fn clipmap_vs(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((vid << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vid & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn clipmap_generate(@builtin(position) pos: vec4<f32>) -> ClipmapFsOut {
+    let tex = vec2<u32>(u32(pos.x), u32(pos.y));
+    var out: ClipmapFsOut;
+    out.albedo = vec4<f32>(0.0);
+    out.surface = vec4<f32>(0.5, 0.5, 0.8, 1.0);
+    if tex.x < clipmap_gen.rect_min.x || tex.y < clipmap_gen.rect_min.y
+        || tex.x >= clipmap_gen.rect_max.x || tex.y >= clipmap_gen.rect_max.y
+    {
+        return out;
     }
     let size = clipmap_gen.clipmap_size;
     let physical = (vec2<f32>(f32(tex.x), f32(tex.y)) + 0.5) / size;
@@ -46,16 +62,7 @@ fn clipmap_generate(@builtin(global_invocation_id) gid: vec3<u32>) {
         vec2<f32>(0.0, texel_m),
         clipmap_gen.hex != 0u,
     );
-    textureStore(
-        clipmap_albedo_out,
-        vec2<i32>(i32(tex.x), i32(tex.y)),
-        clipmap_gen.ring,
-        packed.albedo,
-    );
-    textureStore(
-        clipmap_surface_out,
-        vec2<i32>(i32(tex.x), i32(tex.y)),
-        clipmap_gen.ring,
-        packed.surface,
-    );
+    out.albedo = packed.albedo;
+    out.surface = packed.surface;
+    return out;
 }
