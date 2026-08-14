@@ -974,9 +974,12 @@ impl somnium_ecs::Component for PostProcessComponent {}
 
 /// Scene-wide camera settings, exposed as a selectable "Camera" entity.
 ///
-/// Fly-cam lives in `hello_engine`; Physical Camera is a Post FX exposure
-/// triangle. This component is the inspector home for CPU frustum early-out
-/// (Phase CR-B), independent of GPU 15B on F10.
+/// Play possesses this entity's **world** transform (so a later player-parented
+/// camera still drives the view). Physical Camera is a Post FX exposure
+/// triangle. Frustum Cull is the CPU early-out (Phase CR-B), independent of
+/// GPU 15B on F10.
+///
+/// Local `-Z` is the look direction, same as lights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CameraSettingsComponent {
     /// Skip terrain chunks whose AABB misses the camera frustum before they
@@ -1002,6 +1005,57 @@ impl CameraSettingsComponent {
 }
 
 impl somnium_ecs::Component for CameraSettingsComponent {}
+
+/// View matrix and eye position from a camera entity's world matrix.
+///
+/// The entity looks along local `-Z`. Parenting the Camera to a player later
+/// is just `propagate_transforms` writing a new [`WorldTransform`].
+#[must_use]
+pub fn camera_view_from_world(world: glam::Mat4) -> (glam::Mat4, glam::Vec3) {
+    let pos = world.transform_point3(glam::Vec3::ZERO);
+    (world.inverse(), pos)
+}
+
+/// Rotation that aims local `-Z` along `forward` (Y-up).
+#[must_use]
+pub fn look_rotation_neg_z(forward: glam::Vec3) -> glam::Quat {
+    let forward = forward.normalize_or_zero();
+    if forward.length_squared() < 1e-8 {
+        return glam::Quat::IDENTITY;
+    }
+    let view = glam::Mat4::look_at_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
+    glam::Quat::from_mat4(&view.inverse())
+}
+
+#[cfg(test)]
+mod camera_view_tests {
+    use super::{camera_view_from_world, look_rotation_neg_z};
+
+    #[test]
+    fn identity_camera_looks_along_neg_z() {
+        let (view, pos) = camera_view_from_world(glam::Mat4::IDENTITY);
+        assert!(pos.length() < 1e-5);
+        let ahead = view.transform_point3(glam::Vec3::NEG_Z);
+        assert!(ahead.z < 0.0, "RH view: a point along look is in front");
+    }
+
+    #[test]
+    fn translated_identity_matches_look_at() {
+        let pos = glam::Vec3::new(0.0, 2.0, 8.0);
+        let world = glam::Mat4::from_translation(pos);
+        let (view, eye) = camera_view_from_world(world);
+        assert!((eye - pos).length() < 1e-5);
+        let expected = glam::Mat4::look_at_rh(pos, pos + glam::Vec3::NEG_Z, glam::Vec3::Y);
+        let d = (view - expected).abs();
+        assert!(d.to_cols_array().iter().all(|x| *x < 1e-4));
+    }
+
+    #[test]
+    fn look_rotation_identity_when_facing_neg_z() {
+        let q = look_rotation_neg_z(glam::Vec3::NEG_Z);
+        assert!(q.dot(glam::Quat::IDENTITY).abs() > 0.999);
+    }
+}
 
 // ─── Phase 11.5A: Scene Graph Components ──────────────────────────────────
 

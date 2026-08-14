@@ -22,10 +22,10 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    BuoyantVessel, Children, Component, ComponentId, ComponentSet, Engine, EngineConfig,
-    EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, Transform, WorldTransform,
-    propagate_transforms,
+    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet, Engine,
+    EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, SimulationState,
+    Transform, WorldTransform, camera_view_from_world, propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -160,6 +160,15 @@ impl EditorCamera {
         )
     }
 
+    /// Scene Camera actor pose: local `-Z` is the look direction.
+    fn to_transform(&self) -> Transform {
+        Transform {
+            translation: self.position,
+            rotation: somnium_core::look_rotation_neg_z(self.forward_vector()),
+            scale: Vec3::ONE,
+        }
+    }
+
     fn look_at(&mut self, target: Vec3) {
         let d = target - self.position;
         if d.length_squared() < 1e-8 {
@@ -169,6 +178,30 @@ impl EditorCamera {
         let horiz = (d.x * d.x + d.z * d.z).sqrt();
         self.pitch = d.y.atan2(horiz).to_degrees().clamp(-89.0, 89.0);
     }
+}
+
+fn play_session(ctx: &EngineContext) -> bool {
+    ctx.simulation.state != SimulationState::Editing
+}
+
+/// World matrix of the Outliner Camera actor, if one exists.
+fn scene_camera_world(world: &somnium_ecs::World) -> Option<glam::Mat4> {
+    world.entities().find_map(|e| {
+        world.get::<CameraSettingsComponent>(e)?;
+        world
+            .get::<WorldTransform>(e)
+            .map(|wt| wt.0)
+            .or_else(|| world.get::<Transform>(e).map(Transform::to_matrix))
+    })
+}
+
+fn active_view(ctx: &EngineContext, editor: &EditorCamera) -> (glam::Mat4, Vec3) {
+    if play_session(ctx) {
+        if let Some(world) = scene_camera_world(ctx.world) {
+            return camera_view_from_world(world);
+        }
+    }
+    (editor.view_matrix(), editor.position)
 }
 
 fn parse_vec3(s: &str) -> Option<Vec3> {
@@ -1185,7 +1218,7 @@ impl GameApp for HelloGame {
         ));
 
         ctx.world.spawn((
-            Transform::from_translation(Vec3::ZERO),
+            self.camera.to_transform(),
             Name::new("Camera"),
             WorldTransform::identity(),
             somnium_core::CameraSettingsComponent::from_env(),
@@ -1303,7 +1336,7 @@ impl GameApp for HelloGame {
             }
 
             EngineEvent::MouseMotion { delta_x, delta_y } => {
-                if self.camera.is_rmb_down {
+                if self.camera.is_rmb_down && !play_session(ctx) {
                     self.camera.yaw += delta_x * self.camera.sensitivity;
                     self.camera.pitch -= delta_y * self.camera.sensitivity;
                     self.camera.pitch = self.camera.pitch.clamp(-89.0, 89.0);
@@ -1464,17 +1497,20 @@ impl GameApp for HelloGame {
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
 
-        self.camera.update(dt, ctx.camera_speed);
+        if !play_session(ctx) {
+            self.camera.update(dt, ctx.camera_speed);
+        }
         self.log_timer += dt;
 
         // Phase 14: create/destroy the voxel driver to match the ECS, then
         // stream chunks around the camera (async generation; finished meshes
         // are uploaded here, freed allocations recycled).
         self.sync_voxel_terrain(ctx);
+        let eye = active_view(ctx, &self.camera).1;
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
-            vt.update(self.camera.position, renderer, render_ctx);
+            vt.update(eye, renderer, render_ctx);
         }
 
         // Handle mesh-creating IPC commands that require renderer access.
@@ -1509,12 +1545,12 @@ impl GameApp for HelloGame {
                     [speed, wake_strength, 110.0, 3.0],
                 )
             });
+        let (view_mat, eye) = active_view(ctx, &self.camera);
         if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
-            let view_mat = self.camera.view_matrix();
             let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
-            renderer.set_view(view_mat, proj, self.camera.position);
+            renderer.set_view(view_mat, proj, eye);
 
             // Sync the lights from ECS LightComponent.
             {

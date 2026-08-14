@@ -30,7 +30,7 @@ use crate::{
     BuoyantVessel, CameraSettingsComponent, FoliageComponent, LightComponent, LightType,
     MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
     PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
-    simulate_particles,
+    look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -3504,6 +3504,16 @@ impl<G: GameApp> Engine<G> {
                     LightComponent::directional(crate::light_units::lux::DIRECT_SUNLIGHT),
                     Name::new("SunLight"),
                     WorldTransform::identity(),
+                ));
+                self.world.spawn((
+                    Transform {
+                        translation: glam::Vec3::new(0.0, 2.0, 8.0),
+                        rotation: look_rotation_neg_z(glam::Vec3::NEG_Z),
+                        scale: glam::Vec3::ONE,
+                    },
+                    Name::new("Camera"),
+                    WorldTransform::identity(),
+                    CameraSettingsComponent::from_env(),
                 ));
                 self.undo_stack = UndoStack::new(128);
                 self.scene_dirty = false;

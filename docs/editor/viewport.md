@@ -8,6 +8,7 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 - **RMB + scroll wheel** — camera speed. The same value lives on the viewport toolbar slider (shown as m/s).
 - The top-right of the title bar shows frame rate.
 - Select the **Camera** entity in the Outliner for **Frustum Cull** (default on): terrain chunks whose AABB misses the camera never reach the draw queue. Off-screen ground can still cast into view (cascade volumes, not the camera). Hold **RMB** and look at empty sky so the tile is behind you — profiler `cpu-cull` rises and `vis` drops; flying with WASD while still looking at the coast will not, because the 1 km tile fits a 45° frustum. If the row says `[off]` or `[forced-off]`, the CPU test is not running (`SOMNIUM_CPU_FRUSTUM=0` or the checkbox). **F10** is the GPU 15B A/B and is independent. Physical Camera (aperture / shutter / ISO) lives on **Post Processing**, not here.
+- **Play** possesses the Outliner **Camera** (its world transform; local `-Z` is look). The editor fly-cam is restored on **Stop**. Parent that Camera under a player later and Play will follow it. Move the Camera with the gizmo in edit mode to choose where Play starts.
 
 ## Picking and gizmos
 

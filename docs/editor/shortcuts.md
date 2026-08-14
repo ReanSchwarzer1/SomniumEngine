@@ -12,7 +12,8 @@
 
 ## Viewport
 
-- **RMB + WASD/QE** — fly · **Shift** — faster
+- **RMB + WASD/QE** — fly (edit mode) · **Shift** — faster
+- **Play** — possess the Outliner Camera · **Stop** — restore the fly-cam
 - **RMB + scroll** — camera speed
 - **T / R / S** — move / rotate / scale
 - **L** — light gizmos
