@@ -27,9 +27,10 @@ use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
-    BuoyantVessel, FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent,
-    MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent, Transform,
-    WaterComponent, WorldTransform, simulate_particles,
+    BuoyantVessel, CameraSettingsComponent, FoliageComponent, LightComponent, LightType,
+    MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
+    PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
+    simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -973,6 +974,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_t = self
                 .selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
+            let sel_camera = self
+                .selected_entity
+                .and_then(|e| self.world.get::<CameraSettingsComponent>(e).copied())
+                .map(|c| c.frustum_cull);
             // Phase 15A1: post-processing settings for the inspector.
             let sel_post = self
                 .selected_entity
@@ -1189,6 +1194,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ui.update_inspector(None, None, None, None);
                 }
                 ui.update_light_inspector(sel_light);
+                ui.update_camera_inspector(sel_camera);
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_water_inspector(sel_water);
@@ -1307,6 +1313,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         }));
                     }
                     let c = p.last_counters;
+                    let frustum_tag = if SomniumRenderer::cpu_frustum_env_off() {
+                        " [forced-off]"
+                    } else if !r.cpu_frustum_active() {
+                        " [off]"
+                    } else {
+                        ""
+                    };
                     rows.push(somnium_ui::ProfilerRow {
                         label: "draws".to_string(),
                         value: c.draw_calls.to_string(),
@@ -1319,7 +1332,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     });
                     rows.push(somnium_ui::ProfilerRow {
                         label: "terrain chunks".to_string(),
-                        value: c.terrain_chunks.to_string(),
+                        value: format!(
+                            "{} vis / {} cpu-cull{frustum_tag}",
+                            c.terrain_chunks, c.terrain_cpu_culled
+                        ),
                         depth: 0,
                     });
                     rows.push(somnium_ui::ProfilerRow {
@@ -1406,6 +1422,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Post-processing settings (Phase 15A1) ────────────────────────────
         self.apply_post_process();
+        self.apply_camera_settings();
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -1959,6 +1976,17 @@ impl<G: GameApp> Engine<G> {
             // Phase 22C: rides along with the sun in the directional-light
             // buffer, so every pass that lights anything picks it up.
             r.set_ibl_intensity(pp.ibl_intensity);
+        }
+    }
+
+    /// Push CPU frustum settings from the Camera entity (Phase CR-C).
+    fn apply_camera_settings(&mut self) {
+        let settings = self
+            .world
+            .entities()
+            .find_map(|e| self.world.get::<CameraSettingsComponent>(e).copied());
+        if let (Some(cam), Some(r)) = (settings, self.renderer.as_mut()) {
+            r.set_cpu_frustum(cam.frustum_cull);
         }
     }
 
@@ -3596,6 +3624,29 @@ impl<G: GameApp> Engine<G> {
                             info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
                         }
                     }
+                }
+            }
+
+            EditorEvent::SetCpuFrustum(on) => {
+                if SomniumRenderer::cpu_frustum_env_off() {
+                    info!("CPU frustum cull: forced off (SOMNIUM_CPU_FRUSTUM=0)");
+                    if let Some(r) = &mut self.renderer {
+                        r.set_cpu_frustum(false);
+                    }
+                } else {
+                    let target = self
+                        .world
+                        .entities()
+                        .find(|e| self.world.get::<CameraSettingsComponent>(*e).is_some());
+                    if let Some(e) = target {
+                        if let Some(cam) = self.world.get_mut::<CameraSettingsComponent>(e) {
+                            cam.frustum_cull = on;
+                        }
+                    }
+                    if let Some(r) = &mut self.renderer {
+                        r.set_cpu_frustum(on);
+                    }
+                    info!("CPU frustum cull: {}", if on { "on" } else { "off" });
                 }
             }
 

@@ -315,6 +315,10 @@ pub enum EditorEvent {
     ToggleTerrainHex,
     /// Nested material clipmaps (Phase DF). Default off until DF-E gates pass.
     ToggleTerrainClipmap,
+    /// CPU camera-frustum early-out (Phase CR-B). Default on. Independent of F10.
+    /// The bool is the checkbox value, not a toggle — applying Check as a flip
+    /// turned a default-on flag off the first time the inspector refreshed.
+    SetCpuFrustum(bool),
     /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default off.
     ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).

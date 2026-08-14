@@ -27,6 +27,10 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 Dbg **32** is clipmap albedo, **33** is ring index (0 = finest).
 
+## Frustum cull (Phase CR)
+
+Select the **Camera** entity for **Frustum Cull** (default on). Off-screen terrain chunks skip the vis draw queue; they still cast into view when they overlap a cascade. Hold **RMB** and look away from the tile to see profiler `cpu-cull` rise — WASD while facing the coast will not. `[off]` / `[forced-off]` on that row means the CPU test is not running. `SOMNIUM_CPU_FRUSTUM=0` forces it off. **F10** remains the GPU 15B A/B.
+
 ## Debug views
 
 Terrain **Dbg** 0–23 are material / shadow / splat probes. **24–31** are lighting: luminance, GI, cluster occupancy, world cache, specular aux, SDF, analytic mips, path-tracer aux.

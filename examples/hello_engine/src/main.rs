@@ -1184,6 +1184,13 @@ impl GameApp for HelloGame {
             somnium_core::DefaultLandscapePreset::current().post_process,
         ));
 
+        ctx.world.spawn((
+            Transform::from_translation(Vec3::ZERO),
+            Name::new("Camera"),
+            WorldTransform::identity(),
+            somnium_core::CameraSettingsComponent::from_env(),
+        ));
+
         ctx.physics.optimize_broad_phase();
 
         // Send initial content browser listing
@@ -1258,6 +1265,7 @@ impl GameApp for HelloGame {
                     }
                     // F10: A/B GPU frustum culling (Phase 15B). A correct cull
                     // is invisible — if geometry pops, the cull is wrong.
+                    // CPU Frustum Cull is the Camera Details toggle (Phase CR-C).
                     KeyCode::F10 if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {
                             let on = renderer.toggle_culling();
@@ -1501,8 +1509,9 @@ impl GameApp for HelloGame {
                     [speed, wake_strength, 110.0, 3.0],
                 )
             });
-        if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
-            let aspect = render_ctx.config.width as f32 / render_ctx.config.height as f32;
+        if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+            let (rw, rh) = renderer.scene_extent();
+            let aspect = rw as f32 / rh.max(1) as f32;
             let view_mat = self.camera.view_matrix();
             let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
             renderer.set_view(view_mat, proj, self.camera.position);

@@ -970,6 +970,39 @@ impl PostProcessComponent {
 }
 impl somnium_ecs::Component for PostProcessComponent {}
 
+// ─── Phase CR: Camera settings ──────────────────────────────────────────────
+
+/// Scene-wide camera settings, exposed as a selectable "Camera" entity.
+///
+/// Fly-cam lives in `hello_engine`; Physical Camera is a Post FX exposure
+/// triangle. This component is the inspector home for CPU frustum early-out
+/// (Phase CR-B), independent of GPU 15B on F10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraSettingsComponent {
+    /// Skip terrain chunks whose AABB misses the camera frustum before they
+    /// reach `draw_queue`. Default on. Off-screen casters still shadow into
+    /// view. `SOMNIUM_CPU_FRUSTUM=0` forces this off.
+    pub frustum_cull: bool,
+}
+
+impl Default for CameraSettingsComponent {
+    fn default() -> Self {
+        Self { frustum_cull: true }
+    }
+}
+
+impl CameraSettingsComponent {
+    /// Honour `SOMNIUM_CPU_FRUSTUM=0` at spawn.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            frustum_cull: std::env::var("SOMNIUM_CPU_FRUSTUM").as_deref() != Ok("0"),
+        }
+    }
+}
+
+impl somnium_ecs::Component for CameraSettingsComponent {}
+
 // ─── Phase 11.5A: Scene Graph Components ──────────────────────────────────
 
 /// ECS component that marks an entity as a child of another entity.

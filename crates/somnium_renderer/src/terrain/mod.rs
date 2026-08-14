@@ -887,14 +887,17 @@ impl TerrainData {
         let chunk_world = self.desc.chunk_cells as f32 * self.desc.cell_size;
 
         // 1. Distance-based LOD per chunk (Phase 14B-2 formula).
-        for chunk in &mut self.chunks {
+        // Phase CR-D: parallel once the grid is large enough that fork-join
+        // beats a serial loop. Default 16×16 stays serial (CR-A: GPU-bound).
+        let lod_base = self.desc.lod_base_range;
+        crate::jobs::for_each_mut(&mut self.chunks, |chunk| {
             let center = glam::Vec3::new(
                 (chunk.grid_pos[0] as f32 + 0.5) * chunk_world,
                 (chunk.aabb_min.y + chunk.aabb_max.y) * 0.5,
                 (chunk.grid_pos[1] as f32 + 0.5) * chunk_world,
             );
             let dist = local_camera_pos.distance(center).max(0.01);
-            let lod_f = (dist / self.desc.lod_base_range).log2().floor();
+            let lod_f = (dist / lod_base).log2().floor();
             chunk.lod = lod_f.clamp(0.0, MAX_TERRAIN_LOD as f32) as u8;
 
             // A coarser index buffer skips height vertices. Where a horizontal
@@ -907,7 +910,7 @@ impl TerrainData {
             if chunk_crosses_water_surface(chunk, chunk_world, shoreline_regions) {
                 chunk.lod = 0;
             }
-        }
+        });
 
         // 2. Relax until adjacent chunks differ by at most one level.
         let at = |chunks: &[TerrainChunk], x: i64, z: i64| -> Option<u8> {

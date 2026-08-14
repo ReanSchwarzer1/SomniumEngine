@@ -295,6 +295,22 @@ pub struct SomniumRenderer {
     pub meshlet_draws: bool,
     /// When false the cull shader keeps every draw (useful for A/B checks).
     pub culling_enabled: bool,
+    /// CPU AABB frustum early-out for terrain vis draws (Phase CR-B). Default
+    /// on. Independent of [`Self::culling_enabled`] (GPU 15B / F10). Off-screen
+    /// casters still reach the shadow pass via `shadow_only_queue`.
+    pub cpu_frustum_cull: bool,
+    /// Cull shadow casters against cascade volumes, never the camera (CR-E).
+    pub cascade_caster_cull: bool,
+    /// This frame's cascade view-projections, for CPU caster tests.
+    cascade_view_projs: [glam::Mat4; crate::shadow::NUM_CASCADES],
+    /// Terrain chunks rebuilt this frame; capacity is kept across frames (CR-F).
+    rebuilt_chunks: Vec<u32>,
+    /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
+    /// so they skip vis / GPU 15B, but they occupy instance slots after the
+    /// opaque vis draws so the shadow pass can find their transforms.
+    shadow_only_queue: Vec<DrawCommand>,
+    /// Persistent shadow-caster list (CR-F). Cleared and refilled each frame.
+    shadow_caster_scratch: Vec<crate::pass::shadow::ShadowCaster>,
 
     /// Phase 21: forward pass for alpha-blended materials.
     transparent_pass: crate::pass::transparent::TransparentPass,
@@ -686,11 +702,17 @@ impl SomniumRenderer {
             cull_stats_buffers: None,
             occlusion_off: std::env::var("SOMNIUM_NO_OCCLUSION").is_ok_and(|v| v == "1"),
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
-            cull_aabbs: Vec::new(),
-            cluster_args: Vec::new(),
+            cull_aabbs: Vec::with_capacity(256),
+            cluster_args: Vec::with_capacity(256),
             instanced_counts: std::collections::HashMap::new(),
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
+            cpu_frustum_cull: !cpu_frustum_env_off(),
+            cascade_caster_cull: !cascade_cull_env_off(),
+            cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
+            rebuilt_chunks: Vec::with_capacity(32),
+            shadow_only_queue: Vec::with_capacity(256),
+            shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
             supports_gpu_driven: ctx.supports_gpu_driven(),
             water_pass,
@@ -706,8 +728,8 @@ impl SomniumRenderer {
             terrains: Vec::new(),
             clipmaps: Vec::new(),
             clipmap_pass,
-            terrain_queue: Vec::new(),
-            draw_queue: Vec::new(),
+            terrain_queue: Vec::with_capacity(4),
+            draw_queue: Vec::with_capacity(256),
 
             water_textures_bind_group,
             water_bodies: Default::default(),
@@ -1084,6 +1106,31 @@ impl SomniumRenderer {
     pub fn toggle_culling(&mut self) -> bool {
         self.culling_enabled = !self.culling_enabled;
         self.culling_enabled
+    }
+
+    /// Toggle CPU camera-frustum early-out (Phase CR-B). Independent of F10.
+    pub fn toggle_cpu_frustum(&mut self) -> bool {
+        self.set_cpu_frustum(!self.cpu_frustum_cull)
+    }
+
+    /// Apply the Camera Details checkbox. `SOMNIUM_CPU_FRUSTUM=0` wins.
+    pub fn set_cpu_frustum(&mut self, on: bool) -> bool {
+        if cpu_frustum_env_off() {
+            self.cpu_frustum_cull = false;
+            return false;
+        }
+        self.cpu_frustum_cull = on;
+        self.cpu_frustum_cull
+    }
+
+    /// Whether terrain vis enqueue will run the CPU AABB test this frame.
+    pub fn cpu_frustum_active(&self) -> bool {
+        self.cpu_frustum_cull && !cpu_frustum_env_off()
+    }
+
+    /// `SOMNIUM_CPU_FRUSTUM=0` forces the CPU early-out off.
+    pub fn cpu_frustum_env_off() -> bool {
+        cpu_frustum_env_off()
     }
 
     /// Whether the GPU-driven indirect path is currently in use.
@@ -1726,6 +1773,7 @@ impl SomniumRenderer {
         // off: `jitter_ndc` returns zero when TAA is disabled, so the cascades
         // stopped moving.
         let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
+        self.cascade_view_projs = std::array::from_fn(|i| cascades[i].view_proj);
 
         let shadow_debug = if self.shading_debug != 0.0 {
             self.shading_debug
@@ -1774,15 +1822,27 @@ impl SomniumRenderer {
         // same shadow pass — which is also the first time terrain casts a
         // shadow — and the same visibility buffer, where `shading.wgsl` picks
         // it up. There is no terrain pass left to run at the end of the frame.
-        let mut rebuilt_chunks: Vec<u32> = Vec::new();
+        //
+        // Phase CR-B: camera-frustum failures skip `draw_queue` (and therefore
+        // vis / GPU 15B). They still occupy `shadow_only_queue` when they hit a
+        // cascade, so off-screen ground can still shadow into view (15B's
+        // contract). CR-E cascade-culls that list; never the camera frustum.
+        self.profiler.cpu_begin("Terrain");
+        self.shadow_only_queue.clear();
+        let cam_planes = crate::culling::frustum_planes(self.view_proj_unjittered);
+        let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
+            self.cascade_view_projs.map(crate::culling::frustum_planes);
+        let cpu_frustum = self.cpu_frustum_active();
+        let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
+        let mut cpu_culled = 0u32;
         for &(id, model) in &self.terrain_queue {
             let shoreline_regions = self.water_bodies.shoreline_lod_regions(id);
             let terrain = &mut self.terrains[id as usize];
             terrain.model = model;
             let local_cam = model.inverse().transform_point3(self.camera_pos);
             terrain.select_lods(local_cam, &shoreline_regions);
-            rebuilt_chunks.clear();
-            terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut rebuilt_chunks);
+            self.rebuilt_chunks.clear();
+            terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut self.rebuilt_chunks);
             terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
             terrain.splatmap.upload_dirty(&ctx.queue);
 
@@ -1801,12 +1861,12 @@ impl SomniumRenderer {
             // isolates what 25B added: with it, terrain both casts and receives
             // traced shadows; without it, the TLAS holds the same scene 24J saw.
             if self.raytrace_pass.supported()
-                && !rebuilt_chunks.is_empty()
+                && !self.rebuilt_chunks.is_empty()
                 && std::env::var("SOMNIUM_RT_TERRAIN").as_deref() != Ok("0")
             {
                 if let Some((rt_index_offset, rt_index_count)) = terrain.rt_index_block() {
                     let vertex_count = terrain.chunk_vertex_capacity();
-                    for &vertex_offset in &rebuilt_chunks {
+                    for &vertex_offset in &self.rebuilt_chunks {
                         self.raytrace_pass.register_mesh(
                             &ctx.device,
                             vertex_offset,
@@ -1838,7 +1898,7 @@ impl SomniumRenderer {
                 // `submit`, which would need a second mutable borrow of self —
                 // terrain's material is registered opaque, so the routing
                 // `submit` does would be a no-op anyway.
-                self.draw_queue.push(DrawCommand {
+                let cmd = DrawCommand {
                     casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
                         0,
@@ -1850,9 +1910,30 @@ impl SomniumRenderer {
                     index_count,
                     material_id,
                     transform: model,
-                });
+                };
+                let in_camera = !cpu_frustum
+                    || crate::culling::chunk_in_frustum(
+                        &cam_planes,
+                        model,
+                        chunk.aabb_min,
+                        chunk.aabb_max,
+                    );
+                if in_camera {
+                    self.draw_queue.push(cmd);
+                } else {
+                    cpu_culled += 1;
+                    let (wmin, wmax) =
+                        crate::culling::transform_aabb(model, chunk.aabb_min, chunk.aabb_max);
+                    let in_cascade = !cascade_cull
+                        || crate::culling::aabb_in_any_frustum(&cascade_planes, wmin, wmax);
+                    if cmd.casts_shadow && in_cascade {
+                        self.shadow_only_queue.push(cmd);
+                    }
+                }
             }
         }
+        self.profiler.counters.terrain_cpu_culled = cpu_culled;
+        self.profiler.cpu_end();
 
         for &(id, model) in &self.terrain_queue {
             let Some(terrain) = self.terrains.get(id as usize) else {
@@ -1894,42 +1975,17 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
-            let terrain_packed = self.terrains.iter().find_map(|terrain| {
-                terrain.chunks.iter().find_map(|chunk| {
-                    if chunk.vertex_offset != cmd.vertex_offset {
-                        return None;
-                    }
-                    let verts = terrain.desc.chunk_cells + 1;
-                    let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
-                    let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
-                    let morph_on = u32::from(terrain.lod_morph);
-                    Some(
-                        (u32::from(chunk.lod) & 15)
-                            | ((verts & 511) << 4)
-                            | (morph_on << 13)
-                            | ((lod_base & 255) << 14)
-                            | ((start & 1023) << 22),
-                    )
-                })
-            });
-            let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
-                terrain_packed.map(|p| (p & 15) + 1).unwrap_or(0)
-            } else {
-                terrain_packed.unwrap_or(0)
-            };
             self.instances
-                .add_instance(crate::instance::GpuInstanceData {
-                    model_matrix: cmd.transform.to_cols_array_2d(),
-                    material_id: cmd.material_id,
-                    mesh_vertex_offset: cmd.vertex_offset,
-                    mesh_index_offset: cmd.index_offset,
-                    _padding: terrain_lod,
-                });
+                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
+        }
+        for cmd in &self.shadow_only_queue {
+            self.instances
+                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
         }
         // Phase 21: blended draws share the same instance buffer, appended
-        // after the opaque ones. The visibility pass only draws the opaque
-        // range; the transparent pass indexes into the tail.
-        let transparent_base = self.draw_queue.len() as u32;
+        // after the opaque ones (vis + shadow-only). The visibility pass only
+        // draws the opaque vis range; the transparent pass indexes into the tail.
+        let transparent_base = (self.draw_queue.len() + self.shadow_only_queue.len()) as u32;
         let mut transparent_draws: Vec<crate::pass::transparent::TransparentDraw> =
             Vec::with_capacity(self.transparent_queue.len());
         for (i, cmd) in self.transparent_queue.iter().enumerate() {
@@ -2107,15 +2163,17 @@ impl SomniumRenderer {
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
         //
         // Phase 24AE: cull casters too small to be worth a shadow before any of
-        // them reach the atlas. See `shadow_casters`.
-        let casters = self.shadow_casters();
-        self.profiler.counters.shadow_casters = u32::try_from(casters.len()).unwrap_or(u32::MAX);
+        // them reach the atlas. Phase CR-E also drops casters that miss every
+        // cascade volume. See `rebuild_shadow_casters`.
+        self.rebuild_shadow_casters();
+        self.profiler.counters.shadow_casters =
+            u32::try_from(self.shadow_caster_scratch.len()).unwrap_or(u32::MAX);
         self.profiler.begin(&mut encoder, "Shadows");
         self.shadow_pass.record(
             &mut encoder,
             &self.shadow_resources.atlas_view,
             &self.global_pool.bind_group,
-            &casters,
+            &self.shadow_caster_scratch,
         );
         self.profiler.end(&mut encoder);
 
@@ -3083,6 +3141,15 @@ impl SomniumRenderer {
     ///
     /// Must run on *every* path out of `render`, including the ones that bail
     /// before drawing.
+    fn clear_frame_queues(&mut self) {
+        self.draw_queue.clear();
+        self.shadow_only_queue.clear();
+        self.water_queue.clear();
+        self.terrain_queue.clear();
+        self.transparent_queue.clear();
+        self.light_gizmo_queue.clear();
+    }
+
     /// Which draws are worth rendering into the shadow atlas this frame.
     ///
     /// # Why this exists
@@ -3117,53 +3184,129 @@ impl SomniumRenderer {
     /// UE applies it to whole-scene (CSM) shadows only and skips it for virtual
     /// shadow maps, which need the draw for GPU-side caching. Somnium has only
     /// the cascade path, so it applies everywhere.
-    fn shadow_casters(&self) -> Vec<crate::pass::shadow::ShadowCaster> {
+    ///
+    /// Phase CR-E: a caster that fails the **camera** frustum can still shadow
+    /// into view. Those live in `shadow_only_queue` with instance indices after
+    /// the vis draws. This method cascade-frustum-culls both lists; it never
+    /// camera-culls a caster.
+    fn rebuild_shadow_casters(&mut self) {
         let threshold = self.shadow_radius_threshold;
-        let mut out = Vec::with_capacity(self.draw_queue.len());
+        let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
+        let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
+            self.cascade_view_projs.map(crate::culling::frustum_planes);
+        self.shadow_caster_scratch.clear();
+        let vis_len = self.draw_queue.len();
         for (i, cmd) in self.draw_queue.iter().enumerate() {
-            let instance_index = u32::try_from(i).unwrap_or(0);
-            let caster = crate::pass::shadow::ShadowCaster {
-                instance_index,
-                index_count: cmd.index_count,
-            };
-            // The authored opt-out comes first: foliage past its own shadow
-            // distance is out regardless of how large it is on screen.
-            if !cmd.casts_shadow {
-                continue;
-            }
-            if threshold <= 0.0 {
-                out.push(caster);
-                continue;
-            }
-            // No recorded bounds means no basis to reject it. Keeping it is the
-            // safe direction: a missing shadow is a visible bug, an extra draw
-            // is only slow.
-            let Some((min, max)) = self.geometry.mesh_aabb(cmd.vertex_offset) else {
-                out.push(caster);
-                continue;
-            };
-            let min = glam::Vec3::from(min);
-            let max = glam::Vec3::from(max);
-            // Local half-extent scaled by the transform. `transform_vector3`
-            // rather than a length of the scale row, so a non-uniform or
-            // rotated instance still gets a radius that bounds it.
-            let half = cmd.transform.transform_vector3((max - min) * 0.5);
-            let radius = half.length();
-            let centre = cmd.transform.transform_point3((min + max) * 0.5);
-            let dist_sq = (centre - self.camera_pos).length_squared();
-            if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
-                out.push(caster);
-            }
+            consider_shadow_caster(
+                cmd,
+                u32::try_from(i).unwrap_or(0),
+                threshold,
+                cascade_cull,
+                &cascade_planes,
+                self.camera_pos,
+                &self.geometry,
+                &mut self.shadow_caster_scratch,
+            );
         }
-        out
+        for (i, cmd) in self.shadow_only_queue.iter().enumerate() {
+            consider_shadow_caster(
+                cmd,
+                u32::try_from(vis_len + i).unwrap_or(u32::MAX),
+                threshold,
+                cascade_cull,
+                &cascade_planes,
+                self.camera_pos,
+                &self.geometry,
+                &mut self.shadow_caster_scratch,
+            );
+        }
     }
+}
 
-    fn clear_frame_queues(&mut self) {
-        self.draw_queue.clear();
-        self.water_queue.clear();
-        self.terrain_queue.clear();
-        self.transparent_queue.clear();
-        self.light_gizmo_queue.clear();
+fn cpu_frustum_env_off() -> bool {
+    std::env::var("SOMNIUM_CPU_FRUSTUM").as_deref() == Ok("0")
+}
+
+fn cascade_cull_env_off() -> bool {
+    std::env::var("SOMNIUM_CASCADE_CULL").as_deref() == Ok("0")
+}
+
+fn gpu_instance_from_cmd(
+    terrains: &[crate::terrain::TerrainData],
+    cmd: &DrawCommand,
+    shadow_debug: f32,
+) -> crate::instance::GpuInstanceData {
+    let terrain_packed = terrains.iter().find_map(|terrain| {
+        terrain.chunks.iter().find_map(|chunk| {
+            if chunk.vertex_offset != cmd.vertex_offset {
+                return None;
+            }
+            let verts = terrain.desc.chunk_cells + 1;
+            let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
+            let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
+            let morph_on = u32::from(terrain.lod_morph);
+            Some(
+                (u32::from(chunk.lod) & 15)
+                    | ((verts & 511) << 4)
+                    | (morph_on << 13)
+                    | ((lod_base & 255) << 14)
+                    | ((start & 1023) << 22),
+            )
+        })
+    });
+    let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
+        terrain_packed.map(|p| (p & 15) + 1).unwrap_or(0)
+    } else {
+        terrain_packed.unwrap_or(0)
+    };
+    crate::instance::GpuInstanceData {
+        model_matrix: cmd.transform.to_cols_array_2d(),
+        material_id: cmd.material_id,
+        mesh_vertex_offset: cmd.vertex_offset,
+        mesh_index_offset: cmd.index_offset,
+        _padding: terrain_lod,
+    }
+}
+
+fn consider_shadow_caster(
+    cmd: &DrawCommand,
+    instance_index: u32,
+    threshold: f32,
+    cascade_cull: bool,
+    cascade_planes: &[[[f32; 4]; 6]],
+    camera_pos: glam::Vec3,
+    geometry: &crate::geometry::GeometryPool,
+    out: &mut Vec<crate::pass::shadow::ShadowCaster>,
+) {
+    if !cmd.casts_shadow {
+        return;
+    }
+    let caster = crate::pass::shadow::ShadowCaster {
+        instance_index,
+        index_count: cmd.index_count,
+    };
+    let Some((min, max)) = geometry.mesh_aabb(cmd.vertex_offset) else {
+        out.push(caster);
+        return;
+    };
+    let min = glam::Vec3::from(min);
+    let max = glam::Vec3::from(max);
+    if cascade_cull {
+        let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
+        if !crate::culling::aabb_in_any_frustum(cascade_planes, wmin, wmax) {
+            return;
+        }
+    }
+    if threshold <= 0.0 {
+        out.push(caster);
+        return;
+    }
+    let half = cmd.transform.transform_vector3((max - min) * 0.5);
+    let radius = half.length();
+    let centre = cmd.transform.transform_point3((min + max) * 0.5);
+    let dist_sq = (centre - camera_pos).length_squared();
+    if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
+        out.push(caster);
     }
 }
 
