@@ -46,6 +46,9 @@ almost broken.
    - [`phase_DF.md`](phase_DF.md) — Daggerfall **in engine**, default off.
      Clipmap **audit** is §12 (separate session, other model). Do not retune
      clipmaps inside the Halcyon→HEAD audit unless the user redirects.
+   - [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md)
+     — Island vs Coastal fps, compact shading PSO, why inspector checkboxes
+     did not drop Shading ms. **Read before “fixing” terrain frame time.**
    - historical handoffs (`post_IV_context_handoff.md`, `post_25M2_context_handoff.md`,
      `phase_25m2_completion_report.md`, `phase_IV.md`, XV research/evidence)
 5. Help pages that document the live editor: [`docs/editor/`](../docs/editor/)
@@ -62,8 +65,10 @@ Optional depth after (1)–(6): `wgpu_api_gotchas.md`, `CONTRIBUTING.md`,
 | Contract | Value | Why |
 |---|---|---|
 | Water | `WaterComponent::great_lakes`: datum **16.1 m**, optical `max_depth` **18.6 m**, Gerstner `wave_speed` **0.85** | Boat buoyancy samples Gerstner only; FFT is visual |
-| Terrain look | 32 layers, strongest-four, sidecar v4, unique colour from splat, biome v3 / landscape v4, snow `relief * 0.48`, aerial hex/POM off **> 80 m AGL**. `GpuTerrainMaterial` **2032** bytes (XV **1664** body + DF clipmap fields). Do not shrink it. | [`XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · [`phase_DF.md`](phase_DF.md) |
+| Terrain look | 32 layers, strongest-four, sidecar v4, unique colour from splat, biome v3 / landscape v4, snow `relief * 0.48`, aerial hex/POM off **> 80 m AGL**. `GpuTerrainMaterial` **2032** bytes (XV **1664** body + DF clipmap fields). Do **not** shrink `TERRAIN_LAYER_COUNT` so Coastal “becomes Island.” Island publishes 16 layers (`hero_bank_only`); the GPU struct stays 32 slots. | [`XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · [`phase_DF.md`](phase_DF.md) |
 | Terrain LOD shader | **No per-pixel** `close` / `use_maps` / `layer_budget` sample branch | Compiled three paths into one shader; walking 20→27 ms |
+| Clipmap default | Inspector **off**. Do not enable as the Coastal default to win fps. | Cheap shade path for a 1 km tile; DF audit is `phase_DF.md` §12 |
+| Island look | Hex off, Parallax off, 16-layer hero bank. User signed off 2026-08-14. | Do not retune the recipe for frame time |
 | Water / transparents in TLAS | **Out** | Halcyon non-goal; reflected shore will not show water lapping |
 | `trace_ssr` | **Keep** | Degrade path and VV-G near-field |
 | World Cache | **Default off** | Extra GPU on top of ReSTIR GI, not a speedup |
@@ -84,14 +89,17 @@ Optional depth after (1)–(6): `wgpu_api_gotchas.md`, `CONTRIBUTING.md`,
 | **FSR 3** | Default on (`1cc33cd`) | **Yes — extra** |
 | **Foliage LOD + GPU cull** | Signed off (`2fd242d` and cull/Hi-Z follow-ups) | **Yes — extra** (do not “improve” LOD) |
 | **IV / XV** | Closed | Regression-only |
-| **DF Daggerfall** | Plan only — [`phase_DF.md`](phase_DF.md) | Do not implement during the audit |
+| **Maps / Island look** | Coastal + Island recipes; Island look signed off | Regression-only (do not retune water or Island materials) |
+| **Terrain shading occupancy** | Compact PSO in tree; Island **30+ fps**; Coastal ~**20 fps** on the ground with Hex/POM/PCSS off | **Read the notes — do not re-diagnose with inspector checkboxes.** [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md) |
+| **DF Daggerfall** | **In engine**, default **off** — [`phase_DF.md`](phase_DF.md) | Own audit (§12). Do not implement or default-on during this audit |
 
 **Still open (not an invitation to rewrite):**
 
 - Halcyon live SSR miss-rate / before-after PNGs in `dev records/phase VV/`
 - [`phase_VV.md`](phase_VV.md) §11 GPU timings vs profiler
 - wgpu-ffx `GenerateReactive` unimplemented → water/transparents can ghost under FSR
-- XV-J 1.10 ms shading budget **not met** (walk ~5.5 ms at 1280×720) — that is Daggerfall’s job, not a silent sample-count LOD
+- XV-J 1.10 ms shading budget **not met** (walk ~5.5 ms at 1280×720) — that is Daggerfall / a second aerial PSO, not a silent sample-count LOD
+- Coastal ground fps after compact PSO (~20) vs Island (30+) — tile size / 32 published layers / full-screen terrain, **not** leftover POM. Notes: [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md)
 
 ---
 
@@ -110,8 +118,9 @@ Phase 26 plan `719086c`, 26-A–I `ce16c31`, evening chrome `973b9a6` / `b5d1e57
 | 2026-08-14 | `36b8fc7` | Viewport **Resolution** selector |
 | 2026-08-14 | `1cc33cd` | **FSR 3 temporal upscale** (no frame gen) |
 | 2026-08-14 | `2fd242d` | Foliage LOD: dummy impostor gone; later cull/cone/Hi-Z fixes in the same conversation |
+| 2026-08-14 | worktree (check `git status`) | Maps (Coastal / Island). Compact shading PSO (`ShadingSpec` overrides). Uniform POM / ReSTIR-vis gates (necessary, **not** sufficient). Island **30+ fps**; Coastal still ~20 fps on the ground |
 
-Line numbers in older plans drift. Verify against the worktree.
+Line numbers in older plans drift. Verify against the worktree. The occupancy / PSO work may still be **uncommitted**.
 
 ---
 
@@ -212,6 +221,41 @@ revival is a single instance because the CPU no longer batches `N` copies onto
 one argument. Cone test `cone.w = 2` disables. Large screen-space AABB → not
 occluded (CPU mirror in `culling.rs`).
 
+### 4.6 Terrain shading occupancy (extra — already diagnosed)
+
+Full notes: [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md).
+Help: [`docs/editor/terrain.md`](../docs/editor/terrain.md) (Hex / Parallax /
+Clipmap / Maps), [`docs/editor/lighting.md`](../docs/editor/lighting.md)
+(**Soft Shadows** = PCSS).
+
+**Do not spend the audit re-testing inspector checkboxes for Shading ms.**
+
+Runtime uniforms do not delete WGSL. Occupancy is the union of every path still
+in the compiled shading shader. Measured on Island (terrain selected): Shading
+~41 ms of ~53 ms total, ~20 fps — same ballpark as Coastal ~18 fps. Uniform POM
+skip, uniform ReSTIR sun-vis (`shading_mode` bit 4), and unchecking Parallax /
+Soft Shadows / Contact **did not drop** frame time.
+
+**What did:** `ShadingSpec` + `ensure_pipeline` overrides (`enable_hex`,
+`enable_pom`, `enable_pcss`, `enable_contact`, `enable_clipmap`, `enable_debug`,
+`terrain_scan`). Island (hex off, POM off, 16-layer scan) stays on
+`ShadingSpec::COMPACT` → **30+ fps**. Coastal with Hex / Parallax / Soft Shadows
+unchecked is still ~**20 fps on the ground**: 1024 m / 256 chunks / 32 published
+layers / almost every pixel is terrain. Unchecking those boxes does not turn
+Coastal into Island.
+
+**Audit questions (regression only):**
+
+- Island still loads compact (hex off, POM off, `hero_bank_only`,
+  `terrain_scan = 16`)? Look signed off — do not retune the recipe.
+- Coastal still 32 layers / 8 splatmaps? Do not shrink the GPU format.
+- Clipmap still default **off**? Do not enable it as the Coastal default.
+- Soft Shadows still the PCSS checkbox (no “PCSS” label)?
+- `shading_mode` bit 4 still set when ReSTIR DI + TLAS are live?
+
+If profiler Shading on Coastal is now near Island and Vis/Shadow ate the extra
+~15 ms, that is the 256-chunk tile — not leftover POM.
+
 ---
 
 ## 5. Key paths (verify; lines drift)
@@ -225,8 +269,10 @@ occluded (CPU mirror in `culling.rs`).
 | Foliage submit / LOD | `crates/somnium_core/src/app.rs` `submit_foliage`, `ensure_palette_mesh` |
 | Water RT | `pass/water.rs`, `pass/water_reflection.rs`, `shaders/water.wgsl`, `shaders/water_reflection.wgsl`, `shaders/rt_hit.wgsl` |
 | Lighting extras | `pass/lighting_extra.rs`, `shaders/lighting_extra.wgsl` |
-| Terrain material | `shaders/terrain_material.wgsl` (strongest-four, hex, POM) |
+| Terrain material | `shaders/terrain_material.wgsl` (strongest-four, hex, POM, `enable_*` overrides) |
+| Compact shading PSO | `pass/shading.rs` (`ShadingSpec`, `ensure_pipeline`); spec built in `renderer.rs` before Shading |
 | Help | `docs/editor/viewport.md`, `lighting.md`, `water.md`, `terrain.md` |
+| Occupancy notes | [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md) |
 
 ---
 
@@ -244,8 +290,14 @@ occluded (CPU mirror in `culling.rs`).
    the cull shader to preserve `N`.
 10. Play / Pause / Stop / immersive Esc, foliage Type combo, terrain paint,
     boat buoyancy, FSR Sharp, Resolution combo stay working.
-11. Do not implement [`phase_DF.md`](phase_DF.md) during the audit unless the
-    user says to start Daggerfall.
+11. Do not implement or default-on [`phase_DF.md`](phase_DF.md) during the
+    audit unless the user says to start Daggerfall. Clipmap stays inspector
+    **off**; do not enable it as the Coastal default to win fps.
+12. Do not shrink `TERRAIN_LAYER_COUNT` / `GpuTerrainMaterial` so Coastal
+    matches Island’s 16 published layers. Island is `hero_bank_only`.
+13. Do not “fix” Shading ms by flipping Hex / Parallax / Soft Shadows /
+    Contact and calling it done. Those uniforms do not delete compiled paths;
+    the compact PSO already does when they are off. See §4.6.
 
 ---
 
@@ -262,10 +314,12 @@ occluded (CPU mirror in `culling.rs`).
 
 ## 8. Accuracy rule
 
-Implementation and tests are truth; this handoff is a snapshot at 2026-08-14.
-If architecture, defaults, or contracts change, update **this file**,
-[`context.md`](../context.md), and [`ATTRIBUTION.md`](../ATTRIBUTION.md) together.
+Implementation and tests are truth; this handoff is a snapshot at 2026-08-14
+(occupancy addendum the same day). If architecture, defaults, or contracts
+change, update **this file**, [`context.md`](../context.md), and
+[`ATTRIBUTION.md`](../ATTRIBUTION.md) together.
 
 **AI disclosure:** Reconstructed from the Halcyon handoff, `context.md` /
 `ATTRIBUTION.md`, git history `ce16c31`→`2fd242d`, FSR/foliage session notes,
-and Help pages. It does not replace licenses or the full VV/XV/IV plans.
+Help pages, and the 2026-08-14 Island/Coastal shading occupancy session. It
+does not replace licenses or the full VV/XV/IV plans.
