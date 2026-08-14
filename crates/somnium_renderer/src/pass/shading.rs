@@ -5,8 +5,52 @@
 //!   @group(1) binding 3 — shadow_sampler (sampler_comparison for PCF)
 use wgpu;
 
+/// Compile-time feature set for the shading PSO.
+///
+/// Runtime uniforms cannot delete hex/POM/PCSS from the shader, so occupancy
+/// stayed at the union of every path. Recreating the pipeline with these
+/// overrides is what actually drops Shading ms when the features are off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShadingSpec {
+    pub hex: bool,
+    pub pom: bool,
+    pub pcss: bool,
+    pub contact: bool,
+    pub clipmap: bool,
+    pub debug: bool,
+    pub terrain_scan: u32,
+}
+
+impl ShadingSpec {
+    pub const COMPACT: Self = Self {
+        hex: false,
+        pom: false,
+        pcss: false,
+        contact: false,
+        clipmap: false,
+        debug: false,
+        terrain_scan: 16,
+    };
+
+    fn constants(self) -> [(&'static str, f64); 7] {
+        [
+            ("enable_hex", f64::from(u32::from(self.hex))),
+            ("enable_pom", f64::from(u32::from(self.pom))),
+            ("enable_pcss", f64::from(u32::from(self.pcss))),
+            ("enable_contact", f64::from(u32::from(self.contact))),
+            ("enable_clipmap", f64::from(u32::from(self.clipmap))),
+            ("enable_debug", f64::from(u32::from(self.debug))),
+            ("terrain_scan", f64::from(self.terrain_scan)),
+        ]
+    }
+}
+
 pub struct ShadingPass {
     pub pipeline: wgpu::RenderPipeline,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    hdr_format: wgpu::TextureFormat,
+    spec: ShadingSpec,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
     // Stored for bind-group recreation on resize / shadow atlas change.
@@ -342,42 +386,21 @@ impl ShadingPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Shading Pipeline"),
-            layout: Some(&pipeline_layout),
-            multiview_mask: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            cache: None,
-        });
+        let spec = ShadingSpec::COMPACT;
+        let pipeline = Self::make_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            spec,
+        );
 
         Self {
             pipeline,
+            shader,
+            pipeline_layout,
+            hdr_format: surface_format,
+            spec,
             bind_group_layout,
             bind_group,
             sampler,
@@ -401,6 +424,79 @@ impl ShadingPass {
             _clipmap_dummy_detail: dummy_detail,
             _clipmap_dummy_macro: dummy_macro,
         }
+    }
+
+    fn make_pipeline(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        layout: &wgpu::PipelineLayout,
+        hdr_format: wgpu::TextureFormat,
+        spec: ShadingSpec,
+    ) -> wgpu::RenderPipeline {
+        let constants = spec.constants();
+        let compilation_options = wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            zero_initialize_workgroup_memory: true,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shading Pipeline"),
+            layout: Some(layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: compilation_options.clone(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: hdr_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+        })
+    }
+
+    /// Recreate the PSO when hex/POM/PCSS/clipmap/debug/layer-scan change.
+    /// Hitch is one shader compile, not a per-frame cost.
+    pub fn ensure_pipeline(&mut self, device: &wgpu::Device, spec: ShadingSpec) {
+        if self.spec == spec {
+            return;
+        }
+        tracing::info!(
+            hex = spec.hex,
+            pom = spec.pom,
+            pcss = spec.pcss,
+            contact = spec.contact,
+            clipmap = spec.clipmap,
+            debug = spec.debug,
+            terrain_scan = spec.terrain_scan,
+            "shading pipeline spec changed"
+        );
+        self.pipeline = Self::make_pipeline(
+            device,
+            &self.shader,
+            &self.pipeline_layout,
+            self.hdr_format,
+            spec,
+        );
+        self.spec = spec;
     }
 
     fn make_bind_group(
@@ -661,5 +757,22 @@ impl ShadingPass {
 
     pub fn set_lighting_extra(&self, queue: &wgpu::Queue, params: [f32; 4]) {
         queue.write_buffer(&self.lighting_extra, 0, bytemuck::bytes_of(&params));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShadingSpec;
+
+    #[test]
+    fn compact_spec_zeros_the_expensive_overrides() {
+        let c = ShadingSpec::COMPACT.constants();
+        assert_eq!(c[0], ("enable_hex", 0.0));
+        assert_eq!(c[1], ("enable_pom", 0.0));
+        assert_eq!(c[2], ("enable_pcss", 0.0));
+        assert_eq!(c[3], ("enable_contact", 0.0));
+        assert_eq!(c[4], ("enable_clipmap", 0.0));
+        assert_eq!(c[5], ("enable_debug", 0.0));
+        assert_eq!(c[6], ("terrain_scan", 16.0));
     }
 }

@@ -311,8 +311,10 @@ pub enum EditorEvent {
     SetTerrainPaintLayer(u8),
     /// Arm or disarm terrain layer paint from the inspector (XV-Zeta).
     ToggleTerrainPaint,
-    /// Hex anti-tiling on the selected terrain. Default on.
+    /// Hex anti-tiling on the selected terrain. Default on for Coastal.
     ToggleTerrainHex,
+    /// Parallax occlusion on the selected terrain. The expensive POM march.
+    ToggleTerrainParallax,
     /// Nested material clipmaps (Phase DF). Default off until DF-E gates pass.
     ToggleTerrainClipmap,
     /// CPU camera-frustum early-out (Phase CR-B). Default on. Independent of F10.

@@ -1088,6 +1088,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         && self.terrain_brush.mode == BrushMode::Paint,
                     foliage_paint: self.foliage_paint_active,
                     hex_tiling: t.hex_tiling,
+                    parallax: t.parallax_scale > 0.0,
                     clipmap: r
                         .clipmaps
                         .get(tc.terrain_id as usize)
@@ -3169,6 +3170,9 @@ impl<G: GameApp> Engine<G> {
                             .and_then(|r| r.terrain_mut(tc.terrain_id))
                         {
                             t.parallax_scale = value.clamp(0.0, 4.0);
+                            if t.parallax_scale > 0.0 {
+                                t.parallax_held = t.parallax_scale;
+                            }
                         }
                         return;
                     }
@@ -3657,6 +3661,20 @@ impl<G: GameApp> Engine<G> {
                             info!(
                                 "Terrain hex tiling: {}",
                                 if t.hex_tiling { "on" } else { "off" }
+                            );
+                        }
+                    }
+                }
+            }
+
+            EditorEvent::ToggleTerrainParallax => {
+                if let Some(tc) = self.selected_terrain() {
+                    if let Some(r) = &mut self.renderer {
+                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
+                            t.toggle_parallax();
+                            info!(
+                                "Terrain parallax: {}",
+                                if t.parallax_scale > 0.0 { "on" } else { "off" }
                             );
                         }
                     }

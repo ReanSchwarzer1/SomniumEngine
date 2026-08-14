@@ -130,6 +130,8 @@ struct InspectorHandles {
     terrain_paint_label: NodeHandle,
     terrain_hex_toggle: NodeHandle,
     terrain_hex_label: NodeHandle,
+    terrain_parallax_toggle: NodeHandle,
+    terrain_parallax_label: NodeHandle,
     terrain_clipmap_toggle: NodeHandle,
     terrain_clipmap_label: NodeHandle,
     terrain_morph_toggle: NodeHandle,
@@ -363,6 +365,7 @@ pub struct TerrainInspectorState {
     pub terrain_paint: bool,
     pub foliage_paint: bool,
     pub hex_tiling: bool,
+    pub parallax: bool,
     pub clipmap: bool,
     pub lod_morph: bool,
     pub morph_start: f32,
@@ -2171,6 +2174,10 @@ impl UiManager {
                     v.hex_tiling,
                 ));
                 self.native_ui.send(CheckBoxMessage::set_checked(
+                    h.terrain_parallax_toggle,
+                    v.parallax,
+                ));
+                self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_clipmap_toggle,
                     v.clipmap,
                 ));
@@ -2889,6 +2896,11 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_parallax_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainParallax);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainClipmap);
@@ -3184,6 +3196,11 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_parallax_toggle {
+                    self.editor_events
+                        .push_back(EditorEvent::ToggleTerrainParallax);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
@@ -4969,6 +4986,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "Terrain Paint", font_id, terrain_section);
     let (terrain_hex_toggle, terrain_hex_label) =
         make_toggle(ui, "Hex Tiling", font_id, terrain_section);
+    let (terrain_parallax_toggle, terrain_parallax_label) =
+        make_toggle(ui, "Parallax", font_id, terrain_section);
     let (terrain_clipmap_toggle, terrain_clipmap_label) =
         make_toggle(ui, "Clipmap", font_id, terrain_section);
     let (terrain_morph_toggle, terrain_morph_label) =
@@ -5133,6 +5152,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         terrain_paint_label,
         terrain_hex_toggle,
         terrain_hex_label,
+        terrain_parallax_toggle,
+        terrain_parallax_label,
         terrain_clipmap_toggle,
         terrain_clipmap_label,
         terrain_morph_toggle,

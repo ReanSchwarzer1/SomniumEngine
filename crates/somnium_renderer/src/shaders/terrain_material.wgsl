@@ -73,6 +73,18 @@ struct TerrainMaterial {
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
 const TERRAIN_LAYERS: u32 = 32u;
 
+// Pipeline overrides. Defaults keep the full path (clipmap generate, naga).
+// The shading PSO sets these so unused hex/POM code is deleted — runtime
+// uniforms do not change occupancy, which is why the Details checkboxes
+// never moved Shading ms.
+override enable_hex: bool = true;
+override enable_pom: bool = true;
+override terrain_scan: u32 = 32u;
+
+fn terrain_splat_groups() -> u32 {
+    return (min(terrain_scan, TERRAIN_LAYERS) + 3u) / 4u;
+}
+
 /// Below this weight a layer cannot change the result, so it is not sampled.
 ///
 /// This is what makes eight layers cheaper than the four used to be. Splat
@@ -121,7 +133,7 @@ fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
 fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
     var w = array<f32, 32>();
     var total = 0.0;
-    for (var g = 0u; g < 8u; g = g + 1u) {
+    for (var g = 0u; g < terrain_splat_groups(); g = g + 1u) {
         let v = s[g];
         let base = g * 4u;
         w[base + 0u] = v.x;
@@ -131,7 +143,7 @@ fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
         total += v.x + v.y + v.z + v.w;
     }
     total = max(total, 0.0001);
-    for (var i = 0u; i < 32u; i = i + 1u) {
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
         w[i] = w[i] / total;
     }
     return w;
@@ -144,7 +156,7 @@ fn terrain_strongest_four(weight: array<f32, 32>) -> array<u32, 4> {
     for (var s = 0u; s < 4u; s = s + 1u) {
         var best = -1.0;
         var idx = 0u;
-        for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        for (var i = 0u; i < terrain_scan; i = i + 1u) {
             if !used[i] && weight[i] > best {
                 best = weight[i];
                 idx = i;
@@ -222,6 +234,9 @@ fn terrain_parallax_offset(
     depth: f32,
     steps: f32,
 ) -> vec2<f32> {
+    if steps < 4.0 {
+        return vec2<f32>(0.0);
+    }
     // Grazing angles need more steps and shallower ones fewer, because the ray
     // crosses more of the height field per unit of depth. Bevy interpolates the
     // count the same way, and clamps away from zero so a surface parallel to
@@ -627,7 +642,7 @@ fn terrain_fetch_splats(
     splat_ddy: vec2<f32>,
 ) -> array<vec4<f32>, 8> {
     var splat_s = array<vec4<f32>, 8>();
-    for (var g = 0u; g < 8u; g = g + 1u) {
+    for (var g = 0u; g < terrain_splat_groups(); g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
         if id >= 0 {
             splat_s[g] = textureSampleGrad(
@@ -659,7 +674,7 @@ fn terrain_generate_texel(
         kept += weight[i];
     }
     kept = max(kept, 0.0001);
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
         weight[i] = gated[i] / kept;
     }
     let local_xz = world_xz - tm.terrain_origin;
@@ -766,7 +781,7 @@ fn evaluate_terrain_material(
     let weight_rgb = vec3<f32>(
         weight[selected[0]], weight[selected[1]], weight[selected[2]]);
     kept = max(kept, 0.0001);
-    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
         weight[i] = gated[i] / kept;
     }
 
@@ -774,16 +789,13 @@ fn evaluate_terrain_material(
     let view_distance = distance(world_pos, view.camera_pos);
     let fade = terrain_detail_fade(tm, view_distance);
     let epsilon = mix(LAYER_WEIGHT_EPSILON, FAR_LAYER_EPSILON, fade);
-    // Hex stays on at walking distance. Past ~80% of the detail fade (about
-    // 330 m with the default 60–400 m window) a pixel already covers many
-    // tiles and the unique-colour macro owns the hue — three rotated taps
-    // buy nothing the eye can resolve.
-    //
-    // Do **not** branch sampling on a per-pixel close/far flag. That compiles
-    // hex, non-hex, and a mean-albedo path into one shader; warps then pay
-    // the union, and walking got *slower*. Aerial cut is a uniform: the CPU
-    // zeros `hex_tiling` / `parallax_steps` when the camera is high.
-    let hex = tm.hex_tiling != 0u && fade < 0.8;
+    // Hex / POM flags must stay uniform (`tm.hex_tiling`, `tm.parallax_steps`).
+    // ANDing them with a per-pixel fade or cliff test makes the whole `if`
+    // varying; DXC then flattens the march and the Details checkbox appears
+    // to work while the samples still run. Aerial cut and the toggle both
+    // zero those uniforms on the CPU. Do **not** reintroduce a close/far
+    // sample-path mix — warps pay the union, and walking got slower.
+    let hex = enable_hex && tm.hex_tiling != 0u;
 
     let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
     let bitangent = cross(geo_normal, tangent);
@@ -796,35 +808,40 @@ fn evaluate_terrain_material(
 
     var parallax_shadow = 1.0;
     var march_xz = vec2<f32>(0.0);
-    let parallax_steps = f32(tm.parallax_steps) * (1.0 - fade);
-    // Fewer than four remaining steps is a mip-0 march for relief the pixel
-    // cannot resolve. Near ground keeps the full 24-step count.
-    if allow_pom && parallax_steps >= 4.0 {
-        var dominant = selected[0];
-        var best = -1.0;
-        for (var s = 0u; s < 4u; s = s + 1u) {
-            let i = selected[s];
-            if weight[i] > best {
-                best = weight[i];
-                dominant = i;
+    // Uniform kill first so "Parallax off" is a real skip, not a flattened
+    // 1-step view march plus the 8-step shadow that `gpu_material` used to
+    // leave running. Fade and cliffs only apply when the feature is on.
+    if enable_pom && tm.parallax_steps >= 4u {
+        let parallax_steps = f32(tm.parallax_steps) * (1.0 - fade);
+        // Fewer than four remaining steps is a mip-0 march for relief the pixel
+        // cannot resolve. Near ground keeps the full 24-step count.
+        if allow_pom && parallax_steps >= 4.0 {
+            var dominant = selected[0];
+            var best = -1.0;
+            for (var s = 0u; s < 4u; s = s + 1u) {
+                let i = selected[s];
+                if weight[i] > best {
+                    best = weight[i];
+                    dominant = i;
+                }
             }
-        }
-        let depth = terrain_parallax_depth(tm, dominant);
-        if depth > 0.0 {
-            let tiling = terrain_layer_tiling(tm, dominant);
-            let v = normalize(view.camera_pos - world_pos);
-            let view_ts = vec3<f32>(dot(v, tangent), dot(v, bitangent), dot(v, geo_normal));
-            march_xz = terrain_parallax_offset(
-                tm, dominant, local_xz, tiling, view_ts,
-                tangent.xz, bitangent.xz, depth, parallax_steps,
-            );
-            let l = normalize(light.direction);
-            let light_ts = vec3<f32>(dot(l, tangent), dot(l, bitangent), dot(l, geo_normal));
-            parallax_shadow = terrain_parallax_shadow(
-                tm, dominant, local_xz + march_xz, tiling, light_ts,
-                tangent.xz, bitangent.xz, depth, tm.parallax_shadow_steps,
-            );
-            parallax_shadow = mix(parallax_shadow, 1.0, fade);
+            let depth = terrain_parallax_depth(tm, dominant);
+            if depth > 0.0 {
+                let tiling = terrain_layer_tiling(tm, dominant);
+                let v = normalize(view.camera_pos - world_pos);
+                let view_ts = vec3<f32>(dot(v, tangent), dot(v, bitangent), dot(v, geo_normal));
+                march_xz = terrain_parallax_offset(
+                    tm, dominant, local_xz, tiling, view_ts,
+                    tangent.xz, bitangent.xz, depth, parallax_steps,
+                );
+                let l = normalize(light.direction);
+                let light_ts = vec3<f32>(dot(l, tangent), dot(l, bitangent), dot(l, geo_normal));
+                parallax_shadow = terrain_parallax_shadow(
+                    tm, dominant, local_xz + march_xz, tiling, light_ts,
+                    tangent.xz, bitangent.xz, depth, tm.parallax_shadow_steps,
+                );
+                parallax_shadow = mix(parallax_shadow, 1.0, fade);
+            }
         }
     }
     let parallax_xz = local_xz + march_xz;

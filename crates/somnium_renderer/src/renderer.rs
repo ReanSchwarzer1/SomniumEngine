@@ -101,7 +101,8 @@ pub struct SomniumRenderer {
     /// When true, the shading pass tints pixels by cascade index (debug overlay).
     cascade_debug: bool,
 
-    /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact.
+    /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
+    /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
     /// Phase 13C: Accumulated local lights for the frame.
     local_lights: Vec<crate::cluster::GpuLocalLight>,
@@ -1777,6 +1778,15 @@ impl SomniumRenderer {
         self.ensure_ldr_size(ctx, ldr_w, ldr_h);
 
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
+        // Bit 4 must be uniform for the whole draw: a per-pixel `traced.a`
+        // skip of PCSS is varying, DXC flattens it, and every terrain pixel
+        // still pays the 16+24 filter (and contact march) even when ReSTIR
+        // already wrote the sun. `active()` is the CPU's "this frame's vis
+        // target is live" flag.
+        let mut shading_mode = self.shading_mode;
+        if self.restir_pass.active() && self.raytrace_pass.tlas().is_some() {
+            shading_mode |= 16;
+        }
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
             &self.local_lights,
@@ -1786,7 +1796,7 @@ impl SomniumRenderer {
             self.render_height,
             0.1,    // near
             1000.0, // far
-            self.shading_mode,
+            shading_mode,
         );
         self.local_lights.clear();
         // ── 0. Upload view buffer ────────────────────────────────────────────
@@ -2527,6 +2537,40 @@ impl SomniumRenderer {
             }
         }
         self.profiler.end(&mut encoder);
+
+        // Compact PSO when hex/POM/PCSS are off. Recreate is a hitch, not a
+        // per-frame cost; Island stays on COMPACT and never pays it.
+        {
+            let restir_sun =
+                self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
+            let mut spec = crate::pass::shading::ShadingSpec {
+                hex: false,
+                pom: false,
+                pcss: (self.shading_mode & 2) != 0 && !restir_sun,
+                contact: (self.shading_mode & 4) != 0 && !restir_sun,
+                clipmap: false,
+                debug: self.shading_debug != 0.0,
+                terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+            };
+            for &(id, _) in &self.terrain_queue {
+                let Some(t) = self.terrains.get(id as usize) else {
+                    continue;
+                };
+                spec.hex |= t.hex_tiling;
+                spec.pom |= t.parallax_scale > 0.0;
+                if !t.hero_bank_only {
+                    spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
+                }
+                if self
+                    .clipmaps
+                    .get(id as usize)
+                    .is_some_and(|c| c.enabled)
+                {
+                    spec.clipmap = true;
+                }
+            }
+            self.shading_pass.ensure_pipeline(&ctx.device, spec);
+        }
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");

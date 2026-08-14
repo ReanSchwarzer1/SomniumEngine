@@ -369,6 +369,8 @@ pub struct TerrainData {
     /// Phase 25H. Multiplies every layer's authored relief depth; 0 disables
     /// parallax entirely, which is the A/B.
     pub parallax_scale: f32,
+    /// Last non-zero scale, so the Details Parallax toggle can restore Relief.
+    pub parallax_held: f32,
     /// Steps the view march takes at its closest. Falls to 0 with distance.
     pub parallax_steps: u32,
     /// Steps of the march toward the sun that gives the relief self-shadowing.
@@ -526,6 +528,7 @@ impl TerrainData {
             } else {
                 1.0
             },
+            parallax_held: 1.0,
             parallax_steps: 24,
             parallax_shadow_steps: 8,
             projection_sharpness: std::env::var("SOMNIUM_TERRAIN_PROJECTION_SHARPNESS")
@@ -564,6 +567,16 @@ impl TerrainData {
         self.hex_tiling = false;
         self.parallax_scale = 0.0;
         self.texture_ids.unbind_extra_bank();
+    }
+
+    /// Flip POM on the selected terrain. Off stores the current Relief scale.
+    pub fn toggle_parallax(&mut self) {
+        if self.parallax_scale > 0.0 {
+            self.parallax_held = self.parallax_scale;
+            self.parallax_scale = 0.0;
+        } else {
+            self.parallax_scale = self.parallax_held.max(1.0);
+        }
     }
 
     /// Metres of camera height above the ground at which hex and POM turn off
@@ -625,7 +638,11 @@ impl TerrainData {
             } else {
                 0
             },
-            parallax_shadow_steps: self.parallax_shadow_steps,
+            parallax_shadow_steps: if self.parallax_scale > 0.0 {
+                self.parallax_shadow_steps
+            } else {
+                0
+            },
             projection_sharpness: self.projection_sharpness,
             projection_mode: self.projection_mode,
             layer_moisture: textures::LAYER_MOISTURE,
@@ -1441,8 +1458,24 @@ mod tests {
         } else {
             0
         };
+        let gpu_pom_shadow = if parallax_scale > 0.0 { 8u32 } else { 0u32 };
         assert_eq!(gpu_hex, 0);
         assert_eq!(gpu_pom, 0);
+        assert_eq!(gpu_pom_shadow, 0);
         assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));
+    }
+
+    #[test]
+    fn toggle_parallax_restores_the_held_scale() {
+        let mut scale = 1.25f32;
+        let mut held = 1.0f32;
+        if scale > 0.0 {
+            held = scale;
+            scale = 0.0;
+        }
+        assert_eq!(scale, 0.0);
+        assert_eq!(held, 1.25);
+        scale = held.max(1.0);
+        assert_eq!(scale, 1.25);
     }
 }
