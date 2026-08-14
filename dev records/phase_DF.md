@@ -8,8 +8,14 @@
 > on every pixel.**
 
 > **Codename:** Daggerfall, after *The Elder Scrolls II: Daggerfall*  
-> **Status:** PLAN — not implemented (2026-08-14)  
+> **Status:** IN ENGINE (2026-08-14) — DF-A–G are in the tree. Inspector
+> **Clipmap** stays **default off**. Walk luminance vs clipmap-off has **not**
+> passed the 1% gate (DF-A +35.6% on an earlier capture). **A dedicated audit
+> is required** before treating the path as “runs better” or turning it on by
+> default — see §12. Do not start that audit in the same session that shipped
+> the look/hitch fixes.  
 > **Start-here for the engine:** [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)  
+> **Clipmap audit start-here:** this file §12 + [`phase DF/DF-A_timings.md`](phase%20DF/DF-A_timings.md).  
 > **Depends on:** Phase XV-A–J (32-layer PBR, strongest-four, unique-colour
 > macro, aerial hex/POM cut). FSR 3 is complementary (fewer shaded pixels) and
 > is **not** a substitute for this work.  
@@ -283,9 +289,14 @@ placement and GPU scene queries**, not a material clipmap. Out of DF v1
 Each stack: **N rings**, same `clipmap_size` (start **1024**), scale base **2**,
 toroidal origin stored in a uniform (`origin_xz`, `texels_per_meter` per ring).
 
-### 6.2 Generate pass (compute)
+### 6.2 Generate pass (compute in the plan; **fragment in the tree**)
 
-One dispatch per dirty rectangle (not the whole 1024² every frame).
+Plan: one compute dispatch per dirty rectangle. **Shipped:** one fragment
+draw per dirty rectangle into array-layer color attachments (see §11).
+Do not put generate back in compute without a Vulkan Dbg-32 proof.
+
+One pass per dirty rectangle (not the whole 1024² every frame; cap is
+`MAX_GEN_TEXELS`).
 
 For each texel in world XZ:
 
@@ -364,13 +375,13 @@ stays a uniform multiply — prefer dirty if it alters blend weights).
 
 | ID | Work | Est. | Exit |
 |---|---|---|---|
-| **DF-A** | Measure: Phase 29 timings + debug taps (mode 12) at eye / overview / ridge-look with FSR on and `SOMNIUM_FSR=0`. Freeze adapter like XV-J. | 0.5 | Table in `dev records/phase DF/` |
-| **DF-B** | `TerrainClipmap` GPU images + uniforms; CPU toroidal origin; **generate** compute using extracted `terrain_sample_layer` (no POM). Debug view: clipmap albedo. | 2 | Looks like a unique-colour-ish ground from above |
-| **DF-C** | Shading samples detail stack; POM marches clipmap height on finest ring; hex **not** in shade. **One** shader; uniform step count. Inspector **Clipmap** default **off** until DF-E. | 2 | A/B vs current at eye (luminance gate) |
-| **DF-D** | Incremental dirty rects; sculpt/paint invalidate; margin + wrap safety (O3DE extended margin). | 1 | Camera walk does not hitch / smear seams |
-| **DF-E** | Macro stack + unique colour; distance rings; default **on** if gates pass. Profiler. | 1 | Overview shading drop recorded |
-| **DF-F** | Cliff/biplanar: leave live or second generate. Optional RVT-style “decals into clipmap” — only if cheap. | 1 | Cliffs not flatter than XV-F |
-| **DF-G** | Docs, ATTRIBUTION §1.8, Help Terrain, XV-Zeta pointer, tests (origin wrap, density math). | 0.5 | `cargo test --workspace` |
+| **DF-A** | Measure at **maximized Native** + resolution sweep; FSR on/off; eye / overview / ridge-look. | 0.5 | **MEASURED** — [`phase DF/DF-A_timings.md`](phase%20DF/DF-A_timings.md). **Stale vs current look** (see §12); remeasure after audit. |
+| **DF-B** | `TerrainClipmap` GPU images + uniforms; CPU toroidal origin; generate (no POM). Debug 32 albedo. | 2 | **IN ENGINE** — generate is a **fragment** pass (compute bindless wrote black). |
+| **DF-C** | Shading samples detail stack; hex not in shade. Inspector Clipmap default **off**. | 2 | **IN ENGINE** — POM-on-clipmap-height **not** shipped (smear); see remaining. |
+| **DF-D** | Incremental dirty rects; sculpt/paint invalidate; extended margin wrap. | 1 | **IN ENGINE** |
+| **DF-E** | Macro stack; distance rings; profiler scope. Default on **after** maximized-window gates. | 1 | Macro **in engine**. Default **still off** (walk luminance gate). |
+| **DF-F** | Cliffs stay live (biplanar in shade). | 1 | **IN ENGINE** |
+| **DF-G** | Docs, ATTRIBUTION §1.8 as used, Help Terrain, tests. | 0.5 | **IN ENGINE** — this file + Help. `shaders_validate` + `terrain::clipmap` tests. |
 | **DF-H** | Research spike only: AVT sectors / world > 2 km. **No ship** unless user expands the map. | 0 | Note in this file |
 
 Kill switch: `SOMNIUM_TERRAIN_CLIPMAP=0` and inspector toggle.
@@ -385,8 +396,8 @@ Terrain Details:
 - **Detail m** finest texels/m (readout).
 - **Dbg** extra modes: clipmap albedo, ring index, generate heat.
 
-Help `docs/editor/terrain.md`: clipmaps cache blend; feet still POM on baked
-height; aerial 80 m cut remains.
+Help `docs/editor/terrain.md`: clipmaps cache blend; POM is **not** marched
+on the cache (smear); aerial 80 m cut remains. Default off.
 
 ---
 
@@ -421,11 +432,77 @@ height; aerial 80 m cut remains.
 
 ---
 
-## 11. Next-session start
+## 11. As shipped (2026-08-14) — divergences from §6
 
-1. Read [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) §0 if this
-   is a new model.
-2. Do **not** start DF until the user says to implement Daggerfall (an audit
-   session must not quietly begin this phase).
-3. When implementing: DF-A measurements first; then DF-B generate debug.
-4. Frozen: Great Lakes water, XV look, no per-pixel sample LOD.
+Intent in §6 still stands. The tree does **not** match every sentence:
+
+| Plan | Shipped |
+|---|---|
+| Generate **compute** | **Fragment** MRT (albedo + surface). Compute `textureSampleGrad` on the bindless layer array wrote **black** (Dbg 32 silhouettes) even after storage copies. UE5 RVT / this engine’s G-buffer pattern. |
+| Camera-centred stacks | **Look-at** XZ, clamped to **8 m**, snapped to 0.5 m. Looking down keeps the centre under the camera. |
+| Shade `textureSampleGrad` + aniso Repeat | **Toroidal bilinear `textureLoad`**. Repeat + anisotropy smeared the wrap into streak bands. |
+| Square Chebyshev ring pick | **Circle** contains + **256-texel** blend to the next ring. |
+| POM on baked clipmap height | **Off.** Marching `world_xz` off the ring / across wrap smeared UVs. |
+| Finest-first generate | Ring **3** first (8 m at 64 t/m), then 2→0 (sharpen), then 4–7, then macro. Shade **skips unready** rings (`clipmap_detail_ready` / `clipmap_macro_ready`). |
+| Full-stack generate | **`MAX_GEN_TEXELS` = 1M** (one 1024² / frame). More hitchs. Cheap coarse rings in the same frame as a hex ring hitchs. |
+| `GpuTerrainMaterial` | **2032** bytes. Ready bitmasks occupy the old `_clipmap_pad`. XV 1664-byte **body** is unchanged; DF fields follow. |
+
+Files: `terrain/clipmap.rs`, `pass/terrain_clipmap.rs`, `shaders/clipmap_gen.wgsl`, `shaders/clipmap_shade.wgsl`, `shaders/terrain_material.wgsl`, `pass/shading.rs` group 2, `renderer.rs` generate-before-shade.
+
+## 12. Audit (required)
+
+**Do not treat clipmap as default-on or “done” until this audit runs.** The look
+and hitch work landed in one session; a different model (Claude Opus 5) must
+read the architecture and defect-hunt before anyone spends more implementation
+time “making clipmap run better.”
+
+**This is a read-only audit unless the user asks for fixes.** Frozen: Great
+Lakes water (datum 16.1 m, optical max_depth 18.6 m, Gerstner `wave_speed`
+0.85), XV look, foliage LOD, no per-pixel live/clipmap mix (XV-Zeta).
+
+### 12.1 Read first
+
+1. This file (especially §3 non-goals, §6.3 forbidden branch, §6.4 gates, §9, §11).
+2. [`phase DF/DF-A_timings.md`](phase%20DF/DF-A_timings.md) — maximized Native
+   numbers. **Walk luminance +35.6% is from before the fragment/look/sampling
+   rewrite.** Do not cite it as the current look; remeasure if the user wants
+   gates.
+3. Help [`docs/editor/terrain.md`](../docs/editor/terrain.md).
+4. Then the files in §11.
+
+### 12.2 What to hunt
+
+- Generate vs shade UV (framebuffer Y, toroidal `origin`, `textureLoad` wrap).
+- Ready-bit vs dirty vs `fill_gpu` order (same-frame generate then shade).
+- 1M texel cap vs look-at slides vs `mark_full` while flying (~150 m/s).
+- Ring-3-first + unready skip: holes, popping, sampling a ring whose centre
+  has not slid yet.
+- Group 2 array views vs layer `RENDER_ATTACHMENT` views of the **same**
+  textures (the storage/copy path was a dead end; do not reintroduce it).
+- Hitch sources: more than one 1024² hex pass, per-frame bind-group create,
+  `MAX_CHEAP_GEN_TEXELS` (removed).
+- Default-off is correct until §6.4 eye luminance ≤ 1% **and** walk shading
+  does not regress, measured at **maximized Native**.
+
+### 12.3 Remaining DF work (after the audit, not instead of it)
+
+| Item | Status |
+|---|---|
+| **Audit** | **Required next.** Not started. |
+| **DF-E default-on** | Blocked on §6.4 gates at maximized Native with the **current** look. |
+| **POM on clipmap height** | Planned (§1 / DF-C). **Off** — smear. Revisit only if the audit says the cache UV is stable. |
+| **CIEDE2000 vs strongest-four** | Gate in §6.4; no offline fixture run on generate. |
+| **Dbg generate heat** | Listed in §8; not shipped. Dbg 32 albedo / 33 ring index exist. |
+| **DF-H AVT / > 2 km** | Research only if the map grows. Not v1. |
+
+Do **not**: per-pixel live/clipmap mix; drop hex at feet to chase luminance;
+put generate back in compute without a Vulkan Dbg-32 proof; raise
+`MAX_GEN_TEXELS` above 1M; retune water / foliage / unique-colour.
+
+## 13. Next-session start
+
+1. If the user asked for a **clipmap audit**: this file §12. Do not implement
+   “improvements” until the audit is delivered unless they explicitly redirect.
+2. If the user asked to **turn Clipmap default on**: refuse until DF-E gates
+   are remeasured at maximized Native.
+3. Frozen: Great Lakes water, XV look, no per-pixel sample LOD, rustc 1.88.

@@ -313,6 +313,8 @@ pub enum EditorEvent {
     ToggleTerrainPaint,
     /// Hex anti-tiling on the selected terrain. Default on.
     ToggleTerrainHex,
+    /// Nested material clipmaps (Phase DF). Default off until DF-E gates pass.
+    ToggleTerrainClipmap,
     /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default off.
     ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).

@@ -1020,9 +1020,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // that is where the terrain UVs are derived from.
         let world_ddx = dpdx(hit_point.xz);
         let world_ddy = dpdy(hit_point.xz);
-        let terrain = evaluate_terrain_material(
-            u32(material.terrain_index), hit_point, geo_normal, uv,
-            world_ddx, world_ddy);
+        let tm_idx = u32(material.terrain_index);
+        var terrain: TerrainSurface;
+        if terrain_materials[tm_idx].clipmap_enabled != 0u {
+            terrain = evaluate_clipmap_material(
+                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+        } else {
+            terrain = evaluate_terrain_material(
+                tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
+        }
         surface.albedo = terrain.albedo;
         surface.roughness = terrain.roughness;
         surface.metallic = 0.0;
@@ -1101,6 +1107,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // instead of a claim.
     if light._pad2_z > 11.5 && light._pad2_z < 12.5 {
         return vec4<f32>(vec3<f32>(f32(terrain_taps) / TERRAIN_MAX_TAPS), 1.0);
+    }
+    // 32 = clipmap albedo (Phase DF). Same as mode 9 on terrain when the
+    // cache is on; black on non-terrain so a missed bind is obvious.
+    if light._pad2_z > 31.5 && light._pad2_z < 32.5 {
+        return vec4<f32>(surface.albedo, 1.0);
+    }
+    // 33 = clipmap ring index, 0 = finest.
+    if light._pad2_z > 32.5 && light._pad2_z < 33.5 {
+        return vec4<f32>(vec3<f32>(terrain_clipmap_ring), 1.0);
     }
 
     // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only

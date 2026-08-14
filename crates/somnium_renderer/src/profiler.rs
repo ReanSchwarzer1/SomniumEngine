@@ -333,7 +333,9 @@ impl GpuProfiler {
             (None, Vec::new())
         };
 
-        let enabled = std::env::var("SOMNIUM_PROFILE").as_deref() == Ok("1");
+        let enabled = std::env::var("SOMNIUM_PROFILE").as_deref() == Ok("1")
+            || std::env::var("SOMNIUM_CAPTURE_PNG").is_ok()
+            || std::env::var("SOMNIUM_CAPTURE").is_ok();
         Self {
             query_set,
             frames,

@@ -64,7 +64,7 @@ The root files `m2.md` and `m25.md` are still absent. Use [`phase_25m2_completio
 | **XV** | Appalachia | **A–J complete** | [`phase_XV.md`](phase_XV.md) · live: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) · gate: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md) |
 | **26** | Metaphor | **26-A–I shipped**; chrome stays open as later features need UI. 26-J not started. | [`phase_26.md`](phase_26.md) |
 | **VV** | Halcyon | **VV-A–H in tree** (2026-08-13). SSR + half-res RT + env cube. Kill switch `SOMNIUM_RT_REFLECT=0`. Evidence PNGs / §11 timings still open. | [`phase_VV.md`](phase_VV.md) · audit: [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) |
-| **DF** | Daggerfall | **Plan only** (2026-08-14). Nested material clipmaps. | [`phase_DF.md`](phase_DF.md) |
+| **DF** | Daggerfall | **In engine** (2026-08-14), default off. **Audit required** (`phase_DF.md` §12) before default-on. | [`phase_DF.md`](phase_DF.md) |
 
 **Parity bar for XV:** IV-K water is the photographic reference surface. Terrain fails XV if it only looks good as flat albedo swatches next to that water. Live look 2026-08-13 passed that bar for hue/seams/snow; XV-J GPU PNGs are in `phase XV/evidence/`.
 

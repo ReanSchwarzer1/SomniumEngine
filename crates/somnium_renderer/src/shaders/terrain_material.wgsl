@@ -17,7 +17,7 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (1664 bytes, Phase XV-Zeta). Every vec4 sits
+// Mirrors `terrain::GpuTerrainMaterial` (2032 bytes, Phase DF). Every vec4 sits
 // on a 16-byte offset; see the Rust struct for why that is load-bearing.
 struct TerrainMaterial {
     layer_tiling: array<vec4<f32>, 8>,
@@ -49,6 +49,25 @@ struct TerrainMaterial {
     wetness_darken: f32,
     wetness_gloss: f32,
     wetness_f0: f32,
+    // Phase DF: nested material clipmaps. 2032 bytes total.
+    clipmap_enabled: u32,
+    clipmap_rings: u32,
+    clipmap_size: f32,
+    clipmap_debug: u32,
+    clipmap_albedo: array<vec4<i32>, 2>,
+    clipmap_surface: array<vec4<i32>, 2>,
+    clipmap_center: array<vec4<f32>, 4>,
+    clipmap_origin: array<vec4<f32>, 4>,
+    clipmap_tpm: array<vec4<f32>, 2>,
+    clipmap_macro_albedo: vec4<i32>,
+    clipmap_macro_normal: vec4<i32>,
+    clipmap_macro_center: array<vec4<f32>, 2>,
+    clipmap_macro_origin: array<vec4<f32>, 2>,
+    clipmap_macro_tpm: vec4<f32>,
+    clipmap_macro_rings: u32,
+    clipmap_macro_size: f32,
+    clipmap_detail_ready: u32,
+    clipmap_macro_ready: u32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -306,6 +325,8 @@ var<private> terrain_wetness_factor: f32 = 0.0;
 var<private> terrain_cliff_blend_dbg: f32 = 0.0;
 var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
 var<private> terrain_wet_f0: f32 = 0.0;
+/// Phase DF: which detail ring the clipmap path picked (debug mode 33).
+var<private> terrain_clipmap_ring: f32 = 0.0;
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
@@ -467,11 +488,17 @@ fn terrain_macro_blend(
 ///
 /// Falls back to the blend's identity — 0.5 at zero strength — when no macro
 /// map is bound, so the branch below it needs no second path.
-fn terrain_macro_sample(tm: TerrainMaterial, splat_uv: vec2<f32>) -> vec4<f32> {
+fn terrain_macro_sample(
+    tm: TerrainMaterial,
+    splat_uv: vec2<f32>,
+    splat_ddx: vec2<f32>,
+    splat_ddy: vec2<f32>,
+) -> vec4<f32> {
     if tm.macro_map < 0 {
         return vec4<f32>(0.5, 0.5, 0.5, 0.0);
     }
-    let m = textureSample(textures[tm.macro_map], default_sampler, splat_uv);
+    let m = textureSampleGrad(
+        textures[tm.macro_map], default_sampler, splat_uv, splat_ddx, splat_ddy);
     return vec4<f32>(m.rgb, m.a * tm.macro_strength);
 }
 
@@ -588,6 +615,118 @@ fn terrain_projected_pbr(
     return out;
 }
 
+struct TerrainGenerated {
+    albedo: vec4<f32>,
+    surface: vec4<f32>,
+}
+
+fn terrain_generate_texel(
+    terrain_index: u32,
+    world_xz: vec2<f32>,
+    world_ddx: vec2<f32>,
+    world_ddy: vec2<f32>,
+    hex: bool,
+) -> TerrainGenerated {
+    let tm = terrain_materials[terrain_index];
+    let splat_uv = (world_xz - tm.terrain_origin) * tm.inv_world_size;
+    let splat_ddx = world_ddx * tm.inv_world_size;
+    let splat_ddy = world_ddy * tm.inv_world_size;
+    var splat_s = array<vec4<f32>, 8>();
+    for (var g = 0u; g < 8u; g = g + 1u) {
+        let id = tm.splat_maps[g / 4u][g % 4u];
+        splat_s[g] = textureSampleGrad(
+            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
+    }
+    var weight = terrain_unpack_splats(splat_s);
+    let selected = terrain_strongest_four(weight);
+    var kept = 0.0;
+    var gated = array<f32, 32>();
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        gated[i] = weight[i];
+        kept += weight[i];
+    }
+    kept = max(kept, 0.0001);
+    for (var i = 0u; i < TERRAIN_LAYERS; i = i + 1u) {
+        weight[i] = gated[i] / kept;
+    }
+    let local_xz = world_xz - tm.terrain_origin;
+    let geo_normal = vec3<f32>(0.0, 1.0, 0.0);
+    let tangent = vec3<f32>(1.0, 0.0, 0.0);
+    let bitangent = vec3<f32>(0.0, 0.0, 1.0);
+    let epsilon = LAYER_WEIGHT_EPSILON;
+
+    var samples: array<TerrainLayerSample, 4>;
+    var adjusted: array<f32, 4>;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        if weight[i] < epsilon {
+            adjusted[s] = 0.0;
+            continue;
+        }
+        let tiling = terrain_layer_tiling(tm, i);
+        samples[s] = terrain_sample_layer(
+            tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
+        if tm.height_blend != 0u {
+            adjusted[s] = terrain_append_height(tm, i, weight[i], samples[s].height);
+        } else {
+            adjusted[s] = weight[i];
+        }
+    }
+    var max_w = 0.0;
+    var min_depth = -1e30;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let i = selected[s];
+        if weight[i] < epsilon {
+            continue;
+        }
+        max_w = max(max_w, adjusted[s]);
+        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, i));
+    }
+    var blend: array<f32, 4>;
+    var blend_sum = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        var b = 0.0;
+        let i = selected[s];
+        if weight[i] >= epsilon {
+            let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
+            b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
+        }
+        blend[s] = b;
+        blend_sum += b;
+    }
+    blend_sum = max(blend_sum, 0.0001);
+    var albedo = vec3<f32>(0.0);
+    var n_ts = vec3<f32>(0.0, 0.0, 1.0);
+    var roughness = 0.0;
+    var occlusion = 0.0;
+    var height = 0.0;
+    var moisture = 0.0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let b = blend[s] / blend_sum;
+        if b <= 0.0 {
+            continue;
+        }
+        albedo += sqrt(samples[s].albedo) * b;
+        n_ts += samples[s].normal_ts * b;
+        roughness += samples[s].roughness * b;
+        occlusion += samples[s].occlusion * b;
+        height += samples[s].height * b;
+        moisture += terrain_moisture(tm, selected[s]) * b;
+    }
+    let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
+    albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
+    albedo = albedo * albedo;
+    let wet = saturate(tm.wetness * moisture);
+    albedo *= mix(1.0, tm.wetness_darken, wet);
+    roughness = mix(roughness, roughness * tm.wetness_gloss, wet);
+    n_ts = normalize(n_ts);
+    var packed: TerrainGenerated;
+    packed.albedo = vec4<f32>(albedo, height);
+    packed.surface = vec4<f32>(n_ts.xy * 0.5 + 0.5, roughness, occlusion);
+    return packed;
+}
+
 fn evaluate_terrain_material(
     terrain_index: u32,
     world_pos: vec3<f32>,
@@ -597,11 +736,13 @@ fn evaluate_terrain_material(
     world_ddy: vec2<f32>,
 ) -> TerrainSurface {
     let tm = terrain_materials[terrain_index];
-
+    let splat_ddx = world_ddx * tm.inv_world_size;
+    let splat_ddy = world_ddy * tm.inv_world_size;
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
-        splat_s[g] = textureSample(textures[id], default_sampler, splat_uv);
+        splat_s[g] = textureSampleGrad(
+            textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
     }
     var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(weight);
@@ -741,7 +882,7 @@ fn evaluate_terrain_material(
         occlusion += samples[s].occlusion * b;
     }
 
-    let macro_c = terrain_macro_sample(tm, splat_uv);
+    let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
     albedo = albedo * albedo;
 

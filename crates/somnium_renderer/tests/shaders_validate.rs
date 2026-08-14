@@ -27,6 +27,8 @@ const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
 const ATMOSPHERE_VOL: &str = include_str!("../src/shaders/volumetric.wgsl");
 const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
 const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
+const CLIPMAP_GEN: &str = include_str!("../src/shaders/clipmap_gen.wgsl");
+const CLIPMAP_SHADE: &str = include_str!("../src/shaders/clipmap_shade.wgsl");
 const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
 const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
 const SHADOW: &str = include_str!("../src/shaders/shadow.wgsl");
@@ -60,8 +62,16 @@ fn the_shading_module_validates() {
     check(
         "shading",
         &format!(
-            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
         ),
+    );
+}
+
+#[test]
+fn the_clipmap_generate_module_validates() {
+    check(
+        "clipmap_gen",
+        &format!("{GLOBAL_POOL}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_GEN}"),
     );
 }
 
@@ -90,7 +100,7 @@ fn the_volumetric_module_validates() {
 #[test]
 fn the_terrain_material_struct_matches_the_rust_layout() {
     let source = format!(
-        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{SHADING}"
+        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
     );
     let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
 
@@ -104,7 +114,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 1664, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 2032, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -137,6 +147,11 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("projection_sharpness"), 1512);
     assert_eq!(offset("layer_moisture"), 1520);
     assert_eq!(offset("wetness"), 1648);
+    assert_eq!(offset("clipmap_enabled"), 1664);
+    assert_eq!(offset("clipmap_albedo"), 1680);
+    assert_eq!(offset("clipmap_center"), 1744);
+    assert_eq!(offset("clipmap_tpm"), 1872);
+    assert_eq!(offset("clipmap_macro_rings"), 2016);
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
