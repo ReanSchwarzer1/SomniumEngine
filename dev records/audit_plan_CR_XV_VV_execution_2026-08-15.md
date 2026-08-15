@@ -8,7 +8,8 @@ contract was retuned.
 
 ## Result
 
-The reported failures were reproduced or source-isolated and corrected:
+The reported failures were reproduced or source-isolated. Most were corrected;
+path tracing remains an open visual failure:
 
 - Post Process checkboxes now deliver one explicit value instead of two
   flip-style events. Inspector synchronization no longer mutates settings.
@@ -30,6 +31,12 @@ The reported failures were reproduced or source-isolated and corrected:
   Cache and probe intensities are independent.
 - World Cache and Mesh SDF cannot claim incompatible semantics in the shared
   3-D volume at the same time.
+
+**Current exception:** the path-tracing control flow and accumulation counter
+were repaired, but the user's final engine retest still shows broken
+boat/water rendering and artifacting. Path tracing is not accepted as working.
+The current status table at the end of this report supersedes any earlier
+capture-based visual conclusion.
 
 No near-white clipping was measured in the RT specular, probes, path tracer,
 light-shaft, or final water captures.
@@ -234,7 +241,11 @@ specular. Probe and cache intensity no longer overload one uniform.
 Both live images were visually inspected; neither boat nor terrain became
 white. Evidence: `rt_specular_on.*`, `probes_on.*`, `post_neutral.*`.
 
-### Path tracer
+### Path tracer — automated capture assessment, later superseded
+
+The measurements below describe the original automated capture set only. The
+later user acceptance retest found persistent visual artifacting, so these
+numbers must not be interpreted as proof that path tracing works.
 
 Path mode's effective log proves FSR, TAA, CAS, GTAO, volumetrics, shafts,
 ReSTIR DI/GI, motion blur, and DoF were all false while `lighting_extra_flags`
@@ -291,9 +302,10 @@ normal source history.
 
 ## Final disposition
 
-CR, XV, VV, the all-toggle control plane, and the seven reported visual
-symptoms meet their audit gates at the evidence levels stated above. No known
-P0/P1 correctness defect from the expanded plan remains open.
+CR, XV, VV, and the all-toggle control plane meet the automated gates stated
+above. This disposition is superseded for path tracing by the focused user
+acceptance retest below: path tracing remains visibly broken and is an open
+rendering defect. The passing automated tests do not close that visual issue.
 
 ## 2026-08-15 focused regression follow-up
 
@@ -301,26 +313,34 @@ This follow-up covers the three defects reported after the first acceptance
 pass: path-traced boat/water artifacting, dancing dark RT-reflection speckles,
 and a broad black nighttime FSR result near the top of the image.
 
-### Path tracing: fixed
+### Path tracing: still broken / open
 
 The renderer was correctly invalidating accumulation when scene transforms
 changed, but the editing demo continuously advances boat physics and water
 state. That made the scene revision change every frame, so the offline path
 tracer could never retain a second sample. Entering path mode now pauses the
 simulation transport while preserving its prior state; leaving path mode
-restores that exact state. The fixed path also uses the sharp environment only
-for primary misses and a filtered environment for indirect misses, avoiding
-duplicate high-energy sun fireflies.
+restores that exact state. The path also uses the sharp environment only for
+primary misses and a filtered environment for indirect misses.
 
-Runtime proof at a fixed 2560×1392 camera:
+These changes repaired the accumulation counter, but they did **not** repair
+the final rendered result. The user's post-fix engine retest still shows broken
+path-traced boat/water output and objectionable artifacting. Path tracing must
+therefore remain open; the earlier automated capture assessment was a false
+acceptance.
 
-| Capture | Reported accumulated frames | Result |
+Diagnostic data at a fixed 2560×1392 camera:
+
+| Capture | Reported accumulated frames | What it proves |
 |---|---:|---|
-| `after_path_f2` | 1 | Expected initial noise |
-| `after_path_f64` | 63 | Stable, visibly converged image |
+| `after_path_f2` | 1 | Initial accumulation state only |
+| `after_path_f64` | 63 | The counter advances; visual correctness is **not** established |
 
 The new transport-state unit test proves pause/restore behavior, including an
-already-paused starting state.
+already-paused starting state. It does not validate image quality, material
+transport, denoising, water integration, or temporal stability. Required
+follow-up is a new visual diagnosis using the user's failing camera/material
+case; do not treat the frame-63 capture or passing unit tests as closure.
 
 ### RT water reflections: fixed
 
@@ -381,3 +401,15 @@ tests. The ordinary debug target initially encountered transient Windows
 
 Focused captures, effective-state logs, and reproducibility scripts are under
 [`evidence/audit_2026-08-15_remaining/`](evidence/audit_2026-08-15_remaining/).
+
+### Current user-acceptance status
+
+| Area | Status | Note |
+|---|---|---|
+| Path tracing | **Broken / open** | Persistent boat/water artifacting after the attempted accumulation fix |
+| RT water reflections | Working | The reported dancing dark reflection speckles are no longer observed |
+| Nighttime FSR | Working through fallback | Uses TAA below the horizon; daylight continues to use FSR |
+| Other audited post-process controls | Working in the user's check | No additional regression reported in this retest |
+
+The current release cannot be described as fully passing the expanded visual
+audit while the path-tracing row remains open.
