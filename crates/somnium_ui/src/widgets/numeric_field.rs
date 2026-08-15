@@ -206,11 +206,7 @@ impl Control for NumericField {
             theme::ACCENT,
         );
 
-        let bg = if self.focused {
-            [40, 40, 60, 255]
-        } else {
-            theme::BG_INPUT
-        };
+        let bg = theme::BG_INPUT;
         let bdr = if self.focused {
             theme::BORDER_FOCUS
         } else {
@@ -224,7 +220,7 @@ impl Control for NumericField {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
             ctx.push_rect_filled(
                 Rect::new(field.x + 4.0, field.y + 3.0, advance, self.px),
-                [60, 90, 150, 255],
+                theme::ACCENT_DIM,
             );
         }
         ctx.push_text(&text, origin, self.font_id, self.px, self.color);
@@ -436,7 +432,7 @@ impl NumericFieldBuilder {
             widget,
             value: 0.0,
             px: 12.0,
-            color: [200, 200, 200, 255],
+            color: theme::TEXT_PRIMARY,
             font_id: 0,
             drag_step: 0.05,
             slider_range: None,

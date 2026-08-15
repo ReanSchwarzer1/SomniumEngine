@@ -117,17 +117,23 @@ Controlling contract: `dev records/phase_26.md`. Codename is thematic (Atlus);
 icons, Slate, or UMG source.
 
 **Icons:** original geometric strokes rasterized to a 512² atlas (`icons.rs`).
-Optical sizes follow Lucide; SVG paths are not copied. Engine mark is original.
+The Phase 26-Zeta extension adds sixteen original Somnium source SVGs on a
+24×24 / 2 px grid under `crates/somnium_ui/assets/icons/somnium/`; their
+manifest and provenance travel with the sources. No Tabler, Lucide, or other
+third-party SVG path is vendored. The Eclipse-S engine mark and its responsive
+lockups are original Somnium artwork under `assets/brand/`.
 
 **Font:** Inter latin-400, SIL OFL 1.1, bundled at
 `crates/somnium_ui/assets/fonts/Inter-Regular.ttf`.
 
-**Paint:** Somnium **Nocturne** (`theme.rs`, `dev records/phase_26.md` §2.4) —
-lunar indigo `#7A86FF`, Inter, cool `#14161C` void. Unreal IA only; **not** Epic
-`#0070E0` / Roboto / Starship radii.
+**Paint:** Somnium **Nocturne Atelier** (`theme.rs`,
+`assets/tokens/nocturne.tokens.json`) — lunar indigo `#7A86FF`, Inter, cool
+`#14161C` void. Authored sRGB tokens are decoded exactly once before an sRGB
+surface encodes them; straight alpha is preserved. Unreal IA only; **not**
+Epic `#0070E0` / Roboto / Starship radii.
 
 **Colour picker** (Metaphor 26-F Iris) — Details swatch + HSV popup; Cancel restores.
-Linear storage, approximate sRGB display. Kelvin > 0 locks the light swatch.
+Linear storage, exact IEC 61966-2-1 sRGB display. Kelvin > 0 locks the light swatch.
 
 **Boundary:** UE EULA — pattern and information architecture only. No Slate
 source is copied. Widget implementation is original Rust on the existing
@@ -142,7 +148,7 @@ Fyrox-inspired UI stack (already attributed in §13.13–13.18).
 | `SColorBlock` (`AppFramework/Public/Widgets/Colors/`) | Compact swatch in the Details row; click opens the picker | `ColorSwatch` button-sized fill in the inspector property row |
 | `SColorPicker` | Popup: HSV spectrum, value/hue strips, RGB/HSV/Hex fields, optional alpha, OK/Cancel | `ColorPickerPopup` hosted on the root canvas (same escape-from-clip pattern as the File menu) |
 | `FColorPickerArgs` | `InitialColor`, `OnColorCommitted`, `OnColorPickerCancelled`, `bUseAlpha`, interactive begin/end, `bOnlyRefreshOnOk` | `ColorChanging` / `ColorChanged` / `ColorCancelled` messages mirroring `NumericFieldMessage`'s live vs commit split |
-| `FLinearColor` vs display gamma | Linear is storage; the swatch applies display encode so it matches the tonemapped frame | Linear RGB(A) in components; approximate sRGB encode for swatch/spectrum only |
+| `FLinearColor` vs display gamma | Linear is storage; the swatch applies display encode so it matches the tonemapped frame | Linear RGB(A) in components; exact IEC 61966-2-1 sRGB encode for swatch/spectrum only |
 | Light Details colour + temperature | Swatch edits tint; Intensity and Kelvin stay separate; temperature can override the swatch | Keep `LightColorTemperature`; Kelvin > 0 locks the swatch to the derived tint |
 
 **Boundary:** UE EULA — pattern and information architecture only. No Slate
@@ -1458,4 +1464,3 @@ internal reflection, directionally gated subsurface scattering, and a fixed
 50 Hz cascade step — the departure and its cause are recorded in
 `dev records/phase_IV.md` section 14.4. The GPU spray emitter in the last row
 was studied but never shipped.
-

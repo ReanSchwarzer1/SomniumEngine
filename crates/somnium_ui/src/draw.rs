@@ -18,7 +18,8 @@ use glam::Vec2;
 pub struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
-    pub color: [u8; 4], // RGBA, premultiplied alpha
+    /// Authored sRGB tint with straight (unassociated) alpha.
+    pub color: [u8; 4],
 }
 
 impl Vertex {

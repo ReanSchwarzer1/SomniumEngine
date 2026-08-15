@@ -1,7 +1,8 @@
-//! Original geometric icon atlas for Metaphor chrome (Phase 26-A).
+//! Nocturne Atelier icon atlas.
 //!
-//! Stroke-icon optical sizes follow Lucide (16/20/32) without copying Lucide
-//! SVG path data. Engine mark is an original crescent + S. See ATTRIBUTION.
+//! The original Phase 26 glyphs remain at stable indices. Phase 26-Zeta appends
+//! the approved Somnium-specific extension, drawn on the supplied 24×24 / 2 px
+//! grid. The engine mark implements the approved original Eclipse-S route.
 
 use glam::Vec2;
 
@@ -91,6 +92,18 @@ pub enum IconId {
     Minimize,
     Maximize,
     ImmersivePlay,
+    SculptRaise,
+    SculptLower,
+    SculptSmooth,
+    SculptFlatten,
+    SculptNoise,
+    PaintLayer,
+    FoliagePaint,
+    FoliageErase,
+    FoliageSingle,
+    LightProbe,
+    MaterialGraph,
+    RayTrace,
 }
 
 impl IconId {
@@ -167,6 +180,18 @@ impl IconId {
         Self::Minimize,
         Self::Maximize,
         Self::ImmersivePlay,
+        Self::SculptRaise,
+        Self::SculptLower,
+        Self::SculptSmooth,
+        Self::SculptFlatten,
+        Self::SculptNoise,
+        Self::PaintLayer,
+        Self::FoliagePaint,
+        Self::FoliageErase,
+        Self::FoliageSingle,
+        Self::LightProbe,
+        Self::MaterialGraph,
+        Self::RayTrace,
     ];
 
     pub fn index(self) -> u32 {
@@ -242,34 +267,6 @@ impl IconAtlas {
         self.pixels[i + 3] = self.pixels[i + 3].max(a);
     }
 
-    fn punch(&mut self, x: i32, y: i32) {
-        if x < 0 || y < 0 {
-            return;
-        }
-        let (x, y) = (x as u32, y as u32);
-        if x >= self.width || y >= self.height {
-            return;
-        }
-        let i = ((y * self.width + x) * 4) as usize;
-        self.pixels[i + 3] = 0;
-    }
-
-    fn erase_circle(&mut self, cx: f32, cy: f32, r: f32) {
-        let minx = (cx - r - 1.0).floor() as i32;
-        let maxx = (cx + r + 1.0).ceil() as i32;
-        let miny = (cy - r - 1.0).floor() as i32;
-        let maxy = (cy + r + 1.0).ceil() as i32;
-        for y in miny..=maxy {
-            for x in minx..=maxx {
-                let dx = x as f32 + 0.5 - cx;
-                let dy = y as f32 + 0.5 - cy;
-                if (dx * dx + dy * dy).sqrt() <= r {
-                    self.punch(x, y);
-                }
-            }
-        }
-    }
-
     fn stamp(&mut self, x: f32, y: f32, coverage: f32) {
         let a = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
         if a == 0 {
@@ -334,6 +331,36 @@ impl IconAtlas {
         self.line(x, y + h, x, y, width);
     }
 
+    fn arc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        start_degrees: f32,
+        end_degrees: f32,
+        width: f32,
+    ) {
+        let span = end_degrees - start_degrees;
+        let steps = ((span.abs().to_radians() * radius * 2.0).ceil() as usize).max(8);
+        let point = |degrees: f32| {
+            let angle = degrees.to_radians();
+            (cx + angle.cos() * radius, cy + angle.sin() * radius)
+        };
+        let mut previous = point(start_degrees);
+        for step in 1..=steps {
+            let degrees = start_degrees + span * step as f32 / steps as f32;
+            let current = point(degrees);
+            self.line(previous.0, previous.1, current.0, current.1, width);
+            previous = current;
+        }
+    }
+
+    fn polyline(&mut self, points: &[(f32, f32)], width: f32) {
+        for pair in points.windows(2) {
+            self.line(pair[0].0, pair[0].1, pair[1].0, pair[1].1, width);
+        }
+    }
+
     fn rasterize(&mut self, id: IconId) {
         let (ox, oy) = Self::cell_origin(id);
         let ox = ox as f32;
@@ -344,9 +371,11 @@ impl IconAtlas {
         let w = 1.8;
         match id {
             IconId::EngineMark => {
-                // Filled crescent — readable at 24–32 px, unlike a 1.8 px stroke.
-                self.circle(s(12.0), t(12.0), 10.0, 1.0, true);
-                self.erase_circle(s(16.5), t(10.0), 7.2);
+                // Eclipse S: two counter-rotating crescent blades separated by
+                // a diagonal channel. This is an optical 24 px interpretation
+                // of assets/brand/somnium-s-eclipse.svg, not a font glyph.
+                self.arc(s(9.0), t(8.0), 6.1, -42.0, -292.0, 3.4);
+                self.arc(s(15.0), t(16.0), 6.1, 138.0, 388.0, 3.4);
             }
             IconId::File => {
                 self.line(s(8.0), t(4.0), s(14.0), t(4.0), w);
@@ -688,6 +717,154 @@ impl IconAtlas {
                 self.line(s(9.0), t(8.0), s(17.0), t(12.0), w);
                 self.line(s(9.0), t(16.0), s(17.0), t(12.0), w);
             }
+            IconId::SculptRaise | IconId::SculptLower => {
+                self.line(s(3.0), t(20.0), s(21.0), t(20.0), w);
+                self.polyline(
+                    &[(s(6.5), t(16.5)), (s(12.0), t(10.0)), (s(17.5), t(16.5))],
+                    w,
+                );
+                if id == IconId::SculptRaise {
+                    self.line(s(12.0), t(7.0), s(12.0), t(2.5), w);
+                    self.polyline(&[(s(9.6), t(4.9)), (s(12.0), t(2.5)), (s(14.4), t(4.9))], w);
+                } else {
+                    self.line(s(12.0), t(2.5), s(12.0), t(7.0), w);
+                    self.polyline(&[(s(9.6), t(4.6)), (s(12.0), t(7.0)), (s(14.4), t(4.6))], w);
+                }
+            }
+            IconId::SculptSmooth => {
+                self.line(s(3.0), t(20.0), s(21.0), t(20.0), w);
+                self.polyline(
+                    &[
+                        (s(3.0), t(14.0)),
+                        (s(5.0), t(13.5)),
+                        (s(7.0), t(9.0)),
+                        (s(9.4), t(8.0)),
+                        (s(12.0), t(10.5)),
+                        (s(15.8), t(14.0)),
+                        (s(18.5), t(12.0)),
+                        (s(21.0), t(11.0)),
+                    ],
+                    w,
+                );
+            }
+            IconId::SculptFlatten => {
+                self.line(s(3.0), t(20.0), s(21.0), t(20.0), w);
+                self.line(s(3.0), t(9.0), s(21.0), t(9.0), w);
+                self.polyline(
+                    &[
+                        (s(6.0), t(15.0)),
+                        (s(9.0), t(12.0)),
+                        (s(12.0), t(11.0)),
+                        (s(15.0), t(12.0)),
+                        (s(18.0), t(15.0)),
+                    ],
+                    w,
+                );
+            }
+            IconId::SculptNoise => {
+                self.line(s(3.0), t(20.0), s(21.0), t(20.0), w);
+                self.polyline(
+                    &[
+                        (s(3.0), t(15.0)),
+                        (s(5.4), t(10.0)),
+                        (s(7.8), t(14.0)),
+                        (s(10.2), t(7.0)),
+                        (s(12.6), t(15.0)),
+                        (s(15.0), t(10.0)),
+                        (s(17.4), t(13.0)),
+                        (s(21.0), t(11.0)),
+                    ],
+                    w,
+                );
+            }
+            IconId::PaintLayer => {
+                self.polyline(
+                    &[
+                        (s(12.0), t(3.0)),
+                        (s(3.0), t(8.0)),
+                        (s(12.0), t(13.0)),
+                        (s(21.0), t(8.0)),
+                        (s(12.0), t(3.0)),
+                    ],
+                    w,
+                );
+                self.polyline(
+                    &[(s(3.0), t(14.0)), (s(12.0), t(19.0)), (s(21.0), t(14.0))],
+                    w,
+                );
+            }
+            IconId::FoliagePaint | IconId::FoliageErase => {
+                self.arc(s(12.0), t(10.0), 7.0, 165.0, 355.0, w);
+                self.polyline(
+                    &[
+                        (s(5.0), t(16.0)),
+                        (s(5.0), t(12.0)),
+                        (s(10.0), t(6.0)),
+                        (s(20.0), t(4.0)),
+                    ],
+                    w,
+                );
+                if id == IconId::FoliagePaint {
+                    self.polyline(
+                        &[(s(4.0), t(21.0)), (s(8.0), t(15.0)), (s(13.0), t(12.0))],
+                        w,
+                    );
+                } else {
+                    self.line(s(3.0), t(21.0), s(21.0), t(3.0), w);
+                }
+            }
+            IconId::FoliageSingle => {
+                self.line(s(12.0), t(21.0), s(12.0), t(9.0), w);
+                self.polyline(
+                    &[
+                        (s(12.0), t(12.0)),
+                        (s(15.0), t(6.0)),
+                        (s(18.5), t(5.0)),
+                        (s(18.0), t(9.0)),
+                        (s(12.0), t(12.0)),
+                    ],
+                    w,
+                );
+                self.polyline(
+                    &[
+                        (s(12.0), t(15.0)),
+                        (s(9.0), t(10.0)),
+                        (s(6.5), t(9.0)),
+                        (s(7.0), t(12.5)),
+                        (s(12.0), t(15.0)),
+                    ],
+                    w,
+                );
+            }
+            IconId::LightProbe => {
+                self.circle(s(12.0), t(12.0), 8.5, w, false);
+                self.arc(s(9.0), t(12.0), 6.0, -67.0, 67.0, w);
+                self.line(s(3.5), t(12.0), s(20.5), t(12.0), w);
+            }
+            IconId::MaterialGraph => {
+                self.rect_stroke(s(2.0), t(4.0), 7.0, 6.0, w);
+                self.rect_stroke(s(15.0), t(14.0), 7.0, 6.0, w);
+                self.polyline(
+                    &[
+                        (s(9.0), t(7.0)),
+                        (s(12.5), t(7.0)),
+                        (s(14.5), t(9.0)),
+                        (s(14.5), t(15.5)),
+                    ],
+                    w,
+                );
+                self.line(s(2.0), t(17.0), s(8.0), t(17.0), w);
+            }
+            IconId::RayTrace => {
+                self.line(s(2.0), t(5.0), s(7.0), t(5.0), w);
+                self.polyline(
+                    &[(s(4.5), t(5.0)), (s(13.5), t(12.0)), (s(10.5), t(20.0))],
+                    w,
+                );
+                self.line(s(13.5), t(12.0), s(20.5), t(6.0), w);
+                self.circle(s(21.0), t(4.5), 1.6, w, false);
+                self.line(s(3.0), t(20.0), s(8.0), t(20.0), w);
+            }
         }
     }
 }
@@ -715,5 +892,34 @@ mod tests {
         assert!(painted > 1000, "atlas should contain stroked glyphs");
         let (uv0, uv1) = IconId::Play.uv_rect();
         assert!(uv1.x > uv0.x && uv1.y > uv0.y);
+    }
+
+    #[test]
+    fn zeta_extension_icons_have_visible_coverage() {
+        let atlas = IconAtlas::new();
+        for id in [
+            IconId::SculptRaise,
+            IconId::SculptLower,
+            IconId::SculptSmooth,
+            IconId::SculptFlatten,
+            IconId::SculptNoise,
+            IconId::PaintLayer,
+            IconId::FoliagePaint,
+            IconId::FoliageErase,
+            IconId::FoliageSingle,
+            IconId::LightProbe,
+            IconId::MaterialGraph,
+            IconId::RayTrace,
+        ] {
+            let (ox, oy) = IconAtlas::cell_origin(id);
+            let mut painted = 0usize;
+            for y in oy as u32..oy as u32 + ICON_CELL {
+                for x in ox as u32..ox as u32 + ICON_CELL {
+                    let alpha = atlas.pixels[((y * atlas.width + x) * 4 + 3) as usize];
+                    painted += usize::from(alpha > 0);
+                }
+            }
+            assert!(painted > 20, "{id:?} should paint its atlas cell");
+        }
     }
 }

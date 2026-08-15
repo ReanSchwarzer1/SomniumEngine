@@ -4,6 +4,7 @@ use crate::{
     draw::DrawingContext,
     message::{TextMessage, UiMessage},
     node::{Control, LayoutCtx, UiNode},
+    theme,
     widget::{Widget, WidgetBuilder},
 };
 use glam::Vec2;
@@ -121,8 +122,8 @@ impl TextBuilder {
         Self {
             widget,
             text: String::new(),
-            px: 14.0,
-            color: [255, 255, 255, 255],
+            px: theme::NOCTURNE.typography.body,
+            color: theme::TEXT_PRIMARY,
             font_id: 0,
             wrap: false,
         }

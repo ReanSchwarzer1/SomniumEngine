@@ -539,22 +539,21 @@ The query filters archetypes whose `ComponentSet` is a superset of `required` an
 
 ### 8.1 Architecture
 
-The editor UI is rendered entirely by the wgpu backend — no OS WebView dependency. `UiPass` composites the widget tree over the 3D viewport each frame using an alpha-blending screen-space render pass.
+The editor UI is rendered entirely by the wgpu backend — no OS WebView dependency. `UiPass` composites the widget tree over the 3D viewport each frame using an alpha-blending screen-space render pass. Nocturne's authored-sRGB vertex tints are decoded to linear in the UI shader exactly once before the sRGB target encodes them; alpha remains straight.
 
 ```
 OS Window (HWND, undecorated)  ← wgpu 3D scene, then UI overlay
   │
   └── UiPass (wgpu, alpha blend, LoadOp::Load)
         │
-        └── UserInterface widget tree  (outer_grid, 7 rows)
-              ┌──────────────────────────────────────────────┐  Row 0  36 px  title bar
-              │ mark  Somnium Engine              fps  _ □ × │
-              ├──────────────────────────────────────────────┤  Row 1  menu
-              │ File Edit Create View Window Help            │
-              ├──────────────────────────────────────────────┤  Row 2  toolbar
+        └── UserInterface widget tree  (outer_grid, compatibility rows retained)
+              ┌──────────────────────────────────────────────┐  Row 0  36 px application scope
+              │ mark  File Edit Create View  Search  fps _ □ ×│
+              ├──────────────────────────────────────────────┤  Row 1  0 px retired menu row
+              ├──────────────────────────────────────────────┤  Row 2  32 px mode scope
               │ Save  Select Landscape Foliage  ▶ ⛶ ❚❚ ■       │
-              ├──────────────────────────────────────────────┤  Row 3  26 px  viewport bar
-              ├────────┬──────────────────────┬──────────────┤  Row 4  *  main
+              ├──────────────────────────────────────────────┤  Row 3  32 px viewport context
+              ├────────┬──────────────────────┬──────────────┤  Row 4  *  main (y = 100)
               │ Sculpt │  3D Viewport         │ Outliner     │
               │        │  (transparent)       │ Details      │
               ├────────┴──────────────────────┴──────────────┤  Row 5  220 px
@@ -624,11 +623,10 @@ networking debug, …) must add inspector sections, menus, drawer types, and
 inspector) is still out unless requested.
 
 ```
-outer_grid (7 rows: 36 title | menu | toolbar | 26 vp-bar | * | 220 drawer | 24 status)
-├── title bar — EngineMark, “Somnium Engine”, fps, Minimize / Maximize / Close
-├── menu_bar — File/Edit/Create/View/Window/Help
-├── main toolbar — Save, Select, Landscape, Foliage, Play, Immersive play, Pause/Stop (selected fill)
-├── viewport toolbar — camera speed, profiler
+outer_grid (compatibility rows: 36 application | 0 retired | 32 mode | 32 viewport-context | * | 220 drawer | 26 status)
+├── application bar — Eclipse-S, menus, command search, fps, Minimize / Maximize / Close
+├── mode toolbar — Save, Select, Landscape, Foliage, Play, Immersive play, Pause/Stop (selected fill)
+├── viewport-context toolbar — camera speed, profiler
 ├── tools_split | content_split | details_split (resizable, persisted)
 │     ├── left Sculpt (named Raise/Lower/Smooth/Flatten/Noise/Paint, selected fill)
 │     ├── viewport (transparent passthrough)
@@ -1329,7 +1327,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 25N | 🟡 Started | **Analytic gradients for visibility-buffer shading.** `textureSampleGrad` when shading_mode bit 3 is set (**Analytic Mips**, default on). See §25.14. |
 | 25P | 🟡 Started / LOD signed off 2026-08-14 | **Foliage instancing and LOD.** **LOD** drops leaf/cutout parts; **Impostor** keeps solid parts (the dummy billboard was deleted — it was a black triangle). Distances are **horizontal**. GPU: no `instance_count>1` collapse; two-sided cone cull off. **Do not retune** unless asked. See §25.14. |
 | XV | ✅ A–J complete | **Phase XV — Appalachia.** 32 global photogrammetry PBR layers, eight splatmaps, strongest-four, unique-colour macro, full-PBR biplanar cliffs, Terrain Paint vs Foliage Paint, biome v3 / landscape v4, aerial hex/POM LOD (`gpu_material_for_camera`, 80 m). Live look signed off 2026-08-13. **XV-J** closed the same day: compile gate + `phase_XV-J_*.png` corpus + wgpu freeze (RTX 5080 Laptop, Vulkan, driver 610.74). Release overview shading **3.951 ms**, walk **5.532 ms** (1.10 ms budget is an explicit exception). BC7 encoder ships (`encode_terrain_bc7`); local packs load at 2048+1024 (~213 MiB, `compressed=true`). Visual A/B: `dev records/phase XV/evidence/XV-BC7_visual_check.md`. Plan: `dev records/phase_XV.md`. Live contract: `dev records/phase XV/XV-Zeta_plan.md`. Evidence: `dev records/phase XV/evidence/XV-J_compile_gate.md`. Do not rewrite §20 (Phase 14) as if it were XV. |
-| 26 | 🔧 open | **Phase 26 — Metaphor.** 26-A–I shipped 2026-08-13 (toolkit, Nocturne shell, docked Content Drawer tiles, Details/Outliner, Iris, `UiCanvas`, palette/toasts/HiDPI/layout persist/unsaved, custom title bar, wrapped Help, button hover/press, visible scrollbars). Evening polish: immersive play, 80 px drawer tiles, ComboBox root-popup overlay, toolbar Select/Landscape/Foliage wiring. 26-H SDF slipped (supersampled bitmap Inter). **Phase remains open:** new engine features keep needing new UI/UX. 26-J not started. Contract: `dev records/phase_26.md`. |
+| 26 | 🔧 open | **Phase 26 — Metaphor / Nocturne Atelier.** 26-A–I shipped 2026-08-13. On 2026-08-15 the approved Zeta design package began implementation: exact authored-sRGB UI transfer, typed immutable Nocturne tokens, Eclipse-S + original custom icon sources, and the 36/32/32 application-mode-context shell with visible Ctrl+P search. Existing `EditorEvent` wiring is preserved and UI tests are green. **Still open:** broad component/workspace rollout, shaping/SDF, accessibility/golden/performance gates, 26-J reflection inspector, and later feature chrome. Contract: `dev records/phase_26.md`; execution plan: `dev records/phase_26_Zeta.md`. |
 | VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 | FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
 | DF | 🔧 In engine; **audit required** | **Phase DF — Daggerfall:** nested material clipmaps. Fragment generate; shade taps the cache; POM **not** on clipmap height. Default **off**. Walk luminance gate not passed. **Next:** audit (`phase_DF.md` §12), then remeasure DF-E at maximized Native. `SOMNIUM_TERRAIN_CLIPMAP=1` to enable. |
@@ -3661,9 +3659,12 @@ shading budget (measured 3.951 ms overview / 5.532 ms walk, release 1280×720)
 and BC7 packs (adapter supports BC; encoder ships, packs are local gitignored
 artifacts — `dev records/phase XV/evidence/XV-BC7_visual_check.md`).
 
-**Phase 26 — Metaphor (26-A–I shipped 2026-08-13; phase remains open).**
-Nocturne editor chrome, docked Content Drawer, Iris colour pickers (26-F),
-custom title bar, F1 Help, immersive play, ComboBox overlay. Later engine
+**Phase 26 — Metaphor (26-A–I shipped 2026-08-13; Zeta vertical slice
+2026-08-15; phase remains open).** Nocturne editor chrome, docked Content
+Drawer, Iris colour pickers (26-F), custom title bar, F1 Help, immersive play,
+ComboBox overlay. Zeta corrects UI colour transfer, establishes typed Nocturne
+Atelier tokens and original Eclipse-S/icon assets, and rehosts the top shell
+into 36/32/32 command scopes without changing editor events. Later engine
 features keep needing new UI/UX. 26-J (reflection inspector) not started.
 Contract: `dev records/phase_26.md`. Independent of Phase VV except living
 chrome for debug views.

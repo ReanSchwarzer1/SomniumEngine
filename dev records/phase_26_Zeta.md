@@ -1,6 +1,6 @@
 # Phase 26-Zeta — Nocturne Atelier
 
-> **Status:** research and execution plan — no editor implementation has started
+> **Status:** implementation started 2026-08-15 — Zeta-B and the first safe C/E/F shell vertical slice are in tree; the phase remains open
 > **Prepared:** 2026-08-15
 > **Purpose:** take Somnium's existing Nocturne editor from functional custom UI to a coherent, professional product identity without replacing the retained-mode UI or breaking editor behavior
 > **Design gate:** Claude Design produces and the user approves the identity, token system, component library, and annotated editor screens before visual implementation begins
@@ -691,3 +691,38 @@ When the user returns with Claude Design output:
 7. Keep the engine runnable and the Phase 26 must-not-break matrix green after every sub-phase.
 
 **Definition of done:** Somnium's editor is a coherent, original, accessible, measurable product system—not merely a darker screenshot—and its identity, components, workflows, implementation rules, evidence, and third-party provenance are all documented and reproducible.
+
+---
+
+## 15. Implementation ledger
+
+### 2026-08-15 — approved-design vertical slice
+
+Implemented without changing the `EditorEvent` contract:
+
+- exact IEC 61966-2-1 sRGB transfer and one-decode UI shader contract, with a
+  linear-surface shader variant and straight-alpha preservation;
+- typed immutable `NOCTURNE` snapshot plus palette, semantic, typography,
+  density, geometry, and motion roles; common widget-local colour literals were
+  migrated to semantic aliases;
+- approved token JSON, Eclipse-S responsive SVG set, sixteen original Somnium
+  icon SVGs and manifest/provenance, plus procedural atlas counterparts for the
+  terrain and specialist glyphs used by the current renderer;
+- application / mode / viewport-context command scopes at 36 / 32 / 32 px,
+  with menus rehosted into the application bar and a visible Ctrl+P search
+  entry wired to the existing command palette;
+- regression tests for colour transfer, theme alpha, shader surface variants,
+  atlas coverage, the 100 px shell budget, Create actions, and primary
+  transport controls.
+
+Verification: `cargo test -p somnium_ui` passes 39/39; the serial
+`cargo test --workspace -j 1` gate passes; a live `hello_engine` frame-5 smoke
+run exits cleanly with no wgpu validation error. Its renderer capture is
+`dev records/phase 26/zeta_runtime_smoke.png`; the current capture hook runs
+before editor chrome, so UI geometry and wiring evidence comes from the layout
+tests rather than a fabricated UI screenshot.
+
+Still open and not represented as complete: Zeta-D typography/shaping,
+workspace presets and broader workflow rebuilds, complete interaction-state
+and accessibility coverage, visual golden/performance evidence, and Zeta-J
+sign-off. The Phase 26 must-not-break inventory remains the controlling gate.

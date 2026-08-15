@@ -512,6 +512,7 @@ struct EditorLayout {
     post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
+    palette_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
     toast_host: NodeHandle,
@@ -645,6 +646,7 @@ pub struct UiManager {
     post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
     save_button: NodeHandle,
+    palette_button: NodeHandle,
     palette_popup: NodeHandle,
     palette_widget: NodeHandle,
     toast_host: NodeHandle,
@@ -836,6 +838,7 @@ impl UiManager {
             post_tonemap_popup: layout.post_tonemap_popup,
             viewport_res_popup: layout.viewport_res_popup,
             save_button: layout.save_button,
+            palette_button: layout.palette_button,
             palette_popup: layout.palette_popup,
             palette_widget: layout.palette_widget,
             toast_host: layout.toast_host,
@@ -2712,6 +2715,10 @@ impl UiManager {
 
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 // Outliner row
+                if msg.destination == self.palette_button {
+                    self.toggle_palette();
+                    continue;
+                }
                 if let Some(&(_, eidx)) = self
                     .outliner_rows
                     .iter()
@@ -3348,12 +3355,14 @@ fn build_editor_layout(
 ) -> EditorLayout {
     let root = ui.root();
 
-    // ── Outer grid: title | menu | toolbar | viewport bar | main | drawer | status
+    // Zeta shell budget: application 36 | mode 32 | viewport context 32.
+    // Menus now live in the application band; the retired menu row remains at
+    // index 1 so every existing GridMessage row index stays stable.
     let outer_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .add_row(Row::strict(theme::TITLEBAR_HEIGHT))
-        .add_row(Row::strict(theme::MENU_HEIGHT))
+        .add_row(Row::strict(0.0))
         .add_row(Row::strict(theme::TOOLBAR_HEIGHT))
-        .add_row(Row::strict(26.0))
+        .add_row(Row::strict(theme::NOCTURNE.density.toolbar))
         .add_row(Row::stretch())
         .add_row(Row::strict(theme::BOTTOM_DRAWER_HEIGHT))
         .add_row(Row::strict(theme::STATUS_HEIGHT))
@@ -3379,6 +3388,7 @@ fn build_editor_layout(
     let title_bar_h = ui.add_node(title_bar, outer_h);
     let title_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .add_row(Row::stretch())
+        .add_column(Column::auto())
         .add_column(Column::stretch())
         .add_column(Column::auto())
         .build();
@@ -3429,12 +3439,13 @@ fn build_editor_layout(
 
     let title_right = StackPanelBuilder::new(
         WidgetBuilder::new()
-            .with_column(1)
+            .with_column(2)
             .with_background(theme::TRANSPARENT),
     )
     .with_orientation(Orientation::Horizontal)
     .build();
     let title_right_h = ui.add_node(title_right, title_grid_h);
+    let help_button = icon_tool_button(ui, title_right_h, IconId::HelpCircle, "Help (F1)");
     let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 10.0)))
         .with_text("— fps")
         .with_font_size(11.0)
@@ -3446,28 +3457,23 @@ fn build_editor_layout(
     let win_max = window_chrome_button(ui, title_right_h, IconId::Maximize, "Maximize");
     let win_close = window_chrome_button(ui, title_right_h, IconId::Close, "Close");
 
-    // ── Row 1: menu bar ───────────────────────────────────────────────────────
+    // ── Application menus — folded into the title/application band ──────────
     let menu_bar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_row(1)
-            .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_row(0)
+            .with_column(1)
+            .with_background(theme::TRANSPARENT)
+            .with_foreground(theme::TRANSPARENT),
     )
-    .with_stroke_thickness(Thickness {
-        left: 0.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 1.0,
-    })
+    .with_stroke_thickness(Thickness::ZERO)
     .build();
-    let menu_bar_h = ui.add_node(menu_bar, outer_h);
+    let menu_bar_h = ui.add_node(menu_bar, title_grid_h);
 
-    // Menu bar grid: [stretch col for menu items | auto col for FPS counter]
+    // Menu bar grid: the application commands consume the available centre.
     let menu_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .add_row(Row::stretch())
-        .add_column(Column::stretch()) // col 0 — menu items
-        .add_column(Column::auto()) // col 1 — FPS (right-aligned)
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
         .build();
     let menu_grid_h = ui.add_node(menu_grid, menu_bar_h);
 
@@ -3521,16 +3527,36 @@ fn build_editor_layout(
     let window_button = menu_button(ui, menu_stack_h, "Window", font_id);
     let help_menu_button = menu_button(ui, menu_stack_h, "Help", font_id);
 
-    let fps_col = StackPanelBuilder::new(
+    let palette_button_node = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(1)
-            .with_background(theme::TRANSPARENT),
+            .with_width(320.0)
+            .with_height(26.0)
+            .with_horizontal_alignment(HorizontalAlignment::Right)
+            .with_margin(Thickness {
+                left: 12.0,
+                top: 5.0,
+                right: 12.0,
+                bottom: 5.0,
+            })
+            .with_background(theme::BG_INPUT)
+            .with_tooltip("Search commands, entities, assets (Ctrl+P)"),
     )
-    .with_orientation(Orientation::Horizontal)
     .build();
-    let fps_col_h = ui.add_node(fps_col, menu_grid_h);
-    let help_button = icon_tool_button(ui, fps_col_h, IconId::HelpCircle, "Help (F1)");
+    let palette_button = ui.add_node(palette_button_node, menu_grid_h);
+    let palette_label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 10.0,
+        top: 5.0,
+        right: 10.0,
+        bottom: 0.0,
+    }))
+    .with_text("Search commands, entities, assets     Ctrl+P")
+    .with_font_size(theme::NOCTURNE.typography.caption)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_MUTED)
+    .build();
+    ui.add_node(palette_label, palette_button);
 
     // ── Row 2: main toolbar ──────────────────────────────────────────────────
     let main_tb = BorderBuilder::new(
@@ -3761,12 +3787,12 @@ fn build_editor_layout(
     ui.add_node(ter_lbl, tool_stack_h);
 
     const TERRAIN_TOOLS: &[(IconId, &str, u8)] = &[
-        (IconId::Landscape, "Raise", 0),
-        (IconId::Landscape, "Lower", 1),
-        (IconId::Landscape, "Smooth", 2),
-        (IconId::Landscape, "Flatten", 3),
-        (IconId::Landscape, "Noise", 4),
-        (IconId::Texture, "Paint", 5),
+        (IconId::SculptRaise, "Raise", 0),
+        (IconId::SculptLower, "Lower", 1),
+        (IconId::SculptSmooth, "Smooth", 2),
+        (IconId::SculptFlatten, "Flatten", 3),
+        (IconId::SculptNoise, "Noise", 4),
+        (IconId::PaintLayer, "Paint", 5),
     ];
     let mut terrain_tool_items = Vec::with_capacity(TERRAIN_TOOLS.len());
     for &(icon, label, tool) in TERRAIN_TOOLS {
@@ -4324,9 +4350,11 @@ fn build_editor_layout(
             hint: String::new(),
         },
     ];
-    let palette_popup_node = PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 80]))
-        .with_placement(PopupPlacement::Center)
-        .build();
+    let palette_popup_node = PopupBuilder::new(
+        WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
+    )
+    .with_placement(PopupPlacement::Center)
+    .build();
     let palette_popup = ui.add_node(palette_popup_node, root);
     let palette_widget_node = CommandPaletteBuilder::new(
         WidgetBuilder::new()
@@ -4344,10 +4372,11 @@ fn build_editor_layout(
         .build();
     let toast_host = ui.add_node(toast_node, root);
 
-    let unsaved_popup_node =
-        PopupBuilder::new(WidgetBuilder::new().with_background([0, 0, 0, 100]))
-            .with_placement(PopupPlacement::Center)
-            .build();
+    let unsaved_popup_node = PopupBuilder::new(
+        WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
+    )
+    .with_placement(PopupPlacement::Center)
+    .build();
     let unsaved_popup = ui.add_node(unsaved_popup_node, root);
     let unsaved_border = BorderBuilder::new(
         WidgetBuilder::new()
@@ -4505,6 +4534,7 @@ fn build_editor_layout(
         post_tonemap_popup,
         viewport_res_popup,
         save_button,
+        palette_button,
         palette_popup,
         palette_widget,
         toast_host,
@@ -5827,4 +5857,59 @@ fn build_create_popup(
     }
 
     (popup_h, items)
+}
+
+#[cfg(test)]
+mod zeta_layout_tests {
+    use super::*;
+
+    fn bounds(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
+        ui.nodes
+            .try_borrow(handle.transmute())
+            .expect("layout handle should remain valid")
+            .widget
+            .screen_bounds()
+    }
+
+    #[test]
+    fn application_mode_and_viewport_scopes_use_the_100px_budget() {
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        ui.perform_layout();
+
+        let menu = bounds(&ui, layout.menu_bar_h);
+        let search = bounds(&ui, layout.palette_button);
+        let viewport = bounds(&ui, layout.viewport_handle);
+
+        assert!(menu.y < theme::TITLEBAR_HEIGHT);
+        assert!(menu.y + menu.h <= theme::TITLEBAR_HEIGHT + 0.1);
+        assert!(search.w > 0.0 && search.y + search.h <= theme::TITLEBAR_HEIGHT + 0.1);
+        assert!(
+            (viewport.y - 100.0).abs() < 0.1,
+            "viewport should begin after the 36 + 32 + 32 scope budget, got {}",
+            viewport.y
+        );
+    }
+
+    #[test]
+    fn shell_rehosts_every_create_action_and_primary_transport_control() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        assert_eq!(layout.create_popup_items.len(), 13);
+        for handle in [
+            layout.save_button,
+            layout.select_button,
+            layout.landscape_button,
+            layout.foliage_toolbar_button,
+            layout.play_button,
+            layout.immersive_button,
+            layout.pause_button,
+            layout.stop_button,
+            layout.palette_button,
+        ] {
+            assert!(!handle.is_none());
+        }
+    }
 }

@@ -24,9 +24,12 @@
 > will keep needing inspector sections, menus, drawers, and Help pages. Treat
 > Metaphor as living chrome, not a finished product.
 > **Professional identity extension:** Phase 26-Zeta — Nocturne Atelier is
-> researched and planned in [`phase_26_Zeta.md`](phase_26_Zeta.md). Its first
-> execution gate is an approved Claude Design system; colour-space correctness
-> precedes any palette retuning or editor repaint.
+> specified in [`phase_26_Zeta.md`](phase_26_Zeta.md). The approved Claude
+> Design package entered implementation on 2026-08-15: exact UI colour-space
+> transfer, typed immutable Nocturne tokens, Eclipse-S/custom icon sources, and
+> a behavior-preserving 36/32/32 top-shell vertical slice are in tree. The
+> broader component/workspace, typography, accessibility, and sign-off phases
+> remain open.
 > **Next GPU track is not a re-implementation of Halcyon.** Phase VV-A–H is
 > in the tree. **Start-here:**
 > [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Remaining
