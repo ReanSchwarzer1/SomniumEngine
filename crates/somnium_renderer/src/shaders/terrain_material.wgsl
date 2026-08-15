@@ -80,6 +80,16 @@ const TERRAIN_LAYERS: u32 = 32u;
 override enable_hex: bool = true;
 override enable_pom: bool = true;
 override terrain_scan: u32 = 32u;
+/// False when every terrain queued this frame shades through the clipmap
+/// (Phase DF). The cache already holds strongest-four + hex + height-blend, so
+/// `evaluate_terrain_material` becomes unreachable and the backend drops it —
+/// along with the 8 splat fetches, the 32-entry scan arrays and the POM march
+/// it would otherwise contribute to register pressure for nothing.
+///
+/// Must stay `true` unless the CPU has checked the *same* condition
+/// `TerrainClipmap::fill_gpu` writes into `clipmap_enabled`, or a terrain will
+/// find neither path.
+override enable_live_terrain: bool = true;
 
 fn terrain_splat_groups() -> u32 {
     return (min(terrain_scan, TERRAIN_LAYERS) + 3u) / 4u;
@@ -150,22 +160,43 @@ fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
 }
 
 /// Deterministic strongest-four. Lower index wins ties.
-fn terrain_strongest_four(weight: array<f32, 32>) -> array<u32, 4> {
-    var used = array<bool, 32>();
-    var out = array<u32, 4>(0u, 0u, 0u, 0u);
-    for (var s = 0u; s < 4u; s = s + 1u) {
-        var best = -1.0;
-        var idx = 0u;
-        for (var i = 0u; i < terrain_scan; i = i + 1u) {
-            if !used[i] && weight[i] > best {
-                best = weight[i];
-                idx = i;
-            }
+///
+/// One pass with the running top four held in scalars, not four passes over a
+/// dynamically indexed `array<bool, 32>` companion. The old shape cost 4×32
+/// iterations, a 128-byte by-value copy of `weight` at the call, and a second
+/// 32-entry array that no GPU keeps in registers — every terrain pixel paid
+/// scratch-memory traffic for a selection sort of at most four winners.
+///
+/// The tie break is unchanged: comparisons are strict, so an equal weight
+/// arriving at a higher index never displaces the one already held.
+fn terrain_strongest_four(weight: ptr<function, array<f32, 32>>) -> array<u32, 4> {
+    var b0 = -1.0;
+    var b1 = -1.0;
+    var b2 = -1.0;
+    var b3 = -1.0;
+    var i0 = 0u;
+    var i1 = 0u;
+    var i2 = 0u;
+    var i3 = 0u;
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        let w = (*weight)[i];
+        if w > b0 {
+            b3 = b2; i3 = i2;
+            b2 = b1; i2 = i1;
+            b1 = b0; i1 = i0;
+            b0 = w;  i0 = i;
+        } else if w > b1 {
+            b3 = b2; i3 = i2;
+            b2 = b1; i2 = i1;
+            b1 = w;  i1 = i;
+        } else if w > b2 {
+            b3 = b2; i3 = i2;
+            b2 = w;  i2 = i;
+        } else if w > b3 {
+            b3 = w;  i3 = i;
         }
-        used[idx] = true;
-        out[s] = idx;
     }
-    return out;
+    return array<u32, 4>(i0, i1, i2, i3);
 }
 
 fn ts_to_surfgrad(n_ts: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>) -> vec3<f32> {
@@ -409,8 +440,12 @@ fn terrain_sample_layer(
     var a: vec4<f32>;
     var surf: vec4<f32>;
     if hex {
-        a = hex_sample(albedo_map, uv, ddx, ddy);
-        let hs = hex_sample_packed_surface(surface_map, uv, ddx, ddy);
+        // One simplex grid and three taps for **both** maps. They depend only
+        // on the UV and its derivatives, so building them per map cost a layer
+        // two grids and six taps where three do.
+        let h = hex_taps(uv, ddx, ddy);
+        a = hex_sample_with(albedo_map, h);
+        let hs = hex_sample_packed_surface_with(surface_map, h);
         s.albedo = a.rgb;
         s.height = a.a;
         s.roughness = hs.roughness;
@@ -665,18 +700,21 @@ fn terrain_generate_texel(
     let splat_ddy = world_ddy * tm.inv_world_size;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats(splat_s);
-    let selected = terrain_strongest_four(weight);
+    let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
-    var gated = array<f32, 32>();
     for (var s = 0u; s < 4u; s = s + 1u) {
-        let i = selected[s];
-        gated[i] = weight[i];
-        kept += weight[i];
+        kept += weight[selected[s]];
     }
     kept = max(kept, 0.0001);
-    for (var i = 0u; i < terrain_scan; i = i + 1u) {
-        weight[i] = gated[i] / kept;
-    }
+    // Renormalise the four survivors and nothing else. The old form built a
+    // second `array<f32, 32>`, wrote all 32 slots, and then only ever read the
+    // four selected indices back out.
+    var sel_w = array<f32, 4>(
+        weight[selected[0]] / kept,
+        weight[selected[1]] / kept,
+        weight[selected[2]] / kept,
+        weight[selected[3]] / kept,
+    );
     let local_xz = world_xz - tm.terrain_origin;
     let geo_normal = vec3<f32>(0.0, 1.0, 0.0);
     let tangent = vec3<f32>(1.0, 0.0, 0.0);
@@ -687,7 +725,7 @@ fn terrain_generate_texel(
     var adjusted: array<f32, 4>;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
-        if weight[i] < epsilon {
+        if sel_w[s] < epsilon {
             adjusted[s] = 0.0;
             continue;
         }
@@ -695,16 +733,16 @@ fn terrain_generate_texel(
         samples[s] = terrain_sample_layer(
             tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         if tm.height_blend != 0u {
-            adjusted[s] = terrain_append_height(tm, i, weight[i], samples[s].height);
+            adjusted[s] = terrain_append_height(tm, i, sel_w[s], samples[s].height);
         } else {
-            adjusted[s] = weight[i];
+            adjusted[s] = sel_w[s];
         }
     }
     var max_w = 0.0;
     var min_depth = -1e30;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
-        if weight[i] < epsilon {
+        if sel_w[s] < epsilon {
             continue;
         }
         max_w = max(max_w, adjusted[s]);
@@ -715,7 +753,7 @@ fn terrain_generate_texel(
     for (var s = 0u; s < 4u; s = s + 1u) {
         var b = 0.0;
         let i = selected[s];
-        if weight[i] >= epsilon {
+        if sel_w[s] >= epsilon {
             let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
             b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
         }
@@ -767,13 +805,10 @@ fn evaluate_terrain_material(
     let splat_ddy = world_ddy * tm.inv_world_size;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats(splat_s);
-    let selected = terrain_strongest_four(weight);
+    let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
-    var gated = array<f32, 32>();
     for (var s = 0u; s < 4u; s = s + 1u) {
-        let i = selected[s];
-        gated[i] = weight[i];
-        kept += weight[i];
+        kept += weight[selected[s]];
     }
     let discarded = 1.0 - kept;
     let selected_rgb = vec3<f32>(
@@ -781,9 +816,16 @@ fn evaluate_terrain_material(
     let weight_rgb = vec3<f32>(
         weight[selected[0]], weight[selected[1]], weight[selected[2]]);
     kept = max(kept, 0.0001);
-    for (var i = 0u; i < terrain_scan; i = i + 1u) {
-        weight[i] = gated[i] / kept;
-    }
+    // Renormalise the four survivors and nothing else — see the same change in
+    // `terrain_generate_texel`. Everything below reads `weight` only at the
+    // selected indices, so the 32-slot `gated` array and its 32-iteration
+    // rewrite were pure scratch traffic on every terrain pixel.
+    var sel_w = array<f32, 4>(
+        weight[selected[0]] / kept,
+        weight[selected[1]] / kept,
+        weight[selected[2]] / kept,
+        weight[selected[3]] / kept,
+    );
 
     let local_xz = world_pos.xz - tm.terrain_origin;
     let view_distance = distance(world_pos, view.camera_pos);
@@ -819,10 +861,9 @@ fn evaluate_terrain_material(
             var dominant = selected[0];
             var best = -1.0;
             for (var s = 0u; s < 4u; s = s + 1u) {
-                let i = selected[s];
-                if weight[i] > best {
-                    best = weight[i];
-                    dominant = i;
+                if sel_w[s] > best {
+                    best = sel_w[s];
+                    dominant = selected[s];
                 }
             }
             let depth = terrain_parallax_depth(tm, dominant);
@@ -851,7 +892,7 @@ fn evaluate_terrain_material(
     var taps = 0u;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
-        if weight[i] < epsilon {
+        if sel_w[s] < epsilon {
             adjusted[s] = 0.0;
             continue;
         }
@@ -860,9 +901,9 @@ fn evaluate_terrain_material(
             tm, i, parallax_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         taps += select(2u, 6u, hex);
         if tm.height_blend != 0u {
-            adjusted[s] = terrain_append_height(tm, i, weight[i], samples[s].height);
+            adjusted[s] = terrain_append_height(tm, i, sel_w[s], samples[s].height);
         } else {
-            adjusted[s] = weight[i];
+            adjusted[s] = sel_w[s];
         }
     }
 
@@ -870,7 +911,7 @@ fn evaluate_terrain_material(
     var min_depth = -1e30;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
-        if weight[i] < epsilon {
+        if sel_w[s] < epsilon {
             continue;
         }
         max_w = max(max_w, adjusted[s]);
@@ -882,7 +923,7 @@ fn evaluate_terrain_material(
     for (var s = 0u; s < 4u; s = s + 1u) {
         var b = 0.0;
         let i = selected[s];
-        if weight[i] >= epsilon {
+        if sel_w[s] >= epsilon {
             let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
             b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
         }

@@ -168,43 +168,65 @@ impl TerrainClipmapPass {
         }
         queue.write_buffer(&self.params, 0, &bytes);
 
-        for (i, job) in jobs.iter().take(n).enumerate() {
-            if job.rect.is_empty() {
+        // One render pass per **ring**, not per rectangle.
+        //
+        // `take_jobs` walks the generate order ring by ring, so every job for a
+        // ring arrives consecutively and they all target the same pair of array
+        // layers. Opening a render pass per rectangle meant a begin/end — and
+        // the barrier either side of it — for each arm of an L-shaped slide,
+        // which is up to four per ring and up to 32 per frame, to write a few
+        // thousand texels. Grouping the run costs nothing and issues one draw
+        // per rectangle inside a single pass.
+        let load = wgpu::Operations {
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        };
+        let mut start = 0usize;
+        while start < n {
+            let ring = jobs[start].ring;
+            let mut end = start + 1;
+            while end < n && jobs[end].ring == ring {
+                end += 1;
+            }
+            let run = start..end;
+            start = end;
+
+            if jobs[run.clone()].iter().all(|job| job.rect.is_empty()) {
                 continue;
             }
             let (albedo, surface) = if is_detail {
-                clipmap.detail_layer(job.ring)
+                clipmap.detail_layer(ring)
             } else {
-                clipmap.macro_layer(job.ring)
+                clipmap.macro_layer(ring)
             };
-            let load = wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            };
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Terrain clipmap generate"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: albedo,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: load,
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: surface,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: load,
-                        }),
-                    ],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, global, &[]);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Terrain clipmap generate"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: albedo,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: load,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: surface,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: load,
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, global, &[]);
+            for i in run {
+                let job = &jobs[i];
+                if job.rect.is_empty() {
+                    continue;
+                }
                 pass.set_bind_group(1, &self.bind, &[(i as u32) * PARAMS_STRIDE as u32]);
                 pass.set_viewport(
                     job.rect.x as f32,

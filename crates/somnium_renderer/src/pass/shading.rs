@@ -19,6 +19,11 @@ pub struct ShadingSpec {
     pub clipmap: bool,
     pub debug: bool,
     pub terrain_scan: u32,
+    /// Keep `evaluate_terrain_material` in the module (Phase DF audit).
+    ///
+    /// False only when every terrain queued this frame shades through its
+    /// clipmap, which is the one case where nothing can reach the live path.
+    pub live_terrain: bool,
 }
 
 impl ShadingSpec {
@@ -30,9 +35,10 @@ impl ShadingSpec {
         clipmap: false,
         debug: false,
         terrain_scan: 16,
+        live_terrain: true,
     };
 
-    fn constants(self) -> [(&'static str, f64); 7] {
+    fn constants(self) -> [(&'static str, f64); 8] {
         [
             ("enable_hex", f64::from(u32::from(self.hex))),
             ("enable_pom", f64::from(u32::from(self.pom))),
@@ -41,6 +47,10 @@ impl ShadingSpec {
             ("enable_clipmap", f64::from(u32::from(self.clipmap))),
             ("enable_debug", f64::from(u32::from(self.debug))),
             ("terrain_scan", f64::from(self.terrain_scan)),
+            (
+                "enable_live_terrain",
+                f64::from(u32::from(self.live_terrain)),
+            ),
         ]
     }
 }
@@ -80,6 +90,8 @@ pub struct ShadingPass {
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
     clipmap_layout: wgpu::BindGroupLayout,
+    /// Bilinear + Repeat, anisotropy 1. See [`ShadingPass::clipmap_sampler`].
+    clipmap_sampler: wgpu::Sampler,
     pub clipmap_bind_group: wgpu::BindGroup,
     _clipmap_dummy_detail: wgpu::Texture,
     _clipmap_dummy_macro: wgpu::Texture,
@@ -365,6 +377,7 @@ impl ShadingPass {
         });
 
         let clipmap_layout = Self::clipmap_bind_group_layout(device);
+        let clipmap_sampler = Self::clipmap_sampler(device);
         let (dummy_detail, dummy_detail_view) = Self::dummy_clipmap_array(device, 8);
         let (dummy_macro, dummy_macro_view) = Self::dummy_clipmap_array(device, 4);
         let clipmap_bind_group = Self::make_clipmap_bind_group(
@@ -374,6 +387,7 @@ impl ShadingPass {
             &dummy_detail_view,
             &dummy_macro_view,
             &dummy_macro_view,
+            &clipmap_sampler,
         );
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -387,13 +401,7 @@ impl ShadingPass {
         });
 
         let spec = ShadingSpec::COMPACT;
-        let pipeline = Self::make_pipeline(
-            device,
-            &shader,
-            &pipeline_layout,
-            surface_format,
-            spec,
-        );
+        let pipeline = Self::make_pipeline(device, &shader, &pipeline_layout, surface_format, spec);
 
         Self {
             pipeline,
@@ -420,6 +428,7 @@ impl ShadingPass {
             lighting_extra,
             sh_probes: sh_probes.clone(),
             clipmap_layout,
+            clipmap_sampler,
             clipmap_bind_group,
             _clipmap_dummy_detail: dummy_detail,
             _clipmap_dummy_macro: dummy_macro,
@@ -487,6 +496,7 @@ impl ShadingPass {
             clipmap = spec.clipmap,
             debug = spec.debug,
             terrain_scan = spec.terrain_scan,
+            live_terrain = spec.live_terrain,
             "shading pipeline spec changed"
         );
         self.pipeline = Self::make_pipeline(
@@ -609,7 +619,38 @@ impl ShadingPass {
         };
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shading clipmap arrays"),
-            entries: &[array_tex(0), array_tex(1), array_tex(2), array_tex(3)],
+            entries: &[
+                array_tex(0),
+                array_tex(1),
+                array_tex(2),
+                array_tex(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// Bilinear + Repeat, **no anisotropy**, for the toroidal caches.
+    ///
+    /// Deliberately not `default_sampler`: that one runs at anisotropy 16 for
+    /// terrain's grazing angles, and an anisotropic footprint across the clipmap
+    /// wrap seam is what produced the ring-edge streaking the manual four-tap
+    /// bilinear was written to avoid.
+    fn clipmap_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shading clipmap sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            anisotropy_clamp: 1,
+            ..Default::default()
         })
     }
 
@@ -646,6 +687,7 @@ impl ShadingPass {
         detail_surface: &wgpu::TextureView,
         macro_albedo: &wgpu::TextureView,
         macro_normal: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading clipmap arrays"),
@@ -666,6 +708,10 @@ impl ShadingPass {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(macro_normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         })
@@ -688,6 +734,7 @@ impl ShadingPass {
             detail_surface,
             macro_albedo,
             macro_normal,
+            &self.clipmap_sampler,
         );
     }
 
@@ -774,5 +821,20 @@ mod tests {
         assert_eq!(c[4], ("enable_clipmap", 0.0));
         assert_eq!(c[5], ("enable_debug", 0.0));
         assert_eq!(c[6], ("terrain_scan", 16.0));
+        // The live path stays compiled by default. Deleting it is only safe
+        // once the CPU has confirmed every terrain shades from its clipmap.
+        assert_eq!(c[7], ("enable_live_terrain", 1.0));
+    }
+
+    #[test]
+    fn a_clipmap_only_spec_drops_the_live_terrain_path() {
+        let spec = ShadingSpec {
+            clipmap: true,
+            live_terrain: false,
+            ..ShadingSpec::COMPACT
+        };
+        let c = spec.constants();
+        assert_eq!(c[4], ("enable_clipmap", 1.0));
+        assert_eq!(c[7], ("enable_live_terrain", 0.0));
     }
 }

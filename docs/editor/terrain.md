@@ -11,7 +11,7 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 - **Noise** — add variation
 - **Paint** — splat a material layer (use the layer list in Details)
 
-**[ ]** change brush size. **- =** change strength. The Details terrain section shows the active layer and hex-tiling toggle.
+**[ ]** change brush size. **- =** change strength. The Details terrain section shows the active layer plus **Hex Tiling**, **Parallax**, and **Clipmap**.
 
 ## Foliage
 
@@ -21,11 +21,17 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 **LOD Morph** (default off) and **Morph** (0–1, start of the blend) remove the ridge pop between clipmap LODs. `SOMNIUM_LOD_MORPH=1` turns it on.
 
-## Material clipmaps (Phase DF)
+## Hex, parallax, clipmap
 
-**Clipmap** (default **off** until the DF-E gates pass) bakes strongest-four + hex + height-blend into nested caches centred on the ground the camera is looking at (clamped to 8 m). Shade bilinear-loads the toroidal cache and blends rings so edges do not streak. Generate paints at most one 1024² ring per frame (the 8 m ring first); shade skips rings that have not finished a full generate. Cliffs stay live (biplanar). POM is not marched on the cache. Toggle Clipmap off/on once after updating to rebuild. `SOMNIUM_TERRAIN_CLIPMAP=1` forces on; `=0` forces off.
+**Hex Tiling** and **Parallax** live on the selected Terrain (not Post FX). Hex is the anti-repeat tap; Parallax is POM (there is no separate “POM” label). Unchecking them zeros the uniforms **and** rebuilds the shading pipeline without those paths — a hitch once, then cheaper shade. They do not change the 32-slot GPU splat format.
+
+**Clipmap** (default **off** until the DF-E gates pass) is the cheap shade path for a 1 km tile: it bakes strongest-four + hex + height-blend into nested caches centred on the ground the camera is looking at (clamped to 8 m). Shade bilinear-loads the toroidal cache and blends rings so edges do not streak. Generate paints at most one 1024² ring per frame (the 8 m ring first); shade skips rings that have not finished a full generate. Cliffs stay live (biplanar). POM is not marched on the cache. Toggle Clipmap off/on once after updating to rebuild. `SOMNIUM_TERRAIN_CLIPMAP=1` forces on; `=0` forces off. Leave it off on **Coastal** unless you are running the Daggerfall audit.
 
 Dbg **32** is clipmap albedo, **33** is ring index (0 = finest).
+
+## Maps
+
+**Game / Maps** in the Content Drawer. **Coastal** is the 1 km, 32-layer Appalachia launch landscape (256 chunks). **Island** is a 512 m ocean tile with a 16-layer hero bank (hex and parallax off; GPU splat format still 32 slots with 16–31 empty). Island shade is cheaper because fewer pixels hit ground and the compact pipeline scans 16 layers. Coastal stays heavier on the ground with the same options off — that is tile size and 32 published layers, not leftover POM. Soft Shadows on Post FX is PCSS (Help → **Lighting**).
 
 ## Frustum cull (Phase CR)
 

@@ -2541,8 +2541,7 @@ impl SomniumRenderer {
         // Compact PSO when hex/POM/PCSS are off. Recreate is a hitch, not a
         // per-frame cost; Island stays on COMPACT and never pays it.
         {
-            let restir_sun =
-                self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
+            let restir_sun = self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
             let mut spec = crate::pass::shading::ShadingSpec {
                 hex: false,
                 pom: false,
@@ -2551,23 +2550,43 @@ impl SomniumRenderer {
                 clipmap: false,
                 debug: self.shading_debug != 0.0,
                 terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+                live_terrain: false,
             };
+            // Phase DF audit: a clipmapped terrain shades from the cache, which
+            // already holds strongest-four + hex + height-blend and never
+            // marches POM. Folding its `hex_tiling` / `parallax_scale` into the
+            // spec kept both of those compiled into the shading shader for a
+            // path that cannot execute, and occupancy is the union of what is
+            // in the module — the same trap the runtime checkboxes fell into.
+            //
+            // The clipmap test must match `TerrainClipmap::fill_gpu` exactly.
+            // If it says "clipmapped" where `fill_gpu` writes
+            // `clipmap_enabled = 0`, the live path is deleted from under a
+            // terrain that still needs it and the ground renders unshaded.
+            let clipmap_forced_off = crate::terrain::clipmap::TerrainClipmap::env_forced_off();
             for &(id, _) in &self.terrain_queue {
                 let Some(t) = self.terrains.get(id as usize) else {
                     continue;
                 };
+                let clipmapped = self
+                    .clipmaps
+                    .get(id as usize)
+                    .is_some_and(|c| c.enabled && !clipmap_forced_off);
+                if clipmapped {
+                    spec.clipmap = true;
+                    continue;
+                }
+                spec.live_terrain = true;
                 spec.hex |= t.hex_tiling;
                 spec.pom |= t.parallax_scale > 0.0;
                 if !t.hero_bank_only {
                     spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
                 }
-                if self
-                    .clipmaps
-                    .get(id as usize)
-                    .is_some_and(|c| c.enabled)
-                {
-                    spec.clipmap = true;
-                }
+            }
+            // No terrain queued at all: keep the live path so the next frame's
+            // first terrain does not have to wait on a pipeline rebuild.
+            if self.terrain_queue.is_empty() {
+                spec.live_terrain = true;
             }
             self.shading_pass.ensure_pipeline(&ctx.device, spec);
         }

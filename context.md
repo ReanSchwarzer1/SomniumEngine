@@ -3793,8 +3793,43 @@ which the user confirmed is markedly worse.
 this session was noise. Mode 8 has no run-to-run variance and is what found the
 real bug.
 
+**RESOLVED — GTAO returned zero visibility for the entire scene (2026-08-15).**
+`reconstruct_normal` in `gtao.wgsl` built its view-space normal as
+`cross(dx, dy)`. The two screen axes disagree about handedness by the time they
+reach view space: `coord.x + 1` is `+view x`, but `view_position` flips y
+(`1.0 - uv.y * 2.0`) so `coord.y + 1` is **−view y**. The cross product was
+therefore `cross(+x, −y) = −z` — a normal pointing away from the camera on
+every visible surface.
+
+A back-facing normal puts `n_angle` near ±π, the horizon clamps hand
+`integrate_arc` an arc outside its domain, and the closed form returns a
+*negative* visibility (−0.5 for an unoccluded pixel). `saturate` took that to
+exactly **0**, so `gtao.a` was zero for every pixel with geometry in it.
+`shading.wgsl` multiplies `surface.occlusion` into both terms of
+`evaluate_ibl`, so **no surface in the scene received any indirect light** —
+terrain, meshes and foliage alike.
+
+Why it hid for so long: direct sunlight was untouched, so nothing looked
+*unlit*, only flat and over-contrasty in shade. Dbg 8 was added earlier
+precisely because "toggling GTAO changed nothing on terrain" and the
+ambient-only view read exactly zero there — the reading was correct and the
+cause was upstream of everything then under suspicion. It was finally isolated
+by pointing Dbg 8 at the Viking boat: black meshes proved the fault was
+scene-wide rather than in the terrain material.
+
+`integrate_arc`'s contribution is now floored at zero as well, so a future sign
+error degrades to *no* occlusion — the image a disabled pass gives — instead of
+*total* occlusion.
+
+Expect the scene to change: creases, contact points and foliage interiors now
+receive real occlusion for the first time. `IBL_INTENSITY`'s removal (Phase
+25M-2) was justified on the grounds that "GTAO … now handles the shadowing of
+sky light"; that assumption is only true from this fix onward.
+
 **Foliage renders with wrong colours.** Trees show salmon/pink, grass white.
-Not yet investigated.
+Not yet investigated. Worth re-checking now that ambient occlusion actually
+reaches surfaces — the symptom is a lighting one and the GTAO fault above
+touched every surface in the scene.
 
 
 **24K cannot be visually verified until Phase 25A/25B.** The pass dispatches and

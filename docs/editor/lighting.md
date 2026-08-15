@@ -32,6 +32,10 @@ Create → **Area Light**, **Disc Light**, or **Tube Light**. New lights spawn a
 - **Disc Light** — **Radius** is the disc radius; forward is the emitting-plane normal.
 - **Tube Light** — **Radius** is the tube cross-section; **Half W** is half-length along forward.
 
+## Soft shadows / contact (PCSS)
+
+**Soft Shadows** is percentage-closer soft shadows (PCSS). There is no separate “PCSS” label. **Contact Shadows** is the screen-space contact march. Both live on **Post Processing**. With **RT Direct Light** (ReSTIR DI) on, sun visibility already lives in the ReSTIR buffer, so the shading pipeline drops PCSS/contact from the compiled shader — unchecking the boxes alone does not delete that code until the pipeline rebuilds. Hex and Parallax are on the Terrain entity, not here (Help → **Terrain**).
+
 ## Light shafts (24U)
 
 **Light Shafts** shadow-tests the volume. **Shaft Amt** boosts the sun in-scatter when shafts are on (1 is unscaled air). Default on.

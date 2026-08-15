@@ -264,15 +264,24 @@ frame. Walking (a couple of metres above ground, including a 105 m ridge) keeps
 full hex, POM, four layers, cliff biplanar. Overview skips hex and POM
 uniformly.
 
-Also kept: when ReSTIR DI wrote sun visibility (`traced.a > 0.5`), do not run
-PCSS then discard it (that also threw away POM self-shadow). `shading_mode`
-bit 1 = PCSS, bit 2 = contact; defaults on. Inspector toggles default **on**.
+Also kept (XV-J): when ReSTIR DI wrote sun visibility (`traced.a > 0.5`), do
+not run PCSS then discard it. That varying texture test was later flattened by
+DXC; 2026-08-14 replaced it with uniform `shading_mode` bit 4 plus a compact
+PSO that can delete PCSS entirely. Inspector **Soft Shadows** is PCSS. Bits:
+1 = PCSS, 2 = contact, 4 = ReSTIR already wrote sun vis.
 
-**Later (not XV-J):** a second shading PSO / permutation so aerial can drop to
-unique-colour / two-layer maps without compiling the close path into the same
-program. Do **not** reintroduce a per-pixel sample-count branch. BC7 is the
-residency lever (hero 2K at ~213 MiB); extra bank stays 1024. Shading 1.10 ms
-still wants a second aerial PSO, not a per-pixel branch.
+**Later (2026-08-14, not XV-J):** a compact shading PSO (`ShadingSpec` +
+pipeline overrides) now deletes hex/POM/PCSS/contact/clipmap/debug and can
+scan 16 vs 32 layers. Island (hero bank, hex/POM off) runs that compact
+pipeline and is **30+ fps**. Coastal with the same inspector boxes off stays
+~20 fps on the ground — 32 published layers, 1 km / 256 chunks, full-screen
+terrain — not leftover POM. Uniform gates (Parallax / Soft Shadows) did **not**
+drop Shading ms; occupancy is compile-time. Do **not** reintroduce a per-pixel
+sample-count branch. Clipmap stays default **off**. Notes:
+[`terrain_shading_occupancy_2026-08-14.md`](../terrain_shading_occupancy_2026-08-14.md).
+BC7 is still the residency lever (hero 2K at ~213 MiB); extra bank stays 1024.
+A further aerial unique-colour / two-layer PSO is still the 1.10 ms path, not
+a per-pixel branch.
 
 ### 11.2 Biome v3 — seams and sparse layers
 

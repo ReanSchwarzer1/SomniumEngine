@@ -63,6 +63,25 @@ const HEX_GAIN: f32 = 0.6;
 /// this for a strongly directional texture stays an option.
 const HEX_ROT_STRENGTH: f32 = 0.0;
 
+/// Whether any tap is actually rotated.
+///
+/// At `HEX_ROT_STRENGTH = 0.0` every rotation is the identity, but the shader
+/// was still paying for it: `hex_rot_for` calls `cos` and `sin` per tap, and
+/// `hex_rotate` / `hex_unrotate` then multiplied through by (1, 0). A compiler
+/// will not fold `angle * 0.0` to zero for floats without fast-math, so those
+/// transcendentals survived into every tap of every layer — six per layer
+/// before the tap sharing below, twenty-four per pixel at four layers.
+///
+/// This is a `const`, so raising `HEX_ROT_STRENGTH` restores the full path at
+/// compile time and nothing else has to change.
+const HEX_ROT_ENABLED: bool = HEX_ROT_STRENGTH != 0.0;
+
+/// `hex_gain3`'s exponent, which depends only on the constant `HEX_GAIN`.
+///
+/// `log(1 - 0.6) / log(0.5)`. It was being recomputed with two `log` calls on
+/// every weight evaluation — twice per layer, eight times per pixel.
+const HEX_GAIN_K: f32 = 1.3219281;
+
 /// Rotate by the tap's angle. `rot` is `(cos, sin)`.
 ///
 /// Matches the reference's row-vector `mul(v, M)` convention, so the UV offset
@@ -104,7 +123,8 @@ fn hex_hash(p: vec2<f32>) -> vec2<f32> {
 
 /// Contrast on the barycentric weights: sharpens above 0.5, softens below.
 fn hex_gain3(x: vec3<f32>, r: f32) -> vec3<f32> {
-    let k = log(1.0 - r) / log(0.5);
+    // `r` is always HEX_GAIN; see HEX_GAIN_K.
+    let k = select(log(1.0 - r) / log(0.5), HEX_GAIN_K, r == HEX_GAIN);
     let s = 2.0 * step(vec3<f32>(0.5), x);
     let m = 2.0 * (1.0 - s);
     let res = 0.5 * s + 0.25 * m * pow(max(vec3<f32>(0.0), s + x * m), vec3<f32>(k));
@@ -152,14 +172,48 @@ struct HexTap {
 }
 
 fn hex_tap(vertex: vec2<f32>, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> HexTap {
-    let rot = hex_rot_for(vertex);
-    let cen = hex_centre(vertex);
     var t: HexTap;
-    t.rot = rot;
-    t.uv = hex_rotate(uv - cen, rot) + cen + hex_hash(vertex);
-    t.ddx = hex_rotate(ddx, rot);
-    t.ddy = hex_rotate(ddy, rot);
+    if HEX_ROT_ENABLED {
+        let rot = hex_rot_for(vertex);
+        let cen = hex_centre(vertex);
+        t.rot = rot;
+        t.uv = hex_rotate(uv - cen, rot) + cen + hex_hash(vertex);
+        t.ddx = hex_rotate(ddx, rot);
+        t.ddy = hex_rotate(ddy, rot);
+    } else {
+        // Identity rotation collapses `rotate(uv - cen) + cen` to `uv`, so the
+        // tile centre is not needed either. The hashed *offset* is the part
+        // that breaks the lattice, and it is all that remains.
+        t.rot = vec2<f32>(1.0, 0.0);
+        t.uv = uv + hex_hash(vertex);
+        t.ddx = ddx;
+        t.ddy = ddy;
+    }
     return t;
+}
+
+/// The grid and all three taps for one UV — computed **once** and reused for
+/// every map of a layer.
+///
+/// `hex_sample` and `hex_sample_packed_surface` each built their own grid and
+/// their own three taps from identical arguments, so a layer paid for the
+/// simplex grid twice and for six taps where three would do. The taps depend
+/// only on `uv` / `ddx` / `ddy`, never on which map is being read.
+struct HexTaps {
+    w: vec3<f32>,
+    t1: HexTap,
+    t2: HexTap,
+    t3: HexTap,
+}
+
+fn hex_taps(uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> HexTaps {
+    let g = hex_grid(uv);
+    var h: HexTaps;
+    h.w = g.w;
+    h.t1 = hex_tap(g.v1, uv, ddx, ddy);
+    h.t2 = hex_tap(g.v2, uv, ddx, ddy);
+    h.t3 = hex_tap(g.v3, uv, ddx, ddy);
+    return h;
 }
 
 /// Blend weights for three taps, given each tap's luminance.
@@ -180,26 +234,25 @@ const HEX_LUMA: vec3<f32> = vec3<f32>(0.299, 0.587, 0.114);
 /// process dies during pipeline creation with no diagnostic at all. Indexing
 /// the array at the point of use is also what every other sampling site in this
 /// engine does, so this stays consistent with them.
+fn hex_sample_with(map: i32, h: HexTaps) -> vec4<f32> {
+    let c1 = textureSampleGrad(textures[map], default_sampler, h.t1.uv, h.t1.ddx, h.t1.ddy);
+    let c2 = textureSampleGrad(textures[map], default_sampler, h.t2.uv, h.t2.ddx, h.t2.ddy);
+    let c3 = textureSampleGrad(textures[map], default_sampler, h.t3.uv, h.t3.ddx, h.t3.ddy);
+
+    let w = hex_weights(
+        h.w,
+        vec3<f32>(dot(c1.rgb, HEX_LUMA), dot(c2.rgb, HEX_LUMA), dot(c3.rgb, HEX_LUMA)),
+    );
+    return w.x * c1 + w.y * c2 + w.z * c3;
+}
+
 fn hex_sample(
     map: i32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
 ) -> vec4<f32> {
-    let g = hex_grid(uv);
-    let t1 = hex_tap(g.v1, uv, ddx, ddy);
-    let t2 = hex_tap(g.v2, uv, ddx, ddy);
-    let t3 = hex_tap(g.v3, uv, ddx, ddy);
-
-    let c1 = textureSampleGrad(textures[map], default_sampler, t1.uv, t1.ddx, t1.ddy);
-    let c2 = textureSampleGrad(textures[map], default_sampler, t2.uv, t2.ddx, t2.ddy);
-    let c3 = textureSampleGrad(textures[map], default_sampler, t3.uv, t3.ddx, t3.ddy);
-
-    let w = hex_weights(
-        g.w,
-        vec3<f32>(dot(c1.rgb, HEX_LUMA), dot(c2.rgb, HEX_LUMA), dot(c3.rgb, HEX_LUMA)),
-    );
-    return w.x * c1 + w.y * c2 + w.z * c3;
+    return hex_sample_with(map, hex_taps(uv, ddx, ddy));
 }
 
 /// Hex-tiled tangent-space normal, returned already decoded to `[-1, 1]`.
@@ -250,29 +303,29 @@ struct HexPackedSurface {
     occlusion: f32,
 }
 
+fn hex_sample_packed_surface_with(map: i32, h: HexTaps) -> HexPackedSurface {
+    let s1 = textureSampleGrad(textures[map], default_sampler, h.t1.uv, h.t1.ddx, h.t1.ddy);
+    let s2 = textureSampleGrad(textures[map], default_sampler, h.t2.uv, h.t2.ddx, h.t2.ddy);
+    let s3 = textureSampleGrad(textures[map], default_sampler, h.t3.uv, h.t3.ddx, h.t3.ddy);
+    let n1xy = hex_unrotate(s1.rg * 2.0 - 1.0, h.t1.rot);
+    let n2xy = hex_unrotate(s2.rg * 2.0 - 1.0, h.t2.rot);
+    let n3xy = hex_unrotate(s3.rg * 2.0 - 1.0, h.t3.rot);
+    let n1 = vec3<f32>(n1xy, sqrt(max(1.0 - dot(n1xy, n1xy), 0.0)));
+    let n2 = vec3<f32>(n2xy, sqrt(max(1.0 - dot(n2xy, n2xy), 0.0)));
+    let n3 = vec3<f32>(n3xy, sqrt(max(1.0 - dot(n3xy, n3xy), 0.0)));
+    let w = hex_weights(h.w, vec3<f32>(n1.z, n2.z, n3.z));
+    var out: HexPackedSurface;
+    out.normal_ts = normalize(w.x * n1 + w.y * n2 + w.z * n3);
+    out.roughness = w.x * s1.b + w.y * s2.b + w.z * s3.b;
+    out.occlusion = w.x * s1.a + w.y * s2.a + w.z * s3.a;
+    return out;
+}
+
 fn hex_sample_packed_surface(
     map: i32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
 ) -> HexPackedSurface {
-    let g = hex_grid(uv);
-    let t1 = hex_tap(g.v1, uv, ddx, ddy);
-    let t2 = hex_tap(g.v2, uv, ddx, ddy);
-    let t3 = hex_tap(g.v3, uv, ddx, ddy);
-    let s1 = textureSampleGrad(textures[map], default_sampler, t1.uv, t1.ddx, t1.ddy);
-    let s2 = textureSampleGrad(textures[map], default_sampler, t2.uv, t2.ddx, t2.ddy);
-    let s3 = textureSampleGrad(textures[map], default_sampler, t3.uv, t3.ddx, t3.ddy);
-    let n1xy = hex_unrotate(s1.rg * 2.0 - 1.0, t1.rot);
-    let n2xy = hex_unrotate(s2.rg * 2.0 - 1.0, t2.rot);
-    let n3xy = hex_unrotate(s3.rg * 2.0 - 1.0, t3.rot);
-    let n1 = vec3<f32>(n1xy, sqrt(max(1.0 - dot(n1xy, n1xy), 0.0)));
-    let n2 = vec3<f32>(n2xy, sqrt(max(1.0 - dot(n2xy, n2xy), 0.0)));
-    let n3 = vec3<f32>(n3xy, sqrt(max(1.0 - dot(n3xy, n3xy), 0.0)));
-    let w = hex_weights(g.w, vec3<f32>(n1.z, n2.z, n3.z));
-    var out: HexPackedSurface;
-    out.normal_ts = normalize(w.x * n1 + w.y * n2 + w.z * n3);
-    out.roughness = w.x * s1.b + w.y * s2.b + w.z * s3.b;
-    out.occlusion = w.x * s1.a + w.y * s2.a + w.z * s3.a;
-    return out;
+    return hex_sample_packed_surface_with(map, hex_taps(uv, ddx, ddy));
 }

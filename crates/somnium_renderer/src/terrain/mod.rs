@@ -34,7 +34,9 @@ pub mod textures;
 use std::collections::HashMap;
 
 use mesh::{EDGE_EAST, EDGE_NORTH, EDGE_SOUTH, EDGE_WEST, MAX_TERRAIN_LOD};
-use textures::{LAYER_NAMES, Splatmap, TERRAIN_HERO_LAYERS, TERRAIN_LAYER_COUNT, TerrainLayerTextures};
+use textures::{
+    LAYER_NAMES, Splatmap, TERRAIN_HERO_LAYERS, TERRAIN_LAYER_COUNT, TerrainLayerTextures,
+};
 
 /// Static terrain configuration (Phase 14A-1). The matching ECS component
 /// `somnium_core::TerrainComponent` stores a copy of these plus the terrain id.
@@ -806,13 +808,8 @@ impl TerrainData {
     /// Low rolling islet: inland peak, rim below the frozen water datum.
     pub fn generate_island_relief(&mut self, seed: u32, peak_metres: f32) {
         let (tx, tz) = (self.desc.total_vertices_x(), self.desc.total_vertices_z());
-        self.heightmap = heightmap::island_relief(
-            tx,
-            tz,
-            seed,
-            peak_metres,
-            DEFAULT_WATER_LEVEL_METRES,
-        );
+        self.heightmap =
+            heightmap::island_relief(tx, tz, seed, peak_metres, DEFAULT_WATER_LEVEL_METRES);
         self.mark_all_dirty();
     }
 
