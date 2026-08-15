@@ -92,7 +92,27 @@ fn reconstruct_normal(coord: vec2<i32>, centre: vec3<f32>) -> vec3<f32> {
     let dy = select(up - centre, centre - down,
         abs(down.z - centre.z) < abs(up.z - centre.z));
 
-    return normalize(cross(dx, dy));
+    // `cross(dy, dx)`, not `cross(dx, dy)`.
+    //
+    // The two screen axes do not agree about handedness once they reach view
+    // space. `coord.x + 1` is `+NDC x` is `+view x`, so `dx` runs `+x`; but
+    // `view_position` flips y (`1.0 - uv.y * 2.0`), so `coord.y + 1` runs
+    // **−view y** and `dy` runs `−y`. `cross(dx, dy)` is therefore
+    // `cross(+x, −y) = −z`: a normal pointing away from the camera on every
+    // visible surface.
+    //
+    // That is not a subtle error in the output. A back-facing normal puts
+    // `n_angle` near ±π, the horizon clamps hand `integrate_arc` an arc it was
+    // never meant to see, and the closed form returns a *negative* visibility
+    // (−0.5 for an unoccluded pixel). `saturate` then takes it to exactly zero,
+    // so `gtao.a` was 0 for every pixel with geometry in it — which multiplies
+    // both terms of `evaluate_ibl` and removed all indirect light from the
+    // entire scene while leaving direct sun untouched. Dbg 8 rendered pure
+    // black on terrain, meshes and foliage alike.
+    //
+    // It read as a terrain or shadow problem for a long time because direct
+    // lighting was unaffected: surfaces were lit, just never *ambient* lit.
+    return normalize(cross(dy, dx));
 }
 
 /// Visible arc for one slice, given its two horizon angles.
@@ -197,7 +217,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let h1 = n_angle + max(-acos(clamp(cos_h1, -1.0, 1.0)) - n_angle, -1.5707963);
         let h2 = n_angle + min(acos(clamp(cos_h2, -1.0, 1.0)) - n_angle, 1.5707963);
 
-        occlusion += projected_len * integrate_arc(h1, h2, n_angle);
+        // Floored at zero. The closed form can go negative when it is handed an
+        // arc outside its domain — which is what a wrongly-signed normal does —
+        // and a negative visibility is meaningless. Without the floor the error
+        // propagates into `saturate(...)` as exactly 0, i.e. *fully occluded*,
+        // which is the most destructive possible reading of a broken input and
+        // silently removes all indirect light. Clamping makes the failure
+        // direction "no occlusion" instead: the same image a disabled pass
+        // gives, which is obvious to nobody but harmless to everybody.
+        occlusion += projected_len * max(integrate_arc(h1, h2, n_angle), 0.0);
 
         // Bent normal: the average unoccluded direction. Cheaper to derive from
         // the horizon midpoint than to accumulate separately, and it is what
