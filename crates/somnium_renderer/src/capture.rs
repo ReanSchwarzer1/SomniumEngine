@@ -293,6 +293,10 @@ fn f16_to_f32(bits: u16) -> f32 {
 pub struct FrameCapture {
     write_to: Option<String>,
     write_png: Option<String>,
+    /// Final display-referred image, captured after tone map/CAS/FXAA but
+    /// before editor overlays. Unlike `write_png`, this can prove display-only
+    /// controls such as CAS and bloom.
+    write_display_png: Option<String>,
     compare_to: Option<String>,
     target_frame: u64,
     frame: u64,
@@ -300,6 +304,8 @@ pub struct FrameCapture {
     vis_staging: Option<wgpu::Buffer>,
     /// Set by `record`, consumed by `resolve`.
     pending: Option<(u32, u32)>,
+    display_staging: Option<wgpu::Buffer>,
+    display_pending: Option<(u32, u32, wgpu::TextureFormat)>,
 }
 
 impl FrameCapture {
@@ -307,6 +313,7 @@ impl FrameCapture {
         Self {
             write_to: std::env::var("SOMNIUM_CAPTURE").ok(),
             write_png: std::env::var("SOMNIUM_CAPTURE_PNG").ok(),
+            write_display_png: std::env::var("SOMNIUM_CAPTURE_DISPLAY_PNG").ok(),
             compare_to: std::env::var("SOMNIUM_CAPTURE_COMPARE").ok(),
             target_frame: std::env::var("SOMNIUM_CAPTURE_FRAME")
                 .ok()
@@ -316,13 +323,22 @@ impl FrameCapture {
             hdr_staging: None,
             vis_staging: None,
             pending: None,
+            display_staging: None,
+            display_pending: None,
         }
     }
 
     /// Whether anything is configured at all. Keeps the per-frame cost at one
     /// bool test when it is not.
     pub fn active(&self) -> bool {
-        self.write_to.is_some() || self.write_png.is_some() || self.compare_to.is_some()
+        self.write_to.is_some()
+            || self.write_png.is_some()
+            || self.write_display_png.is_some()
+            || self.compare_to.is_some()
+    }
+
+    pub fn wants_display(&self) -> bool {
+        self.write_display_png.is_some()
     }
 
     /// Advance the frame counter and report whether this is the capture frame.
@@ -387,6 +403,59 @@ impl FrameCapture {
         copy(encoder, hdr, self.hdr_staging.as_ref().unwrap(), hdr_row);
         copy(encoder, vis, self.vis_staging.as_ref().unwrap(), vis_row);
         self.pending = Some((width, height));
+    }
+
+    /// Read back the final swapchain image before editor overlays are drawn.
+    pub fn record_display(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        if !self.wants_display() {
+            return;
+        }
+        if !matches!(
+            format,
+            wgpu::TextureFormat::Rgba8Unorm
+                | wgpu::TextureFormat::Rgba8UnormSrgb
+                | wgpu::TextureFormat::Bgra8Unorm
+                | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            tracing::warn!(
+                ?format,
+                "display capture skipped: unsupported surface format"
+            );
+            return;
+        }
+        let row = Self::padded_row(width, 4);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Display Capture LDR"),
+            size: row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            display.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.display_staging = Some(staging);
+        self.display_pending = Some((width, height, format));
     }
 
     /// Map the staging buffers, build the capture, then write and/or compare it.
@@ -521,8 +590,45 @@ impl FrameCapture {
             }
         }
 
+        if let (Some(path), Some(staging), Some((dw, dh, format))) = (
+            self.write_display_png.as_ref(),
+            self.display_staging.as_ref(),
+            self.display_pending,
+        ) {
+            let row = Self::padded_row(dw, 4) as usize;
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let data = slice.get_mapped_range();
+            let bgra = matches!(
+                format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            );
+            let mut rgb = vec![0u8; dw as usize * dh as usize * 3];
+            for y in 0..dh as usize {
+                let src = &data[y * row..];
+                for x in 0..dw as usize {
+                    let s = x * 4;
+                    let d = (y * dw as usize + x) * 3;
+                    if bgra {
+                        rgb[d..d + 3].copy_from_slice(&[src[s + 2], src[s + 1], src[s]]);
+                    } else {
+                        rgb[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                    }
+                }
+            }
+            drop(data);
+            staging.unmap();
+            match std::fs::write(path, encode_png(dw, dh, &rgb)) {
+                Ok(()) => tracing::info!("CAPTURE display png written to {path}"),
+                Err(e) => tracing::error!("CAPTURE display png write to {path} failed: {e}"),
+            }
+        }
+
         self.hdr_staging = None;
         self.vis_staging = None;
+        self.display_staging = None;
+        self.display_pending = None;
         CAPTURE_FINISHED.store(true, Ordering::Relaxed);
     }
 }

@@ -2743,99 +2743,10 @@ impl UiManager {
                     self.native_ui.invalidate_ancestors(self.file_popup);
                     continue;
                 }
-                // Post FX toggles (Phase 15A1)
-                if msg.destination == self.inspector_handles.post_vig_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
-                    continue;
-                }
-                // Phase 24A/24B exposure controls.
-                if msg.destination == self.inspector_handles.post_auto_exp_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
-                    continue;
-                }
-                for (handle, which) in [
-                    (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
-                    (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
-                    (
-                        self.inspector_handles.post_restir_toggle,
-                        PostFxToggle::Restir,
-                    ),
-                    (
-                        self.inspector_handles.post_restir_gi_toggle,
-                        PostFxToggle::RestirGi,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_reflect_toggle,
-                        PostFxToggle::RtReflect,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_refract_toggle,
-                        PostFxToggle::RtRefract,
-                    ),
-                    (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
-                    (
-                        self.inspector_handles.post_contact_toggle,
-                        PostFxToggle::ContactShadows,
-                    ),
-                    (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
-                    (
-                        self.inspector_handles.post_mb_toggle,
-                        PostFxToggle::MotionBlur,
-                    ),
-                    (
-                        self.inspector_handles.post_bloom_toggle,
-                        PostFxToggle::Bloom,
-                    ),
-                    (
-                        self.inspector_handles.post_dof_toggle,
-                        PostFxToggle::DepthOfField,
-                    ),
-                    (
-                        self.inspector_handles.post_vol_toggle,
-                        PostFxToggle::Volumetrics,
-                    ),
-                    (
-                        self.inspector_handles.post_shafts_toggle,
-                        PostFxToggle::LightShafts,
-                    ),
-                    (
-                        self.inspector_handles.post_phys_toggle,
-                        PostFxToggle::PhysicalCamera,
-                    ),
-                    (
-                        self.inspector_handles.post_world_cache_toggle,
-                        PostFxToggle::WorldCache,
-                    ),
-                    (
-                        self.inspector_handles.post_specular_toggle,
-                        PostFxToggle::SpecularGi,
-                    ),
-                    (
-                        self.inspector_handles.post_path_toggle,
-                        PostFxToggle::PathTracer,
-                    ),
-                    (
-                        self.inspector_handles.post_sdf_toggle,
-                        PostFxToggle::MeshSdf,
-                    ),
-                    (
-                        self.inspector_handles.post_probes_toggle,
-                        PostFxToggle::Probes,
-                    ),
-                    (
-                        self.inspector_handles.post_analytic_toggle,
-                        PostFxToggle::AnalyticGrad,
-                    ),
-                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
-                ] {
-                    if msg.destination == handle {
-                        self.editor_events
-                            .push_back(EditorEvent::TogglePostFx(which));
-                        break;
-                    }
-                }
+                // Post-process controls are checkboxes now. Handling their
+                // underlying button-click messages as well as Check messages
+                // delivered two events for one click and flipped the setting
+                // straight back to its starting value.
                 if msg.destination == self.profiler_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleProfiler);
                     continue;
@@ -2867,11 +2778,6 @@ impl UiManager {
                 }
                 if msg.destination == self.stop_button {
                     self.editor_events.push_back(EditorEvent::StopSimulation);
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_cel_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::CelShading));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_tonemap_button {
@@ -2919,16 +2825,6 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.foliage_single_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleFoliageSingle);
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_fxaa_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Fxaa));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_ca_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::ChromaticAberration));
                     continue;
                 }
                 if let Some(&(_, _, tool)) = self
@@ -3159,6 +3055,12 @@ impl UiManager {
                     self.native_ui.invalidate_ancestors(msg.destination);
                 }
             } else if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
+                // ToWidget messages are state synchronization from the engine,
+                // not user intent. Treating them as clicks caused every
+                // inspector refresh to mutate the component again.
+                if msg.direction != MessageDirection::FromWidget {
+                    continue;
+                }
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
                     self.refresh_content_list();
@@ -3167,17 +3069,17 @@ impl UiManager {
                 // Inspector checkboxes share the same destinations as the old buttons.
                 if msg.destination == self.inspector_handles.post_vig_toggle {
                     self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Vignette));
+                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Vignette, *on));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_auto_exp_toggle {
                     self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::AutoExposure));
+                        .push_back(EditorEvent::SetPostFx(PostFxToggle::AutoExposure, *on));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_cel_toggle {
                     self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::CelShading));
+                        .push_back(EditorEvent::SetPostFx(PostFxToggle::CelShading, *on));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_toggle {
@@ -3232,12 +3134,14 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.post_fxaa_toggle {
                     self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::Fxaa));
+                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Fxaa, *on));
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_ca_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::TogglePostFx(PostFxToggle::ChromaticAberration));
+                    self.editor_events.push_back(EditorEvent::SetPostFx(
+                        PostFxToggle::ChromaticAberration,
+                        *on,
+                    ));
                     continue;
                 }
                 for (handle, which) in [
@@ -3317,7 +3221,7 @@ impl UiManager {
                 ] {
                     if msg.destination == handle {
                         self.editor_events
-                            .push_back(EditorEvent::TogglePostFx(which));
+                            .push_back(EditorEvent::SetPostFx(which, *on));
                         break;
                     }
                 }

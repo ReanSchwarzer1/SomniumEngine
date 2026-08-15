@@ -1353,13 +1353,16 @@ impl SomniumRenderer {
         if width > 0 && height > 0 {
             self.vis_pass
                 .resize(&ctx.device, width, height, &self.global_pool.layout);
-            self.postprocess_pass.resize(&ctx.device, width, height);
+            // Bloom must resize first: PostProcess keeps its result view in the
+            // final bind group, and the old view becomes stale here.
+            self.bloom_pass.resize(&ctx.device, width, height);
+            self.postprocess_pass
+                .resize(&ctx.device, width, height, self.bloom_pass.result_view());
             self.auto_exposure_pass
                 .resize(&ctx.device, &self.postprocess_pass.hdr_view);
             self.render_width = width;
             self.render_height = height;
             self.gtao_pass.resize(&ctx.device, width, height);
-            self.bloom_pass.resize(&ctx.device, width, height);
             self.dof_pass.resize(&ctx.device, width, height);
             self.rt_debug_pass.invalidate();
             self.restir_pass.resize(&ctx.device, width, height);
@@ -2042,7 +2045,9 @@ impl SomniumRenderer {
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones (vis + shadow-only). The visibility pass only
         // draws the opaque vis range; the transparent pass indexes into the tail.
-        let transparent_base = (self.draw_queue.len() + self.shadow_only_queue.len()) as u32;
+        let frame_layout =
+            frame_instance_layout(self.draw_queue.len(), self.shadow_only_queue.len());
+        let transparent_base = frame_layout.transparent_base;
         let mut transparent_draws: Vec<crate::pass::transparent::TransparentDraw> =
             Vec::with_capacity(self.transparent_queue.len());
         for (i, cmd) in self.transparent_queue.iter().enumerate() {
@@ -2391,6 +2396,15 @@ impl SomniumRenderer {
                 })
                 .collect();
             self.profiler.begin(&mut encoder, "Lighting extra");
+            let traced_scene_revision = if (self.lighting_extra_pass.flags_bits()
+                & (crate::pass::lighting_extra::FLAG_PATH
+                    | crate::pass::lighting_extra::FLAG_SPECULAR))
+                != 0
+            {
+                self.traced_scene_revision()
+            } else {
+                0
+            };
             self.lighting_extra_pass.record(
                 &ctx.device,
                 &ctx.queue,
@@ -2405,6 +2419,9 @@ impl SomniumRenderer {
                 &self.ibl_pass.cube_view,
                 &self.ibl_pass.sampler,
                 self.view_proj,
+                self.view_matrix,
+                self.proj_matrix,
+                traced_scene_revision,
                 self.camera_pos,
                 self.render_width,
                 self.render_height,
@@ -2469,6 +2486,7 @@ impl SomniumRenderer {
             &ctx.queue,
             self.view_proj_unjittered.inverse(),
             self.view_proj_unjittered,
+            self.view_matrix,
             self.camera_pos,
             self.light_direction,
             self.light_color,
@@ -3124,6 +3142,23 @@ impl SomniumRenderer {
             self.present_pass.record(&mut encoder, &surface_view);
         }
 
+        // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
+        // gizmos/UI so an A/B measures the scene rather than editor chrome.
+        if capture_now && self.capture.wants_display() {
+            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.capture.record_display(
+                    &ctx.device,
+                    &mut encoder,
+                    &output.texture,
+                    ctx.config.width,
+                    ctx.config.height,
+                    ctx.config.format,
+                );
+            } else {
+                tracing::warn!("display capture skipped: surface lacks COPY_SRC usage");
+            }
+        }
+
         // Overlays draw onto the reconstructed image. The scene used a jittered
         // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
         // here makes gizmos and outlines swim by a pixel every frame.
@@ -3218,8 +3253,9 @@ impl SomniumRenderer {
                     .get(instance as usize)
                     .is_some_and(|d| terrain_ids.contains(&d.material_id))
             });
+            let profile_report = self.profiler.report();
             if self.profiler.enabled() {
-                for line in self.profiler.report() {
+                for line in &profile_report {
                     tracing::info!("XV-J-PROFILE {line}");
                 }
             }
@@ -3241,6 +3277,51 @@ impl SomniumRenderer {
                     t.hex_tiling,
                 );
             }
+            // The Windows GUI executable has no console attached in release
+            // builds, so redirected stdout is legitimately empty. This
+            // explicit audit sink keeps the capture matrix reproducible and
+            // records effective pass state alongside timings/counters.
+            if let Ok(path) = std::env::var("SOMNIUM_AUDIT_LOG") {
+                let mut lines = vec![
+                    format!("scene={}x{}", self.render_width, self.render_height),
+                    format!("swapchain={}x{}", ctx.config.width, ctx.config.height),
+                    format!("surface_format={:?}", ctx.config.format),
+                    format!("device_features={:?}", ctx.features),
+                    format!(
+                        "effective fsr={} taa={} cas={} bloom={} gtao={} volumetrics={} shafts={} water_rt={} water_refract={} restir_di={} restir_gi={} motion_blur={} dof={} lighting_extra_flags=0x{:x}",
+                        self.fsr_pass.enabled,
+                        self.taa_pass.enabled(),
+                        self.cas_pass.enabled,
+                        self.bloom_pass.enabled,
+                        self.gtao_pass.enabled,
+                        self.volumetric_pass.enabled,
+                        self.volumetric_pass.enabled && self.volumetric_pass.fog.shafts,
+                        self.water_reflection_pass.enabled,
+                        self.water_reflection_pass.refract_enabled,
+                        self.restir_pass.enabled,
+                        self.restir_gi_pass.enabled,
+                        self.motion_blur_pass.enabled,
+                        self.dof_pass.enabled,
+                        self.lighting_extra_pass.flags_bits(),
+                    ),
+                ];
+                if let Some(t) = self.terrains.first() {
+                    lines.push(format!(
+                        "terrain compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} parallax={:.4}",
+                        t.layer_textures.compressed,
+                        t.layer_textures.from_assets,
+                        t.layer_textures.resolution,
+                        t.layer_textures.extra_resolution,
+                        t.wetness,
+                        t.hex_tiling,
+                        t.parallax_scale,
+                    ));
+                }
+                lines.extend(profile_report);
+                if let Err(error) = std::fs::write(&path, lines.join("\n")) {
+                    tracing::error!("audit log write to {path} failed: {error}");
+                }
+            }
         }
         output.present();
 
@@ -3258,6 +3339,52 @@ impl SomniumRenderer {
         self.terrain_queue.clear();
         self.transparent_queue.clear();
         self.light_gizmo_queue.clear();
+    }
+
+    /// Compact revision of every input that changes a reference path sample.
+    ///
+    /// This intentionally runs only while a traced 2-D lighting estimator is
+    /// active. Hashing transforms for a foliage-heavy frame is negligible next
+    /// to ray tracing but needless overhead for the normal raster renderer.
+    fn traced_scene_revision(&self) -> u64 {
+        fn mix(hash: &mut u64, value: u64) {
+            *hash ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+        }
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        mix(&mut hash, self.materials_pool.revision());
+        for value in self
+            .light_direction
+            .to_array()
+            .into_iter()
+            .chain(self.light_color.to_array())
+        {
+            mix(&mut hash, u64::from(value.to_bits()));
+        }
+        mix(&mut hash, u64::from(self.moon_intensity.to_bits()));
+        for light in &self.local_lights {
+            for chunk in bytemuck::bytes_of(light).chunks_exact(8) {
+                mix(&mut hash, u64::from_ne_bytes(chunk.try_into().unwrap()));
+            }
+        }
+        for cmd in &self.draw_queue {
+            mix(&mut hash, u64::from(cmd.vertex_offset));
+            mix(&mut hash, u64::from(cmd.index_offset));
+            mix(&mut hash, u64::from(cmd.index_count));
+            mix(&mut hash, u64::from(cmd.material_id));
+            for value in cmd.transform.to_cols_array() {
+                mix(&mut hash, u64::from(value.to_bits()));
+            }
+        }
+        for terrain in &self.terrains {
+            mix(&mut hash, terrain.edit_revision);
+            mix(&mut hash, u64::from(terrain.wetness.to_bits()));
+            mix(&mut hash, u64::from(terrain.parallax_scale.to_bits()));
+            mix(&mut hash, u64::from(terrain.hex_tiling));
+            mix(&mut hash, u64::from(terrain.height_blend));
+        }
+        hash
     }
 
     /// Which draws are worth rendering into the shadow atlas this frame.
@@ -3305,7 +3432,8 @@ impl SomniumRenderer {
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
         self.shadow_caster_scratch.clear();
-        let vis_len = self.draw_queue.len();
+        let frame_layout =
+            frame_instance_layout(self.draw_queue.len(), self.shadow_only_queue.len());
         for (i, cmd) in self.draw_queue.iter().enumerate() {
             consider_shadow_caster(
                 cmd,
@@ -3321,7 +3449,9 @@ impl SomniumRenderer {
         for (i, cmd) in self.shadow_only_queue.iter().enumerate() {
             consider_shadow_caster(
                 cmd,
-                u32::try_from(vis_len + i).unwrap_or(u32::MAX),
+                frame_layout
+                    .shadow_only_base
+                    .saturating_add(u32::try_from(i).unwrap_or(u32::MAX)),
                 threshold,
                 cascade_cull,
                 &cascade_planes,
@@ -3330,6 +3460,31 @@ impl SomniumRenderer {
                 &mut self.shadow_caster_scratch,
             );
         }
+    }
+}
+
+/// Frozen per-frame instance-buffer partition.
+///
+/// Visibility draws come first, followed by camera-culled shadow casters and
+/// finally blended draws. Centralising the two bases prevents one consumer
+/// from silently drifting away from the upload order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameInstanceLayout {
+    shadow_only_base: u32,
+    transparent_base: u32,
+}
+
+fn frame_instance_layout(visible: usize, shadow_only: usize) -> FrameInstanceLayout {
+    let shadow_only_base = u32::try_from(visible).expect("visible instance count exceeds u32");
+    let transparent_base = u32::try_from(
+        visible
+            .checked_add(shadow_only)
+            .expect("frame instance count overflow"),
+    )
+    .expect("opaque instance count exceeds u32");
+    FrameInstanceLayout {
+        shadow_only_base,
+        transparent_base,
     }
 }
 
@@ -3664,6 +3819,72 @@ mod mip_tests {
         let data = vec![0u8; 16 * 16 * 4];
         for (w, h, level) in build_mip_chain(&data, 16, 16) {
             assert_eq!(level.len(), (w * h * 4) as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_instance_layout_tests {
+    use super::{frame_instance_layout, gpu_instance_from_cmd};
+    use crate::command::{DrawCommand, SortKey};
+
+    fn draw(vertex: u32, index: u32, material: u32, tx: f32) -> DrawCommand {
+        DrawCommand {
+            sort_key: SortKey::new(0, material as u16, vertex),
+            vertex_offset: vertex,
+            index_offset: index,
+            index_count: 3,
+            material_id: material,
+            transform: glam::Mat4::from_translation(glam::Vec3::new(tx, 0.0, 0.0)),
+            casts_shadow: true,
+        }
+    }
+
+    #[test]
+    fn visible_shadow_only_and_transparent_ranges_do_not_overlap() {
+        let layout = frame_instance_layout(2, 1);
+        assert_eq!(layout.shadow_only_base, 2);
+        assert_eq!(layout.transparent_base, 3);
+    }
+
+    #[test]
+    fn empty_middle_range_keeps_transparent_base_at_visible_end() {
+        let layout = frame_instance_layout(7, 0);
+        assert_eq!(layout.shadow_only_base, 7);
+        assert_eq!(layout.transparent_base, 7);
+    }
+
+    #[test]
+    fn final_consumer_indices_recover_each_draws_ids_on_both_visibility_paths() {
+        let visible = draw(11, 101, 1, 10.0);
+        let shadow_only = draw(22, 202, 2, 20.0);
+        let transparent = draw(33, 303, 3, 30.0);
+        let uploaded =
+            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&[], cmd, 0.0));
+        let layout = frame_instance_layout(1, 1);
+
+        for gpu_driven in [false, true] {
+            // GPU indirect and CPU fallback differ in how the draw is issued,
+            // but both must deliver these same instance indices to the vertex
+            // shader. Cluster reordering is safe only because it carries 0 as
+            // first_instance rather than using its dispatch position.
+            let visible_first_instance = if gpu_driven { 0 } else { 0 };
+            let consumer_indices = [
+                visible_first_instance,
+                layout.shadow_only_base,
+                layout.transparent_base,
+            ];
+            for (slot, expected) in consumer_indices.into_iter().zip([
+                (11, 101, 1, 10.0),
+                (22, 202, 2, 20.0),
+                (33, 303, 3, 30.0),
+            ]) {
+                let instance = uploaded[slot as usize];
+                assert_eq!(instance.mesh_vertex_offset, expected.0);
+                assert_eq!(instance.mesh_index_offset, expected.1);
+                assert_eq!(instance.material_id, expected.2);
+                assert_eq!(instance.model_matrix[3][0], expected.3);
+            }
         }
     }
 }

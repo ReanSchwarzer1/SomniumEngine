@@ -347,7 +347,17 @@ impl PostProcessPass {
     }
 
     /// Recreate the HDR texture at the new dimensions (called on window resize).
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        bloom_view: &wgpu::TextureView,
+    ) {
+        // Bloom owns and recreates its mip views. Keeping the clone captured at
+        // construction leaves this bind group sampling an orphaned, never
+        // rendered texture after the first resize.
+        self.bloom_view = bloom_view.clone();
         let (hdr_texture, hdr_view) = Self::make_hdr_texture(device, width, height);
         self.hdr_texture = hdr_texture;
         self.hdr_view = hdr_view;

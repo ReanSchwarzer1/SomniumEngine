@@ -54,6 +54,8 @@ pub struct WaterReflectionPass {
     frame: u32,
     /// Foam / unresolved water above this roughness skips the ray (VV-E).
     pub roughness_skip: f32,
+    last_reflect_on: bool,
+    last_refract_on: bool,
 }
 
 impl WaterReflectionPass {
@@ -87,6 +89,8 @@ impl WaterReflectionPass {
             history_valid: false,
             frame: 0,
             roughness_skip: 0.72,
+            last_reflect_on: false,
+            last_refract_on: false,
         };
         pass.allocate(device, width, height);
         if !supported {
@@ -260,9 +264,19 @@ impl WaterReflectionPass {
         let active = reflect_on || refract_on;
         if !active {
             self.history_valid = false;
+            self.last_reflect_on = false;
+            self.last_refract_on = false;
             self.frame = self.frame.wrapping_add(1);
             return false;
         }
+        // Reflection and refraction share the array history. Any mode edge
+        // invalidates both layers so re-enabling one cannot blend a result
+        // left behind before the toggle changed.
+        if reflect_on != self.last_reflect_on || refract_on != self.last_refract_on {
+            self.history_valid = false;
+        }
+        self.last_reflect_on = reflect_on;
+        self.last_refract_on = refract_on;
         if self.history_valid {
             std::mem::swap(&mut self.current, &mut self.history);
         }
@@ -423,7 +437,9 @@ fn half_target(
         size: wgpu::Extent3d {
             width,
             height,
-            depth_or_array_layers: 2,
+            // 0 reflection, 1 refraction, 2 previous-frame water guide,
+            // 3/4 reflection/refraction moments + sample count + hit distance.
+            depth_or_array_layers: 5,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -437,7 +453,10 @@ fn half_target(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
-        array_layer_count: Some(2),
+        // The compute pass must see every history layer. The water shading
+        // consumer only samples 0/1, but exposing five is harmless there and
+        // avoids an out-of-bounds layer-2 guide store.
+        array_layer_count: Some(5),
         ..Default::default()
     });
     (texture, view)

@@ -52,6 +52,7 @@ struct DirectionalLight {
 
 struct VolumetricParams {
     inv_view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
     camera_pos: vec3<f32>,
     /// Distance the volume spans. Beyond it, the last slice is held.
     max_distance: f32,
@@ -69,8 +70,8 @@ struct VolumetricParams {
     fog_base_height: f32,
     /// Non-zero shadow-tests each step, which is what draws light shafts.
     shafts_enabled: u32,
-    /// Boost on the lit (unshadowed) in-scatter. 1 is physical; higher makes
-    /// shafts readable in a thin medium.
+    /// Visibility contrast of shadowed in-scatter. 0 disables the shadow
+    /// modulation and 1 applies the full shadow-map visibility.
     shaft_intensity: f32,
     /// Phase 24U temporal reprojection.
     prev_view_proj: mat4x4<f32>,
@@ -125,9 +126,14 @@ fn volume_sun_visibility(world_pos: vec3<f32>, view_depth: f32) -> f32 {
     else if view_depth < vol_light.cascade_splits.z { cascade = 2u; }
 
     let clip = vol_light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
     let ndc = clip.xyz / clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
+        || ndc.z < 0.0 || ndc.z > 1.0
+    {
         return 1.0;
     }
 
@@ -194,7 +200,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // frame turns that bias into noise, and the temporal blend below
             // averages it away. This is the half of the technique that lets the
             // step count come down; reprojection alone would only smear.
-            let frac = fract((f32(step) + 0.5) / f32(VOL_STEPS_PER_SLICE) + vol.jitter);
+            // Jitter the two ordered strata, never wrap them with fract(). The
+            // wrapped form can put step 1 before step 0, making dt negative;
+            // negative extinction amplifies light and erases shafts.
+            let frac = (f32(step) + clamp(vol.jitter, 0.001, 0.999))
+                / f32(VOL_STEPS_PER_SLICE);
             let t = vol.max_distance * (f32(slice) + frac) / f32(slices);
             let dt = t - prev_t;
             prev_t = t;
@@ -236,12 +246,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             var sun_vis = 1.0;
             if vol.shafts_enabled != 0u {
-                sun_vis = volume_sun_visibility(world_pos, t);
+                // Cascade splits are camera/view depth, not radial ray length.
+                // They only match at screen centre; using t selected a wrong
+                // cascade toward the edges and made shafts appear absent.
+                let view_depth = max(-(vol.view * vec4<f32>(world_pos, 1.0)).z, 0.0);
+                let shadow_vis = volume_sun_visibility(world_pos, view_depth);
+                // "Shaft amount" is contrast, not a global light multiplier.
+                // Multiplying all lit froxels made the enabled image globally
+                // brighter; auto exposure then normalized that shift and made
+                // the actual occlusion pattern appear inert. Keep unoccluded
+                // single scattering unchanged and only remove direct light in
+                // shadowed fog. Values above one mean full contrast so old
+                // scenes using the former 1.5 default remain sensible.
+                sun_vis = mix(1.0, shadow_vis, saturate(vol.shaft_intensity));
             }
-            let shaft = max(vol.shaft_intensity, 0.0);
 
             var step_scatter = (scatter_rayleigh * rayleigh + scatter_mie * mie)
-                * sun_transmittance * sun_vis * shaft
+                * sun_transmittance * sun_vis
                 + (scatter_rayleigh + scatter_mie) * multiscatter;
 
             // ── Fog medium and shafts (24U) ─────────────────────────────────
@@ -250,7 +271,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if fog > 0.0 {
                 // Fog scatters greyly: a water-droplet medium is not
                 // wavelength-selective the way Rayleigh is.
-                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance * shaft;
+                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance;
                 extinction += vec3<f32>(fog);
             }
 

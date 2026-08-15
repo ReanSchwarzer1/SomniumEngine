@@ -49,4 +49,27 @@ mod tests {
             .for_each(|x| *x = x.wrapping_mul(3).wrapping_add(1));
         assert_eq!(parallel, serial);
     }
+
+    #[test]
+    fn threshold_boundary_matches_serial() {
+        // The branch itself is part of the contract: 511 stays serial, while
+        // 512 and 513 take Rayon's path. Exercise all three sizes so changing
+        // the comparison or losing an edge item cannot hide behind the broad
+        // "threshold + 16" coverage above.
+        for n in [
+            PARALLEL_THRESHOLD - 1,
+            PARALLEL_THRESHOLD,
+            PARALLEL_THRESHOLD + 1,
+        ] {
+            let mut actual: Vec<u32> = (0..n as u32).collect();
+            let mut expected = actual.clone();
+            for_each_mut(&mut actual, |x| {
+                *x = x.rotate_left(7).wrapping_add(0x9e37_79b9)
+            });
+            expected
+                .iter_mut()
+                .for_each(|x| *x = x.rotate_left(7).wrapping_add(0x9e37_79b9));
+            assert_eq!(actual, expected, "job result diverged at length {n}");
+        }
+    }
 }

@@ -67,6 +67,7 @@ pub const MATERIAL_FLAG_FOLIAGE: u32 = 1 << 1;
 pub struct MaterialPool {
     pub buffer: wgpu::Buffer,
     materials: Vec<GpuMaterial>,
+    revision: u64,
 }
 
 impl MaterialPool {
@@ -81,6 +82,7 @@ impl MaterialPool {
         Self {
             buffer,
             materials: Vec::new(),
+            revision: 0,
         }
     }
 
@@ -88,6 +90,7 @@ impl MaterialPool {
     pub fn add_material(&mut self, queue: &wgpu::Queue, material: GpuMaterial) -> u32 {
         let id = self.materials.len() as u32;
         self.materials.push(material);
+        self.revision = self.revision.wrapping_add(1);
 
         // Update the buffer
         queue.write_buffer(
@@ -110,11 +113,17 @@ impl MaterialPool {
             return;
         };
         *slot = material;
+        self.revision = self.revision.wrapping_add(1);
         queue.write_buffer(
             &self.buffer,
             (id as usize * std::mem::size_of::<GpuMaterial>()) as u64,
             bytemuck::bytes_of(&material),
         );
+    }
+
+    /// Changes whenever material data visible to raster/ray hit shading changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 }
 

@@ -252,6 +252,56 @@ mod tests {
     }
 
     #[test]
+    fn box_exactly_touching_a_plane_is_kept() {
+        // A zero signed distance is inside. Using <= here (in either the CPU
+        // mirror or cull.wgsl) would turn camera motion at a chunk boundary
+        // into single-frame terrain holes.
+        let planes = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 10.0],
+            [0.0, -1.0, 0.0, 10.0],
+            [0.0, 0.0, 1.0, 10.0],
+            [0.0, 0.0, -1.0, 10.0],
+            [1.0, 0.0, 0.0, 100.0],
+        ];
+        assert!(aabb_in_frustum(
+            &planes,
+            glam::Vec3::new(-2.0, -1.0, -1.0),
+            glam::Vec3::new(0.0, 1.0, 1.0),
+        ));
+    }
+
+    #[test]
+    fn every_plane_is_conservative_at_large_world_coordinates() {
+        // Exercise both signs of every axis at a magnitude where careless
+        // epsilon/normal handling tends to show up. Repeating the plane six
+        // times isolates the exact half-space under test.
+        let plane_origin = glam::Vec3::new(1_000_000.0, -750_000.0, 500_000.0);
+        let half_extent = 8.0;
+        for normal in [
+            glam::Vec3::X,
+            glam::Vec3::NEG_X,
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::Z,
+            glam::Vec3::NEG_Z,
+        ] {
+            let plane = [normal.x, normal.y, normal.z, -normal.dot(plane_origin)];
+            let planes = [plane; 6];
+            for (offset, expected) in [(0.0, true), (-1.0, true), (1.0, false)] {
+                let centre = plane_origin - normal * (half_extent + offset);
+                let min = centre - glam::Vec3::splat(half_extent);
+                let max = centre + glam::Vec3::splat(half_extent);
+                assert_eq!(
+                    aabb_in_frustum(&planes, min, max),
+                    expected,
+                    "normal={normal:?} offset={offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn empty_bounds_are_never_visible() {
         let planes = frustum_planes(test_view_proj());
         let min = glam::Vec3::splat(f32::INFINITY);

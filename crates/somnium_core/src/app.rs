@@ -35,6 +35,77 @@ use crate::{
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
 
+/// Maintain the scene-wide post-process component as an actual singleton.
+///
+/// Legacy/imported scenes can contain duplicates and New Scene used to contain
+/// none. Prefer the selected component so an inspector edit is never discarded;
+/// otherwise keep the oldest ECS entity and remove the extras.
+fn normalize_post_process_singleton(
+    world: &mut World,
+    selected_entity: &mut Option<somnium_ecs::Entity>,
+) {
+    let entities: Vec<_> = world
+        .entities()
+        .filter(|entity| world.get::<PostProcessComponent>(*entity).is_some())
+        .collect();
+    if entities.is_empty() {
+        world.spawn((
+            Transform::from_translation(glam::Vec3::ZERO),
+            Name::new("Post Processing"),
+            WorldTransform::identity(),
+            PostProcessComponent::default(),
+        ));
+        return;
+    }
+    let keeper = selected_entity
+        .filter(|selected| entities.contains(selected))
+        .unwrap_or(entities[0]);
+    for entity in entities {
+        if entity != keeper {
+            world.despawn(entity);
+        }
+    }
+}
+
+#[cfg(test)]
+mod post_process_singleton_tests {
+    use super::*;
+
+    fn count(world: &World) -> usize {
+        world
+            .entities()
+            .filter(|entity| world.get::<PostProcessComponent>(*entity).is_some())
+            .count()
+    }
+
+    #[test]
+    fn missing_post_process_is_created() {
+        let mut world = World::new();
+        normalize_post_process_singleton(&mut world, &mut None);
+        assert_eq!(count(&world), 1);
+    }
+
+    #[test]
+    fn selected_duplicate_is_the_one_preserved() {
+        let mut world = World::new();
+        let first = world.spawn((PostProcessComponent::default(),));
+        let mut selected_settings = PostProcessComponent::default();
+        selected_settings.bloom_intensity = 0.73;
+        let selected = world.spawn((selected_settings,));
+        let mut selection = Some(selected);
+        normalize_post_process_singleton(&mut world, &mut selection);
+        assert_eq!(count(&world), 1);
+        assert!(!world.is_alive(first));
+        assert_eq!(
+            world
+                .get::<PostProcessComponent>(selected)
+                .unwrap()
+                .bloom_intensity,
+            0.73
+        );
+    }
+}
+
 /// State captured when the user begins dragging a gizmo axis handle.
 #[derive(Clone)]
 struct GizmoDragState {
@@ -1902,13 +1973,22 @@ impl<G: GameApp> Engine<G> {
     /// Push the scene's post-processing settings to the renderer (Phase 15A1).
     ///
     /// Driven by the first entity carrying a `PostProcessComponent`. With no
-    /// such entity the renderer keeps its defaults, which are all-off — an
-    /// editor viewport shows the raw image unless a look is asked for.
+    /// Legacy scenes with none or several are normalized to one before the
+    /// selected settings are copied into the renderer.
     fn apply_post_process(&mut self) {
+        normalize_post_process_singleton(&mut self.world, &mut self.selected_entity);
+        // Prefer the selected Post Processing entity. This makes the details
+        // panel authoritative even if an imported legacy scene accidentally
+        // contains a duplicate; falling back to the first keeps old scenes
+        // working when another entity is selected.
         let settings = self
-            .world
-            .entities()
-            .find_map(|e| self.world.get::<PostProcessComponent>(e).copied());
+            .selected_entity
+            .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
+            .or_else(|| {
+                self.world
+                    .entities()
+                    .find_map(|e| self.world.get::<PostProcessComponent>(e).copied())
+            });
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
             // Phase 24A: exposure is now derived from EV100 rather than being a
             // free multiplier. Auto-exposure overrides it on the GPU from the
@@ -1925,30 +2005,40 @@ impl<G: GameApp> Engine<G> {
                 | if pp.pcss_enabled { 2 } else { 0 }
                 | if pp.contact_shadows_enabled { 4 } else { 0 }
                 | if pp.analytic_grad { 8 } else { 0 };
-            r.fsr_pass.set_enabled(pp.fsr_enabled);
+            let path_active = pp.path_tracer && r.raytrace_pass.supported();
+            // The path tracer already owns temporal accumulation. Feeding that
+            // result through FSR/TAA (and then motion blur) accumulates history
+            // a second time and is the source of the reported afterimages.
+            r.fsr_pass.set_enabled(pp.fsr_enabled && !path_active);
             r.fsr_pass.sharpness = pp.fsr_sharpness;
-            r.taa_pass.set_enabled(pp.taa_enabled && !pp.fsr_enabled);
-            r.gtao_pass.enabled = pp.gtao_enabled;
+            // Use the pass's effective state, not the authored request: on a
+            // device without FSR features, pp.fsr_enabled may be true while
+            // the pass correctly declined it. TAA/CAS must still be allowed.
+            let fsr_active = r.fsr_pass.enabled;
+            r.taa_pass
+                .set_enabled(pp.taa_enabled && !fsr_active && !path_active);
+            r.gtao_pass.enabled = pp.gtao_enabled && !path_active;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
-            r.dof_pass.enabled = pp.dof_enabled;
+            r.dof_pass.enabled = pp.dof_enabled && !path_active;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
-            r.restir_pass.enabled = pp.restir_enabled;
-            r.restir_gi_pass.enabled = pp.restir_gi_enabled && r.restir_gi_pass.supported();
+            r.restir_pass.enabled = pp.restir_enabled && !path_active;
+            r.restir_gi_pass.enabled =
+                pp.restir_gi_enabled && r.restir_gi_pass.supported() && !path_active;
             r.water_reflection_pass.enabled =
                 pp.rt_reflect_enabled && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
                 pp.rt_refract_enabled && r.water_reflection_pass.supported();
-            r.cas_pass.enabled = pp.cas_enabled && !pp.fsr_enabled;
+            r.cas_pass.enabled = pp.cas_enabled && !fsr_active;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
-            r.motion_blur_pass.enabled = pp.motion_blur_enabled;
+            r.motion_blur_pass.enabled = pp.motion_blur_enabled && !path_active;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
             r.restir_gi_pass.intensity = pp.restir_gi_intensity;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
-            r.volumetric_pass.enabled = pp.volumetrics_enabled;
+            r.volumetric_pass.enabled = pp.volumetrics_enabled && !path_active;
             r.volumetric_pass.fog.density = pp.fog_density;
             r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
@@ -1960,20 +2050,24 @@ impl<G: GameApp> Engine<G> {
                 };
                 let rt = r.raytrace_pass.supported();
                 let mut flags = 0u32;
-                if pp.world_cache && rt {
-                    flags |= FLAG_CACHE;
-                }
-                if pp.specular_gi && rt {
-                    flags |= FLAG_SPECULAR;
-                }
-                if pp.path_tracer && rt {
-                    flags |= FLAG_PATH;
-                }
-                if pp.mesh_sdf {
-                    flags |= FLAG_SDF;
-                }
-                if pp.probes && rt {
-                    flags |= FLAG_PROBES;
+                if path_active {
+                    // Path tracing replaces the frame. Baking caches/probes or
+                    // tracing the separate specular buffer underneath it only
+                    // wastes work and risks cross-mode history contamination.
+                    flags = FLAG_PATH;
+                } else {
+                    if pp.world_cache && rt {
+                        flags |= FLAG_CACHE;
+                    }
+                    if pp.specular_gi && rt {
+                        flags |= FLAG_SPECULAR;
+                    }
+                    if pp.mesh_sdf && !pp.world_cache {
+                        flags |= FLAG_SDF;
+                    }
+                    if pp.probes && rt {
+                        flags |= FLAG_PROBES;
+                    }
                 }
                 r.lighting_extra_pass.flags = flags;
                 r.lighting_extra_pass.intensity = pp.cache_intensity;
@@ -3541,6 +3635,12 @@ impl<G: GameApp> Engine<G> {
                     WorldTransform::identity(),
                     CameraSettingsComponent::from_env(),
                 ));
+                self.world.spawn((
+                    Transform::from_translation(glam::Vec3::ZERO),
+                    Name::new("Post Processing"),
+                    WorldTransform::identity(),
+                    PostProcessComponent::default(),
+                ));
                 self.undo_stack = UndoStack::new(128);
                 self.scene_dirty = false;
             }
@@ -3958,7 +4058,7 @@ impl<G: GameApp> Engine<G> {
                     info!("Tonemapper: {}", pp.tonemapper.label());
                 }
             }
-            EditorEvent::TogglePostFx(which) => {
+            EditorEvent::SetPostFx(which, on) => {
                 use somnium_ui::PostFxToggle;
                 let Some(entity) = self.selected_entity else {
                     return;
@@ -3966,111 +4066,111 @@ impl<G: GameApp> Engine<G> {
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
                     let on = match which {
                         PostFxToggle::Vignette => {
-                            pp.vignette_enabled = !pp.vignette_enabled;
+                            pp.vignette_enabled = on;
                             pp.vignette_enabled
                         }
                         PostFxToggle::ChromaticAberration => {
-                            pp.ca_enabled = !pp.ca_enabled;
+                            pp.ca_enabled = on;
                             pp.ca_enabled
                         }
                         PostFxToggle::Fxaa => {
-                            pp.fxaa_enabled = !pp.fxaa_enabled;
+                            pp.fxaa_enabled = on;
                             pp.fxaa_enabled
                         }
                         PostFxToggle::AutoExposure => {
-                            pp.auto_exposure = !pp.auto_exposure;
+                            pp.auto_exposure = on;
                             pp.auto_exposure
                         }
                         PostFxToggle::CelShading => {
-                            pp.cel_shading = !pp.cel_shading;
+                            pp.cel_shading = on;
                             pp.cel_shading
                         }
                         PostFxToggle::Taa => {
-                            pp.taa_enabled = !pp.taa_enabled;
+                            pp.set_taa_enabled(on);
                             pp.taa_enabled
                         }
                         PostFxToggle::Gtao => {
-                            pp.gtao_enabled = !pp.gtao_enabled;
+                            pp.gtao_enabled = on;
                             pp.gtao_enabled
                         }
                         PostFxToggle::PhysicalCamera => {
-                            pp.use_physical_camera = !pp.use_physical_camera;
+                            pp.use_physical_camera = on;
                             pp.use_physical_camera
                         }
                         PostFxToggle::Volumetrics => {
-                            pp.volumetrics_enabled = !pp.volumetrics_enabled;
+                            pp.set_volumetrics_enabled(on);
                             pp.volumetrics_enabled
                         }
                         PostFxToggle::LightShafts => {
-                            pp.light_shafts = !pp.light_shafts;
+                            pp.set_light_shafts_enabled(on);
                             pp.light_shafts
                         }
                         PostFxToggle::MotionBlur => {
-                            pp.motion_blur_enabled = !pp.motion_blur_enabled;
+                            pp.motion_blur_enabled = on;
                             pp.motion_blur_enabled
                         }
                         PostFxToggle::Cas => {
-                            pp.cas_enabled = !pp.cas_enabled;
+                            pp.set_cas_enabled(on);
                             pp.cas_enabled
                         }
                         PostFxToggle::RestirGi => {
-                            pp.restir_gi_enabled = !pp.restir_gi_enabled;
+                            pp.restir_gi_enabled = on;
                             pp.restir_gi_enabled
                         }
                         PostFxToggle::RtReflect => {
-                            pp.rt_reflect_enabled = !pp.rt_reflect_enabled;
+                            pp.rt_reflect_enabled = on;
                             pp.rt_reflect_enabled
                         }
                         PostFxToggle::RtRefract => {
-                            pp.rt_refract_enabled = !pp.rt_refract_enabled;
+                            pp.rt_refract_enabled = on;
                             pp.rt_refract_enabled
                         }
                         PostFxToggle::Restir => {
-                            pp.restir_enabled = !pp.restir_enabled;
+                            pp.restir_enabled = on;
                             pp.restir_enabled
                         }
                         PostFxToggle::Bloom => {
-                            pp.bloom_enabled = !pp.bloom_enabled;
+                            pp.bloom_enabled = on;
                             pp.bloom_enabled
                         }
                         PostFxToggle::DepthOfField => {
-                            pp.dof_enabled = !pp.dof_enabled;
+                            pp.dof_enabled = on;
                             pp.dof_enabled
                         }
                         PostFxToggle::Pcss => {
-                            pp.pcss_enabled = !pp.pcss_enabled;
+                            pp.pcss_enabled = on;
                             pp.pcss_enabled
                         }
                         PostFxToggle::ContactShadows => {
-                            pp.contact_shadows_enabled = !pp.contact_shadows_enabled;
+                            pp.contact_shadows_enabled = on;
                             pp.contact_shadows_enabled
                         }
                         PostFxToggle::WorldCache => {
-                            pp.world_cache = !pp.world_cache;
+                            pp.set_world_cache_enabled(on);
                             pp.world_cache
                         }
                         PostFxToggle::SpecularGi => {
-                            pp.specular_gi = !pp.specular_gi;
+                            pp.specular_gi = on;
                             pp.specular_gi
                         }
                         PostFxToggle::PathTracer => {
-                            pp.path_tracer = !pp.path_tracer;
+                            pp.path_tracer = on;
                             pp.path_tracer
                         }
                         PostFxToggle::MeshSdf => {
-                            pp.mesh_sdf = !pp.mesh_sdf;
+                            pp.set_mesh_sdf_enabled(on);
                             pp.mesh_sdf
                         }
                         PostFxToggle::Probes => {
-                            pp.probes = !pp.probes;
+                            pp.probes = on;
                             pp.probes
                         }
                         PostFxToggle::AnalyticGrad => {
-                            pp.analytic_grad = !pp.analytic_grad;
+                            pp.analytic_grad = on;
                             pp.analytic_grad
                         }
                         PostFxToggle::Fsr => {
-                            pp.fsr_enabled = !pp.fsr_enabled;
+                            pp.set_fsr_enabled(on);
                             pp.fsr_enabled
                         }
                     };

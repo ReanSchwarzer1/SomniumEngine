@@ -781,7 +781,7 @@ pub struct PostProcessComponent {
     pub probe_intensity: f32,
     /// Analytic UV gradients in vis-buffer shading (Phase 25N). Default on.
     pub analytic_grad: bool,
-    /// Light-shaft boost on the sun in-scatter (Phase 24U). 1 is unscaled air.
+    /// Light-shaft shadow contrast. 0 is neutral; 1 (or greater) is full.
     pub shaft_intensity: f32,
     /// AMD FSR 3 temporal reconstruct to the window. Default on; `SOMNIUM_FSR=0`.
     ///
@@ -794,6 +794,8 @@ pub struct PostProcessComponent {
 
 impl Default for PostProcessComponent {
     fn default() -> Self {
+        let fsr_enabled = std::env::var("SOMNIUM_FSR").as_deref() != Ok("0");
+        let world_cache = std::env::var("SOMNIUM_WORLD_CACHE").as_deref() == Ok("1");
         Self {
             ibl_intensity: 1.0,
             ev100: light_units::ev100::SUNLIGHT,
@@ -813,7 +815,9 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
-            bloom_enabled: true,
+            // Deterministic audit switch; the editor checkbox remains the
+            // runtime source of truth after startup.
+            bloom_enabled: std::env::var("SOMNIUM_BLOOM").as_deref() != Ok("0"),
             bloom_intensity: 0.04,
             // `SOMNIUM_GTAO=0` switches screen-space occlusion off for the
             // Phase 25A acceptance test — the same scene either side of the
@@ -832,14 +836,16 @@ impl Default for PostProcessComponent {
             restir_gi_enabled: std::env::var("SOMNIUM_RESTIR_GI").as_deref() != Ok("0"),
             rt_reflect_enabled: std::env::var("SOMNIUM_RT_REFLECT").as_deref() != Ok("0"),
             rt_refract_enabled: false,
-            cas_enabled: std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
+            // FSR already owns RCAS. Keep the authored checkboxes truthful:
+            // two mutually-exclusive sharpeners must not both start checked.
+            cas_enabled: !fsr_enabled && std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,
             motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
             motion_blur_shutter: 0.5,
             restir_gi_intensity: 1.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
-            light_shafts: true,
+            light_shafts: std::env::var("SOMNIUM_LIGHT_SHAFTS").as_deref() != Ok("0"),
             fog_density: 0.0008,
             fog_height_falloff: 120.0,
             fog_asymmetry: 0.6,
@@ -849,7 +855,9 @@ impl Default for PostProcessComponent {
             gtao_intensity: 1.0,
             dof_enabled: false,
             dof_focus_distance: 10.0,
-            taa_enabled: true,
+            // FSR is temporal AA/reconstruction, so this is the fallback used
+            // when FSR is disabled rather than a second checked no-op.
+            taa_enabled: !fsr_enabled,
             // Seeded from the environment so the debug switch and the Post FX
             // toggle agree. The component is the single source of truth and is
             // copied into the pass every frame, so a pass-side default would be
@@ -871,19 +879,21 @@ impl Default for PostProcessComponent {
             fxaa_enabled: true,
             pcss_enabled: true,
             contact_shadows_enabled: true,
-            world_cache: std::env::var("SOMNIUM_WORLD_CACHE").as_deref() == Ok("1"),
+            world_cache,
             cache_intensity: 1.0,
             cache_cell_size: 2.0,
             specular_gi: std::env::var("SOMNIUM_SPECULAR_GI").as_deref() == Ok("1"),
             spec_roughness: 0.15,
             path_tracer: std::env::var("SOMNIUM_PATH_TRACER").as_deref() == Ok("1"),
             path_bounces: 3,
-            mesh_sdf: std::env::var("SOMNIUM_MESH_SDF").as_deref() == Ok("1"),
+            // Cache RGB and SDF distance share one volume whose alpha has
+            // incompatible meanings. Cache wins if both audit env vars are set.
+            mesh_sdf: !world_cache && std::env::var("SOMNIUM_MESH_SDF").as_deref() == Ok("1"),
             probes: std::env::var("SOMNIUM_PROBES").as_deref() == Ok("1"),
             probe_intensity: 1.0,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
-            fsr_enabled: std::env::var("SOMNIUM_FSR").as_deref() != Ok("0"),
+            fsr_enabled,
             fsr_sharpness: 0.8,
         }
     }
@@ -935,6 +945,65 @@ impl Tonemapper {
 }
 
 impl PostProcessComponent {
+    /// Enable standalone CAS, disabling FSR's built-in RCAS when necessary.
+    pub fn set_cas_enabled(&mut self, enabled: bool) {
+        self.cas_enabled = enabled;
+        if enabled {
+            self.fsr_enabled = false;
+        }
+    }
+
+    /// Enable the engine TAA path, disabling the mutually-exclusive FSR path.
+    pub fn set_taa_enabled(&mut self, enabled: bool) {
+        self.taa_enabled = enabled;
+        if enabled {
+            self.fsr_enabled = false;
+        }
+    }
+
+    /// Enable FSR temporal reconstruction and its RCAS stage.
+    pub fn set_fsr_enabled(&mut self, enabled: bool) {
+        self.fsr_enabled = enabled;
+        if enabled {
+            self.taa_enabled = false;
+            self.cas_enabled = false;
+        }
+    }
+
+    /// Enable the volumetric owner. Disabling it also makes the dependent
+    /// shaft checkbox truthful instead of leaving a checked no-op behind.
+    pub fn set_volumetrics_enabled(&mut self, enabled: bool) {
+        self.volumetrics_enabled = enabled;
+        if !enabled {
+            self.light_shafts = false;
+        }
+    }
+
+    /// Enable shadowed in-scatter. Shafts are part of the volumetric pass, so
+    /// asking for them also enables their owner.
+    pub fn set_light_shafts_enabled(&mut self, enabled: bool) {
+        self.light_shafts = enabled;
+        if enabled {
+            self.volumetrics_enabled = true;
+        }
+    }
+
+    /// The world cache owns the shared 3-D volume while active.
+    pub fn set_world_cache_enabled(&mut self, enabled: bool) {
+        self.world_cache = enabled;
+        if enabled {
+            self.mesh_sdf = false;
+        }
+    }
+
+    /// Mesh SDF stores distance in the same volume alpha used by the cache.
+    pub fn set_mesh_sdf_enabled(&mut self, enabled: bool) {
+        self.mesh_sdf = enabled;
+        if enabled {
+            self.world_cache = false;
+        }
+    }
+
     /// The EV100 actually used this frame, before auto-exposure metering.
     #[must_use]
     pub fn manual_ev100(&self) -> f32 {
@@ -975,6 +1044,59 @@ impl PostProcessComponent {
     }
 }
 impl somnium_ecs::Component for PostProcessComponent {}
+
+#[cfg(test)]
+mod post_process_tests {
+    use super::PostProcessComponent;
+
+    #[test]
+    fn enabling_cas_makes_it_effective_by_disabling_fsr() {
+        let mut pp = PostProcessComponent::default();
+        pp.set_fsr_enabled(true);
+        pp.set_cas_enabled(true);
+        assert!(pp.cas_enabled);
+        assert!(!pp.fsr_enabled);
+    }
+
+    #[test]
+    fn enabling_fsr_disables_the_redundant_taa_and_cas_paths() {
+        let mut pp = PostProcessComponent::default();
+        pp.set_taa_enabled(true);
+        pp.set_cas_enabled(true);
+        pp.set_fsr_enabled(true);
+        assert!(pp.fsr_enabled);
+        assert!(!pp.taa_enabled);
+        assert!(!pp.cas_enabled);
+    }
+
+    #[test]
+    fn enabling_taa_disables_fsr() {
+        let mut pp = PostProcessComponent::default();
+        pp.set_fsr_enabled(true);
+        pp.set_taa_enabled(true);
+        assert!(pp.taa_enabled);
+        assert!(!pp.fsr_enabled);
+    }
+
+    #[test]
+    fn shafts_and_volumetrics_cannot_form_a_checked_noop() {
+        let mut pp = PostProcessComponent::default();
+        pp.set_volumetrics_enabled(false);
+        assert!(!pp.volumetrics_enabled && !pp.light_shafts);
+        pp.set_light_shafts_enabled(true);
+        assert!(pp.volumetrics_enabled && pp.light_shafts);
+    }
+
+    #[test]
+    fn cache_and_mesh_sdf_cannot_claim_the_shared_volume_together() {
+        let mut pp = PostProcessComponent::default();
+        pp.set_world_cache_enabled(true);
+        pp.set_mesh_sdf_enabled(true);
+        assert!(pp.mesh_sdf && !pp.world_cache);
+        pp.set_world_cache_enabled(true);
+        assert!(pp.world_cache && !pp.mesh_sdf);
+    }
+}
 
 // ─── Phase CR: Camera settings ──────────────────────────────────────────────
 

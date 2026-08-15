@@ -41,15 +41,18 @@ struct ExtraParams {
     spec_rough: f32,
     path_bounces: u32,
     inv_res: [f32; 2],
-    history_valid: f32,
+    /// Bit 0 = world-cache history, bit 1 = 2-D aux history.
+    history_flags: u32,
     half_cells: f32,
+    probe_intensity: f32,
+    _pad: [f32; 3],
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_params_struct_is_the_128_byte_uniform_layout() {
-        assert_eq!(std::mem::size_of::<super::ExtraParams>(), 128);
+    fn the_params_struct_is_the_144_byte_uniform_layout() {
+        assert_eq!(std::mem::size_of::<super::ExtraParams>(), 144);
         assert_eq!(std::mem::size_of::<super::ExtraParams>() % 16, 0);
     }
 
@@ -93,6 +96,42 @@ mod tests {
         );
         assert!(selected.len() <= 256);
     }
+
+    #[test]
+    fn path_history_resets_for_translation_and_rotation() {
+        let pos = glam::Vec3::new(0.0, 2.0, 5.0);
+        let forward = glam::Vec3::NEG_Z;
+        assert!(!super::aux_camera_changed(
+            Some(pos.to_array()),
+            Some(forward.to_array()),
+            pos,
+            forward,
+        ));
+        assert!(super::aux_camera_changed(
+            Some(pos.to_array()),
+            Some(forward.to_array()),
+            pos + glam::Vec3::new(0.01, 0.0, 0.0),
+            forward,
+        ));
+        assert!(super::aux_camera_changed(
+            Some(pos.to_array()),
+            Some(forward.to_array()),
+            pos,
+            glam::Vec3::new(0.02, 0.0, -0.9998).normalize(),
+        ));
+    }
+}
+
+fn aux_camera_changed(
+    last_position: Option<[f32; 3]>,
+    last_forward: Option<[f32; 3]>,
+    position: glam::Vec3,
+    forward: glam::Vec3,
+) -> bool {
+    let translated =
+        last_position.is_none_or(|p| (glam::Vec3::from_array(p) - position).length() > 0.001);
+    let rotated = last_forward.is_none_or(|f| glam::Vec3::from_array(f).dot(forward) < 0.999_99);
+    translated || rotated
 }
 
 pub struct LightingExtraPass {
@@ -111,12 +150,22 @@ pub struct LightingExtraPass {
     volume_hist_view: wgpu::TextureView,
     aux: wgpu::Texture,
     aux_view: wgpu::TextureView,
-    aux_hist: wgpu::Texture,
-    aux_hist_view: wgpu::TextureView,
+    specular_hist: wgpu::Texture,
+    specular_hist_view: wgpu::TextureView,
+    path_hist: wgpu::Texture,
+    path_hist_view: wgpu::TextureView,
     supported: bool,
-    history_valid: bool,
+    cache_history_valid: bool,
+    specular_history_valid: bool,
+    path_history_valid: bool,
     frame: u32,
     last_camera: Option<[f32; 3]>,
+    last_camera_forward: Option<[f32; 3]>,
+    last_flags: u32,
+    last_cache_origin: Option<[f32; 3]>,
+    last_aux_settings: Option<[u32; 3]>,
+    last_projection: Option<[f32; 16]>,
+    last_scene_revision: Option<u64>,
     pub flags: u32,
     pub cell_size: f32,
     pub intensity: f32,
@@ -148,7 +197,9 @@ impl LightingExtraPass {
         let (volume, volume_view) = volume_tex(device, "World cache");
         let (volume_hist, volume_hist_view) = volume_tex(device, "World cache history");
         let (aux, aux_view) = aux_tex(device, width, height, "Lighting aux");
-        let (aux_hist, aux_hist_view) = aux_tex(device, width, height, "Lighting aux history");
+        let (specular_hist, specular_hist_view) =
+            aux_tex(device, width, height, "Scene specular history");
+        let (path_hist, path_hist_view) = aux_tex(device, width, height, "Path tracer history");
 
         let sh_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SH probes"),
@@ -173,12 +224,22 @@ impl LightingExtraPass {
             volume_hist_view,
             aux,
             aux_view,
-            aux_hist,
-            aux_hist_view,
+            specular_hist,
+            specular_hist_view,
+            path_hist,
+            path_hist_view,
             supported,
-            history_valid: false,
+            cache_history_valid: false,
+            specular_history_valid: false,
+            path_history_valid: false,
             frame: 0,
             last_camera: None,
+            last_camera_forward: None,
+            last_flags: 0,
+            last_cache_origin: None,
+            last_aux_settings: None,
+            last_projection: None,
+            last_scene_revision: None,
             flags: 0,
             cell_size: 2.0,
             intensity: 1.0,
@@ -278,12 +339,18 @@ impl LightingExtraPass {
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let (aux, aux_view) = aux_tex(device, width, height, "Lighting aux");
-        let (aux_hist, aux_hist_view) = aux_tex(device, width, height, "Lighting aux history");
+        let (specular_hist, specular_hist_view) =
+            aux_tex(device, width, height, "Scene specular history");
+        let (path_hist, path_hist_view) = aux_tex(device, width, height, "Path tracer history");
         self.aux = aux;
         self.aux_view = aux_view;
-        self.aux_hist = aux_hist;
-        self.aux_hist_view = aux_hist_view;
-        self.history_valid = false;
+        self.specular_hist = specular_hist;
+        self.specular_hist_view = specular_hist_view;
+        self.path_hist = path_hist;
+        self.path_hist_view = path_hist_view;
+        self.specular_history_valid = false;
+        self.path_history_valid = false;
+        self.frame = 0;
     }
 
     pub fn shading_params(&self) -> [f32; 4] {
@@ -309,23 +376,69 @@ impl LightingExtraPass {
         env_view: &wgpu::TextureView,
         env_sampler: &wgpu::Sampler,
         view_proj: glam::Mat4,
+        view: glam::Mat4,
+        projection: glam::Mat4,
+        scene_revision: u64,
         camera_pos: glam::Vec3,
         width: u32,
         height: u32,
         mesh_sdf: &[MeshSdfDraw],
     ) {
         if self.flags == 0 {
-            self.history_valid = false;
+            self.cache_history_valid = false;
+            self.specular_history_valid = false;
+            self.path_history_valid = false;
+            self.frame = 0;
+            self.last_flags = 0;
             return;
         }
-        let camera_moved = self
-            .last_camera
-            .is_none_or(|c| (glam::Vec3::from_array(c) - camera_pos).length() > 0.05);
-        if camera_moved && (self.flags & FLAG_PATH) != 0 {
-            self.history_valid = false;
+
+        let camera_forward = view
+            .inverse()
+            .transform_vector3(glam::Vec3::NEG_Z)
+            .normalize_or_zero();
+        let camera_changed = aux_camera_changed(
+            self.last_camera,
+            self.last_camera_forward,
+            camera_pos,
+            camera_forward,
+        );
+        let aux_mode = self.flags & (FLAG_PATH | FLAG_SPECULAR);
+        let previous_aux_mode = self.last_flags & (FLAG_PATH | FLAG_SPECULAR);
+        let aux_settings = [
+            self.intensity.to_bits(),
+            self.spec_rough.to_bits(),
+            self.path_bounces.clamp(1, 8),
+        ];
+        let projection_cols = projection.to_cols_array();
+        let projection_changed = self.last_projection.is_none_or(|last| {
+            last.iter()
+                .zip(projection_cols)
+                .any(|(a, b)| (*a - b).abs() > 1e-6)
+        });
+        let scene_changed = self
+            .last_scene_revision
+            .is_none_or(|last| last != scene_revision);
+        let reset_aux = camera_changed
+            || projection_changed
+            || scene_changed
+            || aux_mode != previous_aux_mode
+            || self
+                .last_aux_settings
+                .is_some_and(|last| last != aux_settings);
+        if reset_aux {
+            // Histories are physically separate as well as logically invalid.
+            // A specular -> path -> specular transition can therefore never
+            // sample radiance produced by the other estimator.
+            self.specular_history_valid = false;
+            self.path_history_valid = false;
             self.frame = 0;
         }
         self.last_camera = Some(camera_pos.to_array());
+        self.last_camera_forward = Some(camera_forward.to_array());
+        self.last_aux_settings = Some(aux_settings);
+        self.last_projection = Some(projection_cols);
+        self.last_scene_revision = Some(scene_revision);
 
         if (self.flags & FLAG_SDF) != 0 && (self.flags & FLAG_CACHE) == 0 {
             self.fill_sdf(queue, camera_pos, mesh_sdf);
@@ -347,6 +460,30 @@ impl LightingExtraPass {
 
         let cell = self.cell_size.max(0.25);
         let origin = (camera_pos / cell).floor() * cell;
+        if (self.flags & FLAG_CACHE) == 0 {
+            self.cache_history_valid = false;
+            self.last_cache_origin = None;
+        } else if self
+            .last_cache_origin
+            .is_some_and(|last| glam::Vec3::from_array(last) != origin)
+            || (self.last_flags & FLAG_CACHE) == 0
+        {
+            // The cache texture is camera-relative. Until it has an explicit
+            // scroll/reprojection pass, sampling old UVW under a new snapped
+            // origin aliases every voxel to a different world position.
+            self.cache_history_valid = false;
+        }
+        self.last_cache_origin = Some(origin.to_array());
+        let aux_history_valid = if (self.flags & FLAG_PATH) != 0 {
+            self.path_history_valid
+        } else if (self.flags & FLAG_SPECULAR) != 0 {
+            self.specular_history_valid
+        } else {
+            false
+        };
+        let history_flags =
+            u32::from(self.cache_history_valid) | (u32::from(aux_history_valid) << 1);
+        self.last_flags = self.flags;
         queue.write_buffer(
             params,
             0,
@@ -357,18 +494,30 @@ impl LightingExtraPass {
                 origin: origin.to_array(),
                 cell_size: cell,
                 flags: self.flags,
-                intensity: if (self.flags & FLAG_PROBES) != 0 {
-                    self.probe_intensity
-                } else {
-                    self.intensity
-                },
+                intensity: self.intensity,
                 spec_rough: self.spec_rough,
                 path_bounces: self.path_bounces.max(1).min(8),
                 inv_res: [1.0 / width as f32, 1.0 / height as f32],
-                history_valid: f32::from(u8::from(self.history_valid)),
+                history_flags,
                 half_cells: VOLUME as f32 * 0.5,
+                probe_intensity: self.probe_intensity,
+                _pad: [0.0; 3],
             }),
         );
+
+        let aux_history_view = if (self.flags & FLAG_PATH) != 0 {
+            &self.path_hist_view
+        } else {
+            &self.specular_hist_view
+        };
+        if reset_aux {
+            let texture = if (self.flags & FLAG_PATH) != 0 {
+                &self.path_hist
+            } else {
+                &self.specular_hist
+            };
+            encoder.clear_texture(texture, &wgpu::ImageSubresourceRange::default());
+        }
 
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Lighting extra"),
@@ -408,7 +557,7 @@ impl LightingExtraPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&self.aux_hist_view),
+                    resource: wgpu::BindingResource::TextureView(aux_history_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -457,6 +606,7 @@ impl LightingExtraPass {
                     depth_or_array_layers: VOLUME,
                 },
             );
+            self.cache_history_valid = true;
         }
 
         if (self.flags & FLAG_PROBES) != 0 {
@@ -487,13 +637,15 @@ impl LightingExtraPass {
             drop(cpass);
             encoder.copy_texture_to_texture(
                 self.aux.as_image_copy(),
-                self.aux_hist.as_image_copy(),
+                self.path_hist.as_image_copy(),
                 wgpu::Extent3d {
                     width: hw,
                     height: hh,
                     depth_or_array_layers: 1,
                 },
             );
+            self.path_history_valid = true;
+            self.frame = self.frame.saturating_add(1);
         } else if (self.flags & FLAG_SPECULAR) != 0 {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Scene specular GI"),
@@ -506,17 +658,20 @@ impl LightingExtraPass {
             drop(cpass);
             encoder.copy_texture_to_texture(
                 self.aux.as_image_copy(),
-                self.aux_hist.as_image_copy(),
+                self.specular_hist.as_image_copy(),
                 wgpu::Extent3d {
                     width: hw,
                     height: hh,
                     depth_or_array_layers: 1,
                 },
             );
+            self.specular_history_valid = true;
+            self.frame = self.frame.wrapping_add(1);
+        } else {
+            self.specular_history_valid = false;
+            self.path_history_valid = false;
+            self.frame = 0;
         }
-
-        self.history_valid = true;
-        self.frame = self.frame.wrapping_add(1);
     }
 
     fn fill_sdf(&mut self, queue: &wgpu::Queue, camera_pos: glam::Vec3, draws: &[MeshSdfDraw]) {

@@ -333,8 +333,9 @@ pub enum EditorEvent {
     ToggleFoliageSingle,
     /// Pick which palette entry the foliage brush paints (Phase 17F).
     SelectFoliageKind(u8),
-    /// Flip a post-processing effect on the selected Post Processing entity.
-    TogglePostFx(PostFxToggle),
+    /// Set a post-processing effect on the selected Post Processing entity.
+    /// Carrying the checkbox value makes UI synchronization idempotent.
+    SetPostFx(PostFxToggle, bool),
     /// Cycle the tone-mapping curve (AgX → ACES → Reinhard).
     CycleTonemapper,
     /// Set the tone-mapping curve by index (0 AgX, 1 ACES, 2 Reinhard).

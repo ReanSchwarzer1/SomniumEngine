@@ -114,6 +114,7 @@ struct ClipmapTap {
     albedo: vec3<f32>,
     roughness: f32,
     occlusion: f32,
+    wetness: f32,
     nxy: vec2<f32>,
     valid: bool,
 }
@@ -124,6 +125,7 @@ fn clipmap_tap_detail(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cl
     t.albedo = vec3<f32>(0.0);
     t.roughness = 0.8;
     t.occlusion = 1.0;
+    t.wetness = 0.0;
     t.nxy = vec2<f32>(0.0);
     if ring >= tm.clipmap_rings || (tm.clipmap_detail_ready & (1u << ring)) == 0u {
         return t;
@@ -158,6 +160,7 @@ fn clipmap_tap_detail(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cl
     t.albedo = a.rgb * a.rgb;
     t.roughness = s.b;
     t.occlusion = s.a;
+    t.wetness = a.a;
     t.nxy = s.rg * 2.0 - 1.0;
     t.valid = true;
     return t;
@@ -169,6 +172,7 @@ fn clipmap_tap_macro(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cli
     t.albedo = vec3<f32>(0.0);
     t.roughness = 0.8;
     t.occlusion = 1.0;
+    t.wetness = 0.0;
     t.nxy = vec2<f32>(0.0);
     if ring >= tm.clipmap_macro_rings || (tm.clipmap_macro_ready & (1u << ring)) == 0u {
         return t;
@@ -195,6 +199,7 @@ fn clipmap_tap_macro(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cli
     t.albedo = a.rgb * a.rgb;
     t.roughness = n.b;
     t.occlusion = n.a;
+    t.wetness = 0.0;
     t.nxy = n.rg * 2.0 - 1.0;
     t.valid = true;
     return t;
@@ -211,6 +216,7 @@ fn clipmap_blend_taps(a: ClipmapTap, b: ClipmapTap, w: f32) -> ClipmapTap {
     t.albedo = mix(a.albedo, b.albedo, w);
     t.roughness = mix(a.roughness, b.roughness, w);
     t.occlusion = mix(a.occlusion, b.occlusion, w);
+    t.wetness = mix(a.wetness, b.wetness, w);
     t.nxy = mix(a.nxy, b.nxy, w);
     t.valid = true;
     return t;
@@ -225,7 +231,7 @@ fn evaluate_clipmap_material(
     world_ddy: vec2<f32>,
 ) -> TerrainSurface {
     _ = splat_uv;
-    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
+    let tangent = terrain_stable_tangent(geo_normal);
     let bitangent = cross(geo_normal, tangent);
     let steepness = 1.0 - abs(geo_normal.y);
     let cliff_blend = smoothstep(0.45, 0.7, steepness);
@@ -243,6 +249,7 @@ fn evaluate_clipmap_material(
     tap.albedo = vec3<f32>(0.0);
     tap.roughness = 0.8;
     tap.occlusion = 1.0;
+    tap.wetness = 0.0;
     tap.nxy = vec2<f32>(0.0);
     tap.valid = false;
     // Walk **outward** to the next detail ring that actually has data.
@@ -333,10 +340,10 @@ fn evaluate_clipmap_material(
         surfgrad = mix(surfgrad, cliff_grad, cliff_blend);
     }
 
-    terrain_wetness_factor = 0.0;
+    terrain_wetness_factor = tap.wetness;
     terrain_cliff_blend_dbg = cliff_blend;
     terrain_dominant_albedo = albedo;
-    terrain_wet_f0 = 0.0;
+    terrain_wet_f0 = tm.wetness_f0 * tap.wetness;
     terrain_discarded = 0.0;
     terrain_selected_rgb = vec3<f32>(0.0);
     terrain_weight_rgb = vec3<f32>(0.0);
