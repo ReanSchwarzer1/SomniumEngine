@@ -203,7 +203,12 @@ fn accumulate(
     let roughness_ok = abs(guide.a - roughness) < 0.12;
     let finite_ok = all(prev.rgb == prev.rgb);
     let prev_moments = textureSampleLevel(history_tex, default_sampler, prev_uv, 3 + layer, 0.0);
-    let distance_ok = (hit_distance <= 0.0 && prev_moments.a <= 0.0)
+    // A rough GGX ray intentionally lands at a different distance each frame;
+    // treating that Monte-Carlo dimension as a disocclusion rejects every
+    // sample and leaves the water stuck at one spp. Hit distance is a useful
+    // guide only for the near-mirror path.
+    let distance_ok = roughness >= 0.10
+        || (hit_distance <= 0.0 && prev_moments.a <= 0.0)
         || (hit_distance > 0.0 && prev_moments.a > 0.0
             && abs(prev_moments.a - hit_distance) < max(hit_distance * 0.2, 0.75));
     let valid = guide.a > 0.0 && depth_ok && normal_ok && roughness_ok
@@ -213,26 +218,32 @@ fn accumulate(
         return temporal_seed(current, hit_distance);
     }
 
-    // Variance-guided clipping keeps a rare bright/dark hit from becoming a
-    // persistent dancing blotch. The current sample supplies the local centre;
-    // prior moments supply a stable scale when one ray cannot estimate a 3x3
-    // current-frame neighbourhood on its own.
+    // Winsorize a new stochastic sample against the established history. The
+    // previous version clipped history around the noisy one-ray current value,
+    // which faithfully turned every rare dark hit into a dancing black pixel.
     let variance = max(prev_moments.y - prev_moments.x * prev_moments.x, 0.0);
     let sigma = sqrt(variance);
     let current_luma = reflect_luma(current.rgb);
-    let radius = max(2.0 * sigma, 0.1 + current_luma * 0.5);
     let history_luma = max(reflect_luma(prev.rgb), 1e-5);
-    let clipped_luma = clamp(history_luma, max(current_luma - radius, 0.0), current_luma + radius);
-    let stable_prev = vec4<f32>(max(prev.rgb, vec3<f32>(0.0)) * clipped_luma / history_luma, prev.a);
+    let radius = max(3.0 * sigma, 0.05 + prev_moments.x * 0.20);
+    let clipped_current_luma = clamp(
+        current_luma,
+        max(prev_moments.x - radius, 0.0),
+        prev_moments.x + radius,
+    );
+    let stable_current = vec4<f32>(
+        max(current.rgb, vec3<f32>(0.0)) * clipped_current_luma / max(current_luma, 1e-5),
+        current.a,
+    );
 
     let old_count = clamp(prev_moments.z, 1.0, 32.0);
     let new_count = min(old_count + 1.0, 32.0);
     let current_weight = 1.0 / new_count;
     let max_history = mix(0.84, 0.93, roughness);
     let history_weight = min(1.0 - current_weight, max_history);
-    let color = mix(current, stable_prev, history_weight);
-    let mean = mix(prev_moments.x, current_luma, current_weight);
-    let mean2 = mix(prev_moments.y, current_luma * current_luma, current_weight);
+    let color = mix(stable_current, max(prev, vec4<f32>(0.0)), history_weight);
+    let mean = mix(prev_moments.x, clipped_current_luma, current_weight);
+    let mean2 = mix(prev_moments.y, clipped_current_luma * clipped_current_luma, current_weight);
     return TemporalResult(color, vec4<f32>(mean, mean2, new_count, hit_distance));
 }
 

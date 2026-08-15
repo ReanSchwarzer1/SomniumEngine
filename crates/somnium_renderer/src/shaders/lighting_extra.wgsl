@@ -246,7 +246,12 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var b = 0u; b < bounces; b++) {
         let hit = rt_trace(origin, dir, 0.02, 500.0);
         if !hit.hit {
-            radiance += throughput * textureSampleLevel(env_cube, env_sampler, dir, 0.0).rgb;
+            // The sun is already sampled explicitly above. Sampling the sharp
+            // sun texel again through a one-ray indirect bounce creates rare,
+            // enormous fireflies; use the prefiltered environment for indirect
+            // misses while retaining the sharp sky for a primary camera miss.
+            let env_lod = select(4.0, 0.0, b == 0u);
+            radiance += throughput * textureSampleLevel(env_cube, env_sampler, dir, env_lod).rgb;
             break;
         }
         radiance += throughput * hit.emissive;

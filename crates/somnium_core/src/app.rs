@@ -67,6 +67,27 @@ fn normalize_post_process_singleton(
     }
 }
 
+/// An offline path trace can only converge while the scene is stationary.
+/// Preserve the user's transport state, hold fixed-step simulation for as long
+/// as the path tracer is active, then restore that state on exit.
+fn synchronize_path_trace_pause(
+    active: bool,
+    clock: &mut SimulationClock,
+    accumulator: &mut f32,
+    previous_state: &mut Option<SimulationState>,
+) {
+    if active {
+        if previous_state.is_none() {
+            *previous_state = Some(clock.state);
+        }
+        clock.state = SimulationState::Paused;
+        *accumulator = 0.0;
+    } else if let Some(previous) = previous_state.take() {
+        clock.state = previous;
+        *accumulator = 0.0;
+    }
+}
+
 #[cfg(test)]
 mod post_process_singleton_tests {
     use super::*;
@@ -103,6 +124,31 @@ mod post_process_singleton_tests {
                 .bloom_intensity,
             0.73
         );
+    }
+
+    #[test]
+    fn path_trace_pause_preserves_and_restores_transport_state() {
+        let mut clock = SimulationClock {
+            state: SimulationState::Playing,
+            ..SimulationClock::default()
+        };
+        let mut accumulator = 0.5;
+        let mut previous = None;
+
+        synchronize_path_trace_pause(true, &mut clock, &mut accumulator, &mut previous);
+        assert_eq!(clock.state, SimulationState::Paused);
+        assert_eq!(previous, Some(SimulationState::Playing));
+        assert_eq!(accumulator, 0.0);
+
+        synchronize_path_trace_pause(false, &mut clock, &mut accumulator, &mut previous);
+        assert_eq!(clock.state, SimulationState::Playing);
+        assert_eq!(previous, None);
+
+        clock.state = SimulationState::Paused;
+        synchronize_path_trace_pause(true, &mut clock, &mut accumulator, &mut previous);
+        assert_eq!(previous, Some(SimulationState::Paused));
+        synchronize_path_trace_pause(false, &mut clock, &mut accumulator, &mut previous);
+        assert_eq!(clock.state, SimulationState::Paused);
     }
 }
 
@@ -293,6 +339,9 @@ pub struct Engine<G: GameApp> {
     viewport_resolution: usize,
     /// UE-style editor transport state and deterministic gameplay time.
     simulation_clock: SimulationClock,
+    /// Transport state temporarily held while the offline path tracer
+    /// accumulates a stationary scene.
+    path_trace_previous_simulation_state: Option<SimulationState>,
     /// True from Play until Stop, including while a play session is paused.
     /// Editor-only overlays and authoring tools stay disabled for the session.
     play_session_active: bool,
@@ -378,6 +427,7 @@ impl<G: GameApp + 'static> Engine<G> {
                 .unwrap_or(0)
                 .min(4),
             simulation_clock: SimulationClock::default(),
+            path_trace_previous_simulation_state: None,
             play_session_active: false,
             simulation_accumulator: 0.0,
             scene_dirty: false,
@@ -889,6 +939,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
+
+        let path_tracer_active = self
+            .world
+            .entities()
+            .find_map(|entity| self.world.get::<PostProcessComponent>(entity))
+            .is_some_and(|post| post.path_tracer);
+        synchronize_path_trace_pause(
+            path_tracer_active,
+            &mut self.simulation_clock,
+            &mut self.simulation_accumulator,
+            &mut self.path_trace_previous_simulation_state,
+        );
 
         // Editor-world simulations (water, buoyancy, particles, previews) run
         // in ordinary Edit mode. Pause is the only state that freezes time;
@@ -2009,14 +2071,23 @@ impl<G: GameApp> Engine<G> {
             // The path tracer already owns temporal accumulation. Feeding that
             // result through FSR/TAA (and then motion blur) accumulates history
             // a second time and is the source of the reported afterimages.
-            r.fsr_pass.set_enabled(pp.fsr_enabled && !path_active);
+            // The current experimental wgpu-ffx backend corrupts low-luminance
+            // geometry once the directional sun is below the horizon (stars
+            // survive while the rest collapses into a broad black band). Keep
+            // the authored FSR request, but contain that backend defect with
+            // the stable temporal fallback until the embedded FSR shaders are
+            // updated. Daylight FSR and real-resolution upscaling remain live.
+            let fsr_safe_for_lighting = r.light_direction.y > 0.0;
+            r.fsr_pass
+                .set_enabled(pp.fsr_enabled && !path_active && fsr_safe_for_lighting);
             r.fsr_pass.sharpness = pp.fsr_sharpness;
             // Use the pass's effective state, not the authored request: on a
             // device without FSR features, pp.fsr_enabled may be true while
             // the pass correctly declined it. TAA/CAS must still be allowed.
             let fsr_active = r.fsr_pass.enabled;
+            let fsr_fallback = pp.fsr_enabled && !path_active && !fsr_active;
             r.taa_pass
-                .set_enabled(pp.taa_enabled && !fsr_active && !path_active);
+                .set_enabled((pp.taa_enabled || fsr_fallback) && !fsr_active && !path_active);
             r.gtao_pass.enabled = pp.gtao_enabled && !path_active;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;

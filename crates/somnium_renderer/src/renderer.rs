@@ -3304,6 +3304,11 @@ impl SomniumRenderer {
                         self.dof_pass.enabled,
                         self.lighting_extra_pass.flags_bits(),
                     ),
+                    format!(
+                        "lighting_extra_accumulated_frames={}",
+                        self.lighting_extra_pass.accumulated_frames()
+                    ),
+                    format!("sun_direction_y={:.6}", self.light_direction.y),
                 ];
                 if let Some(t) = self.terrains.first() {
                     lines.push(format!(

@@ -337,6 +337,13 @@ impl LightingExtraPass {
         self.flags
     }
 
+    /// Number of consecutive samples accumulated by the active 2-D traced
+    /// estimator. Exposed for capture audits so a reset-every-frame regression
+    /// is visible without inferring it from image noise.
+    pub fn accumulated_frames(&self) -> u32 {
+        self.frame
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let (aux, aux_view) = aux_tex(device, width, height, "Lighting aux");
         let (specular_hist, specular_hist_view) =

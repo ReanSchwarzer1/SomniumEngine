@@ -294,3 +294,90 @@ normal source history.
 CR, XV, VV, the all-toggle control plane, and the seven reported visual
 symptoms meet their audit gates at the evidence levels stated above. No known
 P0/P1 correctness defect from the expanded plan remains open.
+
+## 2026-08-15 focused regression follow-up
+
+This follow-up covers the three defects reported after the first acceptance
+pass: path-traced boat/water artifacting, dancing dark RT-reflection speckles,
+and a broad black nighttime FSR result near the top of the image.
+
+### Path tracing: fixed
+
+The renderer was correctly invalidating accumulation when scene transforms
+changed, but the editing demo continuously advances boat physics and water
+state. That made the scene revision change every frame, so the offline path
+tracer could never retain a second sample. Entering path mode now pauses the
+simulation transport while preserving its prior state; leaving path mode
+restores that exact state. The fixed path also uses the sharp environment only
+for primary misses and a filtered environment for indirect misses, avoiding
+duplicate high-energy sun fireflies.
+
+Runtime proof at a fixed 2560×1392 camera:
+
+| Capture | Reported accumulated frames | Result |
+|---|---:|---|
+| `after_path_f2` | 1 | Expected initial noise |
+| `after_path_f64` | 63 | Stable, visibly converged image |
+
+The new transport-state unit test proves pause/restore behavior, including an
+already-paused starting state.
+
+### RT water reflections: fixed
+
+The temporal validator compared hit distance across independent rough-GGX ray
+samples. On rough water those samples are intentionally different, so valid
+history was rejected. The temporal clip also pulled stable history toward each
+new one-ray dark outlier, producing the reported dancing black speckles.
+
+Distance validation is now retained for near-mirror reflections and bypassed
+for rough stochastic reflections. Current radiance is winsorized against the
+previous luminance moments before blending; stable history is no longer clipped
+around a noisy current sample. The `after_water_rt_off/on` display pair shows
+the RT result without the lake-wide dark speckle field.
+
+### FSR at night: safely contained
+
+Two corrections were made to the FSR integration itself:
+
+- FSR now receives linear, pre-exposed HDR input with the HDR context flag and
+  matching `pre_exposure` value.
+- The embedded legacy RCAS stage is disabled. A bounded non-negative sharpen
+  in the un-pre-exposure pass keeps the existing sharpness control functional.
+
+The current experimental `wgpu-ffx` backend nevertheless continued to turn
+low-luminance geometry black at both native 1:1 and 1600×870 → 2560×1392 after
+those contract corrections. The retained `after_fsr_contract_*` captures
+isolate that backend defect. Nighttime FSR requests therefore use TAA as a
+contained fallback until the backend is replaced or upgraded; daylight FSR
+continues to execute normally.
+
+Runtime state proof:
+
+| Scenario | Sun Y | Scene → swapchain | Effective state | Result |
+|---|---:|---|---|---|
+| Night, FSR requested | -0.309017 | 1600×870 → 2560×1392 | `fsr=false taa=true` | Full scene, no black band |
+| Day, FSR requested | 0.573576 | 1600×870 → 2560×1392 | `fsr=true taa=false` | FSR active, full scene |
+
+This is an explicit fallback rather than a false claim that the defective night
+backend path is repaired. The authored FSR toggle remains requested and the
+audit log reports the effective fallback truthfully.
+
+### Follow-up validation
+
+The final focused gate passed:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace -j1 --target-dir target\validation-remaining
+cargo build --release -p hello_engine
+git diff --check
+```
+
+The clean workspace run passed all 429 unit, integration, shader, and doc tests,
+including 51 core tests, 283 renderer library tests, and 12 WGSL validation
+tests. The ordinary debug target initially encountered transient Windows
+`LNK1104` executable locks; the clean target completed without a test failure.
+
+Focused captures, effective-state logs, and reproducibility scripts are under
+[`evidence/audit_2026-08-15_remaining/`](evidence/audit_2026-08-15_remaining/).
