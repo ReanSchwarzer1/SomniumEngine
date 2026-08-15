@@ -59,12 +59,7 @@ fn load_assets(
         // on the ECS component; this is only coverage.
         let size = [256u32, 256u32];
         let n = (size[0] * size[1]) as usize;
-        return Ok((
-            size,
-            vec![255u8; n],
-            vec![u16::MAX; n],
-            vec![u16::MAX; n],
-        ));
+        return Ok((size, vec![255u8; n], vec![u16::MAX; n], vec![u16::MAX; n]));
     }
     if descriptor.preset != 1 {
         return Err(format!("unsupported water preset {}", descriptor.preset));

@@ -449,7 +449,28 @@ Intent in §6 still stands. The tree does **not** match every sentence:
 
 Files: `terrain/clipmap.rs`, `pass/terrain_clipmap.rs`, `shaders/clipmap_gen.wgsl`, `shaders/clipmap_shade.wgsl`, `shaders/terrain_material.wgsl`, `pass/shading.rs` group 2, `renderer.rs` generate-before-shade.
 
-## 12. Audit (required)
+## 12. Audit — **RAN 2026-08-15**
+
+> **Result: [`phase DF/DF-Audit_2026-08-15.md`](phase%20DF/DF-Audit_2026-08-15.md).**
+> Seven defects, one critical. The user authorised fixes in the same session,
+> so they are in the tree; `cargo test --workspace` (411) and
+> `shaders_validate` (12) pass. **Clipmap is still inspector default off** —
+> DF-E needs a live remeasure that an audit cannot produce.
+>
+> **Headline:** `expand_and_wrap` promoted *every* ring recentre to a full
+> 1 048 576-texel refresh, because `toroidal_dirty_rects` always returns
+> full-height or full-width strips and the margin then tripped the `>= size`
+> bail. One ring consumed the whole `MAX_GEN_TEXELS` budget per frame, the rest
+> starved, starved rings stopped recentring, and shading fell through to a
+> coarse ring or the macro map. **The DF-A “walk luminance +35.6%” below is
+> that bug, not the cache being lossy** — the capture was not reading the ring
+> it thought it was. Do not cite it as a property of the architecture.
+>
+> Second candidate for the same number: the cache stored **linear** albedo in
+> `Rgba8Unorm`, so terrain albedo (0.02–0.05 linear) got about five of 256
+> codes. Now stored perceptually.
+
+The original brief, kept for the record:
 
 **Do not treat clipmap as default-on or “done” until this audit runs.** The look
 and hitch work landed in one session; a different model (Claude Opus 5) must
@@ -488,12 +509,16 @@ Lakes water (datum 16.1 m, optical max_depth 18.6 m, Gerstner `wave_speed`
 
 | Item | Status |
 |---|---|
-| **Audit** | **Required next.** Not started. |
-| **DF-E default-on** | Blocked on §6.4 gates at maximized Native with the **current** look. |
-| **POM on clipmap height** | Planned (§1 / DF-C). **Off** — smear. Revisit only if the audit says the cache UV is stable. |
+| **Audit** | **DONE 2026-08-15** — [`phase DF/DF-Audit_2026-08-15.md`](phase%20DF/DF-Audit_2026-08-15.md). Seven defects found and fixed. |
+| **DF-E default-on** | Blocked on §6.4 gates at maximized Native with the **post-audit** look. Nothing in the audit could measure this; it needs a live capture. |
+| **POM on clipmap height** | Planned (§1 / DF-C). **Off** — smear. The audit found the generate/shade UV mapping algebraically correct and the ready-bit ordering sound, and the rings should now stay ready while walking, so this is newly worth attempting. Not attempted yet. |
 | **CIEDE2000 vs strongest-four** | Gate in §6.4; no offline fixture run on generate. |
 | **Dbg generate heat** | Listed in §8; not shipped. Dbg 32 albedo / 33 ring index exist. |
 | **DF-H AVT / > 2 km** | Research only if the map grows. Not v1. |
+
+Post-audit measurements the next session should take before anything else:
+overview / walk / ridge at maximized Native, clipmap forced on and forced off,
+plus the profiler `Terrain clipmap` and `Shading` scopes. See the audit's §5.
 
 Do **not**: per-pixel live/clipmap mix; drop hex at feet to chase luminance;
 put generate back in compute without a Vulkan Dbg-32 proof; raise
@@ -501,8 +526,17 @@ put generate back in compute without a Vulkan Dbg-32 proof; raise
 
 ## 13. Next-session start
 
-1. If the user asked for a **clipmap audit**: this file §12. Do not implement
-   “improvements” until the audit is delivered unless they explicitly redirect.
-2. If the user asked to **turn Clipmap default on**: refuse until DF-E gates
-   are remeasured at maximized Native.
-3. Frozen: Great Lakes water, XV look, no per-pixel sample LOD, rustc 1.88.
+1. The audit is **done** ([`phase DF/DF-Audit_2026-08-15.md`](phase%20DF/DF-Audit_2026-08-15.md)).
+   Read it before touching clipmap code — several things in §11 and in
+   [`DF-A_timings.md`](phase%20DF/DF-A_timings.md) are now known to be
+   consequences of the `expand_and_wrap` defect rather than properties of the
+   design.
+2. The first job is **measurement**, not more implementation: the audit's §5
+   table lists exactly what has to be captured, and none of it could be
+   produced from a source read.
+3. If the user asked to **turn Clipmap default on**: still refuse until DF-E
+   gates are remeasured at maximized Native on the post-audit build.
+4. If ring-edge streaking appears in Dbg 32, revert the hardware-bilinear
+   change (audit §3.4) first — it is the one fix that was not provable from
+   the tests alone.
+5. Frozen: Great Lakes water, XV look, no per-pixel sample LOD, rustc 1.88.

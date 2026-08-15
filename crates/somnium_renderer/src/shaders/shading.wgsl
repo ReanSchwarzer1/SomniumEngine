@@ -1035,7 +1035,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let world_ddy = dpdy(hit_point.xz);
         let tm_idx = u32(material.terrain_index);
         var terrain: TerrainSurface;
-        if enable_clipmap && terrain_materials[tm_idx].clipmap_enabled != 0u {
+        // `enable_live_terrain` is checked first and is a pipeline override, so
+        // when the clipmap owns every queued terrain the live branch is
+        // statically dead and `evaluate_terrain_material` is dropped from the
+        // module. The `clipmap_enabled` test below is a storage read the
+        // compiler cannot prove uniform: it branches correctly at runtime, but
+        // it cannot delete either body, and occupancy is the union of both.
+        if !enable_live_terrain {
+            terrain = evaluate_clipmap_material(
+                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+        } else if enable_clipmap && terrain_materials[tm_idx].clipmap_enabled != 0u {
             terrain = evaluate_clipmap_material(
                 terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else {

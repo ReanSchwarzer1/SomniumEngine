@@ -753,7 +753,10 @@ impl HelloGame {
                 );
             }
         }
-        info!("Map {:?} preset v{} active", result.kind, result.preset.version);
+        info!(
+            "Map {:?} preset v{} active",
+            result.kind, result.preset.version
+        );
         apply_capture_camera_overrides(
             &mut self.camera,
             result

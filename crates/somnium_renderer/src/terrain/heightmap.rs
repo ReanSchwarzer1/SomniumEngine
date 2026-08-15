@@ -293,13 +293,7 @@ fn island_smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// Low rolling islet: beach, coastal plain, gentle FBM hills. Rim below water.
 ///
 /// `peak_metres` is clamped — a 40 m recipe on a ~130 m footprint is a sea stack.
-pub fn island_relief(
-    tx: u32,
-    tz: u32,
-    seed: u32,
-    peak_metres: f32,
-    water_level: f32,
-) -> Vec<f32> {
+pub fn island_relief(tx: u32, tz: u32, seed: u32, peak_metres: f32, water_level: f32) -> Vec<f32> {
     let rise = (peak_metres - water_level).clamp(7.0, 13.0);
     let half = 256.0;
     let mut out = vec![0.0f32; (tx * tz) as usize];
@@ -340,10 +334,7 @@ pub fn island_relief(
             let inland_h = water_level
                 + 0.4
                 + (1.0 - plateau) * 1.6
-                + plateau
-                    * (5.5
-                        + rolling * rise * 0.55
-                        + (bumps - 0.5) * 1.6);
+                + plateau * (5.5 + rolling * rise * 0.55 + (bumps - 0.5) * 1.6);
             out[(z * tx + x) as usize] = ocean_h + land * (inland_h - ocean_h);
         }
     }
@@ -540,7 +531,10 @@ mod tests {
     fn island_relief_peaks_above_water_and_rim_is_submerged() {
         let water = 16.1;
         let h = island_relief(65, 65, 9, 55.0, water);
-        assert!(h.iter().any(|&x| x > water), "inland must break the surface");
+        assert!(
+            h.iter().any(|&x| x > water),
+            "inland must break the surface"
+        );
         let above = h.iter().filter(|&&x| x > water).count();
         assert!(
             above < h.len() / 4,

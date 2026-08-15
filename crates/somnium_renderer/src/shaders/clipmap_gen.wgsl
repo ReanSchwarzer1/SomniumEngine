@@ -62,7 +62,29 @@ fn clipmap_generate(@builtin(position) pos: vec4<f32>) -> ClipmapFsOut {
         vec2<f32>(0.0, texel_m),
         clipmap_gen.hex != 0u,
     );
-    out.albedo = packed.albedo;
-    out.surface = packed.surface;
+    // Store albedo **perceptually**, not linearly.
+    //
+    // The cache is `Rgba8Unorm`. Terrain albedo is dark — forest floor and wet
+    // rock sit around 0.02–0.05 linear — so writing linear values spent about
+    // five of 256 codes on the whole range the ground actually occupies. That
+    // is visible banding, and because quantisation of a convex curve does not
+    // average out, it is also a systematic brightness offset against the live
+    // path. `clipmap_tap_detail` / `clipmap_tap_macro` square it back.
+    //
+    // A `*Srgb` view would do the same job in hardware, but the surface target
+    // shares this pipeline's colour state and its normal/roughness/AO channels
+    // must stay linear.
+    out.albedo = vec4<f32>(sqrt(max(packed.albedo.rgb, vec3<f32>(0.0))), packed.albedo.a);
+    // Alpha carries occlusion, and **zero is reserved** as "this texel has
+    // never been generated" — wgpu zero-fills a new texture and a ring can
+    // briefly hold a strip generate has not reached yet, which shading has to
+    // be able to tell apart from data. One code of headroom is far below what
+    // an 8-bit AO channel resolves, and a real AO map never reaches a true
+    // zero anyway; without the floor a genuinely dark crevice would be thrown
+    // away as if it were missing.
+    out.surface = vec4<f32>(
+        packed.surface.rgb,
+        max(packed.surface.a, 1.0 / 255.0),
+    );
     return out;
 }

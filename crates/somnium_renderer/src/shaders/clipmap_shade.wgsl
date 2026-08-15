@@ -10,6 +10,16 @@
 @group(2) @binding(1) var clipmap_detail_surface: texture_2d_array<f32>;
 @group(2) @binding(2) var clipmap_macro_albedo: texture_2d_array<f32>;
 @group(2) @binding(3) var clipmap_macro_normal: texture_2d_array<f32>;
+/// Linear + Repeat + **anisotropy 1**, and only ever used at an explicit LOD.
+///
+/// The earlier hardware-sampling attempt reached for `default_sampler`, which
+/// runs at `anisotropy_clamp: 16` for terrain's grazing angles. An anisotropic
+/// tap takes a *footprint*, and a footprint that straddles the toroidal seam
+/// reads texels belonging to the far side of the world — which is what showed
+/// up as streak bands at the ring edges in Dbg 32. It was the anisotropy, not
+/// the wrap: with no footprint and an explicit level this is exactly the 2×2
+/// bilinear the manual version was computing by hand.
+@group(2) @binding(4) var clipmap_sampler: sampler;
 
 fn clipmap_vec2_from_packed(v: array<vec4<f32>, 4>, ring: u32) -> vec2<f32> {
     let packed = v[ring / 2u];
@@ -53,32 +63,16 @@ fn clipmap_edge_w(center: vec2<f32>, world_xz: vec2<f32>, half: f32, tpm: f32) -
     return saturate((dist_texels - begin) / max(CLIPMAP_BLEND_TEXELS, 1.0));
 }
 
-fn clipmap_wrap_i(v: i32, size: i32) -> i32 {
-    var m = v % size;
-    if m < 0 {
-        m += size;
-    }
-    return m;
-}
-
-/// Toroidal bilinear. Hardware Repeat + anisotropy on `default_sampler` smears
-/// the wrap seam into the streak bands at square ring edges (Dbg 32).
-fn clipmap_load4(tex: texture_2d_array<f32>, uv: vec2<f32>, ring: u32, size: f32) -> vec4<f32> {
-    let s = i32(size);
-    let exact = uv * size - vec2<f32>(0.5);
-    let i0 = i32(floor(exact.x));
-    let j0 = i32(floor(exact.y));
-    let f = fract(exact);
-    let p00 = vec2<i32>(clipmap_wrap_i(i0, s), clipmap_wrap_i(j0, s));
-    let p10 = vec2<i32>(clipmap_wrap_i(i0 + 1, s), p00.y);
-    let p01 = vec2<i32>(p00.x, clipmap_wrap_i(j0 + 1, s));
-    let p11 = vec2<i32>(p10.x, p01.y);
-    let r = i32(ring);
-    let c00 = textureLoad(tex, p00, r, 0);
-    let c10 = textureLoad(tex, p10, r, 0);
-    let c01 = textureLoad(tex, p01, r, 0);
-    let c11 = textureLoad(tex, p11, r, 0);
-    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+/// Toroidal bilinear, in one instruction.
+///
+/// This was four `textureLoad`s plus the wrap arithmetic and the two mixes,
+/// per image — eight taps for one cache lookup, and sixteen for any pixel
+/// inside the ring-blend band, which is roughly three quarters of a ring's
+/// area. `Repeat` addressing performs the same wrap in the sampler, and an
+/// explicit level keeps it legal in non-uniform control flow (no derivatives
+/// are taken), so nothing about the result changes.
+fn clipmap_sample(tex: texture_2d_array<f32>, uv: vec2<f32>, ring: u32) -> vec4<f32> {
+    return textureSampleLevel(tex, clipmap_sampler, uv, i32(ring), 0.0);
 }
 
 /// Finest **ready** ring whose interior still covers `world_xz`. Unfilled
@@ -147,9 +141,21 @@ fn clipmap_tap_detail(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cl
         tm.clipmap_size,
         world_xz,
     );
-    let a = clipmap_load4(clipmap_detail_albedo, uv, ring, tm.clipmap_size);
-    let s = clipmap_load4(clipmap_detail_surface, uv, ring, tm.clipmap_size);
-    t.albedo = a.rgb;
+    let a = clipmap_sample(clipmap_detail_albedo, uv, ring);
+    let s = clipmap_sample(clipmap_detail_surface, uv, ring);
+    // An ungenerated texel is exactly zero — wgpu zero-fills a new texture, and
+    // a ring can briefly hold a strip generate has not reached. Generate always
+    // writes occlusion into alpha, and a real blend of layer AO maps is never
+    // 0, so zero alpha means "no data" rather than "fully occluded". Reporting
+    // it as data cost the surface all of its indirect light and read as a black
+    // wedge with straight edges; reporting it as invalid falls through to the
+    // next coarser ring.
+    if s.a <= 0.0 {
+        return t;
+    }
+    // Squared back to linear: the cache stores albedo perceptually so an 8-bit
+    // channel can resolve dark ground. See `clipmap_gen.wgsl`.
+    t.albedo = a.rgb * a.rgb;
     t.roughness = s.b;
     t.occlusion = s.a;
     t.nxy = s.rg * 2.0 - 1.0;
@@ -180,9 +186,13 @@ fn clipmap_tap_macro(tm: TerrainMaterial, world_xz: vec2<f32>, ring: u32) -> Cli
         tm.clipmap_macro_size,
         world_xz,
     );
-    let a = clipmap_load4(clipmap_macro_albedo, uv, ring, tm.clipmap_macro_size);
-    let n = clipmap_load4(clipmap_macro_normal, uv, ring, tm.clipmap_macro_size);
-    t.albedo = a.rgb;
+    let a = clipmap_sample(clipmap_macro_albedo, uv, ring);
+    let n = clipmap_sample(clipmap_macro_normal, uv, ring);
+    // Zero alpha is an ungenerated texel; see `clipmap_tap_detail`.
+    if n.a <= 0.0 {
+        return t;
+    }
+    t.albedo = a.rgb * a.rgb;
     t.roughness = n.b;
     t.occlusion = n.a;
     t.nxy = n.rg * 2.0 - 1.0;
@@ -235,8 +245,32 @@ fn evaluate_clipmap_material(
     tap.occlusion = 1.0;
     tap.nxy = vec2<f32>(0.0);
     tap.valid = false;
+    // Walk **outward** to the next detail ring that actually has data.
+    //
+    // `clipmap_pick_detail_ring` only knows that a ring is flagged ready and
+    // geometrically covers this position. The tap additionally rejects texels
+    // generate has not written, and dropping straight to the macro stack on
+    // that rejection is what turned a strip of missing detail into a flat,
+    // dark band with straight edges: the macro rings are coarse, and if they
+    // miss too the fallback is a constant colour with no normal at all — which
+    // is why the band had no ripples in it while the sand around it did.
+    //
+    // The loop almost always exits on its first iteration, and the rings it
+    // skips reject on the cheap `ready` / `covers` tests before sampling.
     if ring < tm.clipmap_rings {
-        tap = clipmap_tap_detail(tm, sample_xz, ring);
+        for (var r = ring; r < tm.clipmap_rings; r = r + 1u) {
+            let probe = clipmap_tap_detail(tm, sample_xz, r);
+            if probe.valid {
+                tap = probe;
+                ring = r;
+                break;
+            }
+        }
+        terrain_clipmap_ring = select(
+            1.0,
+            f32(ring) / max(f32(tm.clipmap_rings - 1u), 1.0),
+            ring < tm.clipmap_rings,
+        );
         let tpm = tm.clipmap_tpm[ring / 4u][ring % 4u];
         let c = clipmap_vec2_from_packed(tm.clipmap_center, ring);
         let half = clipmap_half_extent(tm.clipmap_size, tpm);
@@ -257,8 +291,13 @@ fn evaluate_clipmap_material(
     if !tap.valid {
         let splat_uv_fb = (world_xz - tm.terrain_origin) * tm.inv_world_size;
         if tm.macro_map >= 0 {
-            tap.albedo = textureSampleLevel(
+            // Squared for the same reason `terrain_macro_blend` squares after
+            // mixing: the unique-colour map is authored perceptually. Reading
+            // it as linear made this fallback noticeably brighter than the
+            // cache it stands in for.
+            let m = textureSampleLevel(
                 textures[tm.macro_map], default_sampler, splat_uv_fb, 0.0).rgb;
+            tap.albedo = m * m;
         } else {
             tap.albedo = vec3<f32>(0.35, 0.32, 0.28);
         }

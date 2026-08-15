@@ -48,8 +48,10 @@ fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
             splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
         }
     }
-    let weight = terrain_unpack_splats(splat_s);
-    let selected = terrain_strongest_four(weight);
+    // `var`, and by pointer: `terrain_strongest_four` takes the scan array by
+    // reference so the shading path does not copy 128 bytes per pixel.
+    var weight = terrain_unpack_splats(splat_s);
+    let selected = terrain_strongest_four(&weight);
     var c = vec3<f32>(0.0);
     var total = 0.0;
     var moisture = 0.0;

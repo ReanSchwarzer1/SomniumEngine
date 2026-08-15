@@ -1388,6 +1388,68 @@ impl Splatmap {
 }
 
 #[cfg(test)]
+mod surface_pack_tests {
+    use super::*;
+
+    /// The shipped surface packs must carry usable ambient occlusion in alpha.
+    ///
+    /// `evaluate_terrain_material` reads `surf.a` as the layer's AO and blends
+    /// it into `surface.occlusion`, which multiplies **both** halves of
+    /// `evaluate_ibl`. An all-zero alpha channel therefore does not read as
+    /// "slightly darker" — it removes every scrap of indirect light from the
+    /// ground while leaving direct sun untouched, and the only way to see it is
+    /// Dbg 8, which renders the terrain pure black.
+    ///
+    /// The procedural fallback writes 255 here, so this can only ever be wrong
+    /// for the packed assets — which is exactly why it needs pinning.
+    #[test]
+    fn shipped_surface_packs_carry_occlusion_in_alpha() {
+        let dir = std::path::Path::new("../../").join(TERRAIN_ASSET_DIR);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skipping: {} not readable from the test cwd", dir.display());
+            return;
+        };
+        let mut checked = 0usize;
+        let mut dead = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if !name.ends_with("_surface.png") {
+                continue;
+            }
+            let Ok(img) = image::open(&path) else {
+                continue;
+            };
+            let rgba = img.to_rgba8();
+            let max_alpha = rgba.pixels().map(|p| p.0[3]).max().unwrap_or(0);
+            let mean_alpha = rgba
+                .pixels()
+                .map(|p| u64::from(p.0[3]))
+                .sum::<u64>()
+                .checked_div(rgba.pixels().len() as u64)
+                .unwrap_or(0);
+            checked += 1;
+            // A real AO map is mostly bright with darker creases. Anything whose
+            // *maximum* alpha is near zero is not AO at all.
+            if max_alpha < 8 {
+                dead.push(format!("{name} (max alpha {max_alpha}, mean {mean_alpha})"));
+            }
+        }
+        assert!(
+            checked > 0,
+            "no surface packs found under {}",
+            dir.display()
+        );
+        assert!(
+            dead.is_empty(),
+            "{} of {checked} surface packs have no occlusion in alpha, which zeroes \
+             terrain indirect light: {dead:#?}",
+            dead.len(),
+        );
+    }
+}
+
+#[cfg(test)]
 mod bc7_pack_tests {
     use super::*;
 

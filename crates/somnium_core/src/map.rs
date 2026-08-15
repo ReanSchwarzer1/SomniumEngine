@@ -141,7 +141,10 @@ fn spawn_landscape(
     let mut water_snapshot = built.water;
     water_snapshot.parent = Some(Parent { entity: terrain });
     let water = water_snapshot.respawn(world);
-    world.get_mut::<crate::Children>(terrain).unwrap().push(water);
+    world
+        .get_mut::<crate::Children>(terrain)
+        .unwrap()
+        .push(water);
     (preset, terrain_id, water_component)
 }
 

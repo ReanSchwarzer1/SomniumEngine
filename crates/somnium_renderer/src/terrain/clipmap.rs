@@ -98,7 +98,11 @@ struct ClipmapRing {
     origin: [i32; 2],
     texels_per_m: f32,
     size: u32,
-    dirty: [ClipRect; 4],
+    /// Eight, not four. A diagonal slide gives two arms, each of which
+    /// `wrap_span` can split in two at the toroidal seam, and `push_dirty`
+    /// answers an overflow with `mark_full` — a whole-ring refresh triggered by
+    /// arithmetic rather than by anything having actually changed.
+    dirty: [ClipRect; 8],
     dirty_count: u8,
     /// False until this ring has finished a full generate at the current
     /// centre. Shade skips it so an empty finest ring cannot hide a ready
@@ -118,7 +122,7 @@ impl ClipmapRing {
                 y: 0,
                 w: 0,
                 h: 0,
-            }; 4],
+            }; 8],
             dirty_count: 0,
             ready: false,
         }
@@ -358,34 +362,61 @@ impl TerrainClipmap {
             &mut self.macro_rings[..]
         };
         let mut out = Vec::new();
-        for &ring_i in order {
-            if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
-                break;
-            }
-            let ring = &mut rings[ring_i];
-            let had_dirty = ring.dirty_count > 0;
-            let pending: Vec<ClipRect> = ring.dirty[..ring.dirty_count as usize].to_vec();
-            ring.dirty_count = 0;
-            for rect in pending {
-                if rect.is_empty() {
-                    continue;
-                }
+        // Two passes, ready rings first.
+        //
+        // A ring that is already `ready` is being sampled by shading **this
+        // frame**, and its pending rectangles are the strip that just slid into
+        // view. If that strip is not written before the shading pass runs, the
+        // ring serves texels nobody has generated — zeroes, which reach
+        // `evaluate_clipmap_material` as `occlusion = 0` and take all indirect
+        // light off the ground. A ring that is *not* ready is skipped by the
+        // picker anyway, so its refresh can wait a frame.
+        //
+        // Before the `expand_and_wrap` fix this could not happen: every slide
+        // promoted itself to `mark_full`, which clears `ready`. Now that a
+        // slide is the thin strip it always should have been, the ordering is
+        // what keeps it safe.
+        for ready_pass in [true, false] {
+            for &ring_i in order {
                 if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
-                    ring.push_dirty(rect);
+                    break;
+                }
+                let ring = &mut rings[ring_i];
+                if ring.ready != ready_pass {
                     continue;
                 }
-                let (now, rest) = split_rect(rect, *budget);
-                let used = now.w.saturating_mul(now.h);
-                *budget = budget.saturating_sub(used);
-                if !now.is_empty() {
-                    out.push(job_from_ring(ring, ring_i as u32, now, is_detail));
+                let had_dirty = ring.dirty_count > 0;
+                let pending: Vec<ClipRect> = ring.dirty[..ring.dirty_count as usize].to_vec();
+                ring.dirty_count = 0;
+                for rect in pending {
+                    if rect.is_empty() {
+                        continue;
+                    }
+                    if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
+                        ring.push_dirty(rect);
+                        continue;
+                    }
+                    let (now, rest) = split_rect(rect, *budget);
+                    let used = now.w.saturating_mul(now.h);
+                    *budget = budget.saturating_sub(used);
+                    if !now.is_empty() {
+                        out.push(job_from_ring(ring, ring_i as u32, now, is_detail));
+                    }
+                    if let Some(left) = rest {
+                        ring.push_dirty(left);
+                    }
                 }
-                if let Some(left) = rest {
-                    ring.push_dirty(left);
+                if had_dirty {
+                    if ring.dirty_count == 0 {
+                        ring.ready = true;
+                    } else if ready_pass {
+                        // The strip did not fit. Drop the ring rather than let
+                        // shading read the part of it generate has not reached:
+                        // the picker falls through to the next coarser ring,
+                        // which is a frame of lost resolution instead of a hole.
+                        ring.ready = false;
+                    }
                 }
-            }
-            if had_dirty && ring.dirty_count == 0 {
-                ring.ready = true;
             }
         }
         out
@@ -669,25 +700,37 @@ fn wrap_span(x: u32, y: u32, w: u32, h: u32, size: u32) -> Vec<ClipRect> {
 }
 
 fn expand_and_wrap(rect: ClipRect, size: i32, margin: i32) -> Vec<ClipRect> {
-    let x = rect.x as i32 - margin;
-    let y = rect.y as i32 - margin;
-    let w = rect.w as i32 + margin * 2;
-    let h = rect.h as i32 + margin * 2;
-    if w >= size || h >= size {
-        return vec![ClipRect {
-            x: 0,
-            y: 0,
-            w: size as u32,
-            h: size as u32,
-        }];
-    }
-    wrap_span(
-        wrap_i(x, size) as u32,
-        wrap_i(y, size) as u32,
-        w as u32,
-        h as u32,
-        size as u32,
-    )
+    // Expand each axis independently.
+    //
+    // This used to bail to a full `size × size` rect whenever *either* expanded
+    // axis reached `size`. `toroidal_dirty_rects` always returns full-height
+    // (X arm) or full-width (Y arm) strips, so the margin pushed that axis past
+    // `size` on **every** recentre and the bail fired every time: an ordinary
+    // 16-texel slide dirtied all 1 048 576 texels of the ring instead of ~20k.
+    //
+    // That was the whole clipmap's behaviour, not an edge case. `MAX_GEN_TEXELS`
+    // is exactly one 1024² ring, so one ring consumed the entire frame budget,
+    // the other eleven starved, `update_ring` refused to recentre a ring that
+    // still had dirty rectangles, and the fine rings never went `ready` while
+    // the camera moved. Shading then skipped them and fell through to a coarse
+    // ring or the macro map — which is what the DF-A walk capture measured as
+    // +35.6% luminance and blamed on the cache being lossy.
+    //
+    // An axis that already spans the ring needs no margin: it wraps onto
+    // itself, and the neighbour a bilinear tap wants is already being written.
+    let axis = |pos: u32, len: u32| -> (u32, u32) {
+        if len as i32 + margin * 2 >= size {
+            (0, size as u32)
+        } else {
+            (
+                wrap_i(pos as i32 - margin, size) as u32,
+                len + (margin as u32) * 2,
+            )
+        }
+    };
+    let (x, w) = axis(rect.x, rect.w);
+    let (y, h) = axis(rect.y, rect.h);
+    wrap_span(x, y, w, h, size as u32)
 }
 
 /// Ground XZ the clipmap should sit on.
@@ -853,6 +896,81 @@ mod tests {
     fn gen_params_are_64_byte_aligned() {
         assert_eq!(std::mem::size_of::<GpuClipmapGen>(), 64);
         assert_eq!(std::mem::size_of::<GpuClipmapGen>() % 16, 0);
+    }
+
+    /// The defect this phase's audit was written to find.
+    ///
+    /// A full-height column strip must stay a column strip after the bilinear
+    /// margin is added. The old `w >= size || h >= size` bail turned it into a
+    /// whole-ring refresh, which is 1 048 576 texels — the entire per-frame
+    /// generate budget — for a 16-texel slide.
+    #[test]
+    fn expanding_a_column_strip_does_not_dirty_the_whole_ring() {
+        let size = DETAIL_SIZE as i32;
+        let strip = ClipRect {
+            x: 100,
+            y: 0,
+            w: 16,
+            h: DETAIL_SIZE,
+        };
+        let out = expand_and_wrap(strip, size, EXTENDED_MARGIN);
+        let texels: u32 = out.iter().map(|r| r.w * r.h).sum();
+        assert!(
+            texels < MAX_GEN_TEXELS / 8,
+            "a 16-texel slide should stay a thin strip, got {texels} texels in {out:?}"
+        );
+        for r in &out {
+            assert_eq!(r.h, DETAIL_SIZE, "the full-height axis keeps its span");
+            assert_eq!(r.w, 16 + EXTENDED_MARGIN as u32 * 2);
+        }
+    }
+
+    #[test]
+    fn expanding_a_row_strip_does_not_dirty_the_whole_ring() {
+        let size = DETAIL_SIZE as i32;
+        let strip = ClipRect {
+            x: 0,
+            y: 700,
+            w: DETAIL_SIZE,
+            h: 24,
+        };
+        let out = expand_and_wrap(strip, size, EXTENDED_MARGIN);
+        let texels: u32 = out.iter().map(|r| r.w * r.h).sum();
+        assert!(texels < MAX_GEN_TEXELS / 8, "got {texels} texels");
+        for r in &out {
+            assert_eq!(r.w, DETAIL_SIZE);
+            assert_eq!(r.h, 24 + EXTENDED_MARGIN as u32 * 2);
+        }
+    }
+
+    /// An ordinary walking slide on the finest ring must fit the frame budget
+    /// many times over, and must not overflow the ring's dirty slots (which
+    /// `push_dirty` would answer with `mark_full`).
+    #[test]
+    fn a_diagonal_slide_stays_cheap_and_fits_the_dirty_slots() {
+        let mut ring = ClipmapRing::new(DETAIL_FINEST_TEXELS_PER_M, DETAIL_SIZE);
+        update_ring(&mut ring, [0.0, 0.0], true);
+        ring.clear_dirty();
+        ring.ready = true;
+        // Slide diagonally by well over UPDATE_MULTIPLE on both axes.
+        let step = (UPDATE_MULTIPLE as f32 + 4.0) / DETAIL_FINEST_TEXELS_PER_M;
+        update_ring(&mut ring, [step, step], false);
+        assert!(
+            ring.dirty_count > 0,
+            "a slide past the threshold must dirty"
+        );
+        assert!(
+            (ring.dirty_count as usize) <= ring.dirty.len(),
+            "dirty slots overflowed into mark_full"
+        );
+        let texels: u32 = ring.dirty[..ring.dirty_count as usize]
+            .iter()
+            .map(|r| r.w * r.h)
+            .sum();
+        assert!(
+            texels < MAX_GEN_TEXELS / 4,
+            "a walking slide should be a small fraction of one frame's budget, got {texels}"
+        );
     }
 
     #[test]
