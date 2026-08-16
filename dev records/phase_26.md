@@ -32,8 +32,12 @@
 > property-row grammar; and the three command scopes with the viewport-context
 > bar floating over the render, which takes the pre-scene budget to 68 px.
 > Editor screenshots are now real — `SOMNIUM_CAPTURE_UI_PNG` captures the
-> swapchain after the UI pass. The icon pipeline, workspaces, workflow
-> surfaces, accessibility and sign-off remain open.
+> swapchain after the UI pass. A second pass the same day landed the Tabler +
+> Somnium icon family through `resvg` with the Eclipse mark, per-property revert
+> on the gutter dot, seven named workspaces, width-driven collapse rules,
+> Tab/Esc traversal, and the `lib.rs` split into `editor/` (6,554 → 3,938
+> lines). Content Browser workflows, text shaping, AccessKit and Zeta-J
+> sign-off remain open; five §14 items still need a human at the keyboard.
 > **Next GPU track is not a re-implementation of Halcyon.** Phase VV-A–H is
 > in the tree. **Start-here:**
 > [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Remaining

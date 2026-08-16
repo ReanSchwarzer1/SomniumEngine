@@ -164,6 +164,10 @@ impl Control for NumericField {
         )
     }
 
+    fn numeric_value(&self) -> Option<f32> {
+        Some(self.value)
+    }
+
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
         let (slider, field) = Self::split_rects(widget.screen_bounds());
         if self.slider_dragging || slider.contains(pos) {

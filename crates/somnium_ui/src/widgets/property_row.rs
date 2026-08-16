@@ -22,7 +22,7 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, NodeHandle, TextMessage, UiMessage},
+    message::{MessageDirection, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
     theme,
     types::Rect,
@@ -100,10 +100,14 @@ pub fn ellipsise(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32) 
 
 #[derive(Debug, Clone)]
 pub enum PropertyRowMessage {
-    /// Value differs from the component default — show the gutter dot.
+    /// Value differs from the row's baseline — show the gutter dot.
     SetModified(bool),
     /// Row is not editable (a preset-locked field, a derived value).
     SetReadOnly(bool),
+    /// Sent `FromWidget` when the gutter dot is clicked. The editor answers it
+    /// by writing the baseline back through the ordinary value path, so a
+    /// revert is one `ValueChanged` and therefore one undo step.
+    RevertRequested,
 }
 
 impl PropertyRowMessage {
@@ -124,10 +128,21 @@ impl PropertyRowMessage {
     }
 }
 
+/// Whether a click at `pos` inside `bounds` landed on the revert gutter.
+pub fn hit_gutter(bounds: Rect, pos: Vec2) -> bool {
+    pos.x >= bounds.x
+        && pos.x < bounds.x + GUTTER
+        && pos.y >= bounds.y
+        && pos.y < bounds.y + bounds.h
+}
+
 pub struct PropertyRow {
     pub label: String,
     pub modified: bool,
     pub read_only: bool,
+    /// Cursor is over the gutter — the dot grows a ring so it reads as a
+    /// control rather than as decoration.
+    hover_gutter: bool,
     /// Cached from the last arrange so `draw` paints the same columns the
     /// child was arranged into.
     metrics: std::cell::Cell<RowMetrics>,
@@ -201,15 +216,22 @@ impl Control for PropertyRow {
         let style = self.label_style();
         let font_id = style.font_id();
 
-        // Modified dot — the single modified cue in the editor.
+        // Modified dot — the single modified cue in the editor, and the click
+        // target that reverts the row.
         if self.modified {
-            let r = 2.5;
             let cx = b.x + GUTTER * 0.5;
             let cy = b.y + (if m.stacked { 12.0 } else { m.height * 0.5 });
-            ctx.push_rect_filled(
-                Rect::new(cx - r, cy - r, r * 2.0, r * 2.0),
-                theme::NOCTURNE.semantic.accent.default.bytes(),
-            );
+            let accent = theme::NOCTURNE.semantic.accent.default.bytes();
+            if self.hover_gutter {
+                let r = 5.0;
+                ctx.push_rect_border(
+                    Rect::new(cx - r, cy - r, r * 2.0, r * 2.0),
+                    theme::NOCTURNE.geometry.stroke_hairline,
+                    theme::NOCTURNE.semantic.accent.hover.bytes(),
+                );
+            }
+            let r = 2.5;
+            ctx.push_rect_filled(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0), accent);
         }
 
         let (label, _truncated) = ellipsise(&self.label, m.label_w, |s| {
@@ -234,18 +256,49 @@ impl Control for PropertyRow {
         );
     }
 
+    fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> crate::node::CursorKind {
+        if self.modified && !self.read_only && hit_gutter(widget.screen_bounds(), pos) {
+            crate::node::CursorKind::Pointer
+        } else {
+            crate::node::CursorKind::Default
+        }
+    }
+
     fn handle_routed_message(
         &mut self,
         widget: &mut Widget,
         msg: &mut UiMessage,
-        _emit: &mut Vec<UiMessage>,
+        emit: &mut Vec<UiMessage>,
     ) {
         if let Some(m) = msg.data::<PropertyRowMessage>() {
             match m {
                 PropertyRowMessage::SetModified(v) => self.modified = *v,
                 PropertyRowMessage::SetReadOnly(v) => self.read_only = *v,
+                PropertyRowMessage::RevertRequested => {}
             }
             msg.handled = true;
+        }
+        if let Some(WidgetMessage::MouseMove { pos }) = msg.data::<WidgetMessage>() {
+            self.hover_gutter = hit_gutter(widget.screen_bounds(), *pos);
+        }
+        if msg
+            .data::<WidgetMessage>()
+            .is_some_and(|m| matches!(m, WidgetMessage::MouseLeave))
+        {
+            self.hover_gutter = false;
+        }
+        if let Some(WidgetMessage::MouseDown { pos, .. }) = msg.data::<WidgetMessage>() {
+            // Only a lit dot is clickable. An unmodified row has nothing to
+            // revert to, and swallowing the click there would make the gutter
+            // feel broken.
+            if self.modified && !self.read_only && hit_gutter(widget.screen_bounds(), *pos) {
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    PropertyRowMessage::RevertRequested,
+                ));
+                msg.handled = true;
+            }
         }
         // A row's label can be renamed (multi-select header, unit change).
         if let Some(TextMessage::SetText(s)) = msg.data::<TextMessage>() {
@@ -299,6 +352,7 @@ impl PropertyRowBuilder {
                 label: self.label,
                 modified: self.modified,
                 read_only: self.read_only,
+                hover_gutter: false,
                 metrics: std::cell::Cell::new(row_metrics(340.0)),
             }),
         )
@@ -359,6 +413,16 @@ mod tests {
         assert!(cut);
         assert!(short.ends_with('…'));
         assert!(width_of(&short) <= 60.0);
+    }
+
+    #[test]
+    fn the_gutter_is_the_only_clickable_strip() {
+        let b = Rect::new(100.0, 40.0, 340.0, 24.0);
+        assert!(hit_gutter(b, Vec2::new(103.0, 50.0)));
+        // One pixel past the gutter belongs to the label, which must stay
+        // click-through so a drag-select in the panel is not interrupted.
+        assert!(!hit_gutter(b, Vec2::new(100.0 + GUTTER, 50.0)));
+        assert!(!hit_gutter(b, Vec2::new(103.0, 39.0)));
     }
 
     #[test]

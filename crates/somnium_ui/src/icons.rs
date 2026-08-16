@@ -239,9 +239,33 @@ impl IconAtlas {
             dirty: true,
         };
         for &id in IconId::ALL {
-            atlas.rasterize(id);
+            // Zeta-E: the vendored SVG family is authoritative. The procedural
+            // strokes below stay as the fallback for any glyph without a
+            // source, so a new `IconId` variant degrades to hand-drawn art
+            // rather than to an empty cell.
+            match crate::icon_svg::source_for(id)
+                .and_then(|svg| crate::icon_svg::rasterize(svg, ICON_CELL))
+            {
+                Some(mask) => atlas.blit_mask(id, &mask),
+                None => atlas.rasterize(id),
+            }
         }
         atlas
+    }
+
+    /// Copy a rasterized alpha mask into `id`'s cell. RGB stays white so the UI
+    /// shader tints the glyph with the widget's semantic colour.
+    fn blit_mask(&mut self, id: IconId, mask: &[u8]) {
+        let (ox, oy) = Self::cell_origin(id);
+        let cell = ICON_CELL as usize;
+        for y in 0..cell {
+            for x in 0..cell {
+                let a = mask.get(y * cell + x).copied().unwrap_or(0);
+                if a > 0 {
+                    self.put(ox + x as i32, oy + y as i32, a);
+                }
+            }
+        }
     }
 
     fn cell_origin(id: IconId) -> (i32, i32) {

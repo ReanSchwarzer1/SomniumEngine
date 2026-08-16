@@ -1380,6 +1380,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 });
                 ui.update_material_inspector(material);
                 ui.set_scene_dirty(self.scene_dirty);
+                // Phase 26-Zeta-G. Must run after the update_* writes above:
+                // the first value a field is seen holding becomes its revert
+                // baseline, so observing it earlier would baseline an empty
+                // inspector.
+                ui.refresh_modified_dots();
                 ui.refresh_inspector_filter();
             }
         }
@@ -2832,6 +2837,11 @@ impl<G: GameApp> Engine<G> {
         match ev {
             EditorEvent::SelectEntity(opt_idx) => {
                 self.selected_entity = opt_idx.and_then(|idx| self.world.find_entity_by_index(idx));
+                // A new selection means the old baselines describe values that
+                // are no longer on screen.
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.reset_inspector_baseline();
+                }
                 // Leaving the terrain entity exits terrain edit mode.
                 if self.terrain_edit_active && self.selected_terrain().is_none() {
                     self.terrain_edit_active = false;
@@ -3644,6 +3654,8 @@ impl<G: GameApp> Engine<G> {
                         self.scene_dirty = false;
                         if let Some(ui) = &mut self.ui_manager {
                             ui.push_toast("Scene saved");
+                            // Saving is what "modified" was measured against.
+                            ui.reset_inspector_baseline();
                         }
                     }
                     Err(e) => {
@@ -3684,6 +3696,9 @@ impl<G: GameApp> Engine<G> {
                     self.world.despawn(e);
                 }
                 self.selected_entity = None;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.reset_inspector_baseline();
+                }
                 if let Some(r) = &mut self.renderer {
                     r.clear_gizmo();
                 }

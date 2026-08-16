@@ -36,8 +36,36 @@ applies no OpenType features, so the tabular figures the token sheet requires
 (`tnum`) cannot be enabled on the proportional face; a monospaced face gives
 the same guarantee by construction.
 
-## Brand and icon assets
+## Tabler Icons
 
-The Nocturne Atelier brand and engine-specific SVG files are original project
-assets. No Tabler SVG is currently vendored; the custom icons only use the
-documented 24×24 / 2 px construction grid as an interoperability constraint.
+The editor's utility icon family is Tabler Icons, copyright 2020–2026 Paweł
+Kuna, licensed under the MIT License. The complete license is distributed at
+`crates/somnium_ui/assets/icons/tabler/LICENSE`.
+
+| Field | Value |
+|---|---|
+| Upstream | <https://github.com/tabler/tabler-icons> |
+| Files | 67 outline SVGs, vendored individually under `crates/somnium_ui/assets/icons/tabler/` |
+| Modification | Renamed from the upstream icon name to the Somnium `IconId` it serves (for example `device-floppy.svg` → `save.svg`). Path data is unaltered. |
+| Retrieved | 2026-08-16 |
+
+Only the icons the editor actually draws are vendored; the upstream set of
+6,000+ is not redistributed. Sources are compiled into the binary with
+`include_str!` and rasterized at startup by `resvg` into the monochrome alpha
+atlas, so the shader tints each glyph with a semantic colour.
+
+## resvg
+
+`resvg` (with `usvg` and `tiny-skia`) rasterizes the icon SVGs. Licensed under
+MIT OR Apache-2.0; <https://github.com/linebender/resvg>. Vendored as a Cargo
+dependency with default features disabled — text, system fonts and raster-image
+support are off, because every icon source is a stroked path and the text
+feature would pull a second font stack in beside `fontdue`.
+
+## Brand and engine-specific icon assets
+
+The Nocturne Atelier brand marks (`assets/brand/`) and the sixteen
+engine-specific icons (`assets/icons/somnium/`) are original project assets from
+the approved Phase 26-Zeta design package. They are drawn on Tabler's 24 × 24 /
+2 px construction grid so the two sets are optically consistent; the grid is an
+interoperability constraint, not copied artwork.

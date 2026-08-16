@@ -633,6 +633,35 @@ impl UserInterface {
 
     /// Load a TrueType/OpenType font from raw bytes.
     /// Returns the font_id to pass to TextBuilder/push_text.
+    /// Whether a node and every ancestor is visible. Used by keyboard
+    /// traversal so Tab cannot land on a hidden region.
+    pub fn is_globally_visible(&self, handle: NodeHandle) -> bool {
+        self.nodes
+            .try_borrow(handle.transmute())
+            .map(|n| n.widget.global_visibility)
+            .unwrap_or(false)
+    }
+
+    /// Parent of a node, or `None` if the handle is stale or is the root.
+    pub fn parent_of(&self, handle: NodeHandle) -> Option<NodeHandle> {
+        let parent = self
+            .nodes
+            .try_borrow(handle.transmute())
+            .ok()?
+            .widget
+            .parent;
+        (!parent.is_none()).then_some(parent)
+    }
+
+    /// Current value of a numeric control, or `None` for any other widget.
+    pub fn numeric_value_of(&self, handle: NodeHandle) -> Option<f32> {
+        self.nodes
+            .try_borrow(handle.transmute())
+            .ok()?
+            .control
+            .numeric_value()
+    }
+
     pub fn add_font(&mut self, bytes: &[u8]) -> Result<u8, &'static str> {
         self.draw_ctx.font_atlas.add_font(bytes)
     }

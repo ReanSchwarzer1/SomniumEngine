@@ -14,7 +14,11 @@ use glam::Vec2;
 
 #[derive(Debug, Clone)]
 pub enum SearchBoxMessage {
+    /// Sent `FromWidget` as the user types.
     Query(String),
+    /// Sent `ToWidget` to replace the contents — Esc clearing a live filter,
+    /// or a workspace restoring one.
+    SetText(String),
 }
 
 pub struct SearchBox {
@@ -76,6 +80,16 @@ impl Control for SearchBox {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        // Programmatic clear (Esc dropping a live filter). No `Query` is
+        // emitted back: the caller that sent this already knows, and echoing
+        // would make an Esc that clears two boxes look like one that cleared
+        // one.
+        if let Some(SearchBoxMessage::SetText(text)) = msg.data::<SearchBoxMessage>() {
+            self.query = text.clone();
+            widget.invalidate_layout();
+            msg.handled = true;
+            return;
+        }
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
                 WidgetMessage::Focus => {

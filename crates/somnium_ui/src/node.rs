@@ -185,6 +185,18 @@ pub trait Control: Send + 'static {
     fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> CursorKind {
         CursorKind::Default
     }
+
+    /// The value this widget is currently displaying, if it is a numeric
+    /// control.
+    ///
+    /// Phase 26-Zeta-G needs to compare every inspector field against its
+    /// baseline once per frame to decide which modified dots are lit. Reading
+    /// the value back out of the tree keeps that in one place; the alternative
+    /// was to mirror the value at each of the ~100 `set_value` call sites in
+    /// `lib.rs` and hope none of them was ever missed.
+    fn numeric_value(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// A node in the UI tree: layout base data + concrete widget behavior.

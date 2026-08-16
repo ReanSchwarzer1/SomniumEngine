@@ -37,7 +37,10 @@ impl CreateKind {
 }
 
 /// Which TRS component a NumericField targets (for SetInspectorValue).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Hash` so Phase 26-Zeta-G can key the per-field revert baseline by it. The
+/// variant set and its meaning are unchanged; this is not a contract change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InspectorField {
     PosX,
     PosY,

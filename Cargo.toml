@@ -91,6 +91,14 @@ exr = "1.74"
 # -- Font rasterization (Phase 12A-4) ----------------------------------------
 fontdue = "0.7"
 
+# -- SVG rasterization (Phase 26-Zeta-E) --------------------------------------
+# Builds the editor icon atlas from vendored Tabler + Somnium SVG sources at
+# startup. Text, system fonts and raster-image support are off: every source is
+# a stroked path, and the disabled features would drag in a second font stack
+# beside fontdue. `resvg` re-exports `usvg` and `tiny_skia`, so it is the only
+# entry needed here.
+resvg = { version = "0.48", default-features = false }
+
 # -- Voxel world (Phase 14) ---------------------------------------------------
 block-mesh = "0.2"
 ndshape    = "0.3"

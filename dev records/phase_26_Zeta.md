@@ -1,6 +1,6 @@
 # Phase 26-Zeta — Nocturne Atelier
 
-> **Status:** open. Zeta-B is complete; Zeta-C, Zeta-D and Zeta-F are substantially in tree as of 2026-08-16. Zeta-E, G, H, I and J remain.
+> **Status:** open. Zeta-B–I are substantially in tree as of 2026-08-16. Zeta-J sign-off and a human keyboard/interaction pass remain.
 > **Prepared:** 2026-08-15 · **Last implementation pass:** 2026-08-16
 > **Purpose:** take Somnium's existing Nocturne editor from functional custom UI to a coherent, professional product identity without replacing the retained-mode UI or breaking editor behavior
 > **Design gate:** **passed.** The Claude Design package is delivered and vendored at [`phase 26/design/`](phase%2026/design/); its machine-readable contract is [`nocturne.tokens.json`](phase%2026/design/assets/tokens/nocturne.tokens.json). See §8A.
@@ -10,16 +10,16 @@
 
 | Sub-phase | State | Evidence |
 |---|---|---|
-| Zeta-0 baseline | partial — no frozen before-package | — |
+| Zeta-0 baseline | partial — the capture path exists, the frozen before/after package does not | `SOMNIUM_CAPTURE_UI_PNG` |
 | Zeta-B colour contract | **done** | `color.rs`, `pass.rs`, transfer tests |
-| Zeta-C theme service + recipes | **done** for tokens and the recipe layer; a raw-literal lint is still missing | `theme.rs`, `style.rs`, 7 state tests |
-| Zeta-D typography | **done** for roles, weights and the mono numeric column; shaping/bidi/fallback remain | `typography.rs`, five bundled cuts, 5 tests |
-| Zeta-E brand + icons | partial — SVG sources and manifest vendored, runtime atlas still procedural | `assets/brand/`, `assets/icons/` |
-| Zeta-F shell | **done** for the three command scopes, the 68 px budget and the status bar; workspaces and collapse rules remain | `zeta_shell_after.png`, layout test |
-| Zeta-G workflows | not started | — |
-| Zeta-H interaction / a11y | partial — focus ring and state grammar exist; no keyboard traversal audit | `style.rs` |
-| Zeta-I maintainability | not started — `lib.rs` is still ~6 k lines | — |
-| Zeta-J sign-off | not started | — |
+| Zeta-C theme service + recipes | **done**; a raw-literal lint is still missing | `theme.rs`, `style.rs`, 7 state tests |
+| Zeta-D typography | **done** for roles and weights; shaping/bidi/fallback remain | `typography.rs`, five bundled cuts |
+| Zeta-E brand + icons | **done** — 67 Tabler + 16 Somnium + the Eclipse mark, rasterized by `resvg` | `icon_svg.rs`, coverage test |
+| Zeta-F shell | **done** for scopes, the 68 px budget, collapse rules, workspaces and the status bar | layout + collapse + workspace tests |
+| Zeta-G workflows | partial — Details grammar and revert are wired; browser/filter/preview workflows are not | `property_row.rs` |
+| Zeta-H interaction / a11y | partial — Tab ring, Esc layer order, focus rings; no AccessKit, no human pass | `focus_stops`, `close_top_overlay` |
+| Zeta-I maintainability | **done** for the split — `lib.rs` 6,554 → 3,938, five `editor/` modules; lints remain | `editor/` |
+| Zeta-J sign-off | partial — automated §14 coverage lands; five items still need a human | `mod must_not_break` |
 
 ---
 
@@ -706,15 +706,25 @@ versus Inter; a typography specimen scene.
 
 ### Zeta-E — Brand and icon asset pipeline
 
-> **Status: partial.** The design package's brand SVGs, the sixteen original
-> Somnium icons and `icon-manifest.json` are vendored under
-> `crates/somnium_ui/assets/`, but nothing consumes them at runtime: `icons.rs`
-> still rasterises procedural strokes into a 512² atlas, which is why the
-> engine mark and several tool glyphs still read as sketches in a capture.
+> **Status: done (2026-08-16).** Route **A (Eclipse)** is chosen — it is the
+> package's own recommendation, and the diagonal channel between the two blades
+> is what keeps it off the generic-tech-`S` pile. `somnium-s-eclipse.svg` is now
+> the engine mark at runtime.
 >
-> The gating decision is the monogram route (§8A.6). Vendoring Tabler and
-> standing up the `resvg` pipeline before the route is chosen would mean cutting
-> the optical ladder twice.
+> The utility family is **Tabler** (MIT): 67 outline SVGs, one per `IconId`,
+> vendored individually under `assets/icons/tabler/` rather than redistributing
+> the 6,000-icon upstream, and renamed to the `IconId` they serve so the mapping
+> is legible from the directory listing. The sixteen original Somnium icons sit
+> beside them on the same 24 × 24 / 2 px grid.
+>
+> `icon_svg.rs` compiles every source in with `include_str!` and rasterizes it
+> at startup through `resvg` (default features off — the text feature would drag
+> a second font stack in beside `fontdue`). Only the alpha channel is kept, so
+> the existing shader still tints each glyph with a semantic colour. Any
+> `IconId` without a source keeps its procedural fallback, so a new variant
+> degrades to hand-drawn art rather than to an empty cell. A test renders all 83
+> and fails any that parses but marks fewer than a dozen pixels — a blank cell
+> that replaced a working glyph is worse than a missing source.
 
 - Land approved original `S` sources, optical variants, application icon, splash/title lockups, and provenance.
 - Vendor only selected Tabler SVGs and their MIT license.
@@ -725,18 +735,17 @@ versus Inter; a typography specimen scene.
 
 **Exit:** no mixed icon family; brand and utility glyphs are crisp and distinct at every target scale.
 
-**Remaining, in order:** pick the route (Eclipse recommended) → cut the 16 / 24
-/ 32 / 48 / 128 / 256 optical variants, the `.ico` set and the splash lockup →
-vendor the exact Tabler ids the manifest names into `assets/icons/tabler/` with
-its MIT text → add `resvg` and build DPI-aware monochrome alpha atlases at
-1× / 1.25× / 1.5× / 2× → switch `IconId` from procedural strokes to an
-`IconId → asset` lookup, preserving the enum order and keeping `ImmersivePlay`
-last → audit that every icon-only control has a tooltip.
+**Remaining:** the atlas is a single 32 px cut, not the DPI ladder. 32 → 16 is
+an exact 2:1 box filter and 32 → 20/24 is a mild downscale, so 100 % is correct;
+at 200 % the 24 px action icons upscale 1.5× and go slightly soft. Regenerating
+the atlas on a DPI change needs `IconId::uv_rect` to read runtime atlas
+dimensions instead of the current consts. Also still owed: the optical ladder
+(16/24/32/48/128/256), the `.ico` set and the splash lockup for the chosen
+route.
 
 ### Zeta-F — Shell hierarchy and workspaces
 
-> **Status: done (2026-08-16) for the scopes, the budget and the status bar;
-> workspaces and collapse rules remain.**
+> **Status: done (2026-08-16).**
 >
 > The three command scopes are real: application 36 with the mark, wordmark,
 > menus, Ctrl+P search entry, help and window controls; mode 32 with Save and
@@ -761,17 +770,37 @@ last → audit that every icon-only control has a tooltip.
 
 **Exit:** screenshots match approved redlines; compact/ultrawide layouts pass; persistence/reset are deterministic.
 
-**Remaining:** the §8A.2 collapse rules (☰ at 1100 px, transport labels at
-1400 px, the split context bar at 1280 px, the 44 px icon rail under 120 px);
-named Layout / Terrain / Foliage / Lighting / Materials / Animation / Debug /
-Play workspaces with Save and Reset; drawer → dock promotion as a 200 ms height
-reconcile; the right-to-left status drop order; making status items actionable
-(click the error count to open the log); the second right column and split
-bottom row at ultrawide.
+**Collapse rules** are a pure `CollapseRules::for_width` table, so the whole
+responsive policy is readable in one place and testable without a window: the
+play-state word drops at 1400, the object count at 1280, the command-search
+field at 1100. A test walks every width from 2560 down to 600 and asserts the
+policy is monotone — nothing reappears as the window narrows. Note the redline
+says *transport* labels drop at 1400, not the mode command names: "icon-only
+controls" is a forbidden motif and the package's own 1280 screen still spells
+Select / Landscape / Foliage out. An earlier pass here got that backwards.
+
+**Workspaces** are seven named presets in `workspace.rs` — Layout, Terrain,
+Foliage, Lighting, Materials, Debug, Play — in the Window menu with Reset.
+Presets resolve against the live window size rather than storing absolutes, then
+clamp to the redline minimums, and a test asserts the viewport stays the largest
+region in every preset at 1280, 1920 and 3440 wide.
+
+**A real defect fell out of writing those tests.** `ChromeLayout`'s default
+stored a 720 px viewport as an absolute, so on a 1920 px window the Details
+column took everything left over — over a thousand pixels of inspector against a
+720 px scene. `ChromeLayout::resolved` now clamps the *derived* right column into
+the redline's 240–520 range, and a test proves a deliberate splitter drag inside
+that range still round-trips unchanged.
+
+**Remaining:** the ☰ menu collapse at 1100 px and the ⋯ overflow for Create; the
+split context bar under 1280 px; the 44 px icon rail; drawer → dock promotion as
+a 200 ms height reconcile; actionable status items (click the error count to open
+the log); the second right column and split bottom row at ultrawide.
 
 ### Zeta-G — Professional workflow surfaces
 
-> **Status: foundations only.** The Details *grammar* landed with Zeta-C/D —
+> **Status: Details and revert done; the browser workflows are not.**
+> The Details *grammar* landed with Zeta-C/D —
 > every inspector row is now a `PropertyRow` that computes the 46 % label
 > column, the 14 px modified gutter, ellipsis-with-tooltip and the sub-240 px
 > stacking rule from the redline instead of a per-section `label_w`. That made
@@ -780,8 +809,26 @@ bottom row at ultrawide.
 > Outliner rows go through the `tree_row` recipe and pick up per-row hover and
 > a `body_strong` lift on selection.
 >
-> The workflows themselves — revert, favourites, filters, breadcrumbs, async
-> previews, drag/drop — are not started.
+> **Revert now works, with no `EditorEvent` change.** `Control` grew a
+> `numeric_value` accessor so `UiManager` can read all 103 inspector fields back
+> out of the tree once a frame rather than mirroring values at ~100 `set_value`
+> call sites and hoping none was missed. The first value a field is seen holding
+> becomes its baseline; the dot lights when the live value differs; clicking the
+> dot writes the baseline back through the ordinary path, which is exactly one
+> `ValueChanged` and therefore one undo step. The gutter grows a ring on hover
+> and a pointer cursor, and only a *lit* dot is clickable — swallowing clicks on
+> an unmodified row would make the gutter feel broken.
+>
+> One honest caveat on semantics. The design says the dot means "differs from
+> the component default". The UI layer does not know component defaults, and
+> inventing them would make the dot lie, so the baseline is reset on scene load,
+> save, and selection change — the dot means **"unsaved edit to this
+> property"**, which is the reading that pairs with the status bar's save state.
+> Promoting it to true component-default semantics needs `app.rs` to publish
+> defaults per field.
+>
+> Favourites, filters, breadcrumbs, async previews and drag/drop are not
+> started.
 
 **Outliner**
 
@@ -814,8 +861,28 @@ validation; it is the cue the package leans on hardest.
 
 > **Status: partial.** `Button` tracks keyboard focus and draws the 1 px ring;
 > `style.rs` guarantees selection is fill *and* rail so no required state is
-> colour-only; the certified contrast pairs are transcribed in §8A.3. Nothing
-> else is done.
+> colour-only; the certified contrast pairs are transcribed in §8A.3.
+>
+> **Tab and Esc now follow the design's annotations.** Tab / Shift+Tab walk a
+> region-level focus ring in the specified order — application → mode → viewport
+> context → rail → Outliner → Details → drawer → status — skipping any stop that
+> is hidden, and wrapping. It is deliberately region-level, not control-level:
+> the annotation gives the viewport, the Outliner and each Details section *one*
+> stop each and expects arrows to traverse inside them, so tabbing through 120
+> property fields would be the wrong shape. A focused text field keeps Tab for
+> itself.
+>
+> `close_top_overlay` was reordered to the package's sequence — **modal →
+> palette → popup → drawer → filter → selection** — and extended past popups to
+> actually reach the last three. The modal moved to the front because it is the
+> only layer that traps focus; closing something underneath it would strand the
+> keyboard. Esc now also clears a live search filter and, failing that, drops
+> the selection.
+>
+> **Remaining:** arrow-key traversal *inside* the Outliner and Details; focus
+> trapping and return inside the modal; AccessKit semantic IDs, roles and
+> actions; a colour-vision simulation pass; reduced-motion; and a human
+> keyboard-only walk, which no headless test substitutes for.
 
 - Complete keyboard traversal, focus trapping/return, mnemonic/shortcut display, and visible focus rings.
 - Give widgets stable semantic IDs, roles, labels, values, states, and actions in preparation for/through AccessKit.
@@ -828,9 +895,16 @@ validation; it is the cue the package leans on hardest.
 
 ### Zeta-I — Maintainability and regression harness
 
-> **Status: not started.** `lib.rs` is still ~6 000 lines. The Zeta work so far
-> has *reduced* the literal count inside it (roles and recipes replaced
-> size/colour triples) without splitting the file.
+> **Status: split done (2026-08-16); lints remain.** `lib.rs` went from 6,554
+> lines to 3,938. Everything that only *builds* widgets moved into `editor/`,
+> one module per surface: `shell.rs` (1,349), `inspector.rs` (744),
+> `parts.rs` (309), `help.rs` (231), `content.rs` (189). `lib.rs` keeps
+> `UiManager` — the state machine, OS-event routing and the `EditorEvent` seam —
+> so a change to how a surface *looks* no longer lands in the same file as a
+> change to how the editor *behaves*.
+>
+> **Remaining:** the token/raw-literal lint, the licence and icon-manifest
+> checks, the component gallery scene and golden screenshot diffing.
 
 - Split `UiManager` editor construction by shell/viewport/Outliner/Details/Content/Log/Help/overlays while preserving event ownership.
 - Add component gallery and golden screenshot scenes.
@@ -981,15 +1055,20 @@ longer "when the design arrives". A session picking Zeta up should:
    the token values; `theme.rs` is a transcription of
    `design/assets/tokens/nocturne.tokens.json` and the two must stay equal.
 4. Take the next step from the "Remaining" block of whichever sub-phase you are
-   in. If choosing freely, the ranked order by visible payoff is:
-   **(a)** Zeta-G revert wiring — the gutter dot already renders and needs only
-   a producer, and no `EditorEvent` change; **(b)** Zeta-E's monogram route plus
-   the `resvg` atlas, which is what still makes the mark and several tool glyphs
-   read as sketches; **(c)** Zeta-F workspaces and collapse rules; **(d)**
-   Zeta-I's `lib.rs` split, which every later change pays for.
-5. Keep the engine runnable and the Phase 26 must-not-break matrix green after
+   in. If choosing freely, the ranked order by visible payoff is now:
+   **(a)** the Content Browser workflows in Zeta-G — filters, breadcrumb
+   history, async previews and drag-to-spawn are the largest surface still
+   showing placeholder behaviour; **(b)** the remaining Zeta-F collapse steps
+   (☰ at 1100 px, the split context bar at 1280 px, the 44 px icon rail);
+   **(c)** Zeta-H's arrow-key traversal inside the Outliner and Details plus
+   modal focus trapping; **(d)** Zeta-I's raw-literal and licence lints, which
+   are what stop the token layer drifting back into decoration.
+5. **Run the five `MANUAL_ONLY` checks in `mod must_not_break`.** They are the
+   part of the `phase_26.md` §14 inventory no headless test can cover, and they
+   have not been performed.
+6. Keep the engine runnable and the Phase 26 must-not-break matrix green after
    every sub-phase, and re-capture rather than describing the result.
-6. Add a dated §15 ledger entry that says what is *not* done as plainly as what
+7. Add a dated §15 ledger entry that says what is *not* done as plainly as what
    is.
 
 **Definition of done:** Somnium's editor is a coherent, original, accessible, measurable product system—not merely a darker screenshot—and its identity, components, workflows, implementation rules, evidence, and third-party provenance are all documented and reproducible.
@@ -1092,3 +1171,74 @@ workflow surfaces including revert, Zeta-H's keyboard traversal and AccessKit,
 Zeta-I's `lib.rs` split and lints, and Zeta-J. The Phase 26 must-not-break
 inventory has not been re-walked interactively since this pass and remains the
 controlling gate.
+
+### 2026-08-16 (second pass) — icons, revert, workspaces, keyboard, the split
+
+Closing the list the first pass left open. No `EditorEvent` variant was added
+or changed; `InspectorField` gained `Hash` so it can key a map, which is not a
+contract change.
+
+**Zeta-E — one icon family, finally.** Route **A (Eclipse)** is chosen, so the
+brand SVG is now the runtime engine mark. 67 Tabler outline icons (MIT) are
+vendored one-per-`IconId` and renamed to the id they serve; the sixteen original
+Somnium icons sit beside them on the same grid. `resvg` (default features off)
+rasterizes all 83 at startup into the existing 32 px atlas cells, keeping only
+alpha so the shader still tints by semantic colour. Icons without a source keep
+their procedural fallback. A test renders every source and fails any that parses
+but marks fewer than a dozen pixels.
+
+**Zeta-G — revert.** `Control::numeric_value` lets `UiManager` read all 103
+inspector fields back out of the tree once a frame, rather than mirroring values
+at ~100 `set_value` call sites. First observation becomes the baseline; the dot
+lights on difference; clicking it writes the baseline back through the ordinary
+value path — one `ValueChanged`, one undo step. Baselines reset on scene load,
+save and selection change, so the dot honestly means "unsaved edit to this
+property" rather than claiming component-default semantics the UI layer cannot
+know.
+
+**Zeta-F — collapse rules and workspaces.** `CollapseRules::for_width` holds the
+whole responsive policy as one pure table; a test walks 2560 → 600 px and proves
+it is monotone. Seven named workspaces in `workspace.rs` reach the Window menu
+with Reset, resolving against the live window size and clamping to the redline
+minimums. Writing their tests surfaced a real defect: `ChromeLayout`'s default
+stored a 720 px viewport as an absolute, so a 1920 px window gave the Details
+column over a thousand pixels and the scene 720. `ChromeLayout::resolved` now
+clamps the derived right column into the redline's 240–520 range while letting a
+deliberate drag inside that range round-trip unchanged.
+
+An earlier version of the collapse table also had the 1400 px rule backwards —
+it dropped the *mode command* names rather than the transport's play-state word.
+The package forbids icon-only controls and its own 1280 screen spells the mode
+commands out; the table now matches.
+
+**Zeta-H — Tab and Esc.** Tab / Shift+Tab walk a region-level focus ring in the
+annotated order, skipping hidden stops and wrapping. `close_top_overlay` was
+reordered to modal → palette → popup → drawer → filter → selection and extended
+to actually reach the last three; the modal moved to the front because it is the
+only layer that traps focus.
+
+**Zeta-I — the split.** `lib.rs` 6,554 → 3,938 lines. Construction code moved to
+`editor/{shell,inspector,parts,help,content}.rs`; `lib.rs` keeps `UiManager`.
+
+**Zeta-J — automated §14 coverage.** A `must_not_break` test module asserts that
+every `CreateKind` still has a Create row, that the transport / mode / file /
+edit / profiler / drawer / log / help controls all still exist and are sized,
+that the terrain palette still arms tools 0–5 in order, and that the viewport
+stays the largest region at 1280 / 1920 / 2560 / 3440. Five inventory items
+genuinely need a human at the keyboard — fly-cam feel, gizmo drag, terrain
+sculpting, foliage painting, and viewport input passthrough — and are listed in
+`MANUAL_ONLY` so the gap is countable rather than invisible.
+
+Verification: `cargo test -p somnium_ui` 74/74 (was 56); serial
+`cargo test --workspace -j 1` green; `cargo fmt --all` and
+`cargo clippy -p somnium_ui` clean; a live `hello_engine` run captures the editor
+with chrome and exits without a wgpu validation error.
+
+**Still open.** DPI-aware icon atlas regeneration; text shaping and bidi
+(`cosmic-text`); the ☰ / ⋯ collapse steps and the split context bar; Content
+Browser workflows — filters, breadcrumb history, async previews, drag-to-spawn;
+arrow-key traversal inside the Outliner and Details, modal focus trapping, and
+AccessKit; the raw-literal and licence lints; the component gallery and golden
+screenshot diffing; and the before/after evidence package at every target size
+and scale. The five `MANUAL_ONLY` interaction checks have not been performed —
+they need the user at the keyboard, and this document does not claim otherwise.
