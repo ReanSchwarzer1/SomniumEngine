@@ -188,6 +188,38 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
         raw.extend_from_slice(&rgb[row..row + width as usize * 3]);
     }
 
+    // Real deflate, via the `image` encoder already in this crate's tree.
+    //
+    // This used to emit *stored* zlib blocks — structurally valid PNG, but with
+    // no compression at all, so every capture was width × height × 3 bytes on
+    // disk. A 1280×720 editor screenshot was 2.7 MB, which is not a size you
+    // want to commit as evidence on every sub-phase.
+    let mut out = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut out,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    match image::ImageEncoder::write_image(
+        encoder,
+        rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    ) {
+        Ok(()) => out,
+        Err(e) => {
+            // Fall back to the hand-rolled stored-block writer rather than
+            // losing the capture: a large PNG beats no PNG when something is
+            // being debugged.
+            tracing::warn!("PNG encode failed ({e}); falling back to stored blocks");
+            encode_png_stored(width, height, &raw)
+        }
+    }
+}
+
+/// Uncompressed-fallback PNG writer. Only reached if the real encoder fails.
+fn encode_png_stored(width: u32, height: u32, raw: &[u8]) -> Vec<u8> {
     let mut zlib = vec![0x78, 0x01];
     let mut offset = 0usize;
     while offset < raw.len() {
@@ -199,7 +231,7 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
         zlib.extend_from_slice(&raw[offset..offset + n]);
         offset += n;
     }
-    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+    zlib.extend_from_slice(&adler32(raw).to_be_bytes());
 
     let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     let mut ihdr = Vec::with_capacity(13);

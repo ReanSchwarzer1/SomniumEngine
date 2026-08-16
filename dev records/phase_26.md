@@ -16,7 +16,8 @@
 > ComboBox as a root popup overlay (Type / Tonemap), toolbar Select/Landscape/
 > Foliage wiring, terrain palette selected fill, inspector search reapply,
 > ScrollViewer zero-track thumb, ancestor layout invalidation on dirty measure.
-> 26-H SDF/cosmic-text slipped (bundled bitmap Inter, supersampled + HiDPI
+> 26-H SDF/cosmic-text slipped; 26-Zeta-D later shipped five weighted cuts on
+> the same rasterizer (bundled Inter + JetBrains Mono, supersampled + HiDPI
 > raster). 26-J (reflection inspector) not started.
 >
 > **This phase is not closed.** The 26-A–I toolkit and Nocturne shell are the
@@ -977,7 +978,7 @@ Order is dependency. Do not skip A/B to "get to the Drawer".
 | **26-E** | Details / Outliner | Tree outliner, PropertyRows, CheckBox/Combo replacements, inspector search, section icons | No InspectorField lost; foliage/tonemapper are combos; terrain palette and paint still arm brushes |
 | **26-F** | Iris | Colour widget + lights + water colours/leftovers + particles + material base | See §11; Cancel restores; Kelvin lock; water defaults unchanged |
 | **26-G** | Runtime UI | Screen-space `UiCanvas` API usable from `hello_engine` without `UiManager` editor chrome; 9-slice; simple HUD/pause stub **optional** as dogfood | A game can build a widget tree and draw it through `UiPass` (or a second pass) without linking editor layout |
-| **26-H** | Type | **Slipped.** Bundled bitmap Inter, 1.5× supersample + window DPI raster. No SDF/MSDF, no rustybuzz/cosmic-text. | Latin at 12–24 px is readable; shaping/kerning remain a later pass |
+| **26-H** | Type | **Partly superseded by 26-Zeta-D.** Five bundled cuts (Inter Regular/Medium/SemiBold, JetBrains Mono Regular/Medium) behind semantic `FontRole`/`TextRole` roles, 1.5× supersample + window DPI raster, letter-spacing for the caps header role, mono numerics for tabular figures. Still no SDF/MSDF and no rustybuzz/cosmic-text. | Latin at 11–24 px is readable **and** has weight hierarchy; shaping, kerning, bidi and script fallback remain a later pass |
 | **26-I** | Polish | Command palette (Ctrl+P), toasts, HiDPI scale, layout width persistence, modal unsaved, ATTRIBUTION, context.md §8. Evidence PNGs **not invented** — capture live into `dev records/phase 26/` | Palette/toasts/layout persist/unsaved modal work; screenshots optional |
 
 **26-D2 (optional inside D):** drag-drop spawn from drawer to viewport.

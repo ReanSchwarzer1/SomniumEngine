@@ -25,6 +25,12 @@
 
 ## 0. Executive decision
 
+> **Historical.** §0 and §2 record the state Zeta was written against
+> (2026-08-15), not the state of the tree. Six of the issues below are now
+> addressed — see the status table at the top and the §15 ledger. They are kept
+> verbatim because the reasoning is what justifies the design, and rewriting an
+> audit after acting on it destroys the evidence that the action was warranted.
+
 Somnium does **not** need an ImGui migration or another surface-only recolor. It already has the right broad information architecture and a capable custom Rust/wgpu widget stack. The professionalism gap is caused by six system-level issues:
 
 1. **The UI colour pipeline is presently wrong.** Nocturne's sRGB byte values are sent as if they were linear values to an sRGB swapchain. The target encodes them again. The intended panel colour `#1C1E26` therefore appears as approximately `#5D606C`, which exactly matches the pale grey in the supplied Somnium screenshot. Palette design must not be judged or retuned until this is corrected.
@@ -79,7 +85,7 @@ The attached Phase 26 document supplies constraints and engine facts, not a sepa
 
 ---
 
-## 2. Current Somnium audit
+## 2. Somnium audit as of 2026-08-15 (historical)
 
 ### 2.1 Architecture and assets inspected
 
@@ -1299,3 +1305,45 @@ round-trip, the cross-monitor transfer and the legacy-file case.
 Verification: `cargo test -p somnium_ui` 80/80; serial `cargo test --workspace
 -j 1` green; `cargo fmt --all` and `cargo clippy -p somnium_ui --all-targets`
 clean; live capture re-taken.
+
+### 2026-08-16 (documentation pass)
+
+Every living document now describes the editor that is actually in tree.
+
+- **`README.md`** leads with the Eclipse lockup (dark/light via `<picture>`),
+  the identity sentence, and a **real screenshot** — `media/editor.png`, captured
+  from a running build rather than mocked up. A new *Editor design system* block
+  lists what Nocturne Atelier actually provides; the licence section now names
+  the bundled fonts and icons and states plainly that the Somnium name, the
+  Eclipse mark and the engine-specific icons are **not** covered by the dual
+  licence and have not been through trademark clearance.
+- **The README lockups are generated, not hand-edited.** The brand sheet requires
+  outlines rather than live text, and GitHub renders README SVGs through `<img>`,
+  where Inter is unavailable and a `<text>` element would fall back to the
+  reader's `system-ui` with unapproved metrics. `fontTools` converts the wordmark
+  from the bundled Inter cuts to path data; the mark stays `#7A86FF`.
+- **`context.md`** §8 now shows the floating context bar in the shell diagram and
+  the 68 px scene origin, lists the new modules (`style`, `typography`,
+  `workspace`, `icon_svg`, `editor/`), documents the collapse rules, the
+  workspaces, the column-based layout persistence and the Tab/Esc contract, and
+  records `SOMNIUM_CAPTURE_UI_PNG` as the only capture that shows chrome. The
+  roadmap row and both phase summaries are rewritten.
+- **`ATTRIBUTION.md`** §1.4 gains the rows where Somnium *diverges* from Unreal —
+  a floating viewport bar, a gutter-dot revert whose baseline is honestly the
+  last save rather than a component default, and Blender-style workspaces. §1.5
+  replaces "no third-party SVG is vendored" with the Tabler + resvg reality and
+  tabulates the five bundled font cuts.
+- **`THIRD_PARTY_NOTICES.md`** covers Inter, JetBrains Mono, Tabler and resvg
+  with upstream, version, files, modification and retrieval date.
+- **Help pages** (`docs/editor/`): Shortcuts documents Tab traversal, the Esc
+  layer order, the revert dot and workspaces; About is rewritten for the real
+  type and icon story; Welcome explains the three command scopes; Outliner
+  explains why selection is fill *and* rail.
+- **`media/README.md`** records the capture command so screenshots stay
+  reproducible.
+
+**A defect fixed along the way.** `encode_png` emitted *stored* deflate blocks —
+valid PNG, no compression — so every capture was `width × height × 3` on disk and
+a 1280×720 screenshot cost 2.7 MB. It now uses the `image` encoder that was
+already in the renderer's dependency tree, with the hand-rolled writer kept as a
+fallback so a failure loses size rather than the capture. Same image, 448 KB.

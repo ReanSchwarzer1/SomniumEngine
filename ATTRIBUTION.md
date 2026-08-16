@@ -98,15 +98,20 @@
 | Outliner panel (actor hierarchy) | Native `TreeView` in `somnium_ui` | Parent/child depth, type icons, search (Phase 26-E) |
 | Details panel (per-actor properties) | Native inspector `CheckBox` / `ComboBox` / `NumericField` | Every `InspectorField` kept; foliage kind + tonemapper are combos |
 | Content Browser (asset grid) | Docked Content Drawer (`WrapPanel` tiles) | Ctrl+Space; project `assets/`; Show Engine Content off by default (26-D). Click-away does **not** close it. |
-| Toolbar (Play/Pause/Stop) | Icon buttons on the main toolbar | `EditorEvent::PlaySimulation` / Pause / Stop; selected/hover/press fills, no tooltips |
-| FPS counter (top-right toolbar) | Custom title bar `fps_text` | `UiManager::set_fps` each frame |
+| Toolbar (Play/Pause/Stop) | Icon buttons in the mode scope | `EditorEvent::PlaySimulation` / Pause / Stop; selected/hover/press fills, tooltips on every glyph (26-Zeta) |
+| FPS counter (top-right toolbar) | Application-scope `fps_text` + status statistics | `UiManager::set_fps`, `set_status_stats` each frame |
+| Viewport toolbar | A bar that **floats over the render**, 12 px inset | Somnium diverges here: docking it cost 32 px of scene for controls that belong next to what they change (26-Zeta-F) |
+| Details "revert to default" arrow | Gutter dot in a 14 px left column | Reverts one property in one undo step through the existing `SetInspectorValue` path. Somnium's baseline is the last save/load/selection, not the component default — the UI layer does not know defaults, and claiming otherwise would make the dot lie |
+| Named editor layouts | `workspace.rs` presets (Layout, Terrain, Foliage, Lighting, Materials, Debug, Play) | Pattern is closer to **Blender workspaces** than to UE's layout menu; presets resolve against the live window size |
 
 ### 1.5 Editor chrome, Content Drawer, and colour picker (Phase 26 — Metaphor)
 
 **Status:** 26-A through 26-I plus the 2026-08-13 UX polish (custom title bar,
 docked drawer, wrapped Help, button states, scrollbars, tile browser,
-immersive play, ComboBox overlay) implemented 2026-08-13. 26-H SDF/cosmic-text
-slipped (bitmap Inter, supersampled). 26-J not started.
+immersive play, ComboBox overlay) implemented 2026-08-13. Phase 26-Zeta-B–I
+(Nocturne Atelier) implemented 2026-08-15/16. 26-H SDF/cosmic-text still
+slipped — Zeta-D shipped weight hierarchy on `fontdue` first, because weights
+were the visible gap and shaping is the risky one. 26-J not started.
 
 **This phase is not closed.** New renderer, terrain, animation, and gameplay
 features will keep needing inspector sections, menus, drawers, and Help
@@ -116,15 +121,40 @@ Controlling contract: `dev records/phase_26.md`. Codename is thematic (Atlus);
 **no Atlus art**. Visual IA is Unreal Editor 5. **No** `EditorStyle` / Starship
 icons, Slate, or UMG source.
 
-**Icons:** original geometric strokes rasterized to a 512² atlas (`icons.rs`).
-The Phase 26-Zeta extension adds sixteen original Somnium source SVGs on a
-24×24 / 2 px grid under `crates/somnium_ui/assets/icons/somnium/`; their
-manifest and provenance travel with the sources. No Tabler, Lucide, or other
-third-party SVG path is vendored. The Eclipse-S engine mark and its responsive
-lockups are original Somnium artwork under `assets/brand/`.
+**Icons (updated 2026-08-16):** the utility family is now **Tabler Icons**
+(MIT, Paweł Kuna) — 67 outline SVGs vendored individually under
+`crates/somnium_ui/assets/icons/tabler/`, renamed to the `IconId` each one
+serves, path data unaltered. The upstream set of 6,000+ is **not**
+redistributed. Beside them sit sixteen original Somnium SVGs on the same
+24 × 24 / 2 px grid under `assets/icons/somnium/`; the grid is an
+interoperability constraint, not copied artwork. Both are rasterized at startup
+by **resvg** (MIT/Apache-2.0) into a 1024² two-cut alpha atlas — a 32 px block
+for chrome and a 96 px block for Content Browser tiles. The procedural stroke
+routines in `icons.rs` remain as the fallback for any `IconId` without a source.
+Licences and modifications: `THIRD_PARTY_NOTICES.md`.
 
-**Font:** Inter latin-400, SIL OFL 1.1, bundled at
-`crates/somnium_ui/assets/fonts/Inter-Regular.ttf`.
+The **Eclipse-S** engine mark, its optical variants and the horizontal lockups
+are original Somnium artwork under `assets/brand/`. The lockup wordmark is
+converted to outlines rather than set live, per the brand sheet. No `EditorStyle`,
+Starship, Lumina or Unreal mark, silhouette or asset is used anywhere.
+
+**Fonts (updated 2026-08-16):** five static cuts, all SIL OFL 1.1, subset from
+their official upstreams with `fontTools` and bundled under
+`crates/somnium_ui/assets/fonts/`:
+
+| Role | File | Family |
+|---|---|---|
+| `ui_regular` | `Inter-Regular.ttf` | Inter 4.1 |
+| `ui_medium` | `Inter-Medium.ttf` | Inter 4.1 |
+| `ui_semibold` | `Inter-SemiBold.ttf` | Inter 4.1 |
+| `mono` | `JetBrainsMono-Regular.ttf` | JetBrains Mono 2.304 |
+| `mono_strong` | `JetBrainsMono-Medium.ttf` | JetBrains Mono 2.304 |
+
+Numeric property values use the mono face. That is a deliberate substitution for
+the token sheet's `tnum` requirement: `fontdue` applies no OpenType features, so
+tabular figures come from a monospaced face by construction instead of from a
+feature flag. Outlines are unaltered and neither family is renamed, so the
+Reserved Font Name rules are unaffected.
 
 **Paint:** Somnium **Nocturne Atelier** (`theme.rs`,
 `assets/tokens/nocturne.tokens.json`) — lunar indigo `#7A86FF`, Inter, cool

@@ -7,7 +7,7 @@ section. Suggested captures:
 
 | Filename | What to show |
 |---|---|
-| `editor.png` | Custom title bar, viewport, Outliner/Details, docked Content Drawer |
+| `editor.png` | ✅ **done** — command scopes, viewport, Outliner/Details, docked Content Drawer |
 | `terrain.png` | Heightmap terrain with splatmap painting / sculpted hills |
 | `voxel.png` | The voxel world streaming around the camera |
 | `shadows.png` | Cascaded shadows + PBR materials on the glTF scene |
@@ -19,3 +19,20 @@ Tips:
   downscale 4K captures to ~1600px wide.
 - The README references these by path, so keep the filenames above (or update the
   links in `README.md` if you rename them).
+
+## Capturing
+
+Screenshots come from the engine, not from a screen grabber, so they are
+deterministic and always show a real build:
+
+```sh
+SOMNIUM_CAPTURE_UI_PNG=media/editor.png \
+SOMNIUM_CAPTURE_FRAME=140 \
+SOMNIUM_CAPTURE_QUIT=1 \
+SOMNIUM_TERRAIN=1 \
+cargo run -p hello_engine
+```
+
+`SOMNIUM_CAPTURE_UI_PNG` reads the swapchain back **after** the UI pass, so it
+includes editor chrome. `SOMNIUM_CAPTURE_DISPLAY_PNG` runs *before* it, on
+purpose, so a scene A/B measures the render rather than the panels.

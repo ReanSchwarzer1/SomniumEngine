@@ -17,3 +17,10 @@ The panel under the Outliner is the inspector for the current selection.
 - **Terrain / Foliage / Water** — authoring fields for those components. Terrain has **LOD Morph** / **Morph** and **Dbg** 0–31. Foliage has **Cull** / **LOD** / **Impostor** (horizontal metres: drop leaves, then keep solid parts — not a billboard). Water defaults are frozen; **SSR**, **RT Reflect**, and **Reflect Debug** are the reflection knobs (Help → Water).
 
 Search at the top of Details hides sections that do not match. New component types add rows here as they ship — the inspector is not a closed list.
+
+## Reading a row
+
+Selection is always two cues, never one colour: the row takes a translucent
+indigo fill **and** a 2 px indigo rail down its left edge, and its label steps
+up a weight. Hovering washes the row without moving anything — a hover that
+changed a border would reflow the list under your cursor.
