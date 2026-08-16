@@ -6,7 +6,7 @@
             srcset="crates/somnium_ui/assets/brand/somnium-lockup-horizontal-light.svg">
     <img alt="Somnium Engine"
          src="crates/somnium_ui/assets/brand/somnium-lockup-horizontal.svg"
-         width="300">
+         width="400">
   </picture>
 </p>
 

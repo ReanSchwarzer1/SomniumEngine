@@ -1347,3 +1347,32 @@ valid PNG, no compression — so every capture was `width × height × 3` on dis
 a 1280×720 screenshot cost 2.7 MB. It now uses the `image` encoder that was
 already in the renderer's dependency tree, with the hand-rolled writer kept as a
 fallback so a failure loses size rather than the capture. Same image, 448 KB.
+
+### 2026-08-16 (lockup geometry)
+
+The README lockup looked off-centre inside a `<p align="center">` that was in
+fact centring it correctly. The cause was inside the SVG: a hand-set 250 × 64
+viewBox around artwork that only occupied x 15–154, y 18–49. Roughly 40 % of the
+width and half the height were empty, so the *box* centred while the visible
+artwork sat about 115 px to the left at the chosen width — and the logo read as
+small for the space it took.
+
+`tools/build_lockup.py` now measures the viewBox from the artwork's own bounds,
+with clear space set to one blade stroke (9.2 × 0.76 = 7.0 units) on all four
+sides as the brand sheet specifies. The box is 153.08 × 45.21 and the aspect
+moves from 3.91:1 to 3.39:1.
+
+The generator moved out of a scratch directory and into `tools/` because
+`PROVENANCE.md` instructs future maintainers to regenerate rather than hand-edit,
+and an instruction to run a script that does not exist is not an instruction.
+README width dropped 720 → 440, which renders the same artwork size as before
+with the dead space gone.
+
+**Correction (same day).** The first tightened viewBox clipped the top of the S.
+`mark_bounds` had assumed the blade arc was centred on (32, 32) — the grid centre
+the two blades are *rotated* about — when the arc's actual centre is (32, 19).
+The mark's true extent is y 7.99–54.81; the box started at 10.88. `tools/build_lockup.py`
+now runs the SVG endpoint-to-centre parameterisation (F.6.5) and samples the
+stroked envelope of both blades instead of guessing, giving a 153.08 × 60.81 box.
+The in-editor atlas was never affected: `icon_svg::rasterize` asks `resvg` for the
+tree's own size rather than using any hand-computed bound.
