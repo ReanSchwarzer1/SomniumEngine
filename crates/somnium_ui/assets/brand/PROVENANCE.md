@@ -26,11 +26,15 @@ Regenerate; do not re-space or re-colour them by hand.
 
 The script also **measures** the viewBox from the artwork rather than assuming
 one, with clear space set to one blade stroke on all four sides as the brand
-sheet specifies. The first hand-set box was 250 × 64 while the art only occupied
-x 15–154, y 18–49 — roughly 40 % dead space on the right and half the height
-empty. A centred `<img>` therefore looked visibly off-centre, and the logo
-looked small for the room it took. Anything that changes the wordmark or the
-mark scale must go back through the script so the box stays tight.
+sheet specifies. Two hand-set boxes got this wrong before it was computed: a
+250 × 64 box around art occupying only x 15–154, y 18–49 (≈40 % dead width, half
+the height empty, so a centred `<img>` looked off-centre), and then a box that
+assumed the blade arc was centred on (32, 32) — the grid centre the blades are
+*rotated* about — when its real centre is (32, 19), which put the top of the S
+outside the box. The current box is 153.08 × 60.81.
+
+Anything that changes the wordmark, the mark scale or the blade geometry must go
+back through the script so the box stays tight and nothing clips.
 
 Outlined glyph shapes remain covered by Inter's SIL OFL 1.1 — outlining is not a
 licence escape, and the OFL is satisfied because the licence text ships with the

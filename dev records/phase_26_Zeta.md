@@ -1367,3 +1367,12 @@ The generator moved out of a scratch directory and into `tools/` because
 and an instruction to run a script that does not exist is not an instruction.
 README width dropped 720 → 440, which renders the same artwork size as before
 with the dead space gone.
+
+**Correction (same day).** The first tightened viewBox clipped the top of the S.
+`mark_bounds` had assumed the blade arc was centred on (32, 32) — the grid centre
+the two blades are *rotated* about — when the arc's actual centre is (32, 19).
+The mark's true extent is y 7.99–54.81; the box started at 10.88. `tools/build_lockup.py`
+now runs the SVG endpoint-to-centre parameterisation (F.6.5) and samples the
+stroked envelope of both blades instead of guessing, giving a 153.08 × 60.81 box.
+The in-editor atlas was never affected: `icon_svg::rasterize` asks `resvg` for the
+tree's own size rather than using any hand-computed bound.
