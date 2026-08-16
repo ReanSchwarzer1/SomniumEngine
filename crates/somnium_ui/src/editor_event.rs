@@ -70,6 +70,14 @@ pub enum InspectorField {
     LightSourceRadius,
     LightAreaWidth,
     LightAreaHeight,
+    /// Phase DOOM-E: camera distance past which terrain takes the aerial
+    /// pipeline, in metres.
+    TerrainAerialDistance,
+    // Camera (Phase DOOM-F) — only for the Camera singleton.
+    /// Frame time the dynamic-resolution controller aims at, in milliseconds.
+    CameraDynResTargetMs,
+    /// Lowest resolution scale it may choose, entered as a **percentage**.
+    CameraDynResFloor,
     // Post-processing (Phase 15A1) — only for entities with a
     // `PostProcessComponent`.
     /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
@@ -324,6 +332,20 @@ pub enum EditorEvent {
     /// The bool is the checkbox value, not a toggle — applying Check as a flip
     /// turned a default-on flag off the first time the inspector refreshed.
     SetCpuFrustum(bool),
+    /// Phase DOOM-F: let the renderer scale the internal 3D resolution to hold
+    /// the Camera entity's frame budget. Off by default.
+    SetDynamicResolution(bool),
+    /// Phase DOOM-E: shade terrain past `aerial_split` with a second, narrower
+    /// pipeline. Off by default — measured invisible and 2.3 ms slower on its
+    /// own, and a real look change with the 16-layer scan.
+    SetTerrainAerial(bool),
+    /// Phase DOOM-E: also cut the aerial pipeline's layer scan to the hero bank.
+    SetTerrainAerialHeroBank(bool),
+    /// Phase DOOM-B: count pixels per shading class. A diagnostic, ~0.08 ms.
+    SetPixelCensus(bool),
+    /// Phase DOOM-C: route tiles to per-bin shading pipelines. Off by default —
+    /// correct but measured slower than the fullscreen draw at every tile size.
+    SetShadeBins(bool),
     /// CDLOD vertex morphing on the selected terrain (Phase 25C). Default off.
     ToggleTerrainMorph,
     /// Toggle whether painted foliage is shown (Phase 17C).

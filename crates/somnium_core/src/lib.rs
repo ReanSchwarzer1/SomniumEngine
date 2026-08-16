@@ -1108,26 +1108,59 @@ mod post_process_tests {
 /// GPU 15B on F10.
 ///
 /// Local `-Z` is the look direction, same as lights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Eq` dropped when DOOM-F added float fields: `f32` has no total equality, and
+// a derived `Eq` on a struct holding one is a lie about NaN whatever the
+// compiler would let through.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraSettingsComponent {
     /// Skip terrain chunks whose AABB misses the camera frustum before they
     /// reach `draw_queue`. Default on. Off-screen casters still shadow into
     /// view. `SOMNIUM_CPU_FRUSTUM=0` forces this off.
     pub frustum_cull: bool,
+    /// Phase DOOM-F. Let the renderer lower the internal 3D resolution to hold
+    /// a frame budget. **Off by default and deliberately so.**
+    ///
+    /// This is the only control in Phase DOOM that trades image quality for
+    /// speed, so it is something the user turns on with the floor in front of
+    /// them, not something the engine starts doing when a frame gets expensive.
+    pub dynamic_resolution: bool,
+    /// Frame time the controller aims at, in milliseconds. 16.67 is 60 Hz.
+    pub dynamic_target_ms: f32,
+    /// Lowest scale it may choose, as a fraction of the preset resolution.
+    /// 0.67 renders about 45% of the pixels.
+    pub dynamic_floor: f32,
 }
 
 impl Default for CameraSettingsComponent {
     fn default() -> Self {
-        Self { frustum_cull: true }
+        Self {
+            frustum_cull: true,
+            dynamic_resolution: false,
+            dynamic_target_ms: 1000.0 / 60.0,
+            dynamic_floor: 0.67,
+        }
     }
 }
 
 impl CameraSettingsComponent {
-    /// Honour `SOMNIUM_CPU_FRUSTUM=0` at spawn.
+    /// Honour `SOMNIUM_CPU_FRUSTUM=0` and the Phase DOOM-F overrides at spawn.
     #[must_use]
     pub fn from_env() -> Self {
+        let num = |key: &str, default: f32| -> f32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f32| v.is_finite() && *v > 0.0)
+                .unwrap_or(default)
+        };
+        let default = Self::default();
         Self {
             frustum_cull: std::env::var("SOMNIUM_CPU_FRUSTUM").as_deref() != Ok("0"),
+            // `SOMNIUM_DYNRES=1` exists so a timing run can measure the
+            // controller without a human clicking a checkbox first.
+            dynamic_resolution: std::env::var("SOMNIUM_DYNRES").as_deref() == Ok("1"),
+            dynamic_target_ms: num("SOMNIUM_DYNRES_TARGET_MS", default.dynamic_target_ms),
+            dynamic_floor: num("SOMNIUM_DYNRES_FLOOR", default.dynamic_floor).clamp(0.25, 1.0),
         }
     }
 }

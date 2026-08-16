@@ -242,6 +242,44 @@ pub struct SomniumRenderer {
     /// Phase 29. Public because the editor drives its toggle and reads its
     /// report; there is nothing to encapsulate behind an accessor pair.
     pub profiler: crate::profiler::GpuProfiler,
+    /// Phase DOOM-A. Inert unless `SOMNIUM_TIME` is set; when it is, it forces
+    /// the profiler on, accumulates unsmoothed samples and writes a `.somtime`
+    /// table with a standard deviation beside every mean.
+    timing: Option<crate::timing::TimingRun>,
+    /// Phase DOOM-B. Counts pixels per prospective shading bin. Public so the
+    /// editor can toggle it and read the table; default off (`SOMNIUM_CENSUS=1`).
+    pub census_pass: crate::pass::census::CensusPass,
+    /// Phase DOOM-C. Routes tiles to per-bin shading pipelines. Public for the
+    /// Post FX toggle and the Terrain aerial-split field.
+    pub classify_pass: crate::pass::classify::ClassifyPass,
+    /// Phase DOOM-E: camera distance past which terrain shades through the
+    /// aerial pipeline. Editable on the Terrain entity.
+    pub aerial_split: f32,
+    /// Whether the user wants the aerial split at all.
+    ///
+    /// **Default off, and measured rather than assumed.** With only hex tiling
+    /// and the parallax march removed the aerial pipeline changed 925 pixels of
+    /// 2 938 110 — invisible — and cost **+2.3 ms** on the Coastal overview,
+    /// because `gpu_material_for_camera` had already switched both off above
+    /// 80 m and the second full-screen pass was pure overhead. It only pays
+    /// with [`Self::aerial_hero_bank`], which is a real look change.
+    pub aerial_split_enabled: bool,
+    /// Phase DOOM-E: also cut the aerial pipeline's layer scan to the hero
+    /// bank. Changes the look of distant terrain on a 32-layer map, so it is
+    /// opt-in and measured separately.
+    pub aerial_hero_bank: bool,
+    /// Whether it is actually running this frame — false when the near spec has
+    /// nothing to drop, so the second pipeline would be a copy of the first.
+    aerial_split_active: bool,
+    /// Phase DOOM-B ablation code, from `SOMNIUM_SHADE_ABLATE`. Zero in every
+    /// normal run; non-zero deliberately renders a wrong image so one class of
+    /// pixel can be timed on its own.
+    shade_ablate: u32,
+    /// Phase DOOM-F. Scene size the editor asked for, before any dynamic scale.
+    base_extent: (u32, u32),
+    /// Phase DOOM-F resolution controller. Public: the Camera details drive its
+    /// toggle, target and floor. Off by default.
+    pub dynamic_resolution: crate::viewport_resolution::DynamicResolution,
     /// Material ids belonging to a terrain, so a capture can label its pixels.
     terrain_material_ids: std::collections::HashSet<u32>,
     /// All created terrains, indexed by terrain id (`TerrainComponent::terrain_id`).
@@ -368,6 +406,12 @@ impl SomniumRenderer {
             &light_buffer,
             &terrain_materials.buffer,
         );
+
+        // Phase DOOM-B. Built here rather than in the struct literal because it
+        // borrows the global pool's layout, and the literal moves the pool.
+        let census_pass = crate::pass::census::CensusPass::new(&ctx.device, &global_pool.layout);
+        let classify_pass =
+            crate::pass::classify::ClassifyPass::new(&ctx.device, &global_pool.layout);
 
         let materials = MaterialSystem::new();
 
@@ -725,6 +769,23 @@ impl SomniumRenderer {
             shading_debug: 0.0,
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
+            timing: crate::timing::TimingRun::from_env(),
+            census_pass,
+            classify_pass,
+            // 150 m: DOOM-B put 63.9% of Coastal ground inside 100 m and 54.9%
+            // of the overview between 100 and 400 m, so a split in that gap is
+            // where the two viewpoints genuinely differ.
+            aerial_split: std::env::var("SOMNIUM_AERIAL_SPLIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f32| v.is_finite() && *v > 0.0)
+                .unwrap_or(150.0),
+            aerial_split_enabled: std::env::var("SOMNIUM_AERIAL").as_deref() == Ok("1"),
+            aerial_hero_bank: std::env::var("SOMNIUM_AERIAL_HERO").as_deref() == Ok("1"),
+            aerial_split_active: false,
+            shade_ablate: crate::pass::shading::ablate::from_env(),
+            base_extent: (ctx.config.width.max(1), ctx.config.height.max(1)),
+            dynamic_resolution: crate::viewport_resolution::DynamicResolution::default(),
             terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
             clipmaps: Vec::new(),
@@ -1115,6 +1176,40 @@ impl SomniumRenderer {
     }
 
     /// Apply the Camera Details checkbox. `SOMNIUM_CPU_FRUSTUM=0` wins.
+    /// Apply the Camera entity's Phase DOOM-F settings.
+    ///
+    /// Switching the controller **off** resizes back to the base extent
+    /// immediately rather than leaving the last scale frozen — otherwise
+    /// unticking the box would appear to do nothing until the next window
+    /// resize, which reads as a broken control.
+    pub fn set_dynamic_resolution(
+        &mut self,
+        ctx: &RenderContext,
+        enabled: bool,
+        target_ms: f32,
+        floor: f32,
+    ) {
+        let was = self.dynamic_resolution.enabled;
+        self.dynamic_resolution.enabled = enabled;
+        if target_ms.is_finite() && target_ms > 0.0 {
+            self.dynamic_resolution.target_ms = target_ms;
+        }
+        if floor.is_finite() {
+            self.dynamic_resolution.min_scale = floor.clamp(0.25, 1.0);
+        }
+        if was && !enabled {
+            self.dynamic_resolution.reset();
+            let (w, h) = self.base_extent;
+            self.resize_targets(ctx, w, h);
+        }
+    }
+
+    /// Current dynamic-resolution scale, 1.0 when the controller is off.
+    #[must_use]
+    pub fn dynamic_resolution_scale(&self) -> f32 {
+        self.dynamic_resolution.scale()
+    }
+
     pub fn set_cpu_frustum(&mut self, on: bool) -> bool {
         if cpu_frustum_env_off() {
             self.cpu_frustum_cull = false;
@@ -1349,7 +1444,22 @@ impl SomniumRenderer {
         }
     }
 
+    /// Resize the scene targets to the size the *editor* asked for.
+    ///
+    /// This is the authoritative base size — window size through the viewport
+    /// resolution preset — and it is what Phase DOOM-F's dynamic scale is
+    /// applied on top of. Recording it separately is what lets the controller
+    /// return to native when it is switched off, and stops a scaled frame from
+    /// being mistaken for a new base and scaled again.
     pub fn resize(&mut self, ctx: &RenderContext, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.base_extent = (width, height);
+        }
+        let (width, height) = self.dynamic_resolution.apply(width, height);
+        self.resize_targets(ctx, width, height);
+    }
+
+    fn resize_targets(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.vis_pass
                 .resize(&ctx.device, width, height, &self.global_pool.layout);
@@ -1363,6 +1473,10 @@ impl SomniumRenderer {
             self.render_width = width;
             self.render_height = height;
             self.gtao_pass.resize(&ctx.device, width, height);
+            // Phase DOOM-B/C: the vis buffer and depth are new textures now,
+            // and a cached bind group would point at the old ones.
+            self.census_pass.invalidate();
+            self.classify_pass.invalidate();
             self.dof_pass.resize(&ctx.device, width, height);
             self.rt_debug_pass.invalidate();
             self.restir_pass.resize(&ctx.device, width, height);
@@ -1772,6 +1886,52 @@ impl SomniumRenderer {
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+
+        // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
+        //
+        // Here, at the top of the frame, because a resize reallocates every
+        // scene-sized target and nothing has been encoded yet. Doing it later
+        // would invalidate views a half-recorded encoder is already holding.
+        //
+        // The signal is the profiler's smoothed GPU `Frame` scope, not the CPU
+        // frame delta: `TimeState`'s hybrid limiter and vsync both pin the CPU
+        // delta near the budget whatever the GPU is doing, so a controller
+        // reading it would conclude the frame is always exactly on target. That
+        // does mean dynamic resolution needs the profiler, which is a real
+        // dependency and is stated in the Help page rather than hidden.
+        if self.dynamic_resolution.enabled {
+            if self.profiler.enabled() {
+                // A few frames after a change, throw away the rolling average.
+                // Otherwise the next decision is taken on a window that still
+                // holds the previous resolution and the resize transient — the
+                // controller then reads a frame time no resolution ever
+                // produced and undoes its own last correct move.
+                if self.dynamic_resolution.take_settle_due() {
+                    self.profiler.reset_smoothing();
+                }
+                let frame_ms = self.profiler.total_ms();
+                if let Some(scale) = self.dynamic_resolution.tick(frame_ms) {
+                    let (w, h) = self
+                        .dynamic_resolution
+                        .apply(self.base_extent.0, self.base_extent.1);
+                    tracing::debug!(
+                        scale,
+                        frame_ms,
+                        target = self.dynamic_resolution.target_ms,
+                        "dynamic resolution → {w}×{h}"
+                    );
+                    self.resize_targets(ctx, w, h);
+                }
+            } else {
+                // Detect, do not demand — but say so once rather than sitting
+                // silently at native while the user believes it is working.
+                self.dynamic_resolution.enabled = false;
+                self.dynamic_resolution.reset();
+                tracing::warn!(
+                    "dynamic resolution needs the profiler for a GPU frame time; switching it off"
+                );
+            }
+        }
 
         let (ldr_w, ldr_h) = if self.fsr_pass.enabled {
             (ctx.config.width, ctx.config.height)
@@ -2254,6 +2414,10 @@ impl SomniumRenderer {
         let cull_active = self.gpu_driven && !self.indirect.is_empty();
 
         if cull_active {
+            // Phase DOOM-A: bracketed. This was one of the passes the §17.7
+            // table listed as landing in `unattributed`, which is why the row
+            // existed at all.
+            self.profiler.begin(&mut encoder, "Cull (phase 1)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -2263,6 +2427,7 @@ impl SomniumRenderer {
                 0,
                 self.indirect.len(),
             );
+            self.profiler.end(&mut encoder);
         }
 
         if self.cull_stats && cull_active {
@@ -2281,6 +2446,7 @@ impl SomniumRenderer {
 
         if cull_active {
             // ── 6.7 Cull phase 2 ─────────────────────────────────────────────
+            self.profiler.begin(&mut encoder, "Cull (phase 2)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -2290,16 +2456,21 @@ impl SomniumRenderer {
                 1,
                 self.indirect.len(),
             );
+            self.profiler.end(&mut encoder);
 
             if self.cull_stats {
                 self.snapshot_indirect(&ctx.device, &mut encoder, 1);
             }
 
             // ── 6.8 Visibility Pass (phase 2) — disocclusions ────────────────
+            self.profiler.begin(&mut encoder, "Visibility (phase 2)");
             self.record_visibility(&mut encoder, false);
+            self.profiler.end(&mut encoder);
 
             // ── 6.9 Final pyramid, for the next frame's phase 1 ──────────────
+            self.profiler.begin(&mut encoder, "Hi-Z (phase 2)");
             self.hiz_pass.record(&mut encoder);
+            self.profiler.end(&mut encoder);
         }
 
         // Occlusion culling stays off until a pyramid has been built from real
@@ -2331,6 +2502,7 @@ impl SomniumRenderer {
                     )
                 })
                 .collect();
+            self.profiler.begin(&mut encoder, "TLAS build");
             self.raytrace_pass.build(
                 &ctx.device,
                 &mut encoder,
@@ -2338,11 +2510,13 @@ impl SomniumRenderer {
                 &self.geometry.index_buffer,
                 &instances,
             );
+            self.profiler.end(&mut encoder);
 
             // Phase 24K: traced direct lighting. Here because it needs the TLAS
             // built above and the depth the visibility pass filled, and because
             // shading below consumes its result.
             if let Some(tlas) = self.raytrace_pass.tlas() {
+                self.profiler.begin(&mut encoder, "ReSTIR DI");
                 self.restir_pass.record(
                     &ctx.device,
                     &ctx.queue,
@@ -2355,6 +2529,7 @@ impl SomniumRenderer {
                     self.render_width,
                     self.render_height,
                 );
+                self.profiler.end(&mut encoder);
 
                 // Phase 24L. After the DI pass, and for the same reasons: the
                 // TLAS is built and the visibility pass has filled depth and
@@ -2436,8 +2611,14 @@ impl SomniumRenderer {
         // Outside the ray-tracing guards on purpose: a pass that stopped running
         // still owns a stale target, and that is exactly the case that needs
         // clearing.
+        // Bracketed (DOOM-A) because a full-resolution clear is not free at
+        // maximized Native, and a pass that has been switched off still paying
+        // for its own target is exactly the kind of cost that hides in a row
+        // called `unattributed`.
+        self.profiler.begin(&mut encoder, "ReSTIR clear");
         self.restir_pass.clear_if_inactive(&mut encoder);
         self.restir_gi_pass.clear_if_inactive(&mut encoder);
+        self.profiler.end(&mut encoder);
 
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
@@ -2556,6 +2737,56 @@ impl SomniumRenderer {
         }
         self.profiler.end(&mut encoder);
 
+        // ── 6.98 Pixel census (Phase DOOM-B) ─────────────────────────────────
+        //
+        // Immediately before shading, reading the same visibility buffer and
+        // depth that shading is about to read, so the classification cannot
+        // disagree with the pass it is describing. Default off.
+        self.census_pass.ensure_bind_group(
+            &ctx.device,
+            &self.vis_pass.view,
+            &self.vis_pass.depth_view,
+            self.render_width,
+            self.render_height,
+        );
+        self.profiler.begin(&mut encoder, "Census");
+        self.census_pass
+            .record(&mut encoder, &ctx.queue, &self.global_pool.bind_group);
+        self.profiler.end(&mut encoder);
+
+        // ── 6.99 Tile classification (Phase DOOM-C) ──────────────────────────
+        //
+        // Same inputs as the census and the same `pc_classify`, one dispatch
+        // later: the census counts pixels, this routes tiles.
+        // Allocated even when binning is off: group 3 is part of the shading
+        // pipeline layout either way, so the bind group has to exist for the
+        // fullscreen draw as well. Only the dispatch is conditional.
+        if self.classify_pass.ensure(
+            &ctx.device,
+            &self.vis_pass.view,
+            &self.vis_pass.depth_view,
+            self.render_width,
+            self.render_height,
+        ) || self.shading_pass.tile_bind_group().is_none()
+        {
+            self.shading_pass
+                .set_tile_buffer(&ctx.device, self.classify_pass.tiles_buffer());
+        }
+        if self.classify_pass.enabled {
+            self.shading_pass.write_tile_params(
+                &ctx.queue,
+                self.classify_pass.tiles_x(),
+                crate::pass::classify::TILE_SIZE,
+                self.classify_pass.tile_count(),
+                self.render_width,
+                self.render_height,
+            );
+            self.profiler.begin(&mut encoder, "Classify");
+            self.classify_pass
+                .record(&mut encoder, &ctx.queue, &self.global_pool.bind_group);
+            self.profiler.end(&mut encoder);
+        }
+
         // Compact PSO when hex/POM/PCSS are off. Recreate is a hitch, not a
         // per-frame cost; Island stays on COMPACT and never pays it.
         {
@@ -2569,6 +2800,11 @@ impl SomniumRenderer {
                 debug: self.shading_debug != 0.0,
                 terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
                 live_terrain: false,
+                // Phase DOOM-B. Read once at startup and held constant for the
+                // process: an ablation that could change mid-run would recreate
+                // the PSO and put a shader compile inside the window being
+                // timed.
+                ablate: self.shade_ablate,
             };
             // Phase DF audit: a clipmapped terrain shades from the cache, which
             // already holds strongest-four + hex + height-blend and never
@@ -2607,11 +2843,133 @@ impl SomniumRenderer {
                 spec.live_terrain = true;
             }
             self.shading_pass.ensure_pipeline(&ctx.device, spec);
+
+            // ── Phase DOOM-E: the aerial split ───────────────────────────────
+            //
+            // Two fullscreen draws instead of one, separated by a depth test
+            // against the scene depth the visibility pass already filled. The
+            // near draw keeps everything closer than `aerial_split`; the aerial
+            // draw takes the rest, including the sky at the cleared far value.
+            //
+            // What the aerial pipeline drops is what only resolves close up:
+            // hex tiling, which exists to break the repetition of a tiled layer
+            // and cannot be seen at distance, and the parallax march, which
+            // `gpu_material_for_camera` already fades out with height. Both are
+            // *deleted from the pipeline*, not skipped at runtime — a per-pixel
+            // sample-count branch is exactly what XV-Zeta §11.1 forbids, and a
+            // second pipeline is how the same effect is had without one.
+            //
+            // Enabled only when the near spec actually has something to drop.
+            // Compiling a second pipeline identical to the first would cost a
+            // shader compile and a second full-screen pass to save nothing.
+            self.aerial_split_active = self.aerial_split_enabled
+                && (spec.hex || spec.pom)
+                && self.shade_ablate == crate::pass::shading::ablate::OFF;
+            if self.aerial_split_active {
+                let aerial = crate::pass::shading::ShadingSpec {
+                    hex: false,
+                    pom: false,
+                    terrain_scan: if self.aerial_hero_bank {
+                        crate::terrain::textures::TERRAIN_HERO_LAYERS
+                    } else {
+                        spec.terrain_scan
+                    },
+                    ..spec
+                };
+                self.shading_pass
+                    .ensure_split_pipelines(&ctx.device, spec, aerial);
+            }
+
+            // Phase DOOM-C/E: the same spec, narrowed per bin.
+            //
+            // This is the whole point of the phase. `spec` above is the union
+            // of everything any pixel on screen might need, which is what the
+            // one fullscreen draw has to be compiled for. A tile that contains
+            // only sky needs almost none of it, and a tile of terrain 400 m away
+            // needs less than one at the player's feet.
+            if self.classify_pass.enabled {
+                use crate::pass::classify as bins;
+                for bin in 0..bins::BIN_COUNT {
+                    let mut s = spec;
+                    match bin {
+                        // Sky, mesh and foliage never reach the terrain
+                        // material, so the 32-wide splat scan, hex tiling, POM
+                        // and the clipmap sampler all leave the module. Sky
+                        // additionally never samples a shadow map.
+                        bins::BIN_SKY => {
+                            s.live_terrain = false;
+                            s.clipmap = false;
+                            s.hex = false;
+                            s.pom = false;
+                            s.pcss = false;
+                            s.contact = false;
+                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                        }
+                        bins::BIN_MESH | bins::BIN_FOLIAGE => {
+                            s.live_terrain = false;
+                            s.clipmap = false;
+                            s.hex = false;
+                            s.pom = false;
+                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                        }
+                        // DOOM-E. Terrain past the aerial split drops the two
+                        // things that only resolve close up: hex tiling, which
+                        // exists to break tiling repetition the eye can only
+                        // see near the camera, and the parallax march, which
+                        // `gpu_material_for_camera` already fades out with
+                        // distance. Both are *deleted* from this pipeline
+                        // rather than skipped at runtime — a per-pixel
+                        // sample-count branch is what XV-Zeta §11.1 forbids,
+                        // and a separate pipeline is precisely the way to get
+                        // the same effect without one.
+                        bins::BIN_TERRAIN_AERIAL => {
+                            s.hex = false;
+                            s.pom = false;
+                        }
+                        // Near terrain and mixed tiles keep the full spec.
+                        _ => {}
+                    }
+                    self.shading_pass.ensure_bin_pipeline(&ctx.device, bin, s);
+                }
+            }
         }
 
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");
+        // Phase DOOM-A: reserved *before* the pass, because the reservation
+        // needs `&mut self.profiler` and everything inside the block below
+        // borrows `self` immutably. The pass that dominates the frame is the
+        // first one worth a fragment-invocation count: for a fullscreen
+        // triangle it should be within a rounding of the pixel count, and any
+        // large excess is the 2×2 derivative quads at the screen edge rather
+        // than overdraw.
+        let shading_stats = self.profiler.reserve_stats("Shading");
+        // Phase DOOM-E: clip-space depth of the split distance.
+        //
+        // Projected on the CPU rather than derived in the shader because the
+        // projection is already here and the alternative is another uniform
+        // nobody can check. Note this is depth *along the view axis*, while the
+        // census and the tile classifier measure radial distance — they differ
+        // slightly toward the screen corners, which is immaterial for a level
+        // of detail split and would be worth stating if it ever were not.
+        let split_depth = {
+            let clip = self.proj_matrix * glam::Vec4::new(0.0, 0.0, -self.aerial_split, 1.0);
+            if clip.w.abs() > 1e-6 {
+                (clip.z / clip.w).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
+        if self.aerial_split_active {
+            self.shading_pass.write_split_params(
+                &ctx.queue,
+                split_depth,
+                self.render_width,
+                self.render_height,
+            );
+        }
         {
+            let stats_set = self.profiler.stats_query_set();
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shading Pass"),
                 multiview_mask: None,
@@ -2624,16 +2982,87 @@ impl SomniumRenderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                // Read-only: the visibility pass owns this buffer and several
+                // later passes read it. Attached only when the split is live,
+                // because a pipeline with no depth state cannot be used in a
+                // pass that has an attachment.
+                depth_stencil_attachment: self.aerial_split_active.then(|| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.vis_pass.depth_view,
+                        depth_ops: None,
+                        stencil_ops: None,
+                    }
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
 
-            rpass.set_pipeline(&self.shading_pass.pipeline);
+            if let (Some(qs), Some(index)) = (stats_set, shading_stats) {
+                rpass.begin_pipeline_statistics_query(qs, index);
+            }
             rpass.set_bind_group(0, &self.global_pool.bind_group, &[]);
             rpass.set_bind_group(1, &self.shading_pass.bind_group, &[]);
             rpass.set_bind_group(2, &self.shading_pass.clipmap_bind_group, &[]);
-            rpass.draw(0..3, 0..1);
+
+            // Phase DOOM-C: one indirect draw per bin, each an instanced quad
+            // per tile against that bin's pipeline. The fragment shader is the
+            // same code the fullscreen path runs, which is what makes the
+            // capture comparison between the two a real gate.
+            let binned = self.classify_pass.enabled;
+            match (binned, self.shading_pass.tile_bind_group()) {
+                (true, Some(tile_bg)) => {
+                    for bin in 0..crate::pass::classify::BIN_COUNT {
+                        let Some(pipeline) = self.shading_pass.bin_pipeline(bin) else {
+                            continue;
+                        };
+                        rpass.set_pipeline(pipeline);
+                        rpass.set_bind_group(
+                            3,
+                            tile_bg,
+                            &[crate::pass::shading::ShadingPass::tile_params_offset(bin)],
+                        );
+                        // Instance count lives on the GPU — the classifier
+                        // wrote it and the CPU never learns it, which is the
+                        // point: reading it back would cost a stall to save an
+                        // empty draw.
+                        rpass.draw_indirect(
+                            self.classify_pass.draw_args_buffer(),
+                            crate::pass::classify::ClassifyPass::args_offset(bin),
+                        );
+                    }
+                }
+                _ => {
+                    // Group 3 is in the pipeline layout either way, so it still
+                    // has to be bound; on the un-split path `vs_main` reads
+                    // only `split_depth` out of it.
+                    if let Some(tile_bg) = self.shading_pass.tile_bind_group() {
+                        rpass.set_bind_group(3, tile_bg, &[0]);
+                    }
+                    match (
+                        self.aerial_split_active,
+                        self.shading_pass.split_near_pipeline(),
+                        self.shading_pass.split_aerial_pipeline(),
+                    ) {
+                        // Phase DOOM-E. Two draws of the same triangle at the
+                        // split depth; early-Z rejects the half each pipeline
+                        // does not own before any fragment of the expensive
+                        // shader runs.
+                        (true, Some(near), Some(aerial)) => {
+                            rpass.set_pipeline(near);
+                            rpass.draw(0..3, 0..1);
+                            rpass.set_pipeline(aerial);
+                            rpass.draw(0..3, 0..1);
+                        }
+                        _ => {
+                            rpass.set_pipeline(&self.shading_pass.pipeline);
+                            rpass.draw(0..3, 0..1);
+                        }
+                    }
+                }
+            }
+            if shading_stats.is_some() && stats_set.is_some() {
+                rpass.end_pipeline_statistics_query();
+            }
         }
         self.profiler.end(&mut encoder);
 
@@ -2908,6 +3337,12 @@ impl SomniumRenderer {
                 self.postprocess_pass.hdr_texture.size(),
             );
         }
+        // DOOM-A: the `TAA` scope used to stay open through Underwater, the
+        // capture copy, auto-exposure and depth of field, so all four were
+        // reported as TAA. Closing it here is a *reattribution*, not a change
+        // in cost — expect the TAA row to fall and three new rows to appear
+        // holding the difference.
+        self.profiler.end(&mut encoder);
 
         // Phase IV-G: choose the finite body under the camera from the same
         // CPU query contract used by gameplay. Mesh-local XZ is centred, while
@@ -2982,6 +3417,7 @@ impl SomniumRenderer {
         // meters exactly the image being exposed. The reading lands one frame
         // late by construction — that is what adaptation is.
         if self.auto_exposure {
+            self.profiler.begin(&mut encoder, "Auto exposure");
             self.auto_exposure_pass.record(
                 &mut encoder,
                 &ctx.queue,
@@ -2990,6 +3426,7 @@ impl SomniumRenderer {
                 self.frame_delta_time,
                 self.exposure_compensation,
             );
+            self.profiler.end(&mut encoder);
         }
 
         // ── 7.93 Depth of field (Phase 24Z) ──────────────────────────────────
@@ -3001,6 +3438,7 @@ impl SomniumRenderer {
             &self.postprocess_pass.hdr_view,
             &self.vis_pass.depth_view,
         );
+        self.profiler.begin(&mut encoder, "DoF");
         if let Some(result) = self.dof_pass.record(
             &mut encoder,
             &ctx.queue,
@@ -3015,12 +3453,12 @@ impl SomniumRenderer {
                 self.postprocess_pass.hdr_texture.size(),
             );
         }
+        self.profiler.end(&mut encoder);
 
         // ── 7.95 Bloom (Phase 24T) ───────────────────────────────────────────
         // After TAA, so the chain is built from a resolved image rather than a
         // jittered one; a blur of unstable input broadcasts that instability
         // across everything it touches.
-        self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Bloom");
         self.bloom_pass.record(
             &ctx.device,
@@ -3142,6 +3580,12 @@ impl SomniumRenderer {
             self.present_pass.record(&mut encoder, &surface_view);
         }
 
+        // DOOM-A: `Post + present` closes here. Everything below is editor
+        // chrome, and chrome that is billed to the post chain is chrome nobody
+        // ever looks at — the whole reason to separate them is that the scene
+        // budget and the editor budget are answerable to different questions.
+        self.profiler.end(&mut encoder);
+
         // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
         // gizmos/UI so an A/B measures the scene rather than editor chrome.
         if capture_now && self.capture.wants_display() {
@@ -3163,6 +3607,8 @@ impl SomniumRenderer {
         // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
         // here makes gizmos and outlines swim by a pixel every frame.
         self.write_view_buffer(&ctx.queue, self.view_proj_unjittered);
+
+        self.profiler.begin(&mut encoder, "Editor overlays");
 
         // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
         if self.editor_overlays_enabled
@@ -3222,10 +3668,14 @@ impl SomniumRenderer {
             );
         }
 
+        self.profiler.end(&mut encoder); // Editor overlays
+
         // ── 9. UI Overlay ────────────────────────────────────────────────────
+        self.profiler.begin(&mut encoder, "UI");
         if !ui.is_immersive() {
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
         }
+        self.profiler.end(&mut encoder); // UI
 
         // Editor evidence (Phase 26-Zeta). Unlike the display capture above,
         // this runs *after* the UI pass, so it is the only capture that can
@@ -3251,13 +3701,32 @@ impl SomniumRenderer {
         } else {
             0
         };
-        self.profiler.end(&mut encoder); // Post + present
         self.profiler.end(&mut encoder); // Frame
         self.profiler.end_frame(&mut encoder);
         ctx.queue.submit(std::iter::once(encoder.finish()));
         // Must follow the submit: the map would otherwise race the copy that
         // fills the buffer it is reading.
         self.profiler.after_submit(&ctx.device);
+        // Phase DOOM-B. `after_submit` above already polled the device, so a
+        // census readback from an earlier frame may have landed; collect first
+        // so the newest available count is what a timing run records.
+        self.census_pass.collect();
+        self.census_pass.after_submit();
+
+        // Phase DOOM-A. After `after_submit`, because that is what polls the
+        // device and lets an earlier frame's readback callback fire — sampling
+        // before it would read the same stale frame every time and report a
+        // standard deviation of zero.
+        if let Some(run) = &mut self.timing
+            && run.active()
+        {
+            run.tick(
+                &self.profiler,
+                self.census_pass.result,
+                &ctx.adapter,
+                (self.render_width, self.render_height),
+            );
+        }
         if stats_draws > 0 {
             self.report_cull_stats(ctx, stats_draws);
         }

@@ -36,6 +36,9 @@ const TRANSPARENT: &str = include_str!("../src/shaders/transparent.wgsl");
 const WATER: &str = include_str!("../src/shaders/water.wgsl");
 const WATER_SPECTRUM: &str = include_str!("../src/shaders/water_spectrum.wgsl");
 const UNDERWATER: &str = include_str!("../src/shaders/underwater.wgsl");
+const CENSUS: &str = include_str!("../src/shaders/census.wgsl");
+const PIXEL_CLASS: &str = include_str!("../src/shaders/pixel_class.wgsl");
+const CLASSIFY: &str = include_str!("../src/shaders/classify.wgsl");
 
 /// Parse and validate one module, panicking with naga's own diagnostic.
 fn check(label: &str, source: &str) {
@@ -65,6 +68,23 @@ fn the_shading_module_validates() {
             "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
         ),
     );
+}
+
+#[test]
+fn the_census_module_validates() {
+    // Phase DOOM-B. Also the check that the census reads `instances`,
+    // `materials` and `view` from the same global pool the shading pass does —
+    // a census resolving the scene through its own copy of those declarations
+    // could classify a pixel differently from the pass it is describing.
+    check("census", &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CENSUS}"));
+}
+
+#[test]
+fn the_classify_module_validates() {
+    // Phase DOOM-C. Shares `pixel_class.wgsl` with the census above, which is
+    // the structural guarantee that a tile is routed by the same test that
+    // counted it.
+    check("classify", &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"));
 }
 
 #[test]

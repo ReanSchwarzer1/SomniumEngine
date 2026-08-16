@@ -198,6 +198,13 @@ pub(crate) fn build_inspector(
     sec_label(ui, "Camera", font_id, camera_section);
     let (camera_frustum_toggle, camera_frustum_label) =
         make_toggle_checked(ui, "Frustum Cull", font_id, camera_section, true);
+    // Phase DOOM-F. Off by default, and the floor sits directly under the
+    // toggle so the quality being traded away is visible at the moment the
+    // trade is made.
+    let (camera_dynres_toggle, camera_dynres_label) =
+        make_toggle(ui, "Dynamic Resolution", font_id, camera_section);
+    let camera_dynres_target = make_row_step(ui, "Target ms", 34.0, font_id, camera_section, 0.5);
+    let camera_dynres_floor = make_row_step(ui, "Res floor %", 34.0, font_id, camera_section, 1.0);
     ui.set_visibility(camera_section, false);
 
     // ── Post-processing section (Phase 15A1) ─────────────────────────────────
@@ -265,6 +272,14 @@ pub(crate) fn build_inspector(
     let (post_taa_toggle, post_taa_label) =
         make_toggle(ui, "TAA (FSR owns AA)", font_id, post_section);
     let (post_gtao_toggle, post_gtao_label) = make_toggle(ui, "GTAO", font_id, post_section);
+    // Phase DOOM-B/C diagnostics. Both default off and both are measurement
+    // tools rather than features: the census costs 0.08 ms and answers "which
+    // pixels", the bin path is a working tile classifier that measured slower
+    // than the fullscreen draw at every tile size.
+    let (post_census_toggle, post_census_label) =
+        make_toggle(ui, "Pixel Census", font_id, post_section);
+    let (post_bins_toggle, post_bins_label) =
+        make_toggle(ui, "Shade Bins", font_id, post_section);
     // Radius is in metres and is the control that decides whether AO reads as
     // contact darkening under an object or as a broad smear across a hillside.
     let post_ao_radius = make_row_step(ui, "AO radius", 34.0, font_id, post_section, 0.02);
@@ -405,6 +420,15 @@ pub(crate) fn build_inspector(
         make_toggle(ui, "Parallax", font_id, terrain_section);
     let (terrain_clipmap_toggle, terrain_clipmap_label) =
         make_toggle(ui, "Clipmap", font_id, terrain_section);
+    // Phase DOOM-E. Off by default: with only hex and parallax removed the
+    // aerial pipeline is invisible and costs 2.3 ms, and with the layer scan cut
+    // as well it is a real look change on distant ground. Both numbers are in
+    // `dev records/phase DOOM/README.md`.
+    let (terrain_aerial_toggle, terrain_aerial_label) =
+        make_toggle(ui, "Aerial LOD", font_id, terrain_section);
+    let terrain_aerial_dist = make_row_step(ui, "Aerial dist m", 34.0, font_id, terrain_section, 5.0);
+    let (terrain_aerial_hero_toggle, terrain_aerial_hero_label) =
+        make_toggle(ui, "Aerial 16 layers", font_id, terrain_section);
     let (terrain_morph_toggle, terrain_morph_label) =
         make_toggle(ui, "LOD Morph", font_id, terrain_section);
     let terrain_morph_start = make_row_step(ui, "Morph", 34.0, font_id, terrain_section, 0.02);
@@ -562,6 +586,10 @@ pub(crate) fn build_inspector(
         camera_section,
         camera_frustum_toggle,
         camera_frustum_label,
+        camera_dynres_toggle,
+        camera_dynres_label,
+        camera_dynres_target,
+        camera_dynres_floor,
         terrain_section,
         terrain_mode_label,
         terrain_paint_toggle,
@@ -571,6 +599,11 @@ pub(crate) fn build_inspector(
         terrain_parallax_toggle,
         terrain_parallax_label,
         terrain_clipmap_toggle,
+        terrain_aerial_toggle,
+        terrain_aerial_label,
+        terrain_aerial_dist,
+        terrain_aerial_hero_toggle,
+        terrain_aerial_hero_label,
         terrain_clipmap_label,
         terrain_morph_toggle,
         terrain_morph_label,
@@ -671,6 +704,10 @@ pub(crate) fn build_inspector(
         post_taa_toggle,
         post_taa_label,
         post_gtao_toggle,
+        post_census_toggle,
+        post_census_label,
+        post_bins_toggle,
+        post_bins_label,
         post_gtao_label,
         post_restir_toggle,
         post_restir_label,

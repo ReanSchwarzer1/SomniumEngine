@@ -1132,6 +1132,51 @@ engine is only the shape of the solution.
 
 ---
 
+## 13C. Phase DOOM — visibility-buffer shade binning (plan reconnaissance, 2026-08-16)
+
+Read while writing [`dev records/phase_DOOM.md`](dev%20records/phase_DOOM.md).
+**Architecture studied, not code copied.** Nothing from this section is in the
+tree yet; the entries exist so the implementing session does not re-derive the
+provenance. Update the "Somnium implementation" column as DOOM-C lands.
+
+### 13C.1 Wicked Engine — visibility tile binning
+
+**Copyright:** © Turánszki János. **License:** MIT.
+**Source:** `example_repo/New_Engines/WickedEngine-master/WickedEngine/shaders/`
+
+| Wicked source | Pattern studied | Somnium plan |
+|---|---|---|
+| `visibility_analyzeCS.hlsl` | Classify 8×8 tiles from the primitive-ID texture, append tile records + `IndirectDispatchArgs` per bin | DOOM-C1 classify pass |
+| the same file's `WaveActiveAllTrue` + one `InterlockedAnd` per wave | Detect a **primitive-uniform tile** with one wave reduction, not per-pixel atomics | DOOM-C4, under `SUBGROUP` with a group-shared fallback |
+| `visibility_shadeCS.hlsl` — `PRIMITIVEID_UNIFORM` permutation | A uniform tile reads its primitive from the tile record, making triangle setup scalar | DOOM-C4 |
+| `visibility_shadeCS.hlsl` — flat 1-D group + `remap_lane_quads(groupIndex)` | Restore 2×2 quad adjacency in compute so `QuadReadAcrossX/Y` still yields derivatives | DOOM-C2's fallback where 25N analytic gradients do not already apply (`quadSwapX/Y` in WGSL) |
+| `ShaderInterop_Renderer.h` — `SHADERTYPE_BIN_COUNT = 12`, `VISIBILITY_BLOCKSIZE = 8` | Bin count and tile size are tuned constants shared CPU↔GPU | DOOM-C3 bin taxonomy; tile size measured in C4, not assumed |
+| `visibility_surfaceCS.hlsl` | The same binned dispatch reused to extract a thin normal/roughness target | noted; not scheduled |
+
+### 13C.2 Unreal Engine 5 — Nanite shade binning
+
+**Copyright:** © Epic Games, Inc. **Studied only; never adapted or translated.**
+**Source:** `example_repo/UnrealEngine-release/.../Engine/Shaders/Private/Nanite/NaniteShadeBinning.usf`
+
+| UE source | Pattern studied | Somnium plan |
+|---|---|---|
+| `SHADING_BIN_COUNT` / `RESERVE` / `SCATTER` / `VALIDATE` passes | Count, then reserve contiguous ranges, then scatter — deterministic tile ordering instead of atomic-append order | DOOM-C1, because a reproducible capture needs a reproducible tile order |
+| `SHADING_BIN_TILE_SIZE_BITS` 3 or 5 by `BINNING_TECHNIQUE` | Tile size is a measured parameter | DOOM-C4 sweeps 8/16/32 |
+| `INVALID_BIN0..3` per-pixel sentinels | Distinguish "empty" from "coarse rate" within a quad | Somnium's `vis_data == 0u` sky sentinel already covers the empty case |
+
+### 13C.3 The Forge — filtered and culled visibility buffer
+
+**Copyright:** © Confetti Interactive. **License:** Apache-2.0.
+**Source:** `example_repo/The-Forge-master/Common_3/Renderer/VisibilityBuffer2/`
+(`VisibilityBuffer2.cpp`, `Shaders/FSL/TriangleFiltering.h.fsl`)
+
+**Located, not yet read.** Compute triangle filtering across camera + shadow
+views is DOOM-G2, research-only, and the contents are to be read by that
+sub-phase. Somnium already takes the visibility buffer itself from The Forge
+(§2) and the cluster + normal-cone half of the culling from `meshlet.rs`.
+
+---
+
 ## 14. Pattern Index
 
 Cross-reference: which Somnium file implements which reference pattern.

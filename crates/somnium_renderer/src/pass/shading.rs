@@ -24,6 +24,47 @@ pub struct ShadingSpec {
     /// False only when every terrain queued this frame shades through its
     /// clipmap, which is the one case where nothing can reach the live path.
     pub live_terrain: bool,
+    /// Phase DOOM-B ablation: shade only one class of pixel and return black
+    /// for the rest. `0` is normal rendering. See [`Ablate`].
+    ///
+    /// **This is a measuring instrument, not a feature.** It makes the image
+    /// wrong on purpose so the timer can say what a class of pixel costs to
+    /// execute. Driven by `SOMNIUM_SHADE_ABLATE`; never set from the UI.
+    pub ablate: u32,
+}
+
+/// Values for [`ShadingSpec::ablate`], matching `shading.wgsl`.
+///
+/// The numbers are shared with the shader by hand, so they are named here
+/// rather than written as literals at each call site.
+pub mod ablate {
+    /// Normal rendering.
+    pub const OFF: u32 = 0;
+    /// Only the sky/background branch runs.
+    pub const SKY: u32 = 1;
+    /// Only opaque non-terrain, non-cutout surfaces.
+    pub const MESH: u32 = 2;
+    /// Only cutout (foliage) materials.
+    pub const FOLIAGE: u32 = 3;
+    /// Only terrain.
+    pub const TERRAIN: u32 = 4;
+
+    /// Parse `SOMNIUM_SHADE_ABLATE`. Unset or unrecognised means [`OFF`].
+    #[must_use]
+    pub fn from_env() -> u32 {
+        match std::env::var("SOMNIUM_SHADE_ABLATE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "1" | "sky" => SKY,
+            "2" | "mesh" => MESH,
+            "3" | "foliage" => FOLIAGE,
+            "4" | "terrain" => TERRAIN,
+            _ => OFF,
+        }
+    }
 }
 
 impl ShadingSpec {
@@ -36,9 +77,10 @@ impl ShadingSpec {
         debug: false,
         terrain_scan: 16,
         live_terrain: true,
+        ablate: ablate::OFF,
     };
 
-    fn constants(self) -> [(&'static str, f64); 8] {
+    fn constants(self) -> [(&'static str, f64); 9] {
         [
             ("enable_hex", f64::from(u32::from(self.hex))),
             ("enable_pom", f64::from(u32::from(self.pom))),
@@ -51,14 +93,47 @@ impl ShadingSpec {
                 "enable_live_terrain",
                 f64::from(u32::from(self.live_terrain)),
             ),
+            ("shade_ablate", f64::from(self.ablate)),
         ]
     }
 }
+
+/// Per-bin vertex constants (Phase DOOM-C). Mirrors `TileParams` in
+/// `shading.wgsl`; the two are 32 bytes and must stay that way.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TileParams {
+    pub tiles_x: u32,
+    pub tile_size: u32,
+    pub bin_offset: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Phase DOOM-E: clip-space depth of the aerial split.
+    pub split_depth: f32,
+    _pad: [u32; 2],
+}
+
+/// Stride between per-bin slices of the tile-params buffer.
+///
+/// 256 is wgpu's `min_uniform_buffer_offset_alignment` on every backend we
+/// target; the struct itself is 32 bytes and the rest is padding.
+const TILE_PARAMS_STRIDE: u64 = 256;
 
 pub struct ShadingPass {
     pub pipeline: wgpu::RenderPipeline,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
+    /// Phase DOOM-C.
+    tile_layout: wgpu::BindGroupLayout,
+    tile_params: wgpu::Buffer,
+    tile_bind_group: Option<wgpu::BindGroup>,
+    /// One pipeline per bin, each with the spec that bin needs. Indexed by bin;
+    /// grown to `BIN_COUNT` on first use.
+    bin_pipelines: Vec<(ShadingSpec, wgpu::RenderPipeline)>,
+    /// Phase DOOM-E: the near/aerial pair, selected by a depth test rather
+    /// than by a tile list. `None` until the first frame that wants them.
+    split_near: Option<(ShadingSpec, wgpu::RenderPipeline)>,
+    split_aerial: Option<(ShadingSpec, wgpu::RenderPipeline)>,
     hdr_format: wgpu::TextureFormat,
     spec: ShadingSpec,
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -390,23 +465,81 @@ impl ShadingPass {
             &clipmap_sampler,
         );
 
+        // Phase DOOM-C: group 3 carries the tile list and the per-bin offset.
+        // Present in the layout even on the fullscreen path — `vs_main` never
+        // reads it, but wgpu requires every group in the layout to be bound
+        // before a draw, and one always-bound group is simpler than two
+        // pipeline layouts that have to be kept in step.
+        let tile_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shading Tile BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        // One buffer, one aligned slice per bin, selected at
+                        // draw time. Six separate buffers would work and would
+                        // mean six bind groups to rebuild whenever the tile
+                        // buffer is reallocated.
+                        has_dynamic_offset: true,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<TileParams>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let tile_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shading Tile Params"),
+            size: TILE_PARAMS_STRIDE * crate::pass::classify::BIN_COUNT as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shading Pipeline Layout"),
             bind_group_layouts: &[
                 Some(global_bind_group_layout),
                 Some(&bind_group_layout),
                 Some(&clipmap_layout),
+                Some(&tile_layout),
             ],
             immediate_size: 0,
         });
 
         let spec = ShadingSpec::COMPACT;
-        let pipeline = Self::make_pipeline(device, &shader, &pipeline_layout, surface_format, spec);
+        let pipeline = Self::make_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            spec,
+            "vs_main",
+            None,
+        );
 
         Self {
             pipeline,
             shader,
             pipeline_layout,
+            tile_layout,
+            tile_params,
+            tile_bind_group: None,
+            bin_pipelines: Vec::new(),
+            split_near: None,
+            split_aerial: None,
             hdr_format: surface_format,
             spec,
             bind_group_layout,
@@ -441,6 +574,8 @@ impl ShadingPass {
         layout: &wgpu::PipelineLayout,
         hdr_format: wgpu::TextureFormat,
         spec: ShadingSpec,
+        vertex_entry: &str,
+        depth_split: Option<wgpu::CompareFunction>,
     ) -> wgpu::RenderPipeline {
         let constants = spec.constants();
         let compilation_options = wgpu::PipelineCompilationOptions {
@@ -453,7 +588,7 @@ impl ShadingPass {
             multiview_mask: None,
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(vertex_entry),
                 buffers: &[],
                 compilation_options: compilation_options.clone(),
             },
@@ -476,7 +611,25 @@ impl ShadingPass {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            // Phase DOOM-E: the depth split.
+            //
+            // The fullscreen triangle is emitted at the clip-space depth of the
+            // aerial distance, and the test against the scene's own depth buffer
+            // decides which half of the screen this pipeline covers: `Greater`
+            // keeps everything nearer than the split, `LessEqual` everything at
+            // or beyond it (sky included, at the cleared far value). Two draws,
+            // no overlap, complete coverage — and early-Z rejects the other half
+            // before a single fragment of the expensive shader runs.
+            //
+            // Never writes. The depth buffer belongs to the visibility pass and
+            // several later passes read it.
+            depth_stencil: depth_split.map(|compare| wgpu::DepthStencilState {
+                format: crate::pass::visibility::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(compare),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
         })
@@ -505,8 +658,211 @@ impl ShadingPass {
             &self.pipeline_layout,
             self.hdr_format,
             spec,
+            "vs_main",
+            None,
         );
         self.spec = spec;
+    }
+
+    // ── Phase DOOM-E: the depth split ────────────────────────────────────────
+
+    /// Compile (or reuse) the near and aerial pipelines.
+    ///
+    /// Both draw the same fullscreen triangle and differ in two things: the
+    /// depth comparison that decides which half of the screen they cover, and
+    /// the spec they were compiled with. The aerial one is where the saving is —
+    /// DOOM-B measured a terrain pixel at walking height costing 9.58 ns against
+    /// 4.88 ns from the overview, which is what hex tiling and the parallax
+    /// march cost when they are still resolving.
+    pub fn ensure_split_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        near: ShadingSpec,
+        aerial: ShadingSpec,
+    ) {
+        if self.split_near.as_ref().is_none_or(|(s, _)| *s != near) {
+            self.split_near = Some((
+                near,
+                Self::make_pipeline(
+                    device,
+                    &self.shader,
+                    &self.pipeline_layout,
+                    self.hdr_format,
+                    near,
+                    "vs_main",
+                    Some(wgpu::CompareFunction::Greater),
+                ),
+            ));
+        }
+        if self.split_aerial.as_ref().is_none_or(|(s, _)| *s != aerial) {
+            tracing::info!(
+                hex = aerial.hex,
+                pom = aerial.pom,
+                terrain_scan = aerial.terrain_scan,
+                "aerial shading pipeline spec changed"
+            );
+            self.split_aerial = Some((
+                aerial,
+                Self::make_pipeline(
+                    device,
+                    &self.shader,
+                    &self.pipeline_layout,
+                    self.hdr_format,
+                    aerial,
+                    "vs_main",
+                    Some(wgpu::CompareFunction::LessEqual),
+                ),
+            ));
+        }
+    }
+
+    pub fn split_near_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
+        self.split_near.as_ref().map(|(_, p)| p)
+    }
+
+    pub fn split_aerial_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
+        self.split_aerial.as_ref().map(|(_, p)| p)
+    }
+
+    // ── Phase DOOM-C: binned drawing ─────────────────────────────────────────
+
+    /// Compile (or reuse) the pipeline for one bin.
+    ///
+    /// Each bin caches its own spec, so the six pipelines only recompile when
+    /// *that* bin's spec changes. Sharing one cache keyed by spec would be
+    /// tidier and would mean a terrain change recompiling the sky pipeline.
+    pub fn ensure_bin_pipeline(&mut self, device: &wgpu::Device, bin: usize, spec: ShadingSpec) {
+        if self.bin_pipelines.len() <= bin {
+            // Placeholder entries so `bin` indexes directly. The spec stored
+            // alongside is deliberately *not* the requested one, so the loop
+            // below always compiles a real pipeline for every slot it creates.
+            while self.bin_pipelines.len() <= bin {
+                let idx = self.bin_pipelines.len();
+                let init = if idx == bin { spec } else { ShadingSpec::COMPACT };
+                let pipeline = Self::make_pipeline(
+                    device,
+                    &self.shader,
+                    &self.pipeline_layout,
+                    self.hdr_format,
+                    init,
+                    "vs_tile",
+                    None,
+                );
+                self.bin_pipelines.push((init, pipeline));
+            }
+            return;
+        }
+        if self.bin_pipelines[bin].0 == spec {
+            return;
+        }
+        tracing::info!(
+            bin,
+            name = crate::pass::classify::BIN_NAMES.get(bin).copied().unwrap_or("?"),
+            hex = spec.hex,
+            pom = spec.pom,
+            pcss = spec.pcss,
+            terrain_scan = spec.terrain_scan,
+            live_terrain = spec.live_terrain,
+            "shading bin pipeline spec changed"
+        );
+        self.bin_pipelines[bin] = (
+            spec,
+            Self::make_pipeline(
+                device,
+                &self.shader,
+                &self.pipeline_layout,
+                self.hdr_format,
+                spec,
+                "vs_tile",
+                None,
+            ),
+        );
+    }
+
+    pub fn bin_pipeline(&self, bin: usize) -> Option<&wgpu::RenderPipeline> {
+        self.bin_pipelines.get(bin).map(|(_, p)| p)
+    }
+
+    /// Rebuild the tile bind group. Cheap, but the caller should only do it
+    /// when the classifier reports its tile buffer was reallocated.
+    pub fn set_tile_buffer(&mut self, device: &wgpu::Device, tiles: &wgpu::Buffer) {
+        self.tile_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shading Tile BG"),
+            layout: &self.tile_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tiles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.tile_params,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<TileParams>() as u64
+                        ),
+                    }),
+                },
+            ],
+        }));
+    }
+
+    pub fn tile_bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.tile_bind_group.as_ref()
+    }
+
+    /// Write one slice of tile constants per bin.
+    pub fn write_tile_params(
+        &self,
+        queue: &wgpu::Queue,
+        tiles_x: u32,
+        tile_size: u32,
+        tile_capacity: u32,
+        width: u32,
+        height: u32,
+    ) {
+        for bin in 0..crate::pass::classify::BIN_COUNT {
+            let params = TileParams {
+                tiles_x,
+                tile_size,
+                bin_offset: tile_capacity * bin as u32,
+                width,
+                height,
+                // The tile path has no depth attachment, so the value is
+                // ignored; it is written anyway so the two paths cannot drift.
+                split_depth: 0.0,
+                _pad: [0; 2],
+            };
+            queue.write_buffer(
+                &self.tile_params,
+                TILE_PARAMS_STRIDE * bin as u64,
+                bytemuck::bytes_of(&params),
+            );
+        }
+    }
+
+    /// Dynamic offset for bin `bin`'s slice.
+    pub fn tile_params_offset(bin: usize) -> u32 {
+        (TILE_PARAMS_STRIDE * bin as u64) as u32
+    }
+
+    /// Write slice 0 for the depth-split path (Phase DOOM-E).
+    ///
+    /// Only `split_depth` matters here — `vs_main` reads nothing else — but the
+    /// whole struct is written so a stale tile-path value cannot survive in the
+    /// same slice.
+    pub fn write_split_params(&self, queue: &wgpu::Queue, split_depth: f32, width: u32, height: u32) {
+        let params = TileParams {
+            tiles_x: 1,
+            tile_size: 1,
+            bin_offset: 0,
+            width,
+            height,
+            split_depth,
+            _pad: [0; 2],
+        };
+        queue.write_buffer(&self.tile_params, 0, bytemuck::bytes_of(&params));
     }
 
     fn make_bind_group(

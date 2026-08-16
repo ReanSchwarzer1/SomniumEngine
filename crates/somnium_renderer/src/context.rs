@@ -69,6 +69,17 @@ pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RA
 pub const PROFILER_FEATURES: wgpu::Features =
     wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
+/// Phase DOOM-A: pipeline statistics, for the "why" beside the "how long".
+///
+/// A pass time says how long something took and never why. The counters that
+/// answer it — how many fragments the rasterizer actually issued, how many
+/// compute invocations a dispatch really ran — are only available through this
+/// feature, and unlike `TIMESTAMP_QUERY_INSIDE_ENCODERS` there is no
+/// outside-the-pass form: `begin_pipeline_statistics_query` lives on the render
+/// or compute pass itself. So passes opt in one at a time rather than the
+/// profiler bracketing them all, and only the passes worth the wiring have it.
+pub const PIPELINE_STATS_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_STATISTICS_QUERY;
+
 /// Phase XV-E: optional BCn texture compression (BC7 for terrain packs).
 ///
 /// Detect, do not demand — a GPU without BC still starts on the RGBA8 path.
@@ -189,6 +200,20 @@ impl RenderContext {
         }
         let required_features = if timestamps {
             required_features | PROFILER_FEATURES
+        } else {
+            required_features
+        };
+
+        // Phase DOOM-A: same pattern again. No adapter is required to have it,
+        // and the profiler simply omits the counter rows when it does not.
+        let pipeline_stats = available_features.contains(PIPELINE_STATS_FEATURES);
+        if pipeline_stats {
+            info!("Pipeline statistics available (fragment / compute invocation counters)");
+        } else {
+            info!("Pipeline statistics unavailable — profiler reports timings only");
+        }
+        let required_features = if pipeline_stats {
+            required_features | PIPELINE_STATS_FEATURES
         } else {
             required_features
         };

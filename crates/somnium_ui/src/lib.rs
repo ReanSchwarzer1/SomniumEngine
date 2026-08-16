@@ -113,6 +113,21 @@ struct InspectorHandles {
     camera_section: NodeHandle,
     camera_frustum_toggle: NodeHandle,
     camera_frustum_label: NodeHandle,
+    /// Phase DOOM-F.
+    camera_dynres_toggle: NodeHandle,
+    camera_dynres_label: NodeHandle,
+    camera_dynres_target: NodeHandle,
+    camera_dynres_floor: NodeHandle,
+    /// Phase DOOM-E (terrain) and DOOM-B/C (post FX diagnostics).
+    terrain_aerial_toggle: NodeHandle,
+    terrain_aerial_label: NodeHandle,
+    terrain_aerial_dist: NodeHandle,
+    terrain_aerial_hero_toggle: NodeHandle,
+    terrain_aerial_hero_label: NodeHandle,
+    post_census_toggle: NodeHandle,
+    post_census_label: NodeHandle,
+    post_bins_toggle: NodeHandle,
+    post_bins_label: NodeHandle,
     // Post-processing section (Phase 15A1) — hidden unless a Post Processing
     // entity is selected.
     post_section: NodeHandle,
@@ -2051,9 +2066,12 @@ impl UiManager {
         let h = &self.inspector_handles;
         let pairs = [
             (h.light_section, "light"),
-            (h.camera_section, "camera frustum cull"),
-            (h.post_section, "post fx bloom exposure tonemap"),
-            (h.terrain_section, "terrain paint layer hex"),
+            (
+                h.camera_section,
+                "camera frustum cull dynamic resolution target floor",
+            ),
+            (h.post_section, "post fx bloom exposure tonemap census shade bins"),
+            (h.terrain_section, "terrain paint layer hex aerial lod distance"),
             (h.foliage_section, "foliage grass tree"),
             (h.water_section, "water body wave"),
             (h.vessel_section, "vessel buoyancy"),
@@ -2348,16 +2366,41 @@ impl UiManager {
         }
     }
 
-    /// Show or hide the Camera section (Phase CR-C).
-    pub fn update_camera_inspector(&mut self, frustum_cull: Option<bool>) {
+    /// Show or hide the Camera section (Phase CR-C, extended by DOOM-F).
+    ///
+    /// `dynamic` is `(enabled, target_ms, floor_fraction)`. The floor is shown
+    /// as a percentage because "67" is a number someone can reason about and
+    /// "0.67" is not.
+    pub fn update_camera_inspector(
+        &mut self,
+        frustum_cull: Option<bool>,
+        dynamic: Option<(bool, f32, f32)>,
+    ) {
         let h = &self.inspector_handles;
+        let (dynres_toggle, dynres_target, dynres_floor) = (
+            h.camera_dynres_toggle,
+            h.camera_dynres_target,
+            h.camera_dynres_floor,
+        );
+        let (section, frustum) = (h.camera_section, h.camera_frustum_toggle);
         match frustum_cull {
             Some(on) => {
-                self.native_ui.set_visibility(h.camera_section, true);
+                self.native_ui.set_visibility(section, true);
                 self.native_ui
-                    .send(CheckBoxMessage::set_checked(h.camera_frustum_toggle, on));
+                    .send(CheckBoxMessage::set_checked(frustum, on));
             }
-            None => self.native_ui.set_visibility(h.camera_section, false),
+            None => {
+                self.native_ui.set_visibility(section, false);
+                return;
+            }
+        }
+        if let Some((on, target_ms, floor)) = dynamic {
+            self.native_ui
+                .send(CheckBoxMessage::set_checked(dynres_toggle, on));
+            self.native_ui
+                .send(NumericFieldMessage::set_value(dynres_target, target_ms));
+            self.native_ui
+                .send(NumericFieldMessage::set_value(dynres_floor, floor * 100.0));
         }
     }
 
@@ -2888,6 +2931,9 @@ impl UiManager {
             (h.light_radius, IF::LightSourceRadius),
             (h.light_width, IF::LightAreaWidth),
             (h.light_height, IF::LightAreaHeight),
+            (h.terrain_aerial_dist, IF::TerrainAerialDistance),
+            (h.camera_dynres_target, IF::CameraDynResTargetMs),
+            (h.camera_dynres_floor, IF::CameraDynResFloor),
             (h.post_exposure, IF::PostExposure),
             (h.post_exp_comp, IF::PostExposureCompensation),
             (h.post_bloom_amt, IF::PostBloomIntensity),
@@ -3568,6 +3614,39 @@ impl UiManager {
                     }
                     continue;
                 }
+                if msg.destination == self.inspector_handles.terrain_aerial_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::SetTerrainAerial(*on));
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.terrain_aerial_hero_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::SetTerrainAerialHeroBank(*on));
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_census_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events.push_back(EditorEvent::SetPixelCensus(*on));
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.post_bins_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events.push_back(EditorEvent::SetShadeBins(*on));
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.camera_dynres_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::SetDynamicResolution(*on));
+                    }
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainMorph);
@@ -4143,6 +4222,7 @@ mod must_not_break {
             ("foliage kind combo", h.foliage_kind_button),
             ("water underwater", h.water_underwater),
             ("camera frustum cull", h.camera_frustum_toggle),
+            ("camera dynamic resolution", h.camera_dynres_toggle),
             ("terrain paint", h.terrain_paint_toggle),
             ("terrain hex", h.terrain_hex_toggle),
             ("foliage enabled", h.foliage_toggle),

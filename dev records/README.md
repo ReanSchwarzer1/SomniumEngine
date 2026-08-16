@@ -28,6 +28,10 @@ with the phase identifier and describe the validated viewpoint or render stage.
   (stale vs current look). Default **off**.
 - `phase CR/` — Crysis occupancy. Plan: [`phase_CR.md`](phase_CR.md).
   Table: [`phase CR/CR-A_occupancy.md`](phase%20CR/CR-A_occupancy.md).
+- `phase DOOM/` — **not created yet.** Phase DOOM is a plan only
+  ([`phase_DOOM.md`](phase_DOOM.md)): tile-classified compute shading, shadow
+  caching, dynamic resolution, job system. DOOM-A creates the folder with the
+  first `.somtime` baseline. Do not invent captures or timing files for it.
 - `phase XV/` — terrain evidence (XV-A–J **complete**).
   Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
   Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).

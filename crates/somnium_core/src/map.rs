@@ -31,6 +31,16 @@ impl MapKind {
             other => Err(format!("unknown map kind: {other}")),
         }
     }
+
+    /// Parse a map name, case- and whitespace-insensitively.
+    ///
+    /// Public because Phase DOOM-A's timing runs have to select a map from the
+    /// environment: the two recipes have deliberately different GPU budgets
+    /// (Coastal publishes 32 layers, Island 16), so a measurement that does not
+    /// say which one it ran on says nothing at all.
+    pub fn parse(kind: &str) -> Result<Self, String> {
+        Self::from_str(&kind.trim().to_ascii_lowercase())
+    }
 }
 
 /// Camera / water handles the demo needs after a factory spawn.
