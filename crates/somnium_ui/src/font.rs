@@ -113,9 +113,19 @@ impl FontAtlas {
     /// Measure text width/height using font metrics (no rasterization, fast).
     /// Returns (total_advance_width, line_height) in pixels.
     pub fn measure_text(&self, text: &str, px: f32, font_id: u8) -> Vec2 {
+        self.measure_text_tracked(text, px, font_id, 0.0)
+    }
+
+    /// [`measure_text`](Self::measure_text) with letter-spacing. Must agree
+    /// exactly with [`crate::draw::DrawingContext::push_text_tracked`], which
+    /// also adds `tracking` after the final glyph.
+    pub fn measure_text_tracked(&self, text: &str, px: f32, font_id: u8, tracking: f32) -> Vec2 {
         let Some(font) = self.fonts.get(font_id as usize) else {
             // Fallback: 8px wide, px tall per char
-            return Vec2::new(text.chars().count() as f32 * px * 0.55, px);
+            return Vec2::new(
+                text.chars().count() as f32 * (px * 0.55 + tracking).max(0.0),
+                px,
+            );
         };
         let line_h = font
             .horizontal_line_metrics(px)
@@ -126,7 +136,7 @@ impl FontAtlas {
         for line in text.split('\n') {
             let w: f32 = line
                 .chars()
-                .map(|ch| font.metrics(ch, px).advance_width)
+                .map(|ch| font.metrics(ch, px).advance_width + tracking)
                 .sum();
             max_w = max_w.max(w);
             lines += 1;

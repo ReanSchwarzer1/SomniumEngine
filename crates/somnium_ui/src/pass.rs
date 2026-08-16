@@ -17,9 +17,25 @@ use crate::{
     icons::{ICON_ATLAS_HEIGHT, ICON_ATLAS_TEXTURE_ID, ICON_ATLAS_WIDTH},
 };
 use glam::Mat4;
+use std::borrow::Cow;
 
 const INIT_VTX_CAP: u64 = 65536 * 20; // 65 K vertices × 20 B
 const INIT_IDX_CAP: u64 = 131072 * 4; // 128 K indices  × 4 B
+
+const SRGB_OUTPUT_DECLARATION: &str = "const OUTPUT_IS_SRGB: bool = true;";
+
+fn shader_source_for_surface_format(format: wgpu::TextureFormat) -> Cow<'static, str> {
+    let source = include_str!("ui_pass.wgsl");
+    if format.is_srgb() {
+        Cow::Borrowed(source)
+    } else {
+        debug_assert!(source.contains(SRGB_OUTPUT_DECLARATION));
+        Cow::Owned(source.replace(
+            SRGB_OUTPUT_DECLARATION,
+            "const OUTPUT_IS_SRGB: bool = false;",
+        ))
+    }
+}
 
 pub struct UiPass {
     pipeline: wgpu::RenderPipeline,
@@ -210,7 +226,7 @@ impl UiPass {
         // ── Shader + pipeline ─────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("UiPass Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("ui_pass.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source_for_surface_format(surface_format)),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -513,5 +529,22 @@ impl UiPass {
                 0..1,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srgb_surface_decodes_authored_vertex_tints() {
+        let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(shader.contains("const OUTPUT_IS_SRGB: bool = true;"));
+    }
+
+    #[test]
+    fn linear_surface_does_not_apply_an_extra_decode() {
+        let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8Unorm);
+        assert!(shader.contains("const OUTPUT_IS_SRGB: bool = false;"));
     }
 }

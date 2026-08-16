@@ -15,6 +15,7 @@ somnium_ecs = { path = "../somnium_ecs" }
 glam       = { workspace = true }
 bytemuck   = { workspace = true }
 fontdue    = { workspace = true }
+resvg      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 image      = { workspace = true }

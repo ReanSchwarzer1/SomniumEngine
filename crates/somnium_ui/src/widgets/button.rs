@@ -6,6 +6,7 @@ use crate::{
     draw::DrawingContext,
     message::{MessageDirection, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
+    style::{Interaction, VisualState, button as style_button, icon_button as style_icon_button},
     theme,
     types::Rect,
     widget::{Widget, WidgetBuilder},
@@ -36,6 +37,8 @@ pub struct Button {
     pub is_pressed: bool,
     pub hovered: bool,
     pub selected: bool,
+    /// Keyboard focus — draws the 1 px ring without changing the fill.
+    pub focused: bool,
     last_up: Option<Instant>,
 }
 
@@ -67,22 +70,44 @@ impl Control for Button {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        let fill = if self.is_pressed {
-            theme::ACCENT_PRESSED
+        // Zeta-C: paint comes from the shared recipes. A button whose caller
+        // gave it no background is a chrome/icon button — it must stay
+        // transparent at rest so a command band reads as one surface — while a
+        // button with an explicit background keeps it as its rest fill.
+        let ghost = widget.background[3] == 0;
+        let state = VisualState::with(if !widget.enabled {
+            Interaction::Disabled
+        } else if self.is_pressed {
+            Interaction::Pressed
         } else if self.selected {
-            theme::ACCENT_DIM
+            Interaction::Selected
         } else if self.hovered {
-            theme::BG_HOVER
-        } else if widget.background[3] == 0 {
-            theme::TRANSPARENT
+            Interaction::Hover
         } else {
+            Interaction::Rest
+        })
+        .focused(self.focused);
+        let paint = if ghost {
+            style_icon_button(state)
+        } else {
+            style_button(state)
+        };
+        let fill = if !ghost && state.interaction == Interaction::Rest {
             widget.background
+        } else {
+            paint.background
         };
         if fill[3] > 0 {
             ctx.push_rect_filled(b, fill);
         }
-        if self.selected {
-            ctx.push_rect_filled(Rect::new(b.x, b.y, 2.0, b.h), theme::ACCENT);
+        if let Some(rail) = paint.rail {
+            ctx.push_rect_filled(
+                Rect::new(b.x, b.y, theme::NOCTURNE.geometry.stroke_rail, b.h),
+                rail,
+            );
+        }
+        if self.focused {
+            ctx.push_rect_border(b, theme::NOCTURNE.geometry.stroke_focus, paint.border);
         }
     }
 
@@ -109,6 +134,12 @@ impl Control for Button {
                 WidgetMessage::MouseLeave => {
                     self.hovered = false;
                     self.is_pressed = false;
+                }
+                WidgetMessage::Focus => {
+                    self.focused = true;
+                }
+                WidgetMessage::Unfocus => {
+                    self.focused = false;
                 }
                 WidgetMessage::MouseDown { .. } => {
                     self.is_pressed = true;
@@ -168,6 +199,7 @@ impl ButtonBuilder {
                 is_pressed: false,
                 hovered: false,
                 selected: false,
+                focused: false,
                 last_up: None,
             }),
         )
@@ -207,6 +239,7 @@ mod tests {
             is_pressed: false,
             hovered: false,
             selected: false,
+            focused: false,
             last_up: None,
         };
         let mut widget = Widget::default();

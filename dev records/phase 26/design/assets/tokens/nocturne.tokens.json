@@ -1,0 +1,166 @@
+{
+  "$meta": {
+    "name": "Nocturne Atelier",
+    "version": "0.1.0-zeta",
+    "authored_space": "sRGB",
+    "runtime_contract": "decode authored sRGB -> linear exactly once before the sRGB swapchain; alpha is straight, premultiplied at blend",
+    "source": "dev records/phase_26_Zeta.md §6.1"
+  },
+  "palette": {
+    "ink900": "#0E1014",
+    "ink800": "#14161C",
+    "ink700": "#181A20",
+    "ink600": "#1C1E26",
+    "ink500": "#22252F",
+    "ink400": "#282B36",
+    "ink300": "#313543",
+    "ink200": "#3A3E4A",
+    "ink100": "#4A4F5E",
+    "slate300": "#5C6478",
+    "slate200": "#7E8698",
+    "slate100": "#9AA3B5",
+    "mist": "#D8DCE8",
+    "moon": "#F2F4FF",
+    "indigo600": "#4A55C8",
+    "indigo500": "#5C68E0",
+    "indigo400": "#7A86FF",
+    "indigo300": "#949CFF",
+    "indigo200": "#B4BAFF",
+    "sand": "#C4A574",
+    "mint": "#5DCE9A",
+    "amber": "#E6B04A",
+    "rose": "#E05A5A",
+    "cyan": "#59B8D6"
+  },
+  "semantic": {
+    "surface.window": "#14161C",
+    "surface.canvas": "#181A20",
+    "surface.panel": "#1C1E26",
+    "surface.header": "#22252F",
+    "surface.raised": "#282B36",
+    "surface.input": "#12141A",
+    "surface.popup": "#22252F",
+    "surface.modal_scrim": "rgba(10,11,15,0.62)",
+    "surface.hover": "#313543",
+    "surface.selected": "rgba(122,134,255,0.16)",
+    "text.primary": "#D8DCE8",
+    "text.secondary": "#9AA3B5",
+    "text.muted": "#7E8698",
+    "text.disabled": "#5C6478",
+    "text.inverse": "#0E1014",
+    "text.link": "#949CFF",
+    "border.subtle": "#22252F",
+    "border.default": "#313543",
+    "border.strong": "#4A4F5E",
+    "focus.ring": "#949CFF",
+    "accent.default": "#7A86FF",
+    "accent.hover": "#949CFF",
+    "accent.pressed": "#5C68E0",
+    "accent.selected_bg": "rgba(122,134,255,0.16)",
+    "accent.selected_rail": "#7A86FF",
+    "status.info": "#59B8D6",
+    "status.success": "#5DCE9A",
+    "status.warning": "#E6B04A",
+    "status.error": "#E05A5A",
+    "status.busy": "#7A86FF"
+  },
+  "typography": {
+    "family_ui": "Geist (fallback Inter)",
+    "family_mono": "Geist Mono (fallback JetBrains Mono)",
+    "roles": {
+      "display": [
+        22,
+        600
+      ],
+      "title": [
+        16,
+        600
+      ],
+      "section": [
+        13,
+        600
+      ],
+      "body": [
+        13,
+        400
+      ],
+      "body_strong": [
+        13,
+        500
+      ],
+      "label": [
+        12,
+        500
+      ],
+      "caption": [
+        11,
+        400
+      ],
+      "mono": [
+        12,
+        400
+      ],
+      "mono_strong": [
+        12,
+        500
+      ]
+    },
+    "features": [
+      "tnum on all numeric fields",
+      "ss04 disambiguation",
+      "kern"
+    ]
+  },
+  "space": {
+    "base": 4,
+    "inset_panel": 8,
+    "gap_group": 12,
+    "gap_section": 16
+  },
+  "radius": {
+    "input": 2,
+    "chrome": 2,
+    "popup": 4,
+    "modal": 6,
+    "tile": 3,
+    "seam": 0
+  },
+  "stroke": {
+    "hairline": 1,
+    "focus": 1,
+    "rail": 2
+  },
+  "density": {
+    "row_dense": 24,
+    "row_tree": 26,
+    "row_chrome": 30,
+    "titlebar": 36,
+    "menu": 28,
+    "toolbar": 32,
+    "status": 26,
+    "icon_row": 16,
+    "icon_toolbar": 20,
+    "icon_action": 24,
+    "hit_min": 24
+  },
+  "motion": {
+    "hover": 120,
+    "press": 90,
+    "drawer": 200,
+    "popup": 140,
+    "easing": "cubic-bezier(0.2,0,0,1)",
+    "reduced_motion": "0"
+  },
+  "elevation": {
+    "panel": "none",
+    "popup": "0 8px 24px rgba(0,0,0,.45)",
+    "modal": "0 24px 64px rgba(0,0,0,.60)",
+    "drawer": "0 -12px 32px rgba(0,0,0,.40)"
+  },
+  "opacity": {
+    "disabled": 0.38,
+    "ghost": 0.6,
+    "scrim": 0.62,
+    "drop_valid": 0.18
+  }
+}

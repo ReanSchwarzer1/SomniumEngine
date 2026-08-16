@@ -1,6 +1,6 @@
 //! ColorSwatch + ColorPicker (Phase 26-F Iris).
 //!
-//! Linear RGB(A) storage. The swatch and spectrum are approximate sRGB.
+//! Linear RGB(A) storage. The swatch and spectrum use the standard sRGB transfer.
 //! Cancel restores the colour captured when the picker opened.
 
 use crate::{
@@ -50,7 +50,7 @@ impl Control for ColorSwatch {
         let b = widget.screen_bounds();
         let sw = Rect::new(b.x + 4.0, b.y + 3.0, 28.0, (b.h - 6.0).max(12.0));
         // Checker so alpha is visible.
-        ctx.push_rect_filled(sw, [40, 40, 48, 255]);
+        ctx.push_rect_filled(sw, theme::BG_RAISED);
         let display = linear_rgba_to_srgb_u8(self.color);
         ctx.push_rect_filled(sw, display);
         ctx.push_rect_border(sw, 1.0, theme::BORDER_MEDIUM);

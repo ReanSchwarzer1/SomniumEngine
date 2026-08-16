@@ -92,11 +92,23 @@ impl LayoutCtx {
     /// Measure text using the font atlas (no rasterization, uses font metrics only).
     /// Returns (total_advance_width, line_height) in logical pixels.
     pub fn measure_text(&self, text: &str, px: f32, font_id: u8) -> glam::Vec2 {
+        self.measure_text_tracked(text, px, font_id, 0.0)
+    }
+
+    /// [`measure_text`](Self::measure_text) with letter-spacing, so a tracked
+    /// header measures the width it will actually draw.
+    pub fn measure_text_tracked(
+        &self,
+        text: &str,
+        px: f32,
+        font_id: u8,
+        tracking: f32,
+    ) -> glam::Vec2 {
         unsafe {
             (*self.ui_ptr)
                 .draw_ctx
                 .font_atlas
-                .measure_text(text, px, font_id)
+                .measure_text_tracked(text, px, font_id, tracking)
         }
     }
 }
@@ -172,6 +184,18 @@ pub trait Control: Send + 'static {
     /// Cursor shown when the pointer is over this widget.
     fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> CursorKind {
         CursorKind::Default
+    }
+
+    /// The value this widget is currently displaying, if it is a numeric
+    /// control.
+    ///
+    /// Phase 26-Zeta-G needs to compare every inspector field against its
+    /// baseline once per frame to decide which modified dots are lit. Reading
+    /// the value back out of the tree keeps that in one place; the alternative
+    /// was to mirror the value at each of the ~100 `set_value` call sites in
+    /// `lib.rs` and hope none of them was ever missed.
+    fn numeric_value(&self) -> Option<f32> {
+        None
     }
 }
 

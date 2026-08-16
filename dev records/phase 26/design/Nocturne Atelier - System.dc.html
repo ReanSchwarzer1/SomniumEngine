@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;background:#0E1014;}
+  body{font-family:Geist,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
+  a{color:#949CFF;text-decoration:none;border-bottom:1px solid rgba(148,156,255,.35);}
+  a:hover{color:#B4BAFF;border-bottom-color:#B4BAFF;}
+  ::selection{background:rgba(122,134,255,.32);}
+  @keyframes nocturne-busy{0%{background-position:0 0}100%{background-position:220px 0}}
+</style>
+</helmet>
+
+<div style="background:#14161C;color:#D8DCE8;min-height:100%;padding:0;">
+
+  <div style="width:1360px;margin:0 auto;padding:0 48px;box-sizing:content-box;">
+
+    <!-- ══════════ COVER ══════════ -->
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:48px;padding:88px 0 40px;border-bottom:1px solid #22252F;">
+      <div style="display:flex;flex-direction:column;gap:22px;">
+        <div style="display:flex;align-items:center;gap:18px;">
+          <svg viewBox="0 0 64 64" width="46" height="46" fill="none" style="color:#7A86FF;">
+            <g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g>
+          </svg>
+          <div style="display:flex;flex-direction:column;gap:3px;">
+            <div style="font-size:13px;font-weight:500;letter-spacing:.14em;color:#7E8698;text-transform:uppercase;">Phase 26-Zeta · Design gate</div>
+            <div style="font-size:38px;font-weight:600;letter-spacing:-.02em;line-height:1;">Nocturne Atelier</div>
+          </div>
+        </div>
+        <p style="margin:0;max-width:720px;font-size:17px;line-height:1.55;color:#B9C0D0;text-wrap:pretty;">
+          Somnium is a precise instrument for constructing impossible worlds: nocturnal, calm, technical, and quietly cinematic.
+        </p>
+      </div>
+      <div style="display:grid;grid-template-columns:auto auto;gap:6px 18px;font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#7E8698;white-space:nowrap;">
+        <span>package</span><span style="color:#D8DCE8;">design system v0.1.0-zeta</span>
+        <span>authored</span><span style="color:#D8DCE8;">sRGB · corrected pipeline</span>
+        <span>scope</span><span style="color:#D8DCE8;">§8.3 deliverables 1–3, 5–7</span>
+        <span>screens</span><span style="color:#D8DCE8;">separate file</span>
+      </div>
+    </div>
+
+    <!-- ══════════ 00 ASSUMPTIONS ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:56px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">00 / CONTEXT</div>
+      <div style="display:flex;flex-direction:column;gap:26px;">
+        <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">What I read, what I assumed</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;display:flex;flex-direction:column;gap:10px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#5DCE9A;text-transform:uppercase;">Read from source</div>
+            <ul style="margin:0;padding-left:18px;font-size:13.5px;line-height:1.7;color:#B9C0D0;">
+              <li><code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">theme.rs</code> — 78 lines, the Nocturne constants and every density value below is anchored to them</li>
+              <li><code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">icons.rs</code> — the 73-entry <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">IconId</code> enum, append-only, <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">ImmersivePlay</code> last</li>
+              <li><code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">lib.rs</code> §<code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">build_editor_layout</code> — the 7-row outer grid, three splitters, terrain rail, profiler overlay</li>
+              <li>phase_26 §2.4 Nocturne (locked), §14 must-not-break, phase_26_Zeta §§2–7</li>
+            </ul>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;display:flex;flex-direction:column;gap:10px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#E6B04A;text-transform:uppercase;">Assumed — tell me if wrong</div>
+            <ul style="margin:0;padding-left:18px;font-size:13.5px;line-height:1.7;color:#B9C0D0;">
+              <li>Zeta-B lands first. Every hex here is an authored sRGB value that must reach the framebuffer unchanged; nothing is pre-darkened to fight the double encoding.</li>
+              <li>The retained-mode tree stays. Nothing below needs a new layout primitive — grids, stack panels, splitters, popups and the existing <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">Image</code> widget cover it.</li>
+              <li><code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">EditorEvent</code> is untouched. Revert, favourites and validation are presentation over values you already hold.</li>
+              <li>Geist is the type direction, Inter the fallback, and the decision waits on in-engine 12–14 px captures at four scales.</li>
+            </ul>
+          </div>
+        </div>
+        <div style="background:#1C1E26;border-left:2px solid #7A86FF;padding:16px 20px;font-size:13.5px;line-height:1.65;color:#B9C0D0;">
+          The largest single change is not colour. It is that the shell currently gives four horizontal bands the same weight — title, menu, main toolbar, viewport toolbar — costing 122 logical px before the scene starts. The system below folds those into three command scopes and 100 px, and gives the reclaimed vertical to the viewport.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 01 PRINCIPLES ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">01 / IDENTITY</div>
+      <div style="display:flex;flex-direction:column;gap:26px;">
+        <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Principles and motifs</h2>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">Viewport first</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Chrome above the scene is a budget, not a canvas. 100 logical px at 1080p; everything else earns its place against the render.</p>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">Accent is punctuation</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Lunar indigo marks focus, selection, active mode, primary action and links. A panel is never indigo.</p>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">Seams, not cards</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Editor regions meet at hairlines and go edge to edge. Radius belongs to things you can pick up: inputs, popups, tiles.</p>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">One state grammar</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Hover wash, 1 px focus ring, 2 px selection rail, dot for modified. The same four cues in the Outliner, Details, Content and log.</p>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">Numbers are the product</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Tabular figures, right-aligned values, one shared label column. A property table that jitters as you scrub is a broken instrument.</p>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:18px 20px;">
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:8px;">Motion explains space</div>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#9AA3B5;">Drawers travel, popups fade, progress moves. Editing feedback is instant, always.</p>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:rgba(93,206,154,.10);border-bottom:1px solid #22252F;padding:9px 16px;font-size:11px;font-weight:600;letter-spacing:.1em;color:#5DCE9A;text-transform:uppercase;">Permitted motifs</div>
+            <div style="padding:14px 16px;font-size:13px;line-height:1.9;color:#B9C0D0;background:#1C1E26;">Crescent and lune geometry · the 13° chamfer as a repeated cut · point symmetry · hairline seams · one-pixel indigo rings · monospace numerics · warm sand reserved exclusively for folders</div>
+          </div>
+          <div style="border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:rgba(224,90,90,.10);border-bottom:1px solid #22252F;padding:9px 16px;font-size:11px;font-weight:600;letter-spacing:.1em;color:#E05A5A;text-transform:uppercase;">Forbidden</div>
+            <div style="padding:14px 16px;font-size:13px;line-height:1.9;color:#B9C0D0;background:#1C1E26;">Enclosing rings or shields around the mark · gradients and bevels on chrome · glow · rounded-card panels · a second accent hue · icon-only controls without tooltips · colour as the sole carrier of state · any Lumina or Unreal pixel, hex, mark or asset</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 02 MONOGRAM ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">02 / MARK</div>
+      <div style="display:flex;flex-direction:column;gap:26px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:24px;">
+          <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Three routes for the S</h2>
+          <div style="font-size:12.5px;color:#7E8698;">All three are point-symmetric about the optical centre and built from the same 64-unit grid.</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
+
+          <div style="background:#1C1E26;border:1px solid #7A86FF;border-radius:4px;overflow:hidden;">
+            <div style="background:rgba(122,134,255,.12);padding:9px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #22252F;">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.06em;color:#B4BAFF;">A · ECLIPSE</span>
+              <sc-if value="{{ isEclipse }}" hint-placeholder-val="{{ true }}"><span style="font-size:10.5px;font-weight:600;letter-spacing:.1em;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:2px;">RECOMMENDED</span></sc-if>
+            </div>
+            <div style="background:#12141A;padding:34px;display:flex;justify-content:center;">
+              <svg viewBox="0 0 64 64" width="150" height="150" fill="none" style="color:#D8DCE8;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+            </div>
+            <div style="padding:16px 18px;font-size:13px;line-height:1.65;color:#9AA3B5;">Two counter-rotating blades on tangent circles, separated by a diagonal channel. The negative space is the S; neither blade is a letterform on its own. Terminals are butt-cut perpendicular to the tangent, which produces the chamfer for free.</div>
+          </div>
+
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;display:flex;justify-content:space-between;align-items:center;"><span style="font-size:12px;font-weight:600;letter-spacing:.06em;color:#9AA3B5;">B · HORIZON</span><sc-if value="{{ isHorizon }}" hint-placeholder-val="{{ false }}"><span style="font-size:10.5px;font-weight:600;letter-spacing:.1em;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:2px;">RECOMMENDED</span></sc-if></div>
+            <div style="background:#12141A;padding:34px;display:flex;justify-content:center;">
+              <svg viewBox="0 0 64 64" width="150" height="150" fill="none" style="color:#D8DCE8;"><g><path d="M45.47 20.89 L41.78 9.55 L30.58 5.47 L20.47 11.79 L19.22 23.65 L27.8 31.93" stroke="currentColor" stroke-width="9" stroke-linejoin="miter" stroke-linecap="butt" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.47 20.89 L41.78 9.55 L30.58 5.47 L20.47 11.79 L19.22 23.65 L27.8 31.93" stroke="currentColor" stroke-width="9" stroke-linejoin="miter" stroke-linecap="butt" fill="none"></path></g></g></svg>
+            </div>
+            <div style="padding:16px 18px;font-size:13px;line-height:1.65;color:#9AA3B5;">The same skeleton faceted into five straight ribbons per blade. Flatter, more instrument than emblem. Rasterises hardest of the three at 16 px because the facets fall between pixel centres.</div>
+          </div>
+
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;display:flex;justify-content:space-between;align-items:center;"><span style="font-size:12px;font-weight:600;letter-spacing:.06em;color:#9AA3B5;">C · SIGIL</span><sc-if value="{{ isSigil }}" hint-placeholder-val="{{ false }}"><span style="font-size:10.5px;font-weight:600;letter-spacing:.1em;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:2px;">RECOMMENDED</span></sc-if></div>
+            <div style="background:#12141A;padding:34px;display:flex;justify-content:center;">
+              <svg viewBox="0 0 64 64" width="150" height="150" fill="none" style="color:#D8DCE8;"><g fill="currentColor" fill-rule="evenodd"><path d="M49.95 23.98 A18.5 18.5 0 1 0 27.52 37.45 L32.68 31.81 A9.6 9.6 0 1 1 44.31 24.82 Z"></path><g transform="rotate(180 32 32)"><path d="M49.95 23.98 A18.5 18.5 0 1 0 27.52 37.45 L32.68 31.81 A9.6 9.6 0 1 1 44.31 24.82 Z"></path></g></g></svg>
+            </div>
+            <div style="padding:16px 18px;font-size:13px;line-height:1.65;color:#9AA3B5;">True lunes — offset inner circles give a 14.2 → 5.8 unit stroke modulation, so each blade tapers like a crescent. The most expressive and the most fragile: the thin terminals need a hand-corrected micro cut.</div>
+          </div>
+        </div>
+
+        <!-- optical sizes -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:10px 18px;border-bottom:1px solid #22252F;display:flex;justify-content:space-between;">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;">Optical size ladder — route A</span>
+            <span style="font-size:11px;color:#7E8698;">256 / 128 / 64 / 48 / 32 / 24 / 16 · the 16 px cut is a separate drawing</span>
+          </div>
+          <div style="padding:30px 24px;display:flex;align-items:flex-end;gap:38px;background:#12141A;">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;"><svg viewBox="0 0 64 64" width="96" height="96" fill="none" style="color:#D8DCE8;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">96</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;"><svg viewBox="0 0 64 64" width="48" height="48" fill="none" style="color:#D8DCE8;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">48</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;"><svg viewBox="0 0 64 64" width="32" height="32" fill="none" style="color:#D8DCE8;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">32</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;"><svg viewBox="0 0 64 64" width="24" height="24" fill="none" style="color:#D8DCE8;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">24</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" style="color:#D8DCE8;"><path d="M11.4 4.5 A3.6 3.6 0 1 0 8 8 A3.6 3.6 0 1 1 4.6 11.5" stroke="currentColor" stroke-width="2.7" fill="none"></path></svg><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#7A86FF;">16 micro</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;padding-left:20px;border-left:1px solid #22252F;"><div style="width:96px;height:96px;border-radius:18px;background:linear-gradient(#22252F,#14161C);display:flex;align-items:center;justify-content:center;border:1px solid #313543;"><svg viewBox="0 0 64 64" width="56" height="56" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">app icon</span></div>
+          </div>
+        </div>
+
+        <!-- lockups -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="background:#12141A;border:1px solid #22252F;border-radius:4px;padding:30px 28px;display:flex;flex-direction:column;gap:22px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#5C6478;text-transform:uppercase;">Horizontal lockup — dark</div>
+            <div style="display:flex;align-items:center;gap:14px;">
+              <svg viewBox="0 0 64 64" width="38" height="38" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <div style="display:flex;flex-direction:column;">
+                <span style="font-size:21px;font-weight:600;letter-spacing:-.01em;color:#F2F4FF;">Somnium</span>
+                <span style="font-size:10px;font-weight:500;letter-spacing:.34em;color:#7E8698;">ENGINE</span>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;padding-top:6px;border-top:1px solid #22252F;">
+              <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <span style="font-size:13px;font-weight:500;color:#D8DCE8;">Somnium Engine</span>
+              <span style="font-size:11px;color:#5C6478;margin-left:auto;font-family:'Geist Mono',monospace;">title-bar lockup · 36 px band</span>
+            </div>
+          </div>
+          <div style="background:#F2F4FF;border:1px solid #22252F;border-radius:4px;padding:30px 28px;display:flex;flex-direction:column;gap:22px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#7E8698;text-transform:uppercase;">Reversed — light / print / docs</div>
+            <div style="display:flex;align-items:center;gap:14px;">
+              <svg viewBox="0 0 64 64" width="38" height="38" fill="none" style="color:#1C1E26;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <div style="display:flex;flex-direction:column;">
+                <span style="font-size:21px;font-weight:600;letter-spacing:-.01em;color:#0E1014;">Somnium</span>
+                <span style="font-size:10px;font-weight:500;letter-spacing:.34em;color:#5C6478;">ENGINE</span>
+              </div>
+            </div>
+            <div style="padding-top:6px;border-top:1px solid rgba(14,16,20,.12);font-size:12.5px;line-height:1.6;color:#3A3E4A;">Clear space equals the blade stroke (9.2 units, 0.144 × mark height) on all four sides. Minimum mark size 16 px screen, 6 mm print. Never re-space or re-set the wordmark; convert it to outlines before release.</div>
+          </div>
+        </div>
+
+        <!-- similarity -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:10px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;">Similarity review</div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);">
+            <div style="padding:16px 18px;border-right:1px solid #22252F;">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:#D8DCE8;">Enclosing ring / shield</div>
+              <div style="font-size:12.5px;line-height:1.6;color:#9AA3B5;">Unreal's silhouette is a circle first. None of the three routes has an outer container — the silhouette is the letter itself.</div>
+            </div>
+            <div style="padding:16px 18px;border-right:1px solid #22252F;">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:#D8DCE8;">Blackletter L</div>
+              <div style="font-size:12.5px;line-height:1.6;color:#9AA3B5;">Lumina's mark is a calligraphic single stroke with a swash. Ours is constructed from circles and has no calligraphic axis.</div>
+            </div>
+            <div style="padding:16px 18px;border-right:1px solid #22252F;">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:#D8DCE8;">Unity / Godot</div>
+              <div style="font-size:12.5px;line-height:1.6;color:#9AA3B5;">Both are pictorial (cube, robot head). No letterform collision.</div>
+            </div>
+            <div style="padding:16px 18px;">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:#D8DCE8;">Generic tech S</div>
+              <div style="font-size:12.5px;line-height:1.6;color:#9AA3B5;">The risk is real and route A mitigates it with the diagonal channel — the two blades never join, which no type-derived S does. Owner-led trademark clearance is still required.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 03 TOKENS ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">03 / TOKENS</div>
+      <div style="display:flex;flex-direction:column;gap:26px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:24px;">
+          <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Token sheet</h2>
+          <div style="font-size:12.5px;color:#7E8698;">Machine-readable copy: <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">assets/tokens/nocturne.tokens.json</code></div>
+        </div>
+
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:16px 18px;font-size:13px;line-height:1.65;color:#B9C0D0;">
+          <strong style="color:#D8DCE8;font-weight:600;">Colour contract.</strong> Every value below is authored sRGB. The runtime decodes each token to linear exactly once, immediately before the sRGB swapchain; alpha is authored straight and premultiplied at blend time. <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">surface.panel</code> must be captured back as <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#7A86FF;">#1C1E26</code> ±1/255. If a capture reads <code style="font-family:'Geist Mono',monospace;font-size:12px;color:#E05A5A;">#5D606C</code>, the pipeline is still double-encoding and no palette judgement is valid.
+        </div>
+
+        <!-- palette ramp -->
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#5C6478;text-transform:uppercase;">Authored palette</div>
+          <div style="display:grid;grid-template-columns:repeat(14,1fr);gap:2px;">
+            <div style="height:64px;background:#0E1014;"></div><div style="height:64px;background:#14161C;"></div><div style="height:64px;background:#181A20;"></div><div style="height:64px;background:#1C1E26;"></div><div style="height:64px;background:#22252F;"></div><div style="height:64px;background:#282B36;"></div><div style="height:64px;background:#313543;"></div><div style="height:64px;background:#3A3E4A;"></div><div style="height:64px;background:#4A4F5E;"></div><div style="height:64px;background:#5C6478;"></div><div style="height:64px;background:#7E8698;"></div><div style="height:64px;background:#9AA3B5;"></div><div style="height:64px;background:#D8DCE8;"></div><div style="height:64px;background:#F2F4FF;"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(14,1fr);gap:2px;font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;">
+            <span>0E1014</span><span>14161C</span><span>181A20</span><span>1C1E26</span><span>22252F</span><span>282B36</span><span>313543</span><span>3A3E4A</span><span>4A4F5E</span><span>5C6478</span><span>7E8698</span><span>9AA3B5</span><span>D8DCE8</span><span>F2F4FF</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(14,1fr);gap:2px;margin-top:10px;">
+            <div style="height:44px;background:#4A55C8;"></div><div style="height:44px;background:#5C68E0;"></div><div style="height:44px;background:#7A86FF;"></div><div style="height:44px;background:#949CFF;"></div><div style="height:44px;background:#B4BAFF;"></div><div style="height:44px;background:#C4A574;"></div><div style="height:44px;background:#5DCE9A;"></div><div style="height:44px;background:#E6B04A;"></div><div style="height:44px;background:#E05A5A;"></div><div style="height:44px;background:#59B8D6;"></div><div style="height:44px;background:transparent;"></div><div style="height:44px;background:transparent;"></div><div style="height:44px;background:transparent;"></div><div style="height:44px;background:transparent;"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(14,1fr);gap:2px;font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;">
+            <span>indigo600</span><span>indigo500</span><span>indigo400</span><span>indigo300</span><span>indigo200</span><span>sand</span><span>mint</span><span>amber</span><span>rose</span><span>cyan</span>
+          </div>
+        </div>
+
+        <!-- semantic roles table -->
+        <div style="border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:36px 1.5fr 1fr 1.6fr .8fr;background:#22252F;padding:9px 0;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">
+            <span></span><span>Role</span><span style="font-family:'Geist Mono',monospace;letter-spacing:0;">sRGB</span><span>Intended pair / use</span><span style="text-align:right;padding-right:18px;">Contrast</span>
+          </div>
+          <div style="background:#1C1E26;">
+            <sc-for list="{{ roleRows }}" as="r" hint-placeholder-count="10">
+              <div style="display:grid;grid-template-columns:36px 1.5fr 1fr 1.6fr .8fr;align-items:center;padding:7px 0;border-top:1px solid #22252F;font-size:12.5px;">
+                <span style="justify-self:center;width:16px;height:16px;border-radius:2px;border:1px solid rgba(255,255,255,.10);background:{{ r.hex }}"></span>
+                <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;">{{ r.name }}</span>
+                <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#9AA3B5;">{{ r.hex }}</span>
+                <span style="color:#9AA3B5;">{{ r.pair }}</span>
+                <span style="text-align:right;padding-right:18px;font-family:'Geist Mono',monospace;font-size:11.5px;color:{{ r.ratioColor }}">{{ r.ratio }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- typography -->
+        <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:10px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;">Type roles — Geist, Inter fallback</div>
+            <div style="padding:6px 18px 14px;">
+              <sc-for list="{{ typeRows }}" as="t" hint-placeholder-count="9">
+                <div style="display:grid;grid-template-columns:1fr 96px 130px;align-items:baseline;gap:12px;padding:9px 0;border-bottom:1px solid #22252F;">
+                  <span style="font-family:{{ t.font }};font-size:{{ t.px }};font-weight:{{ t.weight }};color:#D8DCE8;">{{ t.sample }}</span>
+                  <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">{{ t.spec }}</span>
+                  <span style="font-size:11.5px;color:#7E8698;text-align:right;">{{ t.use }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:14px;">
+            <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+              <div style="background:#22252F;padding:10px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;">Tabular numerals</div>
+              <div style="padding:16px 18px;display:flex;flex-direction:column;gap:6px;font-family:'Geist Mono',monospace;font-size:12.5px;">
+                <div style="display:flex;justify-content:space-between;"><span style="color:#9AA3B5;">Position X</span><span style="color:#D8DCE8;">-1240.500</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:#9AA3B5;">Position Y</span><span style="color:#D8DCE8;">＋118.000</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:#9AA3B5;">Position Z</span><span style="color:#D8DCE8;">＋9.375</span></div>
+                <div style="margin-top:8px;font-family:Geist,Inter,sans-serif;font-size:11.5px;line-height:1.5;color:#7E8698;">Values right-align on the decimal column so a scrub never shifts the row. <code style="font-family:'Geist Mono',monospace;">tnum</code> and <code style="font-family:'Geist Mono',monospace;">ss04</code> on every numeric field.</div>
+              </div>
+            </div>
+            <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+              <div style="background:#22252F;padding:10px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;">Decision gate</div>
+              <div style="padding:14px 18px;font-size:12.5px;line-height:1.65;color:#9AA3B5;">Geist ships only if in-engine captures at 12 px / 100 %, 125 %, 150 % and 200 % are equal or better than the bundled Inter in the Details column. Until then Inter stays the shipped face and nothing else in this sheet changes.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- metrics -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 16px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">Density</div>
+            <div style="padding:12px 16px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:2;color:#9AA3B5;">
+              <div style="display:flex;justify-content:space-between;"><span>row.dense</span><span style="color:#D8DCE8;">24</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>row.tree</span><span style="color:#D8DCE8;">26</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>row.chrome</span><span style="color:#D8DCE8;">30</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>titlebar</span><span style="color:#D8DCE8;">36</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>command</span><span style="color:#D8DCE8;">34</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>status</span><span style="color:#D8DCE8;">26</span></div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 16px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">Space / radius / stroke</div>
+            <div style="padding:12px 16px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:2;color:#9AA3B5;">
+              <div style="display:flex;justify-content:space-between;"><span>base</span><span style="color:#D8DCE8;">4</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>inset.panel</span><span style="color:#D8DCE8;">8</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>gap.group</span><span style="color:#D8DCE8;">12</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>radius.input</span><span style="color:#D8DCE8;">2</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>radius.popup</span><span style="color:#D8DCE8;">4</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>stroke.rail</span><span style="color:#D8DCE8;">2</span></div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 16px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">Motion</div>
+            <div style="padding:12px 16px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:2;color:#9AA3B5;">
+              <div style="display:flex;justify-content:space-between;"><span>press</span><span style="color:#D8DCE8;">90 ms</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>hover</span><span style="color:#D8DCE8;">120 ms</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>popup</span><span style="color:#D8DCE8;">140 ms</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>drawer</span><span style="color:#D8DCE8;">200 ms</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>edit</span><span style="color:#D8DCE8;">0 ms</span></div>
+              <div style="display:flex;justify-content:space-between;"><span>reduced</span><span style="color:#D8DCE8;">0 ms</span></div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 16px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">Elevation</div>
+            <div style="padding:12px 16px;font-family:'Geist Mono',monospace;font-size:11px;line-height:1.9;color:#9AA3B5;">
+              <div>panel <span style="color:#D8DCE8;">— seam only</span></div>
+              <div>popup <span style="color:#D8DCE8;">0 8 24 /.45</span></div>
+              <div>drawer <span style="color:#D8DCE8;">0 -12 32 /.40</span></div>
+              <div>modal <span style="color:#D8DCE8;">0 24 64 /.60</span></div>
+              <div style="margin-top:6px;font-family:Geist,Inter,sans-serif;font-size:11px;color:#7E8698;">Shadow marks z-order, never decoration. Panels never cast.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<div style="background:#14161C;color:#D8DCE8;padding:0 0 120px;">
+  <div style="width:1360px;margin:0 auto;padding:0 48px;box-sizing:content-box;">
+
+    <!-- ══════════ 04 COMPONENTS ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">04 / COMPONENTS</div>
+      <div style="display:flex;flex-direction:column;gap:18px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:24px;">
+          <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Component library and state contract</h2>
+          <div style="font-size:12.5px;color:#7E8698;">Every tile below is one deterministic state. This section doubles as the regression sheet.</div>
+        </div>
+
+        <!-- BUTTONS -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;display:flex;justify-content:space-between;">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Button · 26 px</span>
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">rest / hover / pressed / focus / primary / disabled / busy / destructive</span>
+          </div>
+          <div style="padding:20px 18px;display:flex;flex-wrap:wrap;gap:26px;align-items:flex-start;">
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#282B36;border:1px solid #313543;border-radius:2px;font-size:12.5px;color:#D8DCE8;">Import…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">rest</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#313543;border:1px solid #4A4F5E;border-radius:2px;font-size:12.5px;color:#F2F4FF;">Import…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">hover</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#1C1E26;border:1px solid #4A4F5E;border-radius:2px;font-size:12.5px;color:#9AA3B5;">Import…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">pressed</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#282B36;border:1px solid #949CFF;border-radius:2px;font-size:12.5px;color:#D8DCE8;box-shadow:0 0 0 1px rgba(148,156,255,.35);">Import…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#949CFF;">keyboard focus</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#7A86FF;border:1px solid #7A86FF;border-radius:2px;font-size:12.5px;font-weight:500;color:#0E1014;">Save scene</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">primary</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:#1C1E26;border:1px solid #282B36;border-radius:2px;font-size:12.5px;color:#5C6478;">Open scene…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">disabled + tooltip</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;gap:8px;background:#282B36;border:1px solid #313543;border-radius:2px;font-size:12.5px;color:#9AA3B5;overflow:hidden;position:relative;"><span style="width:11px;height:11px;border:2px solid #7A86FF;border-right-color:transparent;border-radius:50%;display:inline-block;"></span>Building…</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">busy</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div style="height:26px;padding:0 12px;display:flex;align-items:center;background:rgba(224,90,90,.12);border:1px solid rgba(224,90,90,.55);border-radius:2px;font-size:12.5px;color:#E05A5A;">Delete entity</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">destructive</span></div>
+          </div>
+        </div>
+
+        <!-- ICON BUTTONS + TABS -->
+        <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Icon button · 30 px hit, 20 px glyph</div>
+            <div style="padding:18px;display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap;">
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;color:#9AA3B5;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">rest</span></div>
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:#313543;color:#D8DCE8;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">hover</span></div>
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.16);box-shadow:inset 2px 0 0 #7A86FF;color:#B4BAFF;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">active mode</span></div>
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;border:1px solid #949CFF;color:#D8DCE8;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#949CFF;">focus</span></div>
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;color:#3A3E4A;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">disabled</span></div>
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;"><div style="position:relative;"><div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:#313543;color:#D8DCE8;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="m3 15 2.4-5 2.4 4 2.4-7 2.4 8 2.4-5 2.4 3L21 11"></path></svg></div><div style="position:absolute;top:34px;left:-14px;background:#22252F;border:1px solid #313543;border-radius:4px;padding:4px 8px;font-size:11.5px;color:#D8DCE8;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.45);">Noise <span style="color:#7E8698;">4</span></div></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;margin-top:34px;">tooltip 400 ms</span></div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Tabs · 30 px</div>
+            <div style="padding:18px;display:flex;flex-direction:column;gap:16px;">
+              <div style="display:flex;background:#181A20;border-bottom:1px solid #22252F;">
+                <div style="height:30px;padding:0 14px;display:flex;align-items:center;font-size:12.5px;color:#F2F4FF;background:#1C1E26;box-shadow:inset 0 -2px 0 #7A86FF;">Details</div>
+                <div style="height:30px;padding:0 14px;display:flex;align-items:center;font-size:12.5px;color:#9AA3B5;">World Settings</div>
+                <div style="height:30px;padding:0 14px;display:flex;align-items:center;font-size:12.5px;color:#D8DCE8;background:#22252F;">Layers</div>
+                <div style="height:30px;padding:0 14px;display:flex;align-items:center;font-size:12.5px;color:#5C6478;">Physics</div>
+              </div>
+              <div style="display:flex;gap:16px;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;"><span style="color:#7A86FF;">active</span><span>rest</span><span>hover</span><span>disabled</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- INPUTS -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Text, numeric, combo, checkbox, slider, colour · 22 px controls in a 24 px row</div>
+          <div style="padding:20px 18px;display:grid;grid-template-columns:repeat(4,1fr);gap:24px 26px;">
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#12141A;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;padding:0 8px;font-size:12px;color:#D8DCE8;">Terrain_00</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">text · rest</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#0E1014;border:1px solid #949CFF;border-radius:2px;display:flex;align-items:center;padding:0 8px;font-size:12px;color:#F2F4FF;">Terrain_00<span style="width:1px;height:13px;background:#949CFF;margin-left:1px;"></span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#949CFF;">text · active edit</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#12141A;border:1px solid #E05A5A;border-radius:2px;display:flex;align-items:center;justify-content:space-between;padding:0 8px;font-size:12px;color:#E05A5A;">−12.0<span style="font-size:11px;">min 0</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">numeric · invalid</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#12141A;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding:0 8px;font-family:'Geist Mono',monospace;font-size:12px;color:#D8DCE8;">1024.000</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">numeric · tnum</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#12141A;border:1px solid #4A4F5E;border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding:0 8px;font-family:'Geist Mono',monospace;font-size:12px;color:#B4BAFF;cursor:ew-resize;">1042.500</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">numeric · scrubbing</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#282B36;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 8px;font-size:12px;color:#D8DCE8;">ACES<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9AA3B5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">combo · rest</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="display:flex;align-items:center;gap:8px;height:22px;"><span style="width:14px;height:14px;border-radius:2px;background:#7A86FF;display:flex;align-items:center;justify-content:center;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#0E1014" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"></path></svg></span><span style="font-size:12.5px;color:#D8DCE8;">Cast shadows</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">checkbox · on</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="display:flex;align-items:center;gap:8px;height:22px;"><span style="width:14px;height:14px;border-radius:2px;border:1px solid #4A4F5E;background:#12141A;"></span><span style="font-size:12.5px;color:#9AA3B5;">Show engine content</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">checkbox · off</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="display:flex;align-items:center;gap:10px;height:22px;"><div style="flex:1;height:3px;background:#22252F;border-radius:2px;position:relative;"><div style="position:absolute;left:0;top:0;height:3px;width:62%;background:#7A86FF;border-radius:2px;"></div><div style="position:absolute;left:62%;top:-4.5px;width:10px;height:12px;background:#D8DCE8;border-radius:1px;margin-left:-5px;"></div></div><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;">5.0 m/s</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">slider · value + readout</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="display:flex;align-items:center;gap:8px;height:22px;"><span style="width:34px;height:16px;border-radius:2px;background:#8FB4D9;border:1px solid #4A4F5E;"></span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#9AA3B5;">#8FB4D9</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">colour swatch</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#12141A;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;gap:6px;padding:0 8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg><span style="font-size:12px;color:#5C6478;">Search entities</span></div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">search · empty</span></div>
+            <div style="display:flex;flex-direction:column;gap:7px;"><div style="height:22px;background:#1C1E26;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;padding:0 8px;font-size:12px;color:#5C6478;">Locked by terrain</div><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">read-only</span></div>
+          </div>
+        </div>
+
+        <!-- ROWS -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Tree row · 26 px</div>
+            <div style="padding:12px 0 16px;">
+              <sc-for list="{{ treeRows }}" as="t" hint-placeholder-count="8">
+                <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 14px 0 0;background:{{ t.bg }};box-shadow:{{ t.rail }};">
+                  <span style="width:16px;"></span>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{{ t.iconColor }}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6.5 12 11l8-4.5Z"></path><path d="M4 12.5 12 17l8-4.5"></path></svg>
+                  <span style="font-size:12.5px;font-weight:{{ t.weight }};color:{{ t.color }};">{{ t.name }}</span>
+                  <span style="margin-left:auto;font-size:11px;color:{{ t.metaColor }};">{{ t.meta }}</span>
+                </div>
+              </sc-for>
+              <div style="padding:12px 14px 0;font-family:'Geist Mono',monospace;font-size:10px;line-height:1.9;color:#5C6478;">rest · hover · selected (fill + 2 px rail) · keyboard focus · hidden · locked · dirty · error</div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Property row · 24 px · 46 / 54 columns</div>
+            <div style="padding:12px 0 16px;">
+              <sc-for list="{{ propRows }}" as="p" hint-placeholder-count="7">
+                <div style="height:24px;display:grid;grid-template-columns:14px 1fr 1.2fr;align-items:center;gap:8px;padding:0 14px 0 0;background:{{ p.bg }};">
+                  <span style="justify-self:center;width:5px;height:5px;border-radius:50%;background:{{ p.dot }};"></span>
+                  <span style="font-size:12px;color:{{ p.labelColor }};">{{ p.label }}</span>
+                  <span style="height:20px;background:{{ p.fieldBg }};border:1px solid {{ p.fieldBorder }};border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding:0 7px;font-family:'Geist Mono',monospace;font-size:11.5px;color:{{ p.valueColor }};">{{ p.value }}</span>
+                </div>
+              </sc-for>
+              <div style="padding:12px 14px 0;font-family:'Geist Mono',monospace;font-size:10px;line-height:1.9;color:#5C6478;">the left gutter dot is the only modified indicator; click it to revert one property, click the section header dot to revert the section</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ASSET TILES + CHIPS -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Asset tile · 104 × 128 · and filter chips</div>
+          <div style="padding:20px 18px;display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;">
+            <sc-for list="{{ tiles }}" as="a" hint-placeholder-count="6">
+              <div style="display:flex;flex-direction:column;gap:7px;align-items:center;width:104px;">
+                <div style="width:104px;height:104px;border-radius:3px;background:{{ a.bg }};border:1px solid {{ a.border }};display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;">
+                  <span style="font-size:11px;color:{{ a.glyphColor }};text-align:center;padding:0 8px;line-height:1.4;">{{ a.glyph }}</span>
+                  <span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:{{ a.badge }};"></span>
+                </div>
+                <span style="font-size:11.5px;color:{{ a.labelColor }};text-align:center;line-height:1.3;">{{ a.name }}</span>
+                <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">{{ a.state }}</span>
+              </div>
+            </sc-for>
+            <div style="display:flex;flex-direction:column;gap:12px;padding-left:12px;border-left:1px solid #22252F;">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;max-width:340px;">
+                <span style="height:22px;padding:0 10px;display:flex;align-items:center;gap:6px;border-radius:11px;background:rgba(122,134,255,.16);border:1px solid #7A86FF;font-size:11.5px;color:#B4BAFF;">Mesh <span style="color:#7E8698;">12</span></span>
+                <span style="height:22px;padding:0 10px;display:flex;align-items:center;gap:6px;border-radius:11px;background:#282B36;border:1px solid #313543;font-size:11.5px;color:#9AA3B5;">Texture <span style="color:#5C6478;">31</span></span>
+                <span style="height:22px;padding:0 10px;display:flex;align-items:center;gap:6px;border-radius:11px;background:#282B36;border:1px solid #313543;font-size:11.5px;color:#9AA3B5;">Material <span style="color:#5C6478;">4</span></span>
+                <span style="height:22px;padding:0 10px;display:flex;align-items:center;border-radius:11px;background:#1C1E26;border:1px dashed #3A3E4A;font-size:11.5px;color:#5C6478;">Audio 0</span>
+              </div>
+              <div style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">chip · active / rest / rest / empty-disabled</div>
+              <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9AA3B5;">
+                <span style="color:#C4A574;">Game</span><span style="color:#4A4F5E;">/</span><span style="color:#C4A574;">terrain</span><span style="color:#4A4F5E;">/</span><span style="color:#D8DCE8;">bc7</span>
+                <span style="margin-left:6px;height:18px;padding:0 7px;display:flex;align-items:center;border-radius:2px;background:rgba(230,176,74,.14);border:1px solid rgba(230,176,74,.4);font-size:10.5px;color:#E6B04A;">DERIVED</span>
+              </div>
+              <div style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">breadcrumb + derived badge</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- OVERLAYS -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Menu / popup</div>
+            <div style="padding:18px;background:#181A20;">
+              <div style="width:100%;background:#22252F;border:1px solid #313543;border-radius:4px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0;">
+                <div style="height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:12.5px;color:#D8DCE8;">Undo<span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">Ctrl+Z</span></div>
+                <div style="height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:12.5px;color:#F2F4FF;background:#313543;">Redo<span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9AA3B5;">Ctrl+Y</span></div>
+                <div style="height:1px;background:#313543;margin:4px 0;"></div>
+                <div style="height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:12.5px;color:#5C6478;">Duplicate<span style="font-family:'Geist Mono',monospace;font-size:11px;color:#3A3E4A;">Ctrl+D</span></div>
+                <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 12px;font-size:12.5px;color:#D8DCE8;"><span style="width:14px;height:14px;border-radius:2px;background:#7A86FF;"></span>Show engine content</div>
+              </div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Toast · notification</div>
+            <div style="padding:18px;background:#181A20;display:flex;flex-direction:column;gap:10px;">
+              <div style="background:#22252F;border:1px solid #313543;border-left:2px solid #5DCE9A;border-radius:3px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.45);">
+                <div style="font-size:12.5px;color:#D8DCE8;margin-bottom:3px;">Imported <span style="font-family:'Geist Mono',monospace;">viking_boat.glb</span></div>
+                <div style="font-size:11.5px;color:#7E8698;">4 meshes · 2 materials · 1.8 s</div>
+              </div>
+              <div style="background:#22252F;border:1px solid #313543;border-left:2px solid #E05A5A;border-radius:3px;padding:10px 12px;">
+                <div style="font-size:12.5px;color:#D8DCE8;margin-bottom:3px;">Shader compile failed</div>
+                <div style="font-size:11.5px;color:#7E8698;">water_ssr.wgsl:214 · <span style="color:#949CFF;">Open log</span></div>
+              </div>
+              <div style="background:#22252F;border:1px solid #313543;border-left:2px solid #7A86FF;border-radius:3px;padding:10px 12px;">
+                <div style="display:flex;justify-content:space-between;font-size:12.5px;color:#D8DCE8;margin-bottom:6px;">Building terrain BC7<span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">62 %</span></div>
+                <div style="height:3px;background:#12141A;border-radius:2px;overflow:hidden;"><div style="width:62%;height:3px;background:#7A86FF;"></div></div>
+              </div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Scrollbar · splitter · drop states</div>
+            <div style="padding:18px;background:#181A20;display:flex;gap:20px;">
+              <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
+                <div style="width:10px;height:120px;background:#14161C;border-radius:5px;position:relative;"><div style="position:absolute;top:18px;left:2px;width:6px;height:54px;background:#4A4F5E;border-radius:3px;"></div></div>
+                <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">10 / 6</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
+                <div style="width:6px;height:120px;background:#0E1014;position:relative;"><div style="position:absolute;top:52px;left:1px;width:4px;height:18px;background:#4A4F5E;border-radius:2px;"></div></div>
+                <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">splitter</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:10px;">
+                <div style="height:52px;border:1px dashed #7A86FF;background:rgba(122,134,255,.18);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:#B4BAFF;">Drop to spawn at cursor</div>
+                <div style="height:52px;border:1px dashed #E05A5A;background:rgba(224,90,90,.12);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:#E05A5A;">Texture is not a mesh</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- EMPTY / LOADING / ERROR -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
+          <div style="background:#181A20;border:1px solid #22252F;border-radius:4px;height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
+            <svg viewBox="0 0 64 64" width="30" height="30" fill="none" style="color:#313543;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+            <div style="font-size:13px;color:#9AA3B5;">No entities match “boat”</div>
+            <div style="font-size:11.5px;color:#5C6478;">Clear filter · <span style="color:#949CFF;">Esc</span></div>
+          </div>
+          <div style="background:#181A20;border:1px solid #22252F;border-radius:4px;height:150px;padding:14px;display:flex;flex-direction:column;gap:8px;">
+            <div style="height:14px;background:linear-gradient(90deg,#1C1E26,#282B36,#1C1E26);background-size:220px 100%;animation:nocturne-busy 1.1s linear infinite;border-radius:2px;width:70%;"></div>
+            <div style="height:14px;background:linear-gradient(90deg,#1C1E26,#282B36,#1C1E26);background-size:220px 100%;animation:nocturne-busy 1.1s linear infinite;border-radius:2px;width:88%;"></div>
+            <div style="height:14px;background:linear-gradient(90deg,#1C1E26,#282B36,#1C1E26);background-size:220px 100%;animation:nocturne-busy 1.1s linear infinite;border-radius:2px;width:54%;"></div>
+            <div style="margin-top:auto;font-size:11.5px;color:#5C6478;">Scanning /Game/terrain · 31 of 402</div>
+          </div>
+          <div style="background:#181A20;border:1px solid rgba(224,90,90,.35);border-radius:4px;height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:0 20px;text-align:center;">
+            <div style="width:26px;height:26px;border-radius:50%;border:1.5px solid #E05A5A;display:flex;align-items:center;justify-content:center;color:#E05A5A;font-size:15px;font-weight:600;">!</div>
+            <div style="font-size:13px;color:#D8DCE8;">Preview unavailable</div>
+            <div style="font-size:11.5px;color:#7E8698;line-height:1.5;">SciFiHelmet_Normal.png failed to decode. The asset still imports.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 05 INTERACTION ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">05 / INTERACTION</div>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <h2 style="margin:0 0 12px;font-size:22px;font-weight:600;letter-spacing:-.01em;">Interaction annotations</h2>
+        <sc-for list="{{ interactions }}" as="i" hint-placeholder-count="8">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;display:grid;grid-template-columns:210px 1fr;">
+            <div style="padding:16px 18px;border-right:1px solid #22252F;background:#181A20;">
+              <div style="font-size:13.5px;font-weight:600;color:#D8DCE8;margin-bottom:4px;">{{ i.title }}</div>
+              <div style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">{{ i.tag }}</div>
+            </div>
+            <div style="padding:16px 18px;font-size:13px;line-height:1.7;color:#B9C0D0;">{{ i.body }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- ══════════ 06 REDLINES ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">06 / REDLINES</div>
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Implementation redlines</h2>
+
+        <!-- vertical budget -->
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;display:flex;justify-content:space-between;">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Vertical budget at 1920 × 1080, 100 %</span>
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#5DCE9A;">122 px → 100 px above the viewport</span>
+          </div>
+          <div style="padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:26px;">
+            <div>
+              <div style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#7E8698;margin-bottom:8px;">TODAY — four equal bands</div>
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <div style="height:24px;background:#22252F;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#9AA3B5;justify-content:space-between;"><span>title bar</span><span style="font-family:'Geist Mono',monospace;">36</span></div>
+                <div style="height:20px;background:#22252F;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#9AA3B5;justify-content:space-between;"><span>menu</span><span style="font-family:'Geist Mono',monospace;">28</span></div>
+                <div style="height:22px;background:#22252F;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#9AA3B5;justify-content:space-between;"><span>main toolbar</span><span style="font-family:'Geist Mono',monospace;">32</span></div>
+                <div style="height:18px;background:#22252F;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#9AA3B5;justify-content:space-between;"><span>viewport toolbar</span><span style="font-family:'Geist Mono',monospace;">26</span></div>
+              </div>
+            </div>
+            <div>
+              <div style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#7A86FF;margin-bottom:8px;">ZETA — three command scopes</div>
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <div style="height:24px;background:#14161C;border:1px solid #313543;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#D8DCE8;justify-content:space-between;"><span>application · mark, menus, search, jobs, window</span><span style="font-family:'Geist Mono',monospace;">36</span></div>
+                <div style="height:22px;background:#22252F;border:1px solid #313543;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#D8DCE8;justify-content:space-between;"><span>mode · save, Select/Landscape/Foliage, create, transport</span><span style="font-family:'Geist Mono',monospace;">32</span></div>
+                <div style="height:20px;background:rgba(20,22,28,.72);border:1px solid #313543;display:flex;align-items:center;padding:0 10px;font-size:11px;color:#9AA3B5;justify-content:space-between;"><span>viewport context · floats <em style="font-style:normal;color:#7A86FF;">over</em> the scene, 32 px inset</span><span style="font-family:'Geist Mono',monospace;">32</span></div>
+                <div style="height:14px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:1.1fr 1fr 1.7fr;background:#22252F;padding:9px 18px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9AA3B5;text-transform:uppercase;">
+            <span>Region</span><span style="font-family:'Geist Mono',monospace;letter-spacing:0;">Logical size</span><span>Collapse rule</span>
+          </div>
+          <div style="background:#1C1E26;">
+            <sc-for list="{{ redlines }}" as="d" hint-placeholder-count="10">
+              <div style="display:grid;grid-template-columns:1.1fr 1fr 1.7fr;padding:9px 18px;border-top:1px solid #22252F;font-size:12.5px;align-items:baseline;">
+                <span style="color:#D8DCE8;">{{ d.region }}</span>
+                <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#9AA3B5;">{{ d.size }}</span>
+                <span style="color:#9AA3B5;">{{ d.rule }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">z-order</div>
+            <div style="padding:14px 18px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:2;color:#9AA3B5;">
+              <div><span style="color:#D8DCE8;">0</span> viewport passthrough (never hit-tested)</div>
+              <div><span style="color:#D8DCE8;">1</span> docked panels, drawers, status</div>
+              <div><span style="color:#D8DCE8;">2</span> viewport overlays — context bar, profiler, gizmo HUD</div>
+              <div><span style="color:#D8DCE8;">3</span> popups: menus, combo lists, context menus, colour</div>
+              <div><span style="color:#D8DCE8;">4</span> tooltips</div>
+              <div><span style="color:#D8DCE8;">5</span> command palette + notification centre</div>
+              <div><span style="color:#D8DCE8;">6</span> modal scrim and dialog (focus trapped)</div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+            <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Details column grammar</div>
+            <div style="padding:14px 18px;font-size:12.5px;line-height:1.8;color:#9AA3B5;">
+              Label column is 46 % of panel width, clamped 96–176 px. Value column takes the rest minus the 14 px gutter. Vector rows split the value column into three equal cells with a 4 px gap; the X/Y/Z tag sits inside the field at 10.5 px, <code style="font-family:'Geist Mono',monospace;">text.muted</code>. Labels never wrap — they ellipsise and gain a tooltip. At panel widths under 240 px the row stacks label above value and grows to 40 px.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 07 ASSETS ══════════ -->
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:40px;padding:64px 0 0;">
+      <div style="font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:#5C6478;letter-spacing:.08em;padding-top:5px;">07 / ASSETS</div>
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <h2 style="margin:0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Asset package</h2>
+        <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;overflow:hidden;">
+          <div style="background:#22252F;padding:9px 18px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.1em;color:#D8DCE8;text-transform:uppercase;">Somnium icon extension — original, drawn on the Tabler 24 × 24 / 2 px grid</div>
+          <div style="padding:22px 18px;display:grid;grid-template-columns:repeat(8,1fr);gap:20px 12px;">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 7V2.5"></path><path d="M9.6 4.9 12 2.5l2.4 2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">sculpt-raise</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6.5 16.5 12 10l5.5 6.5"></path><path d="M12 2.5V7"></path><path d="M9.6 4.6 12 7l2.4-2.4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">sculpt-lower</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 14c3.2 0 3.2-6 6.4-6s3.2 6 6.4 6 2.6-3 5.2-3"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">sculpt-smooth</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 9h18"></path><path d="M6 15c2-3 4-4 6-4s4 1 6 4"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">sculpt-flatten</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="m3 15 2.4-5 2.4 4 2.4-7 2.4 8 2.4-5 2.4 3L21 11"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">sculpt-noise</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"></path><path d="m3 14 9 5 9-5"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">paint-layer</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4c0 8-4.6 12-10 12H5c0-8 4.6-12 10-12h5Z"></path><path d="M4 21c2.5-4.5 5.5-7.3 9-9"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">foliage-paint</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4c0 8-4.6 12-10 12H5c0-8 4.6-12 10-12h5Z"></path><path d="m3 21 18-18"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">foliage-erase</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"></path><path d="M12 12c0-4 2.5-6.5 6.5-7 0 4-2.5 6.6-6.5 7Z"></path><path d="M12 15c0-3.4-2-5.6-5.5-6 0 3.4 2 5.6 5.5 6Z"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">foliage-single</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5c2.7 0 2.7 2 5.3 2s2.7-2 5.4-2 2.7 2 5.3 2 2.7-2 4-2"></path><path d="M2 14c2.7 0 2.7 2 5.3 2s2.7-2 5.4-2 2.7 2 5.3 2 2.7-2 4-2"></path><path d="M2 19.5c2.7 0 2.7 2 5.3 2"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">water-body</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15h18l-2.6 5.2a1.6 1.6 0 0 1-1.4.8H7a1.6 1.6 0 0 1-1.4-.8Z"></path><path d="M12 15V3l7 8.5"></path><path d="M10 15V6L5 12"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">vessel</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6.5 12 11l8-4.5Z"></path><path d="M4 12.5 12 17l8-4.5"></path><path d="M4 6.5v6"></path><path d="M20 6.5v6"></path><path d="M12 11v6"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">voxel-terrain</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 3.5 8 12l4 8.5"></path><path d="m20 8-8.4 1.2"></path><path d="m20 16-8.4-1.2"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">post-fx</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 3.5c3 3.4 3 13.6 0 17"></path><path d="M3.5 12h17"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">light-probe</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="7" height="6" rx="1.5"></rect><rect x="15" y="14" width="7" height="6" rx="1.5"></rect><path d="M9 7h3.5a2 2 0 0 1 2 2v6.5"></path><path d="M2 17h6"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">material-graph</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:9px;"><div style="width:44px;height:44px;border-radius:3px;background:#181A20;border:1px solid #22252F;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5h5"></path><path d="m4.5 5 9 7-3 8"></path><path d="m13.5 12 7-6"></path><circle cx="21" cy="4.5" r="1.6"></circle><path d="M3 20h5"></path></svg></div><span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#5C6478;text-align:center;">ray-trace</span></div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:16px 18px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;margin-bottom:10px;">Files in this package</div>
+            <div style="font-family:'Geist Mono',monospace;font-size:11.5px;line-height:1.95;color:#B9C0D0;">
+              <div>assets/brand/somnium-s-eclipse.svg</div>
+              <div>assets/brand/somnium-s-horizon.svg</div>
+              <div>assets/brand/somnium-s-sigil.svg</div>
+              <div>assets/brand/somnium-s-micro-16.svg</div>
+              <div>assets/brand/somnium-lockup-horizontal.svg</div>
+              <div>assets/brand/PROVENANCE.md</div>
+              <div>assets/icons/somnium/*.svg <span style="color:#5C6478;">(16)</span></div>
+              <div>assets/icons/icon-manifest.json</div>
+              <div>assets/tokens/nocturne.tokens.json</div>
+            </div>
+          </div>
+          <div style="background:#1C1E26;border:1px solid #22252F;border-radius:4px;padding:16px 18px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:.1em;color:#9AA3B5;text-transform:uppercase;margin-bottom:10px;">Not in this package — you must source them</div>
+            <div style="font-size:12.5px;line-height:1.75;color:#9AA3B5;">
+              Tabler SVGs (MIT) and Geist / Geist Mono TTF (OFL 1.1) must be fetched from their official upstreams into <code style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;">assets/icons/tabler/</code> and <code style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;">crates/somnium_ui/assets/fonts/</code> with their licence files. I can list the exact Tabler icon ids the manifest needs once you confirm route A. No font or icon binary was copied from any reference editor.
+            </div>
+          </div>
+        </div>
+        <div style="background:#1C1E26;border-left:2px solid #7A86FF;padding:16px 20px;font-size:13px;line-height:1.7;color:#B9C0D0;">
+          <strong style="color:#D8DCE8;font-weight:600;">Next.</strong> Pick a monogram route and I will cut the 16 / 24 / 32 / 48 optical variants, the <code style="font-family:'Geist Mono',monospace;font-size:12px;">.ico</code> set and the splash lockup, then produce the remaining deliverable — the deterministic visual-regression page — as a single scrollable sheet you can screenshot-diff against. The editor screens live in <em style="font-style:normal;color:#949CFF;">Nocturne Atelier — Editor Screens</em>.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;markRoute&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;Eclipse&quot;,&quot;Horizon&quot;,&quot;Sigil&quot;],&quot;default&quot;:&quot;Eclipse&quot;,&quot;tsType&quot;:&quot;'Eclipse' | 'Horizon' | 'Sigil'&quot;,&quot;section&quot;:&quot;Identity&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    const route = this.props.markRoute ?? "Eclipse";
+    const isEclipse = route === "Eclipse", isHorizon = route === "Horizon", isSigil = route === "Sigil";
+    const ok = "#5DCE9A", warn = "#E6B04A", mute = "#7E8698";
+    const roleRows = [
+      ["surface.window", "#14161C", "Title bar, menu band, deepest well", "—", mute],
+      ["surface.canvas", "#181A20", "Viewport surround, drawer well", "—", mute],
+      ["surface.panel", "#1C1E26", "Outliner, Details, log, content view", "—", mute],
+      ["surface.header", "#22252F", "Command scopes, section headers, tabs", "—", mute],
+      ["surface.raised", "#282B36", "Buttons, combo chrome, tiles", "—", mute],
+      ["surface.input", "#12141A", "Numeric / text fields, search — recessed", "—", mute],
+      ["surface.popup", "#22252F", "Menus, combo lists, palette, tooltips", "—", mute],
+      ["surface.hover", "#313543", "Hover wash over any surface", "—", mute],
+      ["surface.selected", "rgba(122,134,255,.16)", "Selection fill; always with the 2 px rail", "3.1:1", ok],
+      ["text.primary", "#D8DCE8", "on surface.panel — labels, values", "11.4:1", ok],
+      ["text.secondary", "#9AA3B5", "on surface.panel — hints, breadcrumbs", "6.2:1", ok],
+      ["text.muted", "#7E8698", "on surface.panel — metadata, units", "4.5:1", ok],
+      ["text.disabled", "#5C6478", "Inactive only — WCAG-exempt", "2.6:1", warn],
+      ["text.link", "#949CFF", "Help and documentation links", "6.0:1", ok],
+      ["border.subtle", "#22252F", "Panel seams over surface.panel", "—", mute],
+      ["border.default", "#313543", "Input and control outlines", "—", mute],
+      ["border.strong", "#4A4F5E", "Splitter grips, drag targets", "3.2:1", ok],
+      ["focus.ring", "#949CFF", "1 px ring on any focused control", "6.0:1", ok],
+      ["accent.default", "#7A86FF", "Active mode, primary action, rail", "4.8:1", ok],
+      ["accent.hover", "#949CFF", "Hovered accent surface", "6.0:1", ok],
+      ["accent.pressed", "#5C68E0", "Pressed accent surface", "3.4:1", ok],
+      ["status.info", "#59B8D6", "Log info, background job", "6.4:1", ok],
+      ["status.success", "#5DCE9A", "Saved, import complete", "8.1:1", ok],
+      ["status.warning", "#E6B04A", "Validation warning, derived asset", "8.4:1", ok],
+      ["status.error", "#E05A5A", "Error rows, invalid value, drop-invalid", "4.9:1", ok],
+      ["folder.sand", "#C4A574", "Folders only — never an accent", "7.3:1", ok],
+    ].map(r => ({ name: r[0], hex: r[1], pair: r[2], ratio: r[3], ratioColor: r[4] }));
+
+    const G = "Geist, Inter, sans-serif", M = "'Geist Mono', monospace";
+    const typeRows = [
+      ["display", "Empty project", G, "22px", 600, "22 / 600", "splash, empty states"],
+      ["title", "World Settings", G, "16px", 600, "16 / 600", "modal + panel titles"],
+      ["section", "TRANSFORM", G, "13px", 600, "13 / 600", "inspector sections"],
+      ["body", "Cast shadows on all layers", G, "13px", 400, "13 / 400", "rows, menus, log"],
+      ["body_strong", "Terrain_00 (modified)", G, "13px", 500, "13 / 500", "selected + dirty rows"],
+      ["label", "Camera speed", G, "12px", 500, "12 / 500", "property labels"],
+      ["caption", "3 of 18 entities shown", G, "11px", 400, "11 / 400", "status, metadata"],
+      ["mono", "18:59:43  Forward pass", M, "12px", 400, "12 / 400", "log, console, paths"],
+      ["mono_strong", "−1240.500", M, "12px", 500, "12 / 500", "numeric fields"],
+    ].map(t => ({ role: t[0], sample: t[1], font: t[2], px: t[3], weight: t[4], spec: t[5], use: t[6] }));
+
+    const T = "#D8DCE8", S = "#9AA3B5", D = "#5C6478";
+    const treeRows = [
+      ["Camera", "", "transparent", "none", S, T, 400, D],
+      ["SunLight", "hover", "#313543", "none", "#B4BAFF", "#F2F4FF", 400, S],
+      ["Terrain", "selected", "rgba(122,134,255,.16)", "inset 2px 0 0 #7A86FF", "#B4BAFF", "#F2F4FF", 500, S],
+      ["Water", "focus", "transparent", "inset 0 0 0 1px #949CFF", S, T, 400, D],
+      ["PointLight", "hidden", "transparent", "none", "#3A3E4A", D, 400, D],
+      ["Post Processing", "locked", "transparent", "none", "#3A3E4A", D, 400, D],
+      ["Gislinge Viking Boat", "modified", "transparent", "none", "#C4A574", T, 500, "#7A86FF"],
+      ["node_damagedHelmet_-6514", "error", "rgba(224,90,90,.10)", "inset 2px 0 0 #E05A5A", "#E05A5A", "#E0A0A0", 400, "#E05A5A"],
+    ].map(r => ({ name: r[0], meta: r[1], bg: r[2], rail: r[3], iconColor: r[4], color: r[5], weight: r[6], metaColor: r[7] }));
+
+    const propRows = [
+      ["Position X", "0.000", "transparent", "transparent", S, "#12141A", "#313543", T],
+      ["Position Y", "118.000", "#313543", "transparent", "#F2F4FF", "#0E1014", "#4A4F5E", "#F2F4FF"],
+      ["Position Z", "9.375", "transparent", "#7A86FF", T, "#12141A", "#313543", "#B4BAFF"],
+      ["Sculpt strength", "0.420", "transparent", "transparent", S, "#0E1014", "#949CFF", "#F2F4FF"],
+      ["Layer count", "32", "transparent", "transparent", S, "#1C1E26", "#282B36", D],
+      ["Sample radius", "−12.0", "transparent", "transparent", S, "#12141A", "#E05A5A", "#E05A5A"],
+      ["Great Lakes preset", "locked", "transparent", "transparent", D, "#1C1E26", "#282B36", D],
+    ].map(p => ({ label: p[0], value: p[1], bg: p[2], dot: p[3], labelColor: p[4], fieldBg: p[5], fieldBorder: p[6], valueColor: p[7] }));
+
+    const tiles = [
+      ["L_Demo", "scene", "#181A20", "#313543", S, "#7A86FF", T, "rest"],
+      ["SciFiHelmet_Mesh", "mesh preview", "#22252F", "#7A86FF", "#B4BAFF", "#7A86FF", "#F2F4FF", "selected"],
+      ["terrain_albedo", "texture", "#181A20", "#4A4F5E", S, "#59B8D6", T, "hover"],
+      ["ocean_pbr", "folder", "#181A20", "#313543", "#C4A574", "#C4A574", T, "folder"],
+      ["helmet_normal", "decoding…", "#181A20", "#22252F", D, "#313543", S, "loading"],
+      ["bc7_pack_02", "derived", "#181A20", "rgba(230,176,74,.4)", "#E6B04A", "#E6B04A", S, "derived"],
+    ].map(a => ({ name: a[0], glyph: a[1], bg: a[2], border: a[3], glyphColor: a[4], badge: a[5], labelColor: a[6], state: a[7] }));
+
+    const interactions = [
+      ["Focus order", "Tab / Shift+Tab", "Application scope → mode scope → viewport context → left rail → viewport (single stop, Enter enters camera control, Esc leaves) → Outliner tree (one stop, arrows traverse) → Details (one stop per section, arrows move between rows, Tab moves between fields inside a row) → drawer → status. Focus is visible at every stop as a 1 px #949CFF ring; a focus that lands on a scrolled-out row scrolls it into view without animation."],
+      ["Shortcuts", "displayed, never hidden", "Every command shows its binding in the menu row, the command palette and the tooltip. Ctrl+Space toggles the Content drawer — open and close, no repeat of the UE 5.4 one-way bug. Ctrl+P opens the palette, F1 Help, Esc closes exactly one layer: modal → palette → popup → drawer → filter → selection."],
+      ["Hover and press", "120 ms / 90 ms", "Hover is a wash, never a border change — a border change reflows the row. Press darkens rather than shifts; no control moves under the cursor. Rows in a scrolling list suppress hover while the wheel is spinning."],
+      ["Drag and drop", "asset → viewport / Details", "The drag source dims to 60 % and the cursor carries a 104 px ghost of the tile. Valid drop targets outline indigo dashed at 18 % fill; invalid targets outline rose and show the reason in the status bar. A texture dragged onto a Details colour row is invalid; onto a material slot it is valid. Drop spawns at the picked surface point, not the origin."],
+      ["Drawer transitions", "200 ms travel, height persisted", "Content and Output share one bottom slot. An undocked drawer rises over the viewport with a shadow and dismisses on focus loss; a docked drawer takes layout space, never dismisses on click-away, and its height is persisted per workspace. Promoting drawer → dock is a 200 ms height reconcile, not a rebuild."],
+      ["Selection synchronisation", "one selection, five views", "Viewport pick, Outliner click, Details header, Content Browser reveal and palette result all write the same selection. Every view scrolls its selected row into view without stealing keyboard focus. Multi-select shows a count in the Details header and edits apply to all; mixed values render as an em dash placeholder, not zero."],
+      ["Changed and revert", "gutter dot", "A property whose value differs from the component default gets a 5 px indigo dot in the 14 px left gutter. Clicking the dot reverts that property; the section header carries the same dot and reverts the section. Revert is one undo step. Live scrubbing writes ValueChanging and never creates undo entries; commit writes ValueChanged once."],
+      ["Validation", "in place, never modal", "An out-of-range value keeps the typed text, turns the field border rose, and puts the constraint at the right of the field at 11 px. Focus leaving an invalid field restores the last valid value and toasts what happened. Nothing is silently clamped."],
+      ["Reduced motion", "OS setting, honoured", "Drawer travel, popup fade, toast slide and progress shimmer all resolve to 0 ms. Progress still advances numerically; the busy spinner becomes a static ring with a percentage. No functionality depends on an animation completing."],
+    ].map(i => ({ title: i[0], tag: i[1], body: i[2] }));
+
+    const redlines = [
+      ["Application scope", "36 px · 8 px inset", "Below 1100 px the menu labels collapse to a single ☰ popup; mark and window controls never collapse."],
+      ["Mode scope", "32 px · 30 px controls", "Below 1400 px transport labels drop to icons; below 1100 px Create moves into the overflow ⋯."],
+      ["Viewport context bar", "32 px · floats, 12 px inset", "Below 1280 px it splits into two floating clusters, left and right of the viewport."],
+      ["Left tool rail", "min 120 · default 168 · max 280", "Under 120 px it becomes a 44 px icon-only rail with tooltips."],
+      ["Outliner", "min 180 · default 300 px tall", "Metadata column hides below 240 px wide; type icons never hide."],
+      ["Details", "min 240 · default 340 px wide", "Under 240 px property rows stack label over value at 40 px."],
+      ["Bottom drawer", "min 140 · default 220 · max 60 % of height", "Grid density steps 72 / 88 / 104 / 128 px; below 160 px tall it forces list mode."],
+      ["Status bar", "26 px", "Items drop right to left: triangles → memory → objects → frame time. FPS and dirty state never drop."],
+      ["Splitters", "6 px hit, 1 px paint", "Double-click resets to the workspace default; drag is clamped to the min/max above."],
+      ["Hit targets", "≥ 24 × 24 logical", "Where density forces 22 px, 4 px of separation on every side satisfies WCAG 2.2 target spacing."],
+    ].map(d => ({ region: d[0], size: d[1], rule: d[2] }));
+
+    return { roleRows, typeRows, treeRows, propRows, tiles, interactions, redlines, isEclipse, isHorizon, isSigil };
+  }
+}
+</script>
+</body>
+</html>

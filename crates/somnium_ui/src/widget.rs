@@ -5,6 +5,7 @@
 
 use crate::{
     message::NodeHandle,
+    theme,
     types::{HorizontalAlignment, Rect, Thickness, VerticalAlignment},
 };
 use glam::Vec2;
@@ -73,8 +74,8 @@ impl Default for Widget {
             margin: Thickness::ZERO,
             row: 0,
             column: 0,
-            background: [50, 50, 50, 255],
-            foreground: [220, 220, 220, 255],
+            background: theme::BG_RAISED,
+            foreground: theme::TEXT_PRIMARY,
             visibility: true,
             enabled: true,
             clip_to_bounds: true,

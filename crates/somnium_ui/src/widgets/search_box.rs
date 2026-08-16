@@ -6,19 +6,19 @@ use crate::{
     message::{MessageDirection, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
     theme,
-    types::{Rect, Thickness},
+    types::Rect,
     widget::{Widget, WidgetBuilder},
-    widgets::{
-        stack_panel::{Orientation, StackPanelBuilder},
-        text::TextBuilder,
-        text_box::TextBoxBuilder,
-    },
+    widgets::text_box::TextBoxBuilder,
 };
 use glam::Vec2;
 
 #[derive(Debug, Clone)]
 pub enum SearchBoxMessage {
+    /// Sent `FromWidget` as the user types.
     Query(String),
+    /// Sent `ToWidget` to replace the contents — Esc clearing a live filter,
+    /// or a workspace restoring one.
+    SetText(String),
 }
 
 pub struct SearchBox {
@@ -80,6 +80,16 @@ impl Control for SearchBox {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        // Programmatic clear (Esc dropping a live filter). No `Query` is
+        // emitted back: the caller that sent this already knows, and echoing
+        // would make an Esc that clears two boxes look like one that cleared
+        // one.
+        if let Some(SearchBoxMessage::SetText(text)) = msg.data::<SearchBoxMessage>() {
+            self.query = text.clone();
+            widget.invalidate_layout();
+            msg.handled = true;
+            return;
+        }
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
                 WidgetMessage::Focus => {
@@ -261,6 +271,14 @@ impl BreadcrumbBuilder {
 }
 
 /// Label + control row used by Details.
+/// Build one Details row.
+///
+/// Phase 26-Zeta routes this through [`crate::widgets::property_row`] so every
+/// inspector row shares the measured label/value grammar from the approved
+/// redline instead of a hand-placed 110 px label. `font_id` is ignored — the
+/// label's face comes from [`crate::typography::TextRole::Label`] — and is kept
+/// in the signature so the ~120 existing call sites did not all have to change
+/// in the same commit.
 pub fn build_property_row(
     ui: &mut crate::ui::UserInterface,
     parent: NodeHandle,
@@ -268,30 +286,15 @@ pub fn build_property_row(
     font_id: u8,
     control: UiNode,
 ) -> (NodeHandle, NodeHandle) {
-    let row = StackPanelBuilder::new(
+    let _ = font_id;
+    let row = crate::widgets::property_row::PropertyRowBuilder::new(
         WidgetBuilder::new()
             .with_clip_to_bounds(false)
             .with_background(theme::TRANSPARENT),
     )
-    .with_orientation(Orientation::Horizontal)
+    .with_label(label)
     .build();
     let row_h = ui.add_node(row, parent);
-    let lbl = TextBuilder::new(
-        WidgetBuilder::new()
-            .with_width(110.0)
-            .with_margin(Thickness {
-                left: 8.0,
-                top: 4.0,
-                right: 4.0,
-                bottom: 0.0,
-            }),
-    )
-    .with_text(label)
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    ui.add_node(lbl, row_h);
     let control_h = ui.add_node(control, row_h);
     (row_h, control_h)
 }

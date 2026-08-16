@@ -1,4 +1,20 @@
-# Somnium Engine
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+            srcset="crates/somnium_ui/assets/brand/somnium-lockup-horizontal.svg">
+    <source media="(prefers-color-scheme: light)"
+            srcset="crates/somnium_ui/assets/brand/somnium-lockup-horizontal-light.svg">
+    <img alt="Somnium Engine"
+         src="crates/somnium_ui/assets/brand/somnium-lockup-horizontal.svg"
+         width="300">
+  </picture>
+</p>
+
+<p align="center">
+  <em>A precise instrument for constructing impossible worlds.</em>
+</p>
+
+---
 
 A from-scratch 3D game engine written in Rust, built directly on `wgpu`. Somnium
 is a learning-driven, ground-up engine: rather than wrapping an existing engine,
@@ -12,7 +28,7 @@ The engine is organized around three deliberate commitments:
 |---|---|
 | **Visibility Buffer rendering** | Geometry is rasterized once into a compact `(instance, triangle)` ID buffer; a single fullscreen pass then shades each visible pixel exactly once. No overdraw, bandwidth scales with the framebuffer rather than scene complexity. |
 | **Archetype ECS** | Entities are grouped by component signature and stored as struct-of-arrays, so iterating a query walks contiguous memory — cache-coherent, no per-component hash lookups. |
-| **Native wgpu UI** | The editor (outliner, inspector, gizmos, log) is a native widget tree drawn by the engine's own GPU pass. No browser, WebView, or external UI toolkit. |
+| **Native wgpu UI** | The editor (outliner, inspector, gizmos, log) is a native widget tree drawn by the engine's own GPU pass. No browser, WebView, or external UI toolkit — and no immediate-mode debug skin either: it runs on **Nocturne Atelier**, a real token system with semantic colour roles, five bundled type cuts and one icon family. |
 
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn — see [`context.md`](context.md) for the current phase
@@ -25,21 +41,15 @@ The engine is organized around three deliberate commitments:
 
 ## Screenshots
 
-> 📸 _Screenshots coming soon._ Captures live in [`media/`](media/) — see that
-> folder's README for the suggested shots. Once images are added, uncomment the
-> block below (or drop files matching these names and they'll appear).
+![The Somnium editor](media/editor.png)
 
-<!--
-| Editor | Heightmap terrain |
-|---|---|
-| ![Editor](media/editor.png) | ![Terrain](media/terrain.png) |
+*The editor at 1280×720: three command scopes, the viewport-context bar floating
+over the render, the Outliner and Details columns, and the Content Drawer. Every
+capture in this repository is taken from a running build — `SOMNIUM_CAPTURE_UI_PNG`
+reads back the swapchain after the UI pass — never mocked up.*
 
-| Voxel world | Shadows & PBR |
-|---|---|
-| ![Voxel world](media/voxel.png) | ![Shadows](media/shadows.png) |
-
-![Demo](media/demo.gif)
--->
+More captures live in [`media/`](media/); that folder's README lists the shots
+still wanted (terrain, voxel world, shadows, water).
 
 ## Highlights
 
@@ -73,10 +83,30 @@ The engine is organized around three deliberate commitments:
 - Archetype ECS with parent/child hierarchy and world-transform propagation
 - Transform gizmos, light gizmos (range/cone visualization), selection outline, infinite editor grid
 - Undo/redo (command stack), scene save/load (`.somnium` JSON)
-- Native UI widget library (Grid, StackPanel, ScrollViewer, WrapPanel, TextBox, NumericField, …)
-- Custom title bar (undecorated window), docked Content Drawer, F1 Help
+- Native UI widget library (Grid, StackPanel, ScrollViewer, WrapPanel, TextBox, NumericField, PropertyRow, …)
+- Custom title bar (undecorated window), docked Content Drawer, F1 Help, Ctrl+P command palette
 - Jolt physics integration; Kira audio scaffolding
 - CPU particle system with GPU billboard instancing
+
+**Editor design system — Nocturne Atelier**
+- **Correct colour pipeline.** Authored sRGB decodes to linear exactly once
+  before the sRGB swapchain, with straight alpha through the widget API. `#1C1E26`
+  reaches the framebuffer as `#1C1E26`
+- **Layered tokens** — palette → semantic roles → component recipes → interaction
+  state, so a widget asks for `style::button(state)` rather than picking a grey
+- **Typography with actual hierarchy** — Inter Regular/Medium/SemiBold and
+  JetBrains Mono Regular/Medium behind named roles; numeric fields use the mono
+  face so a scrub cannot shift a row
+- **One icon family** — 67 Tabler outline icons plus 16 original Somnium glyphs on
+  the same 24×24 / 2 px grid, rasterized from SVG by `resvg` into a two-cut atlas
+- **Three command scopes** at 36 / 32 / 32 px, the third floating over the render,
+  so the scene starts 68 logical px from the top instead of 122
+- **Measured Details grammar** — a 46 % label column, a 14 px modified gutter whose
+  dot reverts the property in one undo step, ellipsis-with-tooltip, and a
+  stack-below-240 px rule
+- Named workspaces, width-driven collapse rules, Tab/Esc traversal, and an
+  original Eclipse `S` monogram
+- The full contract is [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md)
 
 ### Lighting and water reflections
 
@@ -133,11 +163,18 @@ SOMNIUM_RT_REFLECT=0 cargo run -p hello_engine  # SSR + sky cube only (no traced
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
   pick Raise / Lower / Smooth / Flatten / Noise / Paint, `[` / `]` size, `-` / `=` strength
 
-Metaphor editor chrome (26-A–I, plus immersive play and ComboBox overlay) is in
-the tree, but **the UI phase is not over**. Later engine features will keep
-needing new inspector fields, panels, and Help pages. Water Help is
-[`docs/editor/water.md`](docs/editor/water.md). Halcyon (VV-A–H) is in the tree;
-remaining GPU work on that track is evidence captures. **Start-here:**
+- **Tab / Shift+Tab** — move between shell regions; **Window menu** — switch
+  workspace (Layout, Terrain, Foliage, Lighting, Materials, Debug, Play) or reset it
+- Click the indigo dot in a Details row's left gutter to revert that property
+
+Metaphor editor chrome (26-A–I) plus the Nocturne Atelier identity pass
+(26-Zeta-B–I) are in the tree, but **the UI phase is not over**. Later engine
+features will keep needing new inspector fields, panels, and Help pages, and
+Zeta's own remaining work — Content Browser workflows, text shaping, AccessKit —
+is listed in [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md).
+Water Help is [`docs/editor/water.md`](docs/editor/water.md). Halcyon (VV-A–H) is
+in the tree; remaining GPU work on that track is evidence captures.
+**Start-here:**
 [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
 
 ## Repository layout
@@ -151,12 +188,15 @@ crates/
   somnium_physics_sys/  Raw Jolt FFI (compiles Jolt C++ at build time)
   somnium_audio/        Kira audio wrapper
   somnium_ui/           Native wgpu widget tree + UiPass
+                        theme/style/typography tokens, editor/ shell modules,
+                        assets/ bundled fonts, icons and brand marks
   somnium_asset/        Vertex type, glTF loader
   somnium_voxel/        Voxel world (chunks, meshing, async streaming)
 examples/
   hello_engine/         Runnable editor demo
 context.md              Living architecture document (phase history, GPU layouts)
 ATTRIBUTION.md          Provenance: which reference patterns informed which files
+THIRD_PARTY_NOTICES.md  Bundled fonts and icons, their licences and modifications
 example_repo/           Local reference codebases — NOT committed (see below)
 ```
 
@@ -210,5 +250,15 @@ otherwise, any contribution you intentionally submit for inclusion in the work,
 as defined in the Apache-2.0 license, shall be dual-licensed as above, without
 any additional terms or conditions.
 
-Bundled third-party code retains its own license: **Jolt Physics** (in
-`example_repo/JoltPhysics-master/`) is MIT-licensed; see its `LICENSE` file.
+Bundled third-party code and assets retain their own licenses:
+
+- **Jolt Physics** (in `example_repo/JoltPhysics-master/`) — MIT; see its `LICENSE`
+- **Inter** and **JetBrains Mono** — SIL Open Font License 1.1
+- **Tabler Icons** — MIT
+
+Every bundled asset, its upstream, its version and any modification is recorded
+in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The Somnium name, the
+Eclipse `S` monogram and the engine-specific icons are original project assets and
+are **not** covered by the dual license above; they are excluded from the
+trademark-style grant the way project branding usually is, and have not been
+through trademark clearance.

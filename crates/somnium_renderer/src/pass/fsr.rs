@@ -183,7 +183,7 @@ impl FsrPass {
         queue.write_buffer(
             &gpu.exposure_buf,
             0,
-            bytemuck::bytes_of(&[exposure.max(1e-8), 0.0, 0.0, 0.0]),
+            bytemuck::bytes_of(&[exposure.max(1e-8), self.sharpness.clamp(0.0, 1.0), 0.0, 0.0]),
         );
         let sanitized_view = gpu.sanitized.create_view(&Default::default());
         let depth_f32_view = gpu.depth_f32.create_view(&Default::default());
@@ -239,10 +239,18 @@ impl FsrPass {
             motion_vector_scale: [gpu.render_size[0] as f32, gpu.render_size[1] as f32],
             render_size: gpu.render_size,
             upscale_size: gpu.upscale_size,
-            enable_sharpening: self.sharpness > 0.0,
-            sharpness: self.sharpness.clamp(0.0, 1.0),
+            // The embedded pre-3.1.5 RCAS shader can emit negative values on
+            // dark high-contrast scenes (AMD fixed this in FSR 3.1.5). Avoid
+            // compounding the backend's low-light failure: run reconstruction
+            // only, then apply a bounded, non-negative display-space sharpen
+            // in `fsr_untonemap.wgsl` using the same UI control.
+            enable_sharpening: false,
+            sharpness: 0.0,
             frame_time_delta: (frame_delta_seconds * 1000.0).max(1.0),
-            pre_exposure: 1.0,
+            // `fsr_sanitize` writes linear HDR multiplied by this exposure.
+            // FSR divides by pre_exposure when evaluating temporal luminance,
+            // so the two values must match (AMD's HDR integration contract).
+            pre_exposure: exposure.max(1e-8),
             reset_history: reset_history || gpu.frame_index == 0,
             camera_near: CAMERA_NEAR,
             camera_far: CAMERA_FAR,
@@ -305,11 +313,12 @@ fn alloc_gpu(
     display_w: u32,
     display_h: u32,
 ) -> FsrGpu {
-    // Colour is already exposure-normalised Karis 0–1, so the HDR / auto-exposure
-    // shader permutations would double-apply a curve FSR is not expecting.
+    // Somnium feeds linear, exposure-normalised HDR. The HDR permutation is
+    // required; treating a nonlinear tone-compressed signal as ordinary color
+    // made FSR's luma-instability pass erase dark geometry at night.
     let context = FsrContext::new(FsrContextInfo {
         device: device.clone(),
-        flags: FsrContextFlags::empty(),
+        flags: FsrContextFlags::HIGH_DYNAMIC_RANGE,
     });
     let render = clamp_render(render_w, render_h);
     let upscale = clamp_upscale(display_w, display_h);

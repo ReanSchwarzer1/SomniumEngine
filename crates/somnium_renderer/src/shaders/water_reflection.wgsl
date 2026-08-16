@@ -47,10 +47,15 @@ fn reflect_rand(seed: ptr<function, u32>) -> f32 {
     return f32((x >> 22u) ^ x) / 4294967295.0;
 }
 
-fn reconstruct_normal(encoded: vec2<f32>) -> vec3<f32> {
+fn reconstruct_normal_toward(encoded: vec2<f32>, toward: vec3<f32>) -> vec3<f32> {
     let xz = encoded * 2.0 - 1.0;
     let y = sqrt(max(1.0 - dot(xz, xz), 0.0));
-    return normalize(vec3<f32>(xz.x, y, xz.y));
+    let above = normalize(vec3<f32>(xz.x, y, xz.y));
+    let below = normalize(vec3<f32>(xz.x, -y, xz.y));
+    // The prepass orients the water normal toward the camera. x/z alone do
+    // not contain the sign of y, so choose the hemisphere that preserves that
+    // convention instead of always reconstructing an upward normal.
+    return select(below, above, dot(above, toward) >= dot(below, toward));
 }
 
 fn world_from_uv_view_depth(uv: vec2<f32>, view_depth: f32) -> vec3<f32> {
@@ -84,11 +89,21 @@ fn atlas_uv(cascade: u32, uv: vec2<f32>) -> vec2<f32> {
 fn sample_cascade_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
     let cascade = get_cascade_index(view_depth);
     let clip = light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
-    let ndc = clip.xyz / clip.w;
-    let uv = atlas_uv(cascade, vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5));
-    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
+    if clip.w <= 0.0 {
         return 1.0;
     }
+    let ndc = clip.xyz / clip.w;
+    // Validate against the cascade's local tile before converting to atlas
+    // space. Every out-of-frustum coordinate can look valid after `* 0.5 +
+    // tile_offset`, which made unrelated atlas texels become dancing black
+    // shadow blotches in rough reflections.
+    let local_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(local_uv < vec2<f32>(0.0)) || any(local_uv > vec2<f32>(1.0))
+        || ndc.z < 0.0 || ndc.z > 1.0
+    {
+        return 1.0;
+    }
+    let uv = atlas_uv(cascade, local_uv);
     return textureSampleCompareLevel(shadow_atlas, shadow_sampler, uv, ndc.z);
 }
 
@@ -143,34 +158,93 @@ fn shade_hit(hit: RtHit, wo: vec3<f32>) -> vec3<f32> {
     return sun + ibl + hit.emissive;
 }
 
+struct TemporalResult {
+    color: vec4<f32>,
+    // luminance mean, luminance squared mean, sample count, hit distance
+    moments: vec4<f32>,
+}
+
+fn reflect_luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn temporal_seed(current: vec4<f32>, hit_distance: f32) -> TemporalResult {
+    let luma = reflect_luma(current.rgb);
+    return TemporalResult(current, vec4<f32>(luma, luma * luma, 1.0, hit_distance));
+}
+
 fn accumulate(
     uv: vec2<f32>,
     load_coord: vec2<i32>,
     full_dims: vec2<i32>,
     view_depth: f32,
     roughness: f32,
+    normal: vec3<f32>,
     layer: i32,
     current: vec4<f32>,
-) -> vec4<f32> {
+    hit_distance: f32,
+) -> TemporalResult {
     if params.history_valid < 0.5 {
-        return current;
+        return temporal_seed(current, hit_distance);
     }
     let velocity = textureLoad(velocity_tex, load_coord, 0).xy;
     let prev_uv = uv + velocity;
     if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0)) {
-        return current;
+        return temporal_seed(current, hit_distance);
     }
     let prev = textureSampleLevel(history_tex, default_sampler, prev_uv, layer, 0.0);
-    let prev_coord = vec2<i32>(prev_uv * vec2<f32>(full_dims));
-    let prev_g = textureLoad(
-        water_surface,
-        clamp(prev_coord, vec2<i32>(0), full_dims - vec2<i32>(1)),
-        0,
+    // Layer 2 is the previous frame's water guide, written alongside the
+    // reflection result. Sampling today's water G-buffer at prev_uv compares
+    // two current-frame pixels and cannot reject disocclusions.
+    let guide = textureSampleLevel(history_tex, default_sampler, prev_uv, 2, 0.0);
+    let prev_normal = reconstruct_normal_toward(guide.rg, normal);
+    let depth_ok = abs(guide.b - view_depth) < max(0.025 * view_depth, 0.2);
+    let normal_ok = dot(prev_normal, normal) > 0.92;
+    let roughness_ok = abs(guide.a - roughness) < 0.12;
+    let finite_ok = all(prev.rgb == prev.rgb);
+    let prev_moments = textureSampleLevel(history_tex, default_sampler, prev_uv, 3 + layer, 0.0);
+    // A rough GGX ray intentionally lands at a different distance each frame;
+    // treating that Monte-Carlo dimension as a disocclusion rejects every
+    // sample and leaves the water stuck at one spp. Hit distance is a useful
+    // guide only for the near-mirror path.
+    let distance_ok = roughness >= 0.10
+        || (hit_distance <= 0.0 && prev_moments.a <= 0.0)
+        || (hit_distance > 0.0 && prev_moments.a > 0.0
+            && abs(prev_moments.a - hit_distance) < max(hit_distance * 0.2, 0.75));
+    let valid = guide.a > 0.0 && depth_ok && normal_ok && roughness_ok
+        && finite_ok && distance_ok && all(prev_moments == prev_moments);
+
+    if !valid {
+        return temporal_seed(current, hit_distance);
+    }
+
+    // Winsorize a new stochastic sample against the established history. The
+    // previous version clipped history around the noisy one-ray current value,
+    // which faithfully turned every rare dark hit into a dancing black pixel.
+    let variance = max(prev_moments.y - prev_moments.x * prev_moments.x, 0.0);
+    let sigma = sqrt(variance);
+    let current_luma = reflect_luma(current.rgb);
+    let history_luma = max(reflect_luma(prev.rgb), 1e-5);
+    let radius = max(3.0 * sigma, 0.05 + prev_moments.x * 0.20);
+    let clipped_current_luma = clamp(
+        current_luma,
+        max(prev_moments.x - radius, 0.0),
+        prev_moments.x + radius,
     );
-    let depth_ok = abs(prev_g.b - view_depth) < max(0.15 * view_depth, 0.35);
-    let cover_ok = prev_g.a > 0.01;
-    let blend = select(0.0, mix(0.12, 0.28, roughness), depth_ok && cover_ok);
-    return mix(current, prev, blend);
+    let stable_current = vec4<f32>(
+        max(current.rgb, vec3<f32>(0.0)) * clipped_current_luma / max(current_luma, 1e-5),
+        current.a,
+    );
+
+    let old_count = clamp(prev_moments.z, 1.0, 32.0);
+    let new_count = min(old_count + 1.0, 32.0);
+    let current_weight = 1.0 / new_count;
+    let max_history = mix(0.84, 0.93, roughness);
+    let history_weight = min(1.0 - current_weight, max_history);
+    let color = mix(stable_current, max(prev, vec4<f32>(0.0)), history_weight);
+    let mean = mix(prev_moments.x, clipped_current_luma, current_weight);
+    let mean2 = mix(prev_moments.y, clipped_current_luma * clipped_current_luma, current_weight);
+    return TemporalResult(color, vec4<f32>(mean, mean2, new_count, hit_distance));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -191,6 +265,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if params.enabled < 0.5 && params.refract_enabled < 0.5 {
         textureStore(out_tex, half_coord, 0, vec4<f32>(0.0));
         textureStore(out_tex, half_coord, 1, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 2, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 3, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 4, vec4<f32>(0.0));
         return;
     }
 
@@ -199,16 +276,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if coverage < 0.01 {
         textureStore(out_tex, half_coord, 0, vec4<f32>(0.0));
         textureStore(out_tex, half_coord, 1, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 2, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 3, vec4<f32>(0.0));
+        textureStore(out_tex, half_coord, 4, vec4<f32>(0.0));
         return;
     }
 
     let roughness = clamp(textureLoad(water_roughness, load_coord, 0).r, 0.04, 1.0);
-    let n = reconstruct_normal(g.rg);
     let view_depth = g.b;
     let world = world_from_uv_view_depth(uv, view_depth);
     let wo = normalize(params.camera_pos - world);
+    let n = reconstruct_normal_toward(g.rg, wo);
 
     var reflect_result = vec4<f32>(0.0);
+    var reflect_distance = 0.0;
+    var reflect_moments = vec4<f32>(0.0);
     if params.enabled >= 0.5 {
         if roughness >= params.roughness_skip {
             let mirror = reflect(-wo, n);
@@ -232,6 +314,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let origin = world + n * 0.05;
             let hit = rt_trace(origin, dir, 0.05, 4000.0);
             if hit.hit {
+                reflect_distance = distance(hit.pos, origin);
                 let lit = shade_hit(hit, -dir);
                 if all(lit == lit) {
                     reflect_result = vec4<f32>(max(lit, vec3<f32>(0.0)), 1.0);
@@ -249,14 +332,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     0.0,
                 );
             }
-            reflect_result = accumulate(
-                uv, load_coord, full_dims, view_depth, roughness, 0, reflect_result,
+            let temporal = accumulate(
+                uv, load_coord, full_dims, view_depth, roughness, n, 0,
+                reflect_result, reflect_distance,
             );
+            reflect_result = temporal.color;
+            reflect_moments = temporal.moments;
         }
     }
     textureStore(out_tex, half_coord, 0, reflect_result);
+    if reflect_moments.z <= 0.0 {
+        reflect_moments = temporal_seed(reflect_result, reflect_distance).moments;
+    }
+    textureStore(out_tex, half_coord, 3, reflect_moments);
 
     var refract_result = vec4<f32>(0.0);
+    var refract_distance = 0.0;
+    var refract_moments = vec4<f32>(0.0);
     if params.refract_enabled >= 0.5 && roughness < params.roughness_skip {
         // Air→water from above (eta < 1); water→air from below (Snell window).
         let from_below = params.camera_pos.y < world.y;
@@ -267,15 +359,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let rorigin = world - n * 0.05;
             let rhit = rt_trace(rorigin, rdir, 0.05, 4000.0);
             if rhit.hit {
+                refract_distance = distance(rhit.pos, rorigin);
                 let lit = shade_hit(rhit, -rdir);
                 if all(lit == lit) {
                     refract_result = vec4<f32>(max(lit, vec3<f32>(0.0)), 1.0);
                 }
             }
-            refract_result = accumulate(
-                uv, load_coord, full_dims, view_depth, roughness, 1, refract_result,
+            let temporal = accumulate(
+                uv, load_coord, full_dims, view_depth, roughness, n, 1,
+                refract_result, refract_distance,
             );
+            refract_result = temporal.color;
+            refract_moments = temporal.moments;
         }
     }
     textureStore(out_tex, half_coord, 1, refract_result);
+    if refract_moments.z <= 0.0 {
+        refract_moments = temporal_seed(refract_result, refract_distance).moments;
+    }
+    textureStore(out_tex, half_coord, 4, refract_moments);
+    textureStore(
+        out_tex,
+        half_coord,
+        2,
+        vec4<f32>(n.xz * 0.5 + vec2<f32>(0.5), view_depth, roughness),
+    );
 }

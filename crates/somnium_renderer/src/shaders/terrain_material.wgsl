@@ -244,6 +244,9 @@ fn terrain_parallax_height(
     tiling: f32,
 ) -> f32 {
     let map = tm.albedo_maps[layer / 4u][layer % 4u];
+    if map < 0 {
+        return 0.5;
+    }
     // Level 0 explicitly. Inside a march the derivatives are meaningless — the
     // taps walk along a ray, not across the screen — and asking for them would
     // both pick a wrong mip and force the loop to unroll.
@@ -437,6 +440,19 @@ fn terrain_sample_layer(
     let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
     let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
 
+    // Hero-bank mode deliberately leaves layers 16..31 at -1. Their splat
+    // groups are also unbound, but guard the final sampling boundary as well:
+    // a stale/corrupt splat texel must never turn -1 into an out-of-bounds
+    // bindless texture access (the source of intermittent white terrain).
+    if albedo_map < 0 || surface_map < 0 {
+        s.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+        s.height = 0.5;
+        s.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
+        s.roughness = 0.8;
+        s.occlusion = 1.0;
+        return s;
+    }
+
     var a: vec4<f32>;
     var surf: vec4<f32>;
     if hex {
@@ -578,6 +594,14 @@ fn terrain_sample_projected_maps(
     var s: TerrainLayerSample;
     let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
     let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
+    if albedo_map < 0 || surface_map < 0 {
+        s.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+        s.height = 0.5;
+        s.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
+        s.roughness = 0.8;
+        s.occlusion = 1.0;
+        return s;
+    }
     let a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
     let surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
     s.albedo = a.rgb;
@@ -668,6 +692,19 @@ fn terrain_projected_pbr(
 struct TerrainGenerated {
     albedo: vec4<f32>,
     surface: vec4<f32>,
+}
+
+/// A tangent that remains finite even when the geometric normal is ±X.
+/// Projecting a fixed X axis collapses to zero at exactly those normals, then
+/// normalize() spreads NaNs through POM, normal mapping, and ultimately HDR.
+fn terrain_stable_tangent(n: vec3<f32>) -> vec3<f32> {
+    let reference = select(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        abs(n.x) > 0.9,
+    );
+    let projected = reference - n * dot(reference, n);
+    return projected * inverseSqrt(max(dot(projected, projected), 1e-8));
 }
 
 fn terrain_fetch_splats(
@@ -787,7 +824,9 @@ fn terrain_generate_texel(
     roughness = mix(roughness, roughness * tm.wetness_gloss, wet);
     n_ts = normalize(n_ts);
     var packed: TerrainGenerated;
-    packed.albedo = vec4<f32>(albedo, height);
+    // Alpha is not sampled as height by the clipmap shading path. Preserve the
+    // exact wet factor there instead so dielectric F0 matches live terrain.
+    packed.albedo = vec4<f32>(albedo, wet);
     packed.surface = vec4<f32>(n_ts.xy * 0.5 + 0.5, roughness, occlusion);
     return packed;
 }
@@ -839,7 +878,7 @@ fn evaluate_terrain_material(
     // sample-path mix — warps pay the union, and walking got slower.
     let hex = enable_hex && tm.hex_tiling != 0u;
 
-    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - geo_normal * geo_normal.x);
+    let tangent = terrain_stable_tangent(geo_normal);
     let bitangent = cross(geo_normal, tangent);
 
     let steepness = 1.0 - abs(geo_normal.y);

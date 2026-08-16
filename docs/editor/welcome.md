@@ -17,6 +17,19 @@ This window stays inside the editor. Press **F1** or the **?** button to open it
 - Sculpt terrain from the left **Sculpt** strip once a terrain is selected (F6).
 - Play, pause, and stop the simulation from the toolbar. **Play** possesses the Outliner **Camera**; **Stop** returns to the editor fly-cam. The button beside Play fills the screen; **Esc** restores the editor. Overlays hide while you play.
 
+## Finding your way
+
+- The bar at the very top is **application** scope: the menus, the command
+  search, and the window controls. The bar under it is **mode** scope: save,
+  which editing mode you are in, and the transport. The small bar floating over
+  the scene is **viewport context** — camera speed, shading, the profiler. It
+  sits over the render rather than above it so those controls stay next to what
+  they change.
+- The **Window** menu switches workspaces. If a panel arrangement gets away from
+  you, **Window → Reset workspace** puts it back.
+- In **Details**, a small indigo dot in a row's left gutter means you have
+  changed that value since the last save. Click the dot to put it back.
+
 Nothing in Help is a web page. If a control looks like a button, it is a button — click it, it highlights, and it does the thing.
 
 Help will gain topics as the engine does. Missing a page for a new panel usually means the chrome for that feature is still being written.

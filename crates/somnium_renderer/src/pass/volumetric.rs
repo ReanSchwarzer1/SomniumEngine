@@ -40,6 +40,7 @@ const DEFAULT_MAX_DISTANCE: f32 = 1200.0;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolumetricParams {
     inv_view_proj: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
     camera_pos: [f32; 3],
     max_distance: f32,
     sun_direction: [f32; 3],
@@ -58,6 +59,26 @@ struct VolumetricParams {
     _pad3: f32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::VolumetricParams;
+
+    #[test]
+    fn params_keep_rust_and_wgsl_uniform_alignment() {
+        assert_eq!(std::mem::size_of::<VolumetricParams>() % 16, 0);
+    }
+
+    #[test]
+    fn jittered_strata_are_strictly_ordered() {
+        for jitter in [0.0_f32, 0.25, 0.618_034, 0.999_999] {
+            let j = jitter.clamp(0.001, 0.999);
+            let a = j / 2.0;
+            let b = (1.0 + j) / 2.0;
+            assert!(a < b && a >= 0.0 && b < 1.0);
+        }
+    }
+}
+
 /// Artist-facing settings for the fog medium.
 #[derive(Clone, Copy, Debug)]
 pub struct FogSettings {
@@ -70,7 +91,7 @@ pub struct FogSettings {
     pub base_height: f32,
     /// Shadow-test each step, which is what draws light shafts.
     pub shafts: bool,
-    /// Multiplier on lit in-scatter when shafts are on. 1 is physical.
+    /// Shadow-visibility contrast. 0 is neutral; 1 applies full occlusion.
     pub shaft_intensity: f32,
 }
 
@@ -106,6 +127,7 @@ pub struct VolumetricPass {
     prev_view_proj: glam::Mat4,
     history_valid: bool,
     frame: u32,
+    last_settings: Option<[u32; 6]>,
     pub enabled: bool,
     pub fog: FogSettings,
     pub max_distance: f32,
@@ -274,6 +296,7 @@ impl VolumetricPass {
             prev_view_proj: glam::Mat4::IDENTITY,
             history_valid: false,
             frame: 0,
+            last_settings: None,
             // `SOMNIUM_VOLUMETRICS=0` switches the whole volume off, which is
             // the A/B both sub-phases are judged by.
             enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
@@ -353,6 +376,7 @@ impl VolumetricPass {
         queue: &wgpu::Queue,
         inv_view_proj: glam::Mat4,
         view_proj: glam::Mat4,
+        view: glam::Mat4,
         camera_pos: glam::Vec3,
         sun_direction: glam::Vec3,
         sun_illuminance: glam::Vec3,
@@ -361,14 +385,32 @@ impl VolumetricPass {
             return;
         };
         if !self.enabled {
+            // Re-enabling must not blend a volume authored with stale fog or
+            // shaft settings back over the first live frame.
+            self.history_valid = false;
+            self.last_settings = None;
             return;
         }
+
+        let settings = [
+            self.fog.density.to_bits(),
+            self.fog.asymmetry.to_bits(),
+            self.fog.height_falloff.to_bits(),
+            self.fog.base_height.to_bits(),
+            u32::from(self.fog.shafts),
+            self.fog.shaft_intensity.to_bits(),
+        ];
+        if self.last_settings.is_some_and(|last| last != settings) {
+            self.history_valid = false;
+        }
+        self.last_settings = Some(settings);
 
         queue.write_buffer(
             &self.params,
             0,
             bytemuck::bytes_of(&VolumetricParams {
                 inv_view_proj: inv_view_proj.to_cols_array_2d(),
+                view: view.to_cols_array_2d(),
                 camera_pos: camera_pos.to_array(),
                 max_distance: self.max_distance,
                 sun_direction: sun_direction.normalize_or_zero().to_array(),

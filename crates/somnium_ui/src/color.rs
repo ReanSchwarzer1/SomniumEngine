@@ -1,16 +1,27 @@
-//! Linear RGB(A) ↔ sRGB ↔ HSV ↔ hex helpers for the Iris colour picker (26-F).
+//! Linear RGB(A) ↔ sRGB ↔ HSV ↔ hex helpers.
 //!
-//! Storage is linear. Swatches and the spectrum use an approximate sRGB encode
-//! (`pow(x, 1/2.2)`). Hex edits sRGB bytes.
+//! Storage is linear and authored UI/theme values are sRGB. The transfer
+//! functions use IEC 61966-2-1 rather than the old gamma-2.2 approximation so
+//! CPU colour edits and the UI shader share one contract (Phase 26-Zeta-B).
 
-/// Approximate linear → sRGB (display).
+/// IEC 61966-2-1 linear → sRGB transfer function.
 pub fn linear_to_srgb(x: f32) -> f32 {
-    x.max(0.0).powf(1.0 / 2.2)
+    let x = x.max(0.0);
+    if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
 }
 
-/// Approximate sRGB → linear (storage).
+/// IEC 61966-2-1 sRGB → linear transfer function.
 pub fn srgb_to_linear(x: f32) -> f32 {
-    x.max(0.0).powf(2.2)
+    let x = x.max(0.0);
+    if x <= 0.040_45 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 pub fn linear_rgba_to_srgb_u8(linear: [f32; 4]) -> [u8; 4] {
@@ -153,5 +164,19 @@ mod tests {
     fn linear_srgb_encode_is_monotonic() {
         assert!(linear_to_srgb(0.0) < linear_to_srgb(0.2));
         assert!(linear_to_srgb(0.2) < linear_to_srgb(1.0));
+    }
+
+    #[test]
+    fn transfer_function_matches_standard_breakpoints() {
+        assert!((srgb_to_linear(0.04045) - 0.0031308).abs() < 1e-6);
+        assert!((linear_to_srgb(0.0031308) - 0.04045).abs() < 1e-5);
+        assert!((srgb_to_linear(0.5) - 0.21404114).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nocturne_panel_roundtrips_exactly_to_authored_bytes() {
+        let authored = [0x1C, 0x1E, 0x26, 0xFF];
+        let linear = srgb_u8_to_linear_rgba(authored);
+        assert_eq!(linear_rgba_to_srgb_u8(linear), authored);
     }
 }

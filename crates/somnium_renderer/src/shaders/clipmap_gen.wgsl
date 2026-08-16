@@ -74,6 +74,9 @@ fn clipmap_generate(@builtin(position) pos: vec4<f32>) -> ClipmapFsOut {
     // A `*Srgb` view would do the same job in hardware, but the surface target
     // shares this pipeline's colour state and its normal/roughness/AO channels
     // must stay linear.
+    // Alpha carries the already-evaluated wet factor. The shading path uses it
+    // to reproduce live terrain's dielectric F0 instead of silently dropping
+    // the wet specular term whenever a clipmap ring is active.
     out.albedo = vec4<f32>(sqrt(max(packed.albedo.rgb, vec3<f32>(0.0))), packed.albedo.a);
     // Alpha carries occlusion, and **zero is reserved** as "this texel has
     // never been generated" — wgpu zero-fills a new texture and a ring can

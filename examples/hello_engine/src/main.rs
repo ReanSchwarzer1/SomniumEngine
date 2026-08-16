@@ -1532,6 +1532,25 @@ impl GameApp for HelloGame {
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
 
+        // Deterministic temporal-audit hook. It is inert in ordinary runs and
+        // lets the path/reflection capture matrix make a one-frame camera cut
+        // without synthetic mouse input or timing-sensitive automation.
+        if std::env::var("SOMNIUM_AUDIT_YAW_JUMP_FRAME")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(ctx.time.frame_count())
+        {
+            let degrees = std::env::var("SOMNIUM_AUDIT_YAW_JUMP_DEGREES")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(1.0);
+            self.camera.yaw += degrees;
+            info!(
+                frame = ctx.time.frame_count(),
+                degrees, "audit camera yaw jump"
+            );
+        }
+
         if !play_session(ctx) {
             self.camera.update(dt, ctx.camera_speed);
         }

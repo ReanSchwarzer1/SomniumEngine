@@ -1,0 +1,26 @@
+{
+  "$meta": {
+    "family": "Nocturne Atelier Somnium extension on a 24x24 / 2px grid",
+    "origin": "Original project geometry",
+    "pipeline": "canonical SVG -> procedural 32px alpha atlas cell -> semantic tint in UiPass",
+    "index_rule": "IconId order is append-only"
+  },
+  "icons": [
+    { "id": "sculpt-raise", "file": "somnium/sculpt-raise.svg", "runtime": "SculptRaise" },
+    { "id": "sculpt-lower", "file": "somnium/sculpt-lower.svg", "runtime": "SculptLower" },
+    { "id": "sculpt-smooth", "file": "somnium/sculpt-smooth.svg", "runtime": "SculptSmooth" },
+    { "id": "sculpt-flatten", "file": "somnium/sculpt-flatten.svg", "runtime": "SculptFlatten" },
+    { "id": "sculpt-noise", "file": "somnium/sculpt-noise.svg", "runtime": "SculptNoise" },
+    { "id": "paint-layer", "file": "somnium/paint-layer.svg", "runtime": "PaintLayer" },
+    { "id": "foliage-paint", "file": "somnium/foliage-paint.svg", "runtime": "FoliagePaint" },
+    { "id": "foliage-erase", "file": "somnium/foliage-erase.svg", "runtime": "FoliageErase" },
+    { "id": "foliage-single", "file": "somnium/foliage-single.svg", "runtime": "FoliageSingle" },
+    { "id": "water-body", "file": "somnium/water-body.svg", "runtime": "Water" },
+    { "id": "vessel", "file": "somnium/vessel.svg", "runtime": "Vessel" },
+    { "id": "voxel-terrain", "file": "somnium/voxel-terrain.svg", "runtime": "VoxelTerrain" },
+    { "id": "post-fx", "file": "somnium/post-fx.svg", "runtime": "PostFx" },
+    { "id": "light-probe", "file": "somnium/light-probe.svg", "runtime": "LightProbe" },
+    { "id": "material-graph", "file": "somnium/material-graph.svg", "runtime": "MaterialGraph" },
+    { "id": "ray-trace", "file": "somnium/ray-trace.svg", "runtime": "RayTrace" }
+  ]
+}

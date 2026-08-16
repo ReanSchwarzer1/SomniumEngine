@@ -1,0 +1,28 @@
+# Nocturne Atelier — asset provenance
+
+| Asset | Origin | License | Notes |
+|---|---|---|---|
+| `somnium-s-eclipse.svg` | Original geometry, drawn from two counter-rotating lunes on a 64 unit grid | Project license | Route A, approved implementation direction |
+| `somnium-s-horizon.svg` | Original geometry, 13° chamfered ribbons | Project license | Route B, retained as exploration |
+| `somnium-s-sigil.svg` | Original geometry, high-contrast blade with lunar notch | Project license | Route C, retained as exploration |
+| `somnium-s-micro-16.svg` | Original, hand-corrected counters for 16 px | Project license | Title-bar/application micro mark source |
+| `somnium-lockup-horizontal.svg` | Original mark + Inter SemiBold/Medium wordmark **converted to outlines** | Project license (mark) · SIL OFL 1.1 (glyph shapes) | For dark backgrounds: mark `#7A86FF`, wordmark `#D8DCE8`. Used as the GitHub README masthead |
+| `somnium-lockup-horizontal-light.svg` | As above | As above | For light backgrounds: mark `#7A86FF`, wordmark `#14161C` |
+| `assets/icons/somnium/*.svg` | Original, drawn on the Tabler 24×24 / 2 px grid | Project license | Engine-specific extension |
+| `assets/icons/tabler/*.svg` | **Tabler Icons**, © 2020–2026 Paweł Kuna | MIT | 67 outline icons, renamed to the `IconId` each serves; path data unaltered. See `THIRD_PARTY_NOTICES.md` |
+
+**On the lockups.** The brand sheet requires the wordmark to be converted to
+outlines rather than set live, and a README rendered through GitHub's `<img>`
+pipeline has no access to Inter — a live `<text>` element would silently fall
+back to whatever `system-ui` is on the reader's machine, with different metrics
+and unapproved letter-spacing. Both lockups are therefore generated with
+`fontTools`, from the bundled Inter cuts, into static path data. Regenerate them
+if the wordmark ever changes; do not re-space them by hand.
+
+Outlined glyph shapes remain covered by Inter's SIL OFL 1.1 — outlining is not a
+licence escape, and the OFL is satisfied because the licence text ships with the
+font under `assets/fonts/Inter-OFL.txt`.
+
+No font binary, icon, colour value, or mark was taken from Lumina, Unreal, or
+another reference editor. Trademark clearance for the Somnium name and the
+Eclipse mark remains an owner task before public release.

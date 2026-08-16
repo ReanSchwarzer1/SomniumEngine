@@ -15,8 +15,12 @@ struct ExtraParams {
     spec_rough: f32,
     path_bounces: u32,
     inv_res: vec2<f32>,
-    history_valid: f32,
+    history_flags: u32,
     half_cells: f32,
+    probe_intensity: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(1) @binding(0) var accel: acceleration_structure;
@@ -81,7 +85,7 @@ fn cache_splat(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let uvw = (vec3<f32>(gid) + 0.5) / vec3<f32>(dims);
     var hist = vec4<f32>(0.0);
-    if extra.history_valid > 0.5 {
+    if (extra.history_flags & 1u) != 0u {
         hist = textureSampleLevel(cache_history, default_sampler, uvw, 0.0);
     }
     textureStore(cache_out, gid, vec4<f32>(hist.rgb * 0.92, hist.a * 0.92));
@@ -167,8 +171,38 @@ fn specular_gi(@builtin(global_invocation_id) gid: vec3<u32>) {
     if !ss_hit && (extra.flags & 2u) != 0u {
         let hit = rt_trace(pos + n * 0.05, dir, 0.05, 400.0);
         if hit.hit {
-            radiance = hit.albedo * max(dot(hit.normal, normalize(light.direction)), 0.0) * light.color
+            var hit_surface: Surface;
+            hit_surface.albedo = hit.albedo;
+            hit_surface.roughness = hit.roughness;
+            hit_surface.metallic = hit.metallic;
+            hit_surface.normal = hit.normal;
+            hit_surface.view_dir = -dir;
+            hit_surface.f0 = mix(vec3<f32>(0.04), hit.albedo, hit.metallic);
+            hit_surface.occlusion = 1.0;
+            hit_surface.bent_normal = hit.normal;
+
+            let sun_l = normalize(light.direction);
+            let ndl = max(dot(hit.normal, sun_l), 0.0);
+            var direct = vec3<f32>(0.0);
+            if ndl > 0.0 {
+                let blocker = rt_trace(hit.pos + hit.normal * 0.03, sun_l, 0.03, 4000.0);
+                if !blocker.hit {
+                    direct = evaluate_brdf(hit_surface, sun_l) * light.color;
+                }
+            }
+            let n_dot_v = max(dot(hit.normal, -dir), 1e-4);
+            let irradiance = textureSampleLevel(env_cube, env_sampler, hit.normal, 5.0).rgb;
+            let kd = (vec3<f32>(1.0) - hit_surface.f0) * (1.0 - hit.metallic);
+            let hit_r = reflect(dir, hit.normal);
+            let hit_fresnel = hit_surface.f0
+                + (vec3<f32>(1.0) - hit_surface.f0) * pow(1.0 - n_dot_v, 5.0);
+            let env_spec = textureSampleLevel(
+                env_cube, env_sampler, hit_r, hit.roughness * 5.0).rgb
+                * hit_fresnel;
+            radiance = direct
+                + (irradiance * hit.albedo * kd + env_spec) * light.ibl_intensity
                 + hit.emissive;
+            radiance = min(max(radiance, vec3<f32>(0.0)), vec3<f32>(60000.0));
             conf = 1.0;
         } else {
             radiance = textureSampleLevel(env_cube, env_sampler, dir, extra.spec_rough * 5.0).rgb;
@@ -176,7 +210,7 @@ fn specular_gi(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    if extra.history_valid > 0.5 {
+    if (extra.history_flags & 2u) != 0u {
         let px = 1.0 / vec2<f32>(textureDimensions(aux_out));
         var acc = textureSampleLevel(aux_history, default_sampler, uv, 0.0);
         acc += textureSampleLevel(aux_history, default_sampler, uv + vec2<f32>(px.x, 0.0), 0.0);
@@ -184,8 +218,8 @@ fn specular_gi(@builtin(global_invocation_id) gid: vec3<u32>) {
         acc += textureSampleLevel(aux_history, default_sampler, uv + vec2<f32>(0.0, px.y), 0.0);
         acc += textureSampleLevel(aux_history, default_sampler, uv - vec2<f32>(0.0, px.y), 0.0);
         acc *= 0.2;
-        radiance = mix(radiance, acc.rgb, 0.85);
-        conf = max(conf, acc.a * 0.85);
+        radiance = mix(radiance, acc.rgb, 0.65);
+        conf = max(conf, acc.a * 0.65);
     }
     textureStore(aux_out, gid.xy, vec4<f32>(radiance * extra.intensity, conf));
 }
@@ -212,7 +246,12 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var b = 0u; b < bounces; b++) {
         let hit = rt_trace(origin, dir, 0.02, 500.0);
         if !hit.hit {
-            radiance += throughput * textureSampleLevel(env_cube, env_sampler, dir, 0.0).rgb;
+            // The sun is already sampled explicitly above. Sampling the sharp
+            // sun texel again through a one-ray indirect bounce creates rare,
+            // enormous fireflies; use the prefiltered environment for indirect
+            // misses while retaining the sharp sky for a primary camera miss.
+            let env_lod = select(4.0, 0.0, b == 0u);
+            radiance += throughput * textureSampleLevel(env_cube, env_sampler, dir, env_lod).rgb;
             break;
         }
         radiance += throughput * hit.emissive;
@@ -244,10 +283,10 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     var outc = vec4<f32>(radiance, 1.0);
-    if extra.history_valid > 0.5 {
+    if (extra.history_flags & 2u) != 0u {
         let prev = textureSampleLevel(aux_history, default_sampler, uv, 0.0);
-        let f = 1.0 / (f32(extra.frame % 1024u) + 1.0);
-        outc = vec4<f32>(mix(prev.rgb, radiance, max(f, 0.02)), 1.0);
+        let f = 1.0 / (f32(extra.frame) + 1.0);
+        outc = vec4<f32>(mix(prev.rgb, radiance, f), 1.0);
     }
     textureStore(aux_out, gid.xy, outc);
 }
@@ -304,7 +343,7 @@ fn bake_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
             col += textureSampleLevel(cache_history, default_sampler, uvw_c, 0.0).rgb;
         }
         let y = sh_y(dir);
-        let wcol = col * weight * extra.intensity;
+        let wcol = col * weight * extra.probe_intensity;
         sh0 += wcol * y[0];
         sh1 += wcol * y[1];
         sh2 += wcol * y[2];

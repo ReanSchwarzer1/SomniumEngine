@@ -37,7 +37,10 @@ impl CreateKind {
 }
 
 /// Which TRS component a NumericField targets (for SetInspectorValue).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Hash` so Phase 26-Zeta-G can key the per-field revert baseline by it. The
+/// variant set and its meaning are unchanged; this is not a contract change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InspectorField {
     PosX,
     PosY,
@@ -333,8 +336,9 @@ pub enum EditorEvent {
     ToggleFoliageSingle,
     /// Pick which palette entry the foliage brush paints (Phase 17F).
     SelectFoliageKind(u8),
-    /// Flip a post-processing effect on the selected Post Processing entity.
-    TogglePostFx(PostFxToggle),
+    /// Set a post-processing effect on the selected Post Processing entity.
+    /// Carrying the checkbox value makes UI synchronization idempotent.
+    SetPostFx(PostFxToggle, bool),
     /// Cycle the tone-mapping curve (AgX → ACES → Reinhard).
     CycleTonemapper,
     /// Set the tone-mapping curve by index (0 AgX, 1 ACES, 2 Reinhard).

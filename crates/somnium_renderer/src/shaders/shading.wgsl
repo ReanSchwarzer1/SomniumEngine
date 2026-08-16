@@ -272,10 +272,8 @@ fn sample_sh_probes(pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 /// result for this pixel. Only the diffuse half — the specular lobe still comes
 /// from the environment cubemap, because ReSTIR GI resolves *diffuse* indirect
 /// and a mirror needs a sharp reflection this pass cannot give it.
-fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
+fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
-    let v = surface.view_dir;
-    let n_dot_v = max(dot(n, v), 1e-4);
 
     // Diffuse: the roughest mip approximates a cosine-convolved irradiance
     // map. Not a true convolution, but close enough visually and it saves a
@@ -297,17 +295,27 @@ fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         diffuse = traced_diffuse.rgb * surface.albedo * kd;
     }
 
-    // Specular: prefiltered radiance along the reflection vector, weighted by
-    // the analytic BRDF term.
+    return diffuse * surface.occlusion;
+}
+
+fn evaluate_ibl_specular(surface: Surface) -> vec3<f32> {
+    let n = surface.normal;
+    let v = surface.view_dir;
+    let n_dot_v = max(dot(n, v), 1e-4);
     let r = reflect(-v, n);
     let mip = surface.roughness * ENV_MAX_MIP;
     let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
     let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
     let spec_ao  = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
 
+    return specular * spec_ao;
+}
+
+fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     // Occlusion applies to indirect light only. The sun already has shadow
     // maps, and multiplying it by AO as well double-darkens lit surfaces.
-    return (diffuse * surface.occlusion + specular * spec_ao) * light.ibl_intensity;
+    return (evaluate_ibl_diffuse(surface, traced_diffuse)
+        + evaluate_ibl_specular(surface)) * light.ibl_intensity;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
@@ -1357,7 +1365,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (extra_flags & 16u) != 0u {
             let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
             let gather_n = normalize(mix(surface.normal, surface.bent_normal, 0.75));
-            ambient += sample_sh_probes(hit_point, gather_n) * surface.albedo * kd * surface.occlusion;
+            // Probes replace the environment diffuse lobe; adding them on top
+            // evaluates the same sky twice and is the white veil seen when the
+            // checkbox is enabled. Specular IBL remains cubemap-driven.
+            let probe_diffuse = max(sample_sh_probes(hit_point, gather_n), vec3<f32>(0.0))
+                * surface.albedo * kd * surface.occlusion;
+            ambient = (probe_diffuse + evaluate_ibl_specular(surface)) * light.ibl_intensity;
         } else if (extra_flags & 1u) != 0u {
             let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
             ambient += vol_sample.rgb * surface.albedo * kd * lighting_extra.y * surface.occlusion;
@@ -1384,7 +1397,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let aux_uv = (vec2<f32>(pixel_coords) + 0.5) / vec2<f32>(textureDimensions(vis_buffer));
             let spec_gi = textureSampleLevel(lighting_aux, default_sampler, aux_uv, 0.0);
             let spec_w = spec_gi.a * saturate(1.0 - surface.roughness);
-            ambient = mix(ambient, spec_gi.rgb, spec_w);
+            let n_dot_v = max(dot(surface.normal, surface.view_dir), 1e-4);
+            let traced_spec = spec_gi.rgb
+                * env_brdf_approx(surface.f0, surface.roughness, n_dot_v)
+                * specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
+            let baseline_spec = evaluate_ibl_specular(surface) * light.ibl_intensity;
+            // Replace only the environment specular lobe. The old whole-
+            // ambient mix discarded diffuse illumination and treated raw hit
+            // radiance as an already-evaluated BRDF, bleaching boats/terrain.
+            ambient += (traced_spec - baseline_spec) * spec_w;
         }
 
         // Local lights (clustered)

@@ -11,6 +11,7 @@ pub mod image;
 pub mod menu;
 pub mod numeric_field;
 pub mod popup;
+pub mod property_row;
 pub mod scroll_viewer;
 pub mod search_box;
 pub mod slider;
@@ -40,6 +41,7 @@ pub use grid::{Grid, GridBuilder, GridDimension, GridMessage, SizeMode};
 pub use image::{IconBuilder, Image, ImageBuilder};
 pub use numeric_field::{NumericField, NumericFieldBuilder, NumericFieldMessage};
 pub use popup::{Popup, PopupBuilder, PopupMessage, PopupPlacement};
+pub use property_row::{PropertyRow, PropertyRowBuilder, PropertyRowMessage};
 pub use scroll_viewer::{ScrollViewer, ScrollViewerBuilder};
 pub use search_box::{
     Breadcrumb, BreadcrumbBuilder, BreadcrumbMessage, SearchBox, SearchBoxBuilder,

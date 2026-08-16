@@ -2,7 +2,11 @@
 // Vertex: pos(f32x2) | uv(f32x2) | color(unorm8x4) — 20 bytes.
 // Group 0 binding 0: ortho projection uniform (64 bytes).
 // Group 1 binding 0/1: texture2d + sampler — white 1x1 for solid rects,
-//   font atlas for glyph quads. Fragment multiplies vertex color by sample.
+//   font/icon atlas for mask quads. Vertex tint is authored sRGB with straight
+//   alpha. It is decoded once for an sRGB target, then straight-alpha blended.
+
+// UiPass replaces this declaration with `false` only for a non-sRGB surface.
+const OUTPUT_IS_SRGB: bool = true;
 
 struct Ortho {
     proj: mat4x4<f32>,
@@ -37,5 +41,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_sample = textureSample(t_tex, s_tex, in.uv);
-    return in.color * tex_sample;
+    var tint_rgb = in.color.rgb;
+    if OUTPUT_IS_SRGB {
+        let low = tint_rgb / vec3<f32>(12.92);
+        let high = pow((tint_rgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+        tint_rgb = select(high, low, tint_rgb <= vec3<f32>(0.04045));
+    }
+
+    // Font and icon textures are linear white RGB + coverage alpha masks.
+    // Future coloured textures must use an sRGB texture view so sampling
+    // decodes them before this multiplication.
+    return vec4<f32>(tint_rgb * tex_sample.rgb, in.color.a * tex_sample.a);
 }

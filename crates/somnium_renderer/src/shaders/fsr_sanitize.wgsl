@@ -1,10 +1,8 @@
-// Prepare FSR inputs the way TAA prepares its blend (`taa.wgsl`).
+// Prepare FSR's linear HDR color and float depth inputs.
 //
-// Raw HDR in cd/m² makes FSR's Lanczos neighbourhood collapse the same way
-// TAA's clip box did: thousands of nits map to a hair's width at the top of
-// the curve, undershoot goes black, and history keeps it. Compress with a
-// **stable** exposure (not the adapting meter) so history stays in the same
-// space from frame to frame. Copy depth to a float target FSR can sample.
+// FSR's HDR contract requires a linear signal plus the matching pre-exposure
+// value. The former Karis-compressed input violated that contract and made the
+// backend's separate low-light failure impossible to diagnose independently.
 
 const HDR_CEILING: f32 = 60000.0;
 
@@ -27,11 +25,6 @@ fn sanitize(c: vec3<f32>) -> vec3<f32> {
     return clamp(finite, vec3<f32>(0.0), vec3<f32>(HDR_CEILING));
 }
 
-fn tonemap_for_blend(c_in: vec3<f32>) -> vec3<f32> {
-    let c = c_in * max(exposure.value, 1e-8);
-    return c / (1.0 + max(max(c.r, c.g), c.b));
-}
-
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dim = textureDimensions(src);
@@ -40,7 +33,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let coord = vec2<i32>(id.xy);
     let c = textureLoad(src, coord, 0);
-    let compressed = clamp(tonemap_for_blend(sanitize(c.rgb)), vec3<f32>(0.0), vec3<f32>(0.995));
-    textureStore(dst, coord, vec4<f32>(compressed, c.a));
+    let pre_exposed = sanitize(c.rgb) * max(exposure.value, 1e-8);
+    textureStore(dst, coord, vec4<f32>(pre_exposed, c.a));
     textureStore(depth_out, coord, vec4<f32>(textureLoad(depth_tex, coord, 0), 0.0, 0.0, 0.0));
 }

@@ -607,8 +607,23 @@ struct PrepassOutput {
     @location(2) roughness: f32,
 }
 
-fn upsample_rt(uv: vec2<f32>, coverage: f32, layer: i32) -> vec4<f32> {
-    let dims = vec2<f32>(textureDimensions(reflection_tex));
+fn guide_normal_toward(encoded: vec2<f32>, toward: vec3<f32>) -> vec3<f32> {
+    let xz = encoded * 2.0 - 1.0;
+    let y = sqrt(max(1.0 - dot(xz, xz), 0.0));
+    let above = normalize(vec3<f32>(xz.x, y, xz.y));
+    let below = normalize(vec3<f32>(xz.x, -y, xz.y));
+    return select(below, above, dot(above, toward) >= dot(below, toward));
+}
+
+fn upsample_rt(
+    uv: vec2<f32>,
+    coverage: f32,
+    current_normal: vec3<f32>,
+    current_depth: f32,
+    layer: i32,
+) -> vec4<f32> {
+    let idims = vec2<i32>(textureDimensions(reflection_tex));
+    let dims = vec2<f32>(idims);
     if dims.x < 1.5 {
         return vec4<f32>(0.0);
     }
@@ -619,9 +634,19 @@ fn upsample_rt(uv: vec2<f32>, coverage: f32, layer: i32) -> vec4<f32> {
     var weight = 0.0;
     for (var y = 0; y <= 1; y = y + 1) {
         for (var x = 0; x <= 1; x = x + 1) {
-            let tap = textureLoad(reflection_tex, base + vec2<i32>(x, y), layer, 0);
+            let coord = clamp(base + vec2<i32>(x, y), vec2<i32>(0), idims - vec2<i32>(1));
+            let tap = textureLoad(reflection_tex, coord, layer, 0);
+            // Layer 2 is authored by the same half-resolution invocation as
+            // the radiance tap. Reject neighbours from another water surface
+            // or depth edge instead of bilinearly leaking a dark/bright hit
+            // across the shoreline.
+            let guide = textureLoad(reflection_tex, coord, 2, 0);
+            let guide_normal = guide_normal_toward(guide.rg, current_normal);
+            let depth_scale = max(current_depth * 0.025, 0.2);
+            let depth_weight = exp(-abs(guide.b - current_depth) / depth_scale);
+            let normal_weight = pow(max(dot(guide_normal, current_normal), 0.0), 16.0);
             let bilinear = select(frac.x, 1.0 - frac.x, x == 0) * select(frac.y, 1.0 - frac.y, y == 0);
-            let w = bilinear * max(tap.a, 0.05) * coverage;
+            let w = bilinear * depth_weight * normal_weight * max(tap.a, 0.01) * coverage;
             acc += tap * w;
             weight += w;
         }
@@ -730,7 +755,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
         && view_depth(candidate_world) > water_view_depth + 0.03;
     let refr_uv = select(screen_uv, candidate_uv, candidate_valid);
     var refracted = textureSampleLevel(scene_color, sampler_linear, refr_uv, 0.0).rgb;
-    let rt_refr = upsample_rt(screen_uv, coverage, 1);
+    let rt_refr = upsample_rt(screen_uv, coverage, n, water_view_depth, 1);
     refracted = mix(refracted, rt_refr.rgb, rt_refr.a);
 
     let backdrop_distance = select(authored_depth, distance(input.world_position, base_world), base_has_backdrop);
@@ -864,7 +889,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
         reflection_roughness * ENV_MAX_MIP).rgb * light.ibl_intensity;
     let ssr = trace_ssr(input.world_position + n * 0.05, reflection_dir);
     let ssr_weight = ssr.a * clamp(material.surface_params.w, 0.0, 1.0);
-    let rt = upsample_rt(screen_uv, coverage, 0);
+    let rt = upsample_rt(screen_uv, coverage, n, water_view_depth, 0);
     let rt_strength = clamp(material.volume_params.z, 0.0, 1.0);
     // SSR owns the near field where it is confident. The traced ray fills the
     // rest; the environment cube is the miss. `rt.a` is hit confidence.

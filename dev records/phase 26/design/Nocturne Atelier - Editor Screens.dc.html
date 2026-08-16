@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;background:#0E1014;}
+  body{font-family:Geist,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
+  a{color:#949CFF;text-decoration:none;}
+  a:hover{color:#B4BAFF;}
+</style>
+</helmet>
+
+<div style="background:#0E1014;color:#D8DCE8;padding:56px 56px 120px;display:flex;flex-direction:column;gap:56px;">
+
+  <div style="display:flex;align-items:flex-end;gap:20px;">
+    <svg viewBox="0 0 64 64" width="34" height="34" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+    <div>
+      <div style="font-size:11.5px;font-weight:500;letter-spacing:.14em;color:#7E8698;text-transform:uppercase;">Phase 26-Zeta · deliverable 4</div>
+      <div style="font-size:27px;font-weight:600;letter-spacing:-.015em;">Editor screens</div>
+    </div>
+    <div style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;text-align:right;line-height:1.7;">
+      corrected colour pipeline · all surfaces authored sRGB<br>viewport contents are a placeholder proxy for the live render
+    </div>
+  </div>
+
+  <!-- ══════════════ S1 ══════════════ -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:baseline;gap:12px;">
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:3px;font-weight:600;">S1</span>
+      <span style="font-size:15px;font-weight:600;">Terrain selected · dense Details</span>
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">1920 × 1080 · 100 %</span>
+    </div>
+    <div style="width:1344px;height:756px;overflow:hidden;border:1px solid #22252F;border-radius:4px;">
+      <div style="width:1920px;height:1080px;transform:scale(0.7);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;font-size:13px;">
+
+        <!-- application scope -->
+        <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:4px;">
+          <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#7A86FF;margin:0 8px 0 4px;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+          <span style="font-size:13px;font-weight:500;color:#D8DCE8;margin-right:14px;">Somnium Engine</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;border-radius:2px;">File</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Edit</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Create</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">View</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Window</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Help</span>
+          <div style="width:420px;height:24px;margin:0 auto;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;gap:8px;padding:0 8px;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+            <span style="font-size:12px;color:#5C6478;">Search commands, entities, assets</span>
+            <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10.5px;color:#4A4F5E;">Ctrl+P</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-left:auto;">
+            <span style="height:20px;padding:0 8px;display:flex;align-items:center;gap:6px;border-radius:10px;background:rgba(122,134,255,.12);border:1px solid rgba(122,134,255,.4);font-size:11px;color:#B4BAFF;"><span style="width:6px;height:6px;border-radius:50%;background:#7A86FF;"></span>1 job</span>
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">26 fps · 38.4 ms</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">–</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">▢</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">✕</span>
+          </div>
+        </div>
+
+        <!-- mode scope -->
+        <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 8px;gap:2px;">
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#D8DCE8;border-radius:2px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path></svg>Save</span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#9AA3B5;">Select</span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#B4BAFF;background:rgba(122,134,255,.16);box-shadow:inset 0 -2px 0 #7A86FF;border-radius:2px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6 15c2-5 4-7 6-7s4 2 6 7"></path></svg>Landscape</span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#9AA3B5;">Foliage</span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#D8DCE8;">Create <span style="color:#7E8698;font-size:10px;">▾</span></span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#5DCE9A;">▶</span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">❚❚</span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">■</span>
+          <span style="font-size:11.5px;color:#7E8698;margin-left:6px;">Stopped</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+            <span style="font-size:11.5px;color:#7E8698;">Workspace</span>
+            <span style="height:24px;padding:0 8px;display:flex;align-items:center;gap:8px;background:#282B36;border:1px solid #313543;border-radius:2px;font-size:12px;color:#D8DCE8;">Terrain <span style="color:#7E8698;font-size:10px;">▾</span></span>
+          </div>
+        </div>
+
+        <!-- main -->
+        <div style="flex:1;display:flex;min-height:0;">
+          <!-- left rail -->
+          <div style="width:168px;flex:none;background:#1C1E26;border-right:1px solid #22252F;display:flex;flex-direction:column;">
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-bottom:1px solid #22252F;">Sculpt</div>
+            <div style="padding:6px 8px;display:flex;flex-direction:column;gap:2px;">
+              <sc-for list="{{ sculptTools }}" as="t" hint-placeholder-count="6">
+                <div style="height:26px;display:flex;align-items:center;gap:9px;padding:0 8px;border-radius:2px;background:{{ t.bg }};box-shadow:{{ t.rail }};color:{{ t.color }};font-size:12.5px;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6 15c2-5 4-7 6-7s4 2 6 7"></path></svg>
+                  {{ t.name }}
+                  <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">{{ t.key }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-top:1px solid #22252F;border-bottom:1px solid #22252F;margin-top:8px;">Brush</div>
+            <div style="padding:10px 12px;display:flex;flex-direction:column;gap:9px;">
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Radius<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">24.0</span></div>
+              <div style="height:3px;background:#12141A;border-radius:2px;"><div style="width:46%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Strength<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">0.42</span></div>
+              <div style="height:3px;background:#12141A;border-radius:2px;"><div style="width:42%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Falloff<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">Smooth</span></div>
+            </div>
+            <div style="height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-top:1px solid #22252F;border-bottom:1px solid #22252F;">Layers<span style="font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0;text-transform:none;">32</span></div>
+            <div style="padding:8px;display:grid;grid-template-columns:repeat(6,1fr);gap:3px;">
+              <sc-for list="{{ layerSwatches }}" as="s" hint-placeholder-count="24">
+                <span style="aspect-ratio:1;border-radius:2px;background:{{ s.c }};box-shadow:{{ s.ring }};"></span>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- viewport -->
+          <div style="flex:1;position:relative;min-width:0;background:linear-gradient(#5B7FA8 0%,#8FB0CC 38%,#A9C0D2 46%,#6E7F72 47%,#7E8663 60%,#8D8A6A 100%);">
+            <div style="position:absolute;inset:47% 0 0 0;background:repeating-linear-gradient(90deg,rgba(255,255,255,.05) 0 1px,transparent 1px 64px),repeating-linear-gradient(0deg,rgba(255,255,255,.05) 0 1px,transparent 1px 40px);"></div>
+            <div style="position:absolute;left:6%;right:14%;top:50%;height:17%;background:linear-gradient(#3E6F94,#2B5375);border-radius:50%/60%;opacity:.85;"></div>
+            <div style="position:absolute;left:0;right:0;top:47%;height:2px;background:rgba(255,255,255,.18);"></div>
+
+            <!-- viewport context bar -->
+            <div style="position:absolute;top:12px;left:12px;right:12px;height:32px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 6px;gap:2px;">
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.18);color:#B4BAFF;">T</span>
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">R</span>
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">S</span>
+              <span style="width:1px;height:16px;background:#3A3E4A;margin:0 8px;"></span>
+              <span style="font-size:11.5px;color:#9AA3B5;margin-right:6px;">Speed</span>
+              <div style="width:100px;height:3px;background:#12141A;border-radius:2px;"><div style="width:52%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;margin-left:8px;">5.0 m/s</span>
+              <span style="width:1px;height:16px;background:#3A3E4A;margin:0 10px;"></span>
+              <span style="height:24px;padding:0 8px;display:flex;align-items:center;gap:6px;background:#22252F;border:1px solid #313543;border-radius:2px;font-size:11.5px;color:#D8DCE8;">Lit <span style="color:#7E8698;font-size:10px;">▾</span></span>
+              <span style="height:24px;padding:0 8px;display:flex;align-items:center;gap:6px;background:#22252F;border:1px solid #313543;border-radius:2px;font-size:11.5px;color:#D8DCE8;margin-left:6px;">Native <span style="color:#7E8698;font-size:10px;">▾</span></span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:2px;">
+                <span style="height:24px;padding:0 9px;display:flex;align-items:center;font-size:11.5px;color:#9AA3B5;">Snap 1 m</span>
+                <span style="height:24px;padding:0 9px;display:flex;align-items:center;font-size:11.5px;color:#B4BAFF;background:rgba(122,134,255,.16);border-radius:2px;">Profiler</span>
+                <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">⛶</span>
+              </div>
+            </div>
+
+            <!-- brush cursor -->
+            <div style="position:absolute;left:44%;top:62%;width:150px;height:78px;border:1.5px solid rgba(255,255,255,.85);border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.35);"></div>
+            <div style="position:absolute;left:47.5%;top:66%;width:74px;height:38px;border:1px dashed rgba(255,255,255,.6);border-radius:50%;"></div>
+
+            <!-- selection readout -->
+            <div style="position:absolute;left:12px;bottom:12px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;padding:8px 12px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:1.7;color:#9AA3B5;">
+              <div style="color:#D8DCE8;">Terrain · 1024 × 1024 · 32 layers</div>
+              <div>brush raise · r 24.0 · s 0.42 · shift = smooth</div>
+            </div>
+          </div>
+
+          <!-- right column -->
+          <div style="width:340px;flex:none;background:#1C1E26;border-left:1px solid #22252F;display:flex;flex-direction:column;min-height:0;">
+            <!-- outliner -->
+            <div style="height:300px;flex:none;display:flex;flex-direction:column;border-bottom:1px solid #22252F;">
+              <div style="height:30px;flex:none;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;">
+                <span style="font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Outliner</span>
+                <span style="font-size:11px;color:#7E8698;margin-left:8px;">9</span>
+                <span style="margin-left:auto;color:#7E8698;font-size:12px;">⌄</span>
+              </div>
+              <div style="height:24px;flex:none;margin:6px 8px;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;gap:7px;padding:0 8px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                <span style="font-size:12px;color:#5C6478;">Search entities</span>
+              </div>
+              <div style="flex:1;overflow:hidden;">
+                <sc-for list="{{ outliner }}" as="o" hint-placeholder-count="9">
+                  <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 10px 0 {{ o.indent }};background:{{ o.bg }};box-shadow:{{ o.rail }};">
+                    <span style="width:9px;color:#5C6478;font-size:9px;">{{ o.twisty }}</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{{ o.iconColor }}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6.5 12 11l8-4.5Z"></path><path d="M4 12.5 12 17l8-4.5"></path></svg>
+                    <span style="font-size:12.5px;font-weight:{{ o.weight }};color:{{ o.color }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ o.name }}</span>
+                    <span style="margin-left:auto;font-size:10.5px;color:{{ o.badgeColor }};">{{ o.badge }}</span>
+                    <span style="color:{{ o.eye }};font-size:11px;">◉</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <!-- details -->
+            <div style="flex:1;display:flex;flex-direction:column;min-height:0;">
+              <div style="height:30px;flex:none;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;">
+                <span style="font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Details</span>
+                <span style="font-size:11.5px;color:#7E8698;margin-left:8px;">Terrain</span>
+                <span style="margin-left:auto;display:flex;align-items:center;gap:8px;"><span style="width:5px;height:5px;border-radius:50%;background:#7A86FF;"></span><span style="font-size:11px;color:#949CFF;">Revert all</span></span>
+              </div>
+              <div style="height:24px;flex:none;margin:6px 8px;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;gap:7px;padding:0 8px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                <span style="font-size:12px;color:#5C6478;">Search 118 properties</span>
+              </div>
+              <div style="flex:1;overflow:hidden;">
+                <sc-for list="{{ details }}" as="d" hint-placeholder-count="22">
+                  <div style="height:{{ d.h }};display:{{ d.display }};align-items:center;gap:8px;padding:0 10px 0 0;background:{{ d.bg }};border-top:{{ d.borderTop }};">
+                    <span style="width:14px;text-align:center;font-size:9px;color:#5C6478;">{{ d.twisty }}</span>
+                    <span style="font-size:{{ d.labelSize }};font-weight:{{ d.weight }};letter-spacing:{{ d.tracking }};text-transform:{{ d.transform }};color:{{ d.labelColor }};width:{{ d.labelW }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ d.label }}</span>
+                    <span style="flex:1;height:20px;display:{{ d.fieldDisplay }};align-items:center;justify-content:flex-end;padding:0 7px;background:{{ d.fieldBg }};border:1px solid {{ d.fieldBorder }};border-radius:2px;font-family:'Geist Mono',monospace;font-size:11.5px;color:{{ d.valueColor }};">{{ d.value }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- bottom drawer -->
+        <div style="height:220px;flex:none;background:#181A20;border-top:1px solid #22252F;display:flex;flex-direction:column;">
+          <div style="height:30px;flex:none;background:#22252F;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:2px;">
+            <span style="height:30px;padding:0 12px;display:flex;align-items:center;font-size:12.5px;color:#F2F4FF;background:#1C1E26;box-shadow:inset 0 -2px 0 #7A86FF;">Content Browser</span>
+            <span style="height:30px;padding:0 12px;display:flex;align-items:center;font-size:12.5px;color:#9AA3B5;">Output Log</span>
+            <span style="height:30px;padding:0 12px;display:flex;align-items:center;gap:6px;font-size:12.5px;color:#9AA3B5;">Jobs <span style="width:5px;height:5px;border-radius:50%;background:#7A86FF;"></span></span>
+            <div style="margin-left:16px;display:flex;align-items:center;gap:6px;font-size:12px;">
+              <span style="color:#C4A574;">Game</span><span style="color:#4A4F5E;">/</span><span style="color:#C4A574;">terrain</span>
+            </div>
+            <div style="width:240px;height:22px;margin-left:16px;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;gap:7px;padding:0 8px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg><span style="font-size:12px;color:#5C6478;">Search</span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:11.5px;color:#9AA3B5;">
+              <span>Grid</span><span style="color:#5C6478;">List</span><span style="width:1px;height:14px;background:#3A3E4A;"></span><span style="display:flex;align-items:center;gap:6px;"><span style="width:13px;height:13px;border:1px solid #4A4F5E;border-radius:2px;background:#12141A;"></span>Show engine content</span><span style="color:#7E8698;">Dock ⌄</span>
+            </div>
+          </div>
+          <div style="flex:1;display:flex;min-height:0;">
+            <div style="width:190px;flex:none;border-right:1px solid #22252F;padding:8px 0;">
+              <sc-for list="{{ contentTree }}" as="c" hint-placeholder-count="6">
+                <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 {{ c.indent }};background:{{ c.bg }};font-size:12.5px;color:{{ c.color }};">
+                  <span style="color:#5C6478;font-size:9px;width:8px;">{{ c.twisty }}</span>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#C4A574" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path></svg>
+                  {{ c.name }}
+                </div>
+              </sc-for>
+            </div>
+            <div style="flex:1;padding:12px;display:flex;gap:12px;flex-wrap:wrap;align-content:flex-start;">
+              <sc-for list="{{ assets }}" as="a" hint-placeholder-count="9">
+                <div style="width:104px;display:flex;flex-direction:column;gap:6px;align-items:center;">
+                  <div style="width:104px;height:104px;border-radius:3px;background:{{ a.bg }};border:1px solid {{ a.border }};position:relative;display:flex;align-items:center;justify-content:center;font-size:11px;color:{{ a.glyphColor }};overflow:hidden;">{{ a.glyph }}<span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:{{ a.badge }};"></span></div>
+                  <span style="font-size:11px;color:{{ a.labelColor }};text-align:center;line-height:1.25;">{{ a.name }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- status -->
+        <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:18px;font-size:11.5px;color:#9AA3B5;">
+          <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>Unsaved changes</span>
+          <span>Terrain</span>
+          <span>Landscape · Raise</span>
+          <span style="display:flex;align-items:center;gap:6px;color:#B4BAFF;"><span style="width:44px;height:3px;background:#22252F;border-radius:2px;display:inline-block;"><span style="display:block;width:62%;height:3px;background:#7A86FF;border-radius:2px;"></span></span>Building BC7 62 %</span>
+          <span style="margin-left:auto;font-family:'Geist Mono',monospace;color:#7E8698;">1 048 576 tris · 9 objects · 2.1 GB · 26 fps</span>
+        </div>
+      </div>
+    </div>
+    <div style="max-width:1344px;font-size:12.5px;line-height:1.7;color:#7E8698;">
+      Three command scopes: application at 36 px, mode at 32 px, and the viewport context bar floating over the render at 12 px inset — so the scene starts 68 px from the top instead of 122 px and the context controls sit next to what they change. The Details gutter dot marks the four properties edited since load; the header <em style="font-style:normal;color:#949CFF;">Revert all</em> is one undo step.
+    </div>
+  </div>
+</div>
+
+
+<div style="background:#0E1014;color:#D8DCE8;padding:0 56px 120px;display:flex;flex-direction:column;gap:56px;">
+
+  <!-- ══════════════ S2 ══════════════ -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:baseline;gap:12px;">
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:3px;font-weight:600;">S2</span>
+      <span style="font-size:15px;font-weight:600;">Foliage mode · Content Browser docked, filtered, dragging</span>
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">1920 × 1080 · drag-to-spawn, async previews, missing preview, empty filter</span>
+    </div>
+    <div style="width:1344px;height:756px;overflow:hidden;border:1px solid #22252F;border-radius:4px;">
+      <div style="width:1920px;height:1080px;transform:scale(0.7);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;font-size:13px;">
+
+        <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:4px;">
+          <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#7A86FF;margin:0 8px 0 4px;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+          <span style="font-size:13px;font-weight:500;color:#D8DCE8;margin-right:14px;">Somnium Engine</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">File</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Edit</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Create</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">View</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Window</span>
+          <span style="height:24px;padding:0 10px;display:flex;align-items:center;color:#B9C0D0;">Help</span>
+          <div style="width:420px;height:24px;margin:0 auto;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;gap:8px;padding:0 8px;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#5C6478" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+            <span style="font-size:12px;color:#5C6478;">Search commands, entities, assets</span>
+            <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10.5px;color:#4A4F5E;">Ctrl+P</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-left:auto;">
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">58 fps · 17.2 ms</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">–</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">▢</span>
+            <span style="width:34px;height:26px;display:flex;align-items:center;justify-content:center;color:#7E8698;">✕</span>
+          </div>
+        </div>
+
+        <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 8px;gap:2px;">
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#D8DCE8;">Save</span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#9AA3B5;">Select</span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#9AA3B5;">Landscape</span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#B4BAFF;background:rgba(122,134,255,.16);box-shadow:inset 0 -2px 0 #7A86FF;border-radius:2px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4c0 8-4.6 12-10 12H5c0-8 4.6-12 10-12h5Z"></path><path d="M4 21c2.5-4.5 5.5-7.3 9-9"></path></svg>Foliage</span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;padding:0 10px;display:flex;align-items:center;gap:7px;color:#D8DCE8;">Create <span style="color:#7E8698;font-size:10px;">▾</span></span>
+          <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#5DCE9A;">▶</span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">❚❚</span>
+          <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">■</span>
+          <span style="font-size:11.5px;color:#7E8698;margin-left:6px;">Stopped</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+            <span style="font-size:11.5px;color:#7E8698;">Workspace</span>
+            <span style="height:24px;padding:0 8px;display:flex;align-items:center;gap:8px;background:#282B36;border:1px solid #313543;border-radius:2px;font-size:12px;color:#D8DCE8;">Foliage <span style="color:#7E8698;font-size:10px;">▾</span></span>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0;">
+          <div style="width:168px;flex:none;background:#1C1E26;border-right:1px solid #22252F;display:flex;flex-direction:column;">
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-bottom:1px solid #22252F;">Foliage</div>
+            <div style="padding:6px 8px;display:flex;flex-direction:column;gap:2px;">
+              <div style="height:26px;display:flex;align-items:center;gap:9px;padding:0 8px;border-radius:2px;background:rgba(122,134,255,.16);box-shadow:inset 2px 0 0 #7A86FF;color:#B4BAFF;font-size:12.5px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4c0 8-4.6 12-10 12H5c0-8 4.6-12 10-12h5Z"></path><path d="M4 21c2.5-4.5 5.5-7.3 9-9"></path></svg>Paint<span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">P</span></div>
+              <div style="height:26px;display:flex;align-items:center;gap:9px;padding:0 8px;color:#B9C0D0;font-size:12.5px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4c0 8-4.6 12-10 12H5c0-8 4.6-12 10-12h5Z"></path><path d="m3 21 18-18"></path></svg>Erase<span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">E</span></div>
+              <div style="height:26px;display:flex;align-items:center;gap:9px;padding:0 8px;color:#B9C0D0;font-size:12.5px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"></path><path d="M12 12c0-4 2.5-6.5 6.5-7 0 4-2.5 6.6-6.5 7Z"></path></svg>Single<span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">S</span></div>
+            </div>
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-top:1px solid #22252F;border-bottom:1px solid #22252F;margin-top:8px;">Species</div>
+            <div style="padding:6px 8px;display:flex;flex-direction:column;gap:2px;">
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:2px;background:rgba(122,134,255,.16);color:#F2F4FF;font-size:12.5px;"><span style="width:14px;height:14px;border-radius:2px;background:#4E6349;"></span>grass_medium_01</div>
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;color:#B9C0D0;font-size:12.5px;"><span style="width:14px;height:14px;border-radius:2px;background:#5C7355;"></span>grass_bermuda_01</div>
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;color:#B9C0D0;font-size:12.5px;"><span style="width:14px;height:14px;border-radius:2px;background:#3E5540;"></span>fir_sapling</div>
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;color:#B9C0D0;font-size:12.5px;"><span style="width:14px;height:14px;border-radius:2px;background:#4A6042;"></span>island_tree_02</div>
+            </div>
+            <div style="padding:10px 12px;display:flex;flex-direction:column;gap:9px;border-top:1px solid #22252F;margin-top:8px;">
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Density<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">180</span></div>
+              <div style="height:3px;background:#12141A;border-radius:2px;"><div style="width:64%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Max slope<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">38°</span></div>
+              <div style="height:3px;background:#12141A;border-radius:2px;"><div style="width:42%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#9AA3B5;">Scale jitter<span style="font-family:'Geist Mono',monospace;color:#D8DCE8;">0.25</span></div>
+            </div>
+          </div>
+
+          <div style="flex:1;position:relative;min-width:0;background:linear-gradient(#5B7FA8 0%,#8FB0CC 40%,#7A8A6A 41%,#6F7F5E 62%,#5F6E51 100%);">
+            <div style="position:absolute;inset:41% 0 0 0;background:repeating-linear-gradient(90deg,rgba(255,255,255,.05) 0 1px,transparent 1px 64px),repeating-linear-gradient(0deg,rgba(255,255,255,.05) 0 1px,transparent 1px 40px);"></div>
+            <div style="position:absolute;top:12px;left:12px;right:12px;height:32px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 6px;gap:2px;">
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.18);color:#B4BAFF;">T</span>
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">R</span>
+              <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">S</span>
+              <span style="width:1px;height:16px;background:#3A3E4A;margin:0 8px;"></span>
+              <span style="font-size:11.5px;color:#9AA3B5;margin-right:6px;">Speed</span>
+              <div style="width:100px;height:3px;background:#12141A;border-radius:2px;"><div style="width:52%;height:3px;background:#7A86FF;border-radius:2px;"></div></div>
+              <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#D8DCE8;margin-left:8px;">5.0 m/s</span>
+              <span style="width:1px;height:16px;background:#3A3E4A;margin:0 10px;"></span>
+              <span style="height:24px;padding:0 8px;display:flex;align-items:center;gap:6px;background:#22252F;border:1px solid #313543;border-radius:2px;font-size:11.5px;color:#D8DCE8;">Lit <span style="color:#7E8698;font-size:10px;">▾</span></span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:2px;">
+                <span style="height:24px;padding:0 9px;display:flex;align-items:center;font-size:11.5px;color:#9AA3B5;">Foliage overlay</span>
+                <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">⛶</span>
+              </div>
+            </div>
+
+            <!-- drop target -->
+            <div style="position:absolute;left:38%;top:58%;width:210px;height:110px;border:1.5px dashed #7A86FF;background:rgba(122,134,255,.18);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#DDE0FF;">Spawn island_tree_02 here</div>
+            <!-- drag ghost -->
+            <div style="position:absolute;left:46%;top:74%;width:104px;height:104px;border-radius:3px;background:#22252F;border:1px solid #7A86FF;opacity:.72;display:flex;align-items:center;justify-content:center;font-size:11px;color:#B4BAFF;box-shadow:0 12px 32px rgba(0,0,0,.55);">island_tree_02</div>
+            <div style="position:absolute;left:12px;bottom:12px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;padding:8px 12px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:1.7;color:#9AA3B5;">
+              <div style="color:#D8DCE8;">Foliage · grass_medium_01 · 12 480 instances</div>
+              <div>paint · density 180 · slope ≤ 38° · Esc cancels drop</div>
+            </div>
+          </div>
+
+          <div style="width:340px;flex:none;background:#1C1E26;border-left:1px solid #22252F;display:flex;flex-direction:column;min-height:0;">
+            <div style="height:30px;flex:none;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;">
+              <span style="font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Outliner</span>
+              <span style="margin-left:auto;font-size:11px;color:#7E8698;">filtered · 3 of 9</span>
+            </div>
+            <div style="height:24px;flex:none;margin:6px 8px;background:#0E1014;border:1px solid #949CFF;border-radius:2px;display:flex;align-items:center;gap:7px;padding:0 8px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#949CFF" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+              <span style="font-size:12px;color:#F2F4FF;">tree</span><span style="width:1px;height:12px;background:#949CFF;"></span>
+              <span style="margin-left:auto;font-size:11px;color:#7E8698;">Esc</span>
+            </div>
+            <div style="flex:none;">
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 10px;background:rgba(122,134,255,.16);box-shadow:inset 2px 0 0 #7A86FF;"><span style="width:9px;"></span><span style="width:14px;height:14px;border-radius:2px;background:#4A6042;"></span><span style="font-size:12.5px;font-weight:500;color:#F2F4FF;">island_tree_02</span><span style="margin-left:auto;font-size:10.5px;color:#7E8698;">402</span></div>
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 10px;"><span style="width:9px;"></span><span style="width:14px;height:14px;border-radius:2px;background:#3E5540;"></span><span style="font-size:12.5px;color:#B9C0D0;">fir_sapling</span><span style="margin-left:auto;font-size:10.5px;color:#7E8698;">1 204</span></div>
+              <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 10px;"><span style="width:9px;"></span><span style="width:14px;height:14px;border-radius:2px;background:#5C7355;"></span><span style="font-size:12.5px;color:#B9C0D0;">grass_bermuda_01</span><span style="margin-left:auto;font-size:10.5px;color:#7E8698;">8 610</span></div>
+            </div>
+            <div style="height:30px;flex:none;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;border-top:1px solid #22252F;margin-top:8px;">
+              <span style="font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Details</span>
+              <span style="font-size:11.5px;color:#7E8698;margin-left:8px;">Foliage · island_tree_02</span>
+            </div>
+            <div style="flex:1;overflow:hidden;">
+              <sc-for list="{{ foliageDetails }}" as="d" hint-placeholder-count="14">
+                <div style="height:{{ d.h }};display:flex;align-items:center;gap:8px;padding:0 10px 0 0;background:{{ d.bg }};border-top:{{ d.borderTop }};">
+                  <span style="width:14px;text-align:center;font-size:9px;color:#5C6478;">{{ d.twisty }}</span>
+                  <span style="font-size:{{ d.labelSize }};font-weight:{{ d.weight }};letter-spacing:{{ d.tracking }};text-transform:{{ d.transform }};color:{{ d.labelColor }};width:{{ d.labelW }};">{{ d.label }}</span>
+                  <span style="flex:1;height:20px;display:{{ d.fieldDisplay }};align-items:center;justify-content:flex-end;padding:0 7px;background:{{ d.fieldBg }};border:1px solid {{ d.fieldBorder }};border-radius:2px;font-family:'Geist Mono',monospace;font-size:11.5px;color:{{ d.valueColor }};">{{ d.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- content drawer, filtered + loading -->
+        <div style="height:260px;flex:none;background:#181A20;border-top:1px solid #22252F;display:flex;flex-direction:column;box-shadow:0 -12px 32px rgba(0,0,0,.40);">
+          <div style="height:30px;flex:none;background:#22252F;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:2px;">
+            <span style="height:30px;padding:0 12px;display:flex;align-items:center;font-size:12.5px;color:#F2F4FF;background:#1C1E26;box-shadow:inset 0 -2px 0 #7A86FF;">Content Browser</span>
+            <span style="height:30px;padding:0 12px;display:flex;align-items:center;font-size:12.5px;color:#9AA3B5;">Output Log</span>
+            <span style="height:24px;width:26px;display:flex;align-items:center;justify-content:center;color:#5C6478;margin-left:10px;">◀</span>
+            <span style="height:24px;width:26px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">▶</span>
+            <div style="margin-left:8px;display:flex;align-items:center;gap:6px;font-size:12px;"><span style="color:#C4A574;">Game</span><span style="color:#4A4F5E;">/</span><span style="color:#D8DCE8;">foliage</span></div>
+            <div style="width:220px;height:22px;margin-left:16px;background:#0E1014;border:1px solid #949CFF;border-radius:2px;display:flex;align-items:center;gap:7px;padding:0 8px;"><span style="font-size:12px;color:#F2F4FF;">tree</span></div>
+            <div style="display:flex;gap:6px;margin-left:12px;">
+              <span style="height:20px;padding:0 9px;display:flex;align-items:center;gap:5px;border-radius:10px;background:rgba(122,134,255,.16);border:1px solid #7A86FF;font-size:11px;color:#B4BAFF;">Mesh <span style="color:#7E8698;">4</span></span>
+              <span style="height:20px;padding:0 9px;display:flex;align-items:center;gap:5px;border-radius:10px;background:#282B36;border:1px solid #313543;font-size:11px;color:#9AA3B5;">Texture <span style="color:#5C6478;">6</span></span>
+              <span style="height:20px;padding:0 9px;display:flex;align-items:center;border-radius:10px;background:#1C1E26;border:1px dashed #3A3E4A;font-size:11px;color:#5C6478;">Audio 0</span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:12px;font-size:11.5px;color:#9AA3B5;"><span style="color:#F2F4FF;">Grid</span><span>List</span><span style="width:1px;height:14px;background:#3A3E4A;"></span><span>Tile 104</span><span style="color:#7E8698;">Undock ⌃</span></div>
+          </div>
+          <div style="flex:1;display:flex;min-height:0;">
+            <div style="width:190px;flex:none;border-right:1px solid #22252F;padding:8px 0;">
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12.5px;color:#F2F4FF;background:rgba(122,134,255,.10);"><span style="color:#5C6478;font-size:9px;">▾</span>Game</div>
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 26px;font-size:12.5px;color:#F2F4FF;background:rgba(122,134,255,.16);">foliage</div>
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 42px;font-size:12.5px;color:#B9C0D0;">grass_medium_01</div>
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 42px;font-size:12.5px;color:#B9C0D0;">island_tree_02</div>
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 26px;font-size:12.5px;color:#B9C0D0;">models</div>
+              <div style="height:24px;display:flex;align-items:center;gap:7px;padding:0 10px 0 26px;font-size:12.5px;color:#B9C0D0;">terrain</div>
+            </div>
+            <div style="flex:1;padding:12px;display:flex;gap:12px;flex-wrap:wrap;align-content:flex-start;">
+              <sc-for list="{{ foliageAssets }}" as="a" hint-placeholder-count="6">
+                <div style="width:104px;display:flex;flex-direction:column;gap:6px;align-items:center;">
+                  <div style="width:104px;height:104px;border-radius:3px;background:{{ a.bg }};border:1px solid {{ a.border }};position:relative;display:flex;align-items:center;justify-content:center;font-size:11px;color:{{ a.glyphColor }};text-align:center;padding:0 8px;line-height:1.4;opacity:{{ a.opacity }};">{{ a.glyph }}<span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:{{ a.badge }};"></span></div>
+                  <span style="font-size:11px;color:{{ a.labelColor }};text-align:center;line-height:1.25;">{{ a.name }}</span>
+                </div>
+              </sc-for>
+              <div style="width:210px;height:104px;border:1px dashed #22252F;border-radius:3px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;">
+                <span style="font-size:12px;color:#7E8698;">No audio matches “tree”</span>
+                <span style="font-size:11px;color:#5C6478;">Clear the Audio filter</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:18px;font-size:11.5px;color:#9AA3B5;">
+          <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#5DCE9A;"></span>Saved 2 min ago</span>
+          <span>island_tree_02</span>
+          <span>Foliage · Paint</span>
+          <span style="color:#B4BAFF;">Drop to spawn — Esc cancels</span>
+          <span style="margin-left:auto;font-family:'Geist Mono',monospace;color:#7E8698;">22 296 instances · 9 objects · 2.3 GB · 58 fps</span>
+        </div>
+      </div>
+    </div>
+    <div style="max-width:1344px;font-size:12.5px;line-height:1.7;color:#7E8698;">
+      One drawer slot, three tabs, and every Content Browser state in one frame: active type filter with counts, an empty filter that explains itself instead of showing nothing, a tile still decoding, a tile whose preview failed but whose asset is fine, the drag ghost, and the indigo drop target with its cancel affordance echoed in the status bar.
+    </div>
+  </div>
+</div>
+
+<div style="background:#0E1014;color:#D8DCE8;padding:0 56px 140px;display:flex;flex-direction:column;gap:56px;">
+
+  <!-- ══════════════ S3 ══════════════ -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:baseline;gap:12px;">
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:3px;font-weight:600;">S3</span>
+      <span style="font-size:15px;font-weight:600;">Play, unsaved modal, command search, notification centre</span>
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">1920 × 1080 · overlay layer 5–6</span>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+
+      <!-- S3a play + modal -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="width:864px;height:486px;overflow:hidden;border:1px solid #22252F;border-radius:4px;position:relative;">
+          <div style="width:1920px;height:1080px;transform:scale(0.45);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;">
+            <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:14px;font-size:13px;color:#7E8698;">
+              <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#5C6478;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <span>Somnium Engine — Playing</span>
+              <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;">120 fps · 8.3 ms</span>
+            </div>
+            <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 8px;gap:2px;">
+              <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#4A4F5E;">Save</span>
+              <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+              <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#4A4F5E;">Select</span>
+              <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#4A4F5E;">Landscape</span>
+              <span style="height:26px;padding:0 10px;display:flex;align-items:center;color:#4A4F5E;">Foliage</span>
+              <span style="width:1px;height:18px;background:#3A3E4A;margin:0 8px;"></span>
+              <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#5DCE9A;background:rgba(93,206,154,.14);border-radius:2px;">▶</span>
+              <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#D8DCE8;">❚❚</span>
+              <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#D8DCE8;">■</span>
+              <span style="font-size:11.5px;color:#5DCE9A;margin-left:6px;">Playing · 00:41</span>
+              <span style="margin-left:auto;font-size:11.5px;color:#7E8698;">Esc exits immersive · editor chrome hidden in viewport</span>
+            </div>
+            <div style="flex:1;position:relative;background:linear-gradient(#25344A 0%,#3C5570 34%,#4C6551 36%,#33422F 100%);">
+              <div style="position:absolute;inset:0;background:rgba(14,16,20,.62);"></div>
+              <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:520px;background:#1C1E26;border:1px solid #3A3E4A;border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.60);overflow:hidden;">
+                <div style="padding:20px 24px 4px;font-size:16px;font-weight:600;color:#F2F4FF;">Unsaved changes</div>
+                <div style="padding:8px 24px 20px;font-size:13px;line-height:1.6;color:#9AA3B5;">L_Demo has 6 unsaved edits — terrain height, two material layers and the foliage density. Starting a new scene will discard them.</div>
+                <div style="padding:14px 20px;background:#181A20;border-top:1px solid #22252F;display:flex;gap:10px;justify-content:flex-end;">
+                  <span style="height:28px;padding:0 14px;display:flex;align-items:center;font-size:12.5px;color:#9AA3B5;">Cancel</span>
+                  <span style="height:28px;padding:0 14px;display:flex;align-items:center;background:rgba(224,90,90,.12);border:1px solid rgba(224,90,90,.55);border-radius:2px;font-size:12.5px;color:#E05A5A;">Discard</span>
+                  <span style="height:28px;padding:0 14px;display:flex;align-items:center;background:#7A86FF;border-radius:2px;font-size:12.5px;font-weight:500;color:#0E1014;box-shadow:0 0 0 1px rgba(148,156,255,.45);">Save and continue</span>
+                </div>
+              </div>
+            </div>
+            <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:18px;font-size:11.5px;color:#5C6478;">
+              <span style="display:flex;align-items:center;gap:6px;color:#E6B04A;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>6 unsaved edits</span>
+              <span>Play in progress — editing disabled</span>
+              <span style="margin-left:auto;font-family:'Geist Mono',monospace;">120 fps · 1.9 GB</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">S3a · Play running, chrome dimmed and non-interactive, modal at layer 6 with focus trapped on “Save and continue”</div>
+      </div>
+
+      <!-- S3b palette + notifications -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="width:864px;height:486px;overflow:hidden;border:1px solid #22252F;border-radius:4px;">
+          <div style="width:1920px;height:1080px;transform:scale(0.45);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;">
+            <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:14px;font-size:13px;color:#7E8698;">
+              <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <span style="color:#D8DCE8;">Somnium Engine</span>
+              <span style="margin-left:auto;">Paused</span>
+            </div>
+            <div style="flex:1;position:relative;background:#181A20;display:flex;">
+              <div style="flex:1;background:linear-gradient(#5B7FA8,#8FB0CC 40%,#7A8A6A 41%,#5F6E51);opacity:.45;"></div>
+              <div style="width:340px;background:#1C1E26;border-left:1px solid #22252F;opacity:.45;"></div>
+              <div style="position:absolute;inset:0;background:rgba(14,16,20,.45);"></div>
+
+              <!-- command palette -->
+              <div style="position:absolute;left:50%;top:96px;transform:translateX(-50%);width:720px;background:#22252F;border:1px solid #3A3E4A;border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.60);overflow:hidden;">
+                <div style="height:44px;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid #313543;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#949CFF" stroke-width="2.4"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                  <span style="font-size:14px;color:#F2F4FF;">terr</span><span style="width:1px;height:16px;background:#949CFF;"></span>
+                  <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">&gt; commands  # entities  @ assets  ? help</span>
+                </div>
+                <sc-for list="{{ palette }}" as="p" hint-placeholder-count="6">
+                  <div style="height:34px;display:flex;align-items:center;gap:12px;padding:0 16px;background:{{ p.bg }};box-shadow:{{ p.rail }};">
+                    <span style="font-family:'Geist Mono',monospace;font-size:11px;color:{{ p.kindColor }};width:64px;">{{ p.kind }}</span>
+                    <span style="font-size:13px;color:{{ p.color }};">{{ p.label }}</span>
+                    <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">{{ p.hint }}</span>
+                  </div>
+                </sc-for>
+                <div style="height:28px;display:flex;align-items:center;padding:0 16px;background:#1C1E26;border-top:1px solid #313543;font-size:11px;color:#5C6478;gap:16px;">
+                  <span>↑↓ move</span><span>↵ run</span><span>Tab filter by kind</span><span>Esc close</span>
+                </div>
+              </div>
+
+              <!-- notification centre -->
+              <div style="position:absolute;right:24px;top:96px;width:360px;background:#1C1E26;border:1px solid #3A3E4A;border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.60);overflow:hidden;">
+                <div style="height:34px;display:flex;align-items:center;padding:0 14px;background:#22252F;border-bottom:1px solid #313543;">
+                  <span style="font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Notifications</span>
+                  <span style="margin-left:auto;font-size:11px;color:#949CFF;">Clear all</span>
+                </div>
+                <sc-for list="{{ notices }}" as="n" hint-placeholder-count="4">
+                  <div style="padding:11px 14px;border-bottom:1px solid #22252F;border-left:2px solid {{ n.accent }};">
+                    <div style="display:flex;justify-content:space-between;font-size:12.5px;color:#D8DCE8;margin-bottom:3px;">{{ n.title }}<span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#5C6478;">{{ n.time }}</span></div>
+                    <div style="font-size:11.5px;color:#7E8698;line-height:1.5;">{{ n.body }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:18px;font-size:11.5px;color:#9AA3B5;">
+              <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>Unsaved</span>
+              <span>Paused at 00:41</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:8px;color:#E05A5A;">1 error<span style="color:#E6B04A;">2 warnings</span><span style="color:#7E8698;font-family:'Geist Mono',monospace;">click to open log</span></span>
+            </div>
+          </div>
+        </div>
+        <div style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">S3b · Ctrl+P across commands, entities, assets, panels and help · notification centre from the status error count</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ S4 / S5 / S6 ══════════════ -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:baseline;gap:12px;">
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#0E1014;background:#7A86FF;padding:3px 7px;border-radius:3px;font-weight:600;">S4–S6</span>
+      <span style="font-size:15px;font-weight:600;">Size and scale cases</span>
+      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;">same markup, three windows — collapse rules from redline §06</span>
+    </div>
+
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
+
+      <!-- S4 1280x720 -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="width:1280px;height:720px;overflow:hidden;border:1px solid #E6B04A;border-radius:4px;display:flex;flex-direction:column;background:#14161C;">
+          <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:8px;">
+            <svg viewBox="0 0 64 64" width="18" height="18" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+            <span style="width:26px;height:24px;display:flex;align-items:center;justify-content:center;color:#B9C0D0;">☰</span>
+            <span style="font-size:12.5px;color:#7E8698;">L_Demo</span>
+            <div style="width:220px;height:24px;margin-left:12px;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;padding:0 8px;font-size:11.5px;color:#5C6478;">Search <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#4A4F5E;">Ctrl+P</span></div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:8px;font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;"><span>42 fps</span><span style="color:#5C6478;">– ▢ ✕</span></div>
+          </div>
+          <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 8px;gap:2px;font-size:12.5px;">
+            <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path></svg></span>
+            <span style="width:1px;height:18px;background:#3A3E4A;margin:0 6px;"></span>
+            <span style="height:26px;padding:0 9px;display:flex;align-items:center;color:#9AA3B5;">Select</span>
+            <span style="height:26px;padding:0 9px;display:flex;align-items:center;color:#B4BAFF;background:rgba(122,134,255,.16);box-shadow:inset 0 -2px 0 #7A86FF;border-radius:2px;">Landscape</span>
+            <span style="height:26px;padding:0 9px;display:flex;align-items:center;color:#9AA3B5;">Foliage</span>
+            <span style="width:1px;height:18px;background:#3A3E4A;margin:0 6px;"></span>
+            <span style="height:26px;width:28px;display:flex;align-items:center;justify-content:center;color:#5DCE9A;">▶</span>
+            <span style="height:26px;width:28px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">❚❚</span>
+            <span style="height:26px;width:28px;display:flex;align-items:center;justify-content:center;color:#4A4F5E;">■</span>
+            <span style="margin-left:auto;height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;background:#282B36;border:1px solid #313543;border-radius:2px;">⋯</span>
+          </div>
+          <div style="flex:1;display:flex;min-height:0;">
+            <div style="width:44px;flex:none;background:#1C1E26;border-right:1px solid #22252F;display:flex;flex-direction:column;align-items:center;padding:6px 0;gap:2px;">
+              <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.16);box-shadow:inset 2px 0 0 #7A86FF;color:#B4BAFF;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6 15c2-5 4-7 6-7s4 2 6 7"></path></svg></span>
+              <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 14c3.2 0 3.2-6 6.4-6s3.2 6 6.4 6 2.6-3 5.2-3"></path></svg></span>
+              <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 9h18"></path></svg></span>
+              <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 15 2.4-5 2.4 4 2.4-7 2.4 8 2.4-5 2.4 3L21 11"></path><path d="M3 20h18"></path></svg></span>
+              <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"></path></svg></span>
+            </div>
+            <div style="flex:1;position:relative;min-width:0;background:linear-gradient(#5B7FA8,#8FB0CC 42%,#7A8A6A 43%,#5F6E51);">
+              <div style="position:absolute;top:8px;left:8px;height:30px;background:rgba(20,22,28,.88);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 4px;gap:2px;font-size:12px;">
+                <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.18);color:#B4BAFF;">T</span>
+                <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">R</span>
+                <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">S</span>
+              </div>
+              <div style="position:absolute;top:8px;right:8px;height:30px;background:rgba(20,22,28,.88);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 8px;gap:10px;font-size:11.5px;color:#9AA3B5;">
+                <span style="color:#D8DCE8;">Lit ▾</span><span>5.0 m/s</span><span style="color:#B4BAFF;">Prof</span>
+              </div>
+            </div>
+            <div style="width:240px;flex:none;background:#1C1E26;border-left:1px solid #22252F;display:flex;flex-direction:column;">
+              <div style="height:30px;flex:none;background:#22252F;display:flex;align-items:center;padding:0 8px;gap:2px;border-bottom:1px solid #22252F;">
+                <span style="height:30px;padding:0 9px;display:flex;align-items:center;font-size:12px;color:#F2F4FF;background:#1C1E26;box-shadow:inset 0 -2px 0 #7A86FF;">Details</span>
+                <span style="height:30px;padding:0 9px;display:flex;align-items:center;font-size:12px;color:#9AA3B5;">Outliner</span>
+                <span style="margin-left:auto;font-size:11px;color:#7E8698;">⋯</span>
+              </div>
+              <div style="padding:0;">
+                <div style="height:26px;display:flex;align-items:center;padding:0 10px;background:#22252F;font-size:11px;font-weight:600;letter-spacing:.08em;color:#D8DCE8;text-transform:uppercase;">Transform</div>
+                <sc-for list="{{ stackedRows }}" as="s" hint-placeholder-count="5">
+                  <div style="height:40px;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:0 10px;border-bottom:1px solid #22252F;">
+                    <span style="font-size:11px;color:#7E8698;">{{ s.label }}</span>
+                    <span style="height:18px;background:#12141A;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding:0 6px;font-family:'Geist Mono',monospace;font-size:11px;color:#D8DCE8;">{{ s.value }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+          <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 10px;gap:14px;font-size:11px;color:#9AA3B5;">
+            <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>Unsaved</span>
+            <span>Terrain</span>
+            <span style="margin-left:auto;font-family:'Geist Mono',monospace;color:#7E8698;">42 fps</span>
+          </div>
+        </div>
+        <div style="max-width:1280px;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;line-height:1.8;">S4 · 1280 × 720 — the overflow case. Menus collapse to ☰, Create and the workspace picker move into ⋯, the tool rail drops to 44 px icons with tooltips, Outliner and Details share a tab strip at 240 px, property rows stack label over value at 40 px, and the status bar sheds triangles, objects and memory. Nothing becomes unreachable.</div>
+      </div>
+
+      <!-- S5 150% -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="width:1280px;height:720px;overflow:hidden;border:1px solid #22252F;border-radius:4px;">
+          <div style="width:853px;height:480px;transform:scale(1.5);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;">
+            <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 8px;gap:8px;">
+              <svg viewBox="0 0 64 64" width="18" height="18" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+              <span style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:#B9C0D0;">☰</span>
+              <span style="font-size:12.5px;color:#7E8698;">L_Demo</span>
+              <div style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">150 %</div>
+            </div>
+            <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 8px;gap:2px;font-size:12.5px;">
+              <span style="height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#D8DCE8;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path></svg></span>
+              <span style="height:26px;padding:0 9px;display:flex;align-items:center;color:#B4BAFF;background:rgba(122,134,255,.16);box-shadow:inset 0 -2px 0 #7A86FF;border-radius:2px;">Landscape</span>
+              <span style="height:26px;padding:0 9px;display:flex;align-items:center;color:#9AA3B5;">Foliage</span>
+              <span style="height:26px;width:28px;display:flex;align-items:center;justify-content:center;color:#5DCE9A;margin-left:6px;">▶</span>
+              <span style="margin-left:auto;height:26px;width:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;background:#282B36;border:1px solid #313543;border-radius:2px;">⋯</span>
+            </div>
+            <div style="flex:1;display:flex;min-height:0;">
+              <div style="width:44px;flex:none;background:#1C1E26;border-right:1px solid #22252F;display:flex;flex-direction:column;align-items:center;padding:6px 0;gap:2px;">
+                <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.16);box-shadow:inset 2px 0 0 #7A86FF;color:#B4BAFF;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M6 15c2-5 4-7 6-7s4 2 6 7"></path></svg></span>
+                <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 14c3.2 0 3.2-6 6.4-6s3.2 6 6.4 6 2.6-3 5.2-3"></path></svg></span>
+                <span style="width:32px;height:30px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"></path><path d="M3 9h18"></path></svg></span>
+              </div>
+              <div style="flex:1;position:relative;min-width:0;background:linear-gradient(#5B7FA8,#8FB0CC 42%,#7A8A6A 43%,#5F6E51);">
+                <div style="position:absolute;top:8px;left:8px;height:30px;background:rgba(20,22,28,.88);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 4px;gap:2px;font-size:12px;">
+                  <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.18);color:#B4BAFF;">T</span>
+                  <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">R</span>
+                  <span style="height:22px;width:24px;display:flex;align-items:center;justify-content:center;color:#9AA3B5;">S</span>
+                </div>
+              </div>
+              <div style="width:240px;flex:none;background:#1C1E26;border-left:1px solid #22252F;">
+                <div style="height:30px;background:#22252F;display:flex;align-items:center;padding:0 10px;font-size:11px;font-weight:600;letter-spacing:.08em;color:#D8DCE8;text-transform:uppercase;border-bottom:1px solid #22252F;">Details</div>
+                <div style="height:26px;display:flex;align-items:center;padding:0 10px;background:#22252F;font-size:11px;font-weight:600;letter-spacing:.08em;color:#D8DCE8;text-transform:uppercase;">Transform</div>
+                <sc-for list="{{ stackedRows }}" as="s" hint-placeholder-count="5">
+                  <div style="height:40px;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:0 10px;border-bottom:1px solid #22252F;">
+                    <span style="font-size:11px;color:#7E8698;">{{ s.label }}</span>
+                    <span style="height:18px;background:#12141A;border:1px solid #313543;border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding:0 6px;font-family:'Geist Mono',monospace;font-size:11px;color:#D8DCE8;">{{ s.value }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 10px;gap:14px;font-size:11px;color:#9AA3B5;">
+              <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>Unsaved</span>
+              <span>Terrain</span>
+              <span style="margin-left:auto;font-family:'Geist Mono',monospace;color:#7E8698;">42 fps</span>
+            </div>
+          </div>
+        </div>
+        <div style="max-width:1280px;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;line-height:1.8;">S5 · 1280 × 720 logical at 150 % UI scale in a 1920 × 1080 window. Every metric multiplies; hairlines snap to whole device pixels rather than blurring, and the icon atlas serves its 1.5× cut instead of upscaling the 1× one.</div>
+      </div>
+    </div>
+
+    <!-- S6 ultrawide -->
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div style="width:1376px;height:576px;overflow:hidden;border:1px solid #22252F;border-radius:4px;">
+        <div style="width:3440px;height:1440px;transform:scale(0.4);transform-origin:0 0;display:flex;flex-direction:column;background:#14161C;font-size:13px;">
+          <div style="height:36px;flex:none;background:#14161C;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:16px;">
+            <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:#7A86FF;"><g><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path><g transform="rotate(180 32 32)"><path d="M45.07 20.89 A13.2 13.2 0 1 0 27.92 31.55" stroke="currentColor" stroke-width="9.2" fill="none"></path></g></g></svg>
+            <span style="font-weight:500;">Somnium Engine</span>
+            <span style="color:#B9C0D0;">File</span><span style="color:#B9C0D0;">Edit</span><span style="color:#B9C0D0;">Create</span><span style="color:#B9C0D0;">View</span><span style="color:#B9C0D0;">Window</span><span style="color:#B9C0D0;">Help</span>
+            <div style="width:520px;height:24px;margin:0 auto;background:#12141A;border:1px solid #282B36;border-radius:2px;display:flex;align-items:center;padding:0 8px;font-size:12px;color:#5C6478;">Search commands, entities, assets<span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10.5px;color:#4A4F5E;">Ctrl+P</span></div>
+            <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#7E8698;">61 fps · 16.3 ms</span>
+          </div>
+          <div style="height:32px;flex:none;background:#22252F;border-bottom:1px solid #313543;display:flex;align-items:center;padding:0 12px;gap:10px;font-size:12.5px;">
+            <span style="color:#D8DCE8;">Save</span><span style="width:1px;height:18px;background:#3A3E4A;"></span>
+            <span style="color:#9AA3B5;">Select</span>
+            <span style="color:#B4BAFF;background:rgba(122,134,255,.16);box-shadow:inset 0 -2px 0 #7A86FF;height:26px;display:flex;align-items:center;padding:0 9px;border-radius:2px;">Landscape</span>
+            <span style="color:#9AA3B5;">Foliage</span><span style="width:1px;height:18px;background:#3A3E4A;"></span>
+            <span style="color:#D8DCE8;">Create ▾</span><span style="width:1px;height:18px;background:#3A3E4A;"></span>
+            <span style="color:#5DCE9A;">▶</span><span style="color:#4A4F5E;">❚❚</span><span style="color:#4A4F5E;">■</span><span style="color:#7E8698;font-size:11.5px;">Stopped</span>
+            <span style="margin-left:auto;color:#7E8698;font-size:11.5px;">Workspace</span><span style="height:24px;padding:0 8px;display:flex;align-items:center;background:#282B36;border:1px solid #313543;border-radius:2px;color:#D8DCE8;font-size:12px;">Lighting ▾</span>
+          </div>
+          <div style="flex:1;display:flex;min-height:0;">
+            <div style="width:200px;flex:none;background:#1C1E26;border-right:1px solid #22252F;">
+              <div style="height:26px;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:600;letter-spacing:.09em;color:#7E8698;text-transform:uppercase;border-bottom:1px solid #22252F;">Sculpt</div>
+              <sc-for list="{{ sculptTools }}" as="t" hint-placeholder-count="6">
+                <div style="height:26px;display:flex;align-items:center;gap:9px;margin:2px 8px;padding:0 8px;border-radius:2px;background:{{ t.bg }};box-shadow:{{ t.rail }};color:{{ t.color }};font-size:12.5px;">{{ t.name }}<span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;color:#5C6478;">{{ t.key }}</span></div>
+              </sc-for>
+            </div>
+            <div style="flex:1;position:relative;min-width:0;background:linear-gradient(#5B7FA8 0%,#8FB0CC 40%,#7A8A6A 41%,#6F7F5E 62%,#5F6E51 100%);">
+              <div style="position:absolute;top:12px;left:12px;height:32px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 6px;gap:6px;font-size:11.5px;color:#9AA3B5;">
+                <span style="height:24px;width:28px;display:flex;align-items:center;justify-content:center;border-radius:2px;background:rgba(122,134,255,.18);color:#B4BAFF;">T</span><span style="width:28px;text-align:center;">R</span><span style="width:28px;text-align:center;">S</span>
+                <span style="width:1px;height:16px;background:#3A3E4A;margin:0 6px;"></span><span>Speed 5.0 m/s</span><span style="width:1px;height:16px;background:#3A3E4A;margin:0 6px;"></span><span style="color:#D8DCE8;">Lit ▾</span>
+              </div>
+              <div style="position:absolute;top:12px;right:12px;height:32px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;display:flex;align-items:center;padding:0 10px;gap:12px;font-size:11.5px;color:#9AA3B5;">
+                <span>Snap 1 m</span><span style="color:#B4BAFF;">Profiler</span><span>⛶</span>
+              </div>
+              <div style="position:absolute;left:12px;bottom:12px;background:rgba(20,22,28,.86);border:1px solid #313543;border-radius:3px;padding:8px 12px;font-family:'Geist Mono',monospace;font-size:11.5px;color:#9AA3B5;">Terrain · 1024 × 1024 · 32 layers</div>
+            </div>
+            <div style="width:340px;flex:none;background:#1C1E26;border-left:1px solid #22252F;">
+              <div style="height:30px;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Outliner</div>
+              <sc-for list="{{ outliner }}" as="o" hint-placeholder-count="9">
+                <div style="height:26px;display:flex;align-items:center;gap:8px;padding:0 10px 0 {{ o.indent }};background:{{ o.bg }};box-shadow:{{ o.rail }};">
+                  <span style="width:9px;color:#5C6478;font-size:9px;">{{ o.twisty }}</span>
+                  <span style="font-size:12.5px;font-weight:{{ o.weight }};color:{{ o.color }};">{{ o.name }}</span>
+                  <span style="margin-left:auto;font-size:10.5px;color:{{ o.badgeColor }};">{{ o.badge }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="width:360px;flex:none;background:#1C1E26;border-left:1px solid #22252F;">
+              <div style="height:30px;background:#22252F;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #22252F;font-size:11px;font-weight:600;letter-spacing:.09em;color:#D8DCE8;text-transform:uppercase;">Details</div>
+              <sc-for list="{{ details }}" as="d" hint-placeholder-count="22">
+                <div style="height:{{ d.h }};display:flex;align-items:center;gap:8px;padding:0 10px 0 0;background:{{ d.bg }};border-top:{{ d.borderTop }};">
+                  <span style="width:14px;text-align:center;font-size:9px;color:#5C6478;">{{ d.twisty }}</span>
+                  <span style="font-size:{{ d.labelSize }};font-weight:{{ d.weight }};letter-spacing:{{ d.tracking }};text-transform:{{ d.transform }};color:{{ d.labelColor }};width:{{ d.labelW }};">{{ d.label }}</span>
+                  <span style="flex:1;height:20px;display:{{ d.fieldDisplay }};align-items:center;justify-content:flex-end;padding:0 7px;background:{{ d.fieldBg }};border:1px solid {{ d.fieldBorder }};border-radius:2px;font-family:'Geist Mono',monospace;font-size:11.5px;color:{{ d.valueColor }};">{{ d.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="height:220px;flex:none;background:#181A20;border-top:1px solid #22252F;display:flex;">
+            <div style="flex:1;display:flex;flex-direction:column;border-right:1px solid #22252F;">
+              <div style="height:30px;background:#22252F;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 12px;font-size:12.5px;color:#F2F4FF;box-shadow:inset 0 -2px 0 #7A86FF;width:160px;">Content Browser</div>
+              <div style="flex:1;padding:12px;display:flex;gap:12px;flex-wrap:wrap;align-content:flex-start;">
+                <sc-for list="{{ assets }}" as="a" hint-placeholder-count="9">
+                  <div style="width:104px;display:flex;flex-direction:column;gap:6px;align-items:center;">
+                    <div style="width:104px;height:104px;border-radius:3px;background:{{ a.bg }};border:1px solid {{ a.border }};position:relative;display:flex;align-items:center;justify-content:center;font-size:11px;color:{{ a.glyphColor }};">{{ a.glyph }}<span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:{{ a.badge }};"></span></div>
+                    <span style="font-size:11px;color:{{ a.labelColor }};">{{ a.name }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="width:900px;flex:none;display:flex;flex-direction:column;">
+              <div style="height:30px;background:#22252F;border-bottom:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:14px;font-size:12.5px;">
+                <span style="color:#F2F4FF;box-shadow:inset 0 -2px 0 #7A86FF;height:30px;display:flex;align-items:center;">Output Log</span>
+                <span style="color:#9AA3B5;">All</span><span style="color:#59B8D6;">Info 148</span><span style="color:#E6B04A;">Warn 2</span><span style="color:#E05A5A;">Error 1</span>
+                <span style="margin-left:auto;color:#7E8698;font-size:11.5px;">Follow tail</span>
+              </div>
+              <div style="flex:1;padding:6px 12px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:1.85;">
+                <sc-for list="{{ logLines }}" as="l" hint-placeholder-count="8">
+                  <div style="display:flex;gap:12px;color:{{ l.color }};background:{{ l.bg }};padding:0 4px;"><span style="color:#5C6478;">{{ l.time }}</span><span style="width:52px;color:{{ l.tagColor }};">{{ l.tag }}</span><span>{{ l.text }}</span></div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+          <div style="height:26px;flex:none;background:#14161C;border-top:1px solid #22252F;display:flex;align-items:center;padding:0 12px;gap:20px;font-size:11.5px;color:#9AA3B5;">
+            <span style="display:flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#E6B04A;"></span>Unsaved changes</span>
+            <span>Terrain</span><span>Landscape · Raise</span><span style="color:#E05A5A;">1 error</span>
+            <span style="margin-left:auto;font-family:'Geist Mono',monospace;color:#7E8698;">1 048 576 tris · 9 objects · 2.1 GB · 61 fps · GPU 11.4 ms</span>
+          </div>
+        </div>
+      </div>
+      <div style="max-width:1376px;font-family:'Geist Mono',monospace;font-size:11px;color:#5C6478;line-height:1.8;">S6 · 3440 × 1440. Extra width goes to a second right column (Outliner and Details side by side, not stacked) and a split bottom row that shows the Content Browser and Output Log at once. The viewport still holds the majority of the pixels; no panel stretches past its max.</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    const sculptTools = [
+      ["Raise", "1", "rgba(122,134,255,.16)", "inset 2px 0 0 #7A86FF", "#B4BAFF"],
+      ["Lower", "2", "transparent", "none", "#B9C0D0"],
+      ["Smooth", "3", "transparent", "none", "#B9C0D0"],
+      ["Flatten", "4", "transparent", "none", "#B9C0D0"],
+      ["Noise", "5", "transparent", "none", "#B9C0D0"],
+      ["Paint", "6", "transparent", "none", "#B9C0D0"],
+    ].map(t => ({ name: t[0], key: t[1], bg: t[2], rail: t[3], color: t[4] }));
+
+    const base = ["#6B5B47","#7E6A4F","#8D7B5C","#9A8B6B","#6E7F62","#5C7355","#4E6349","#8A8168",
+                  "#A39274","#B0A184","#5A6B7A","#47586A","#3E4E5E","#7D7466","#918876","#A79C86",
+                  "#6A6152","#57503F","#8E9A7C","#79866A","#9FA98C","#C0B49A","#4A5A48","#5F7059"];
+    const layerSwatches = base.map((c, i) => ({ c, ring: i === 3 ? "0 0 0 1.5px #7A86FF" : "none" }));
+
+    const outliner = [
+      ["Camera", "", "8px", "transparent", "none", "#7E8698", "#B9C0D0", 400, "", "#5C6478", "#5C6478"],
+      ["Gislinge Viking Boat", "CC BY", "8px", "transparent", "none", "#C4A574", "#B9C0D0", 400, "", "#5C6478", "#5C6478"],
+      ["node_damagedHelmet_-6514", "", "8px", "transparent", "none", "#7E8698", "#B9C0D0", 400, "", "#5C6478", "#5C6478"],
+      ["PointLight", "", "8px", "transparent", "none", "#E6B04A", "#B9C0D0", 400, "", "#5C6478", "#3A3E4A"],
+      ["Post Processing", "", "8px", "transparent", "none", "#7E8698", "#B9C0D0", 400, "", "#5C6478", "#5C6478"],
+      ["SunLight", "", "8px", "#313543", "none", "#E6B04A", "#F2F4FF", 400, "", "#5C6478", "#5C6478"],
+      ["Terrain", "modified", "8px", "rgba(122,134,255,.16)", "inset 2px 0 0 #7A86FF", "#B4BAFF", "#F2F4FF", 500, "", "#949CFF", "#B4BAFF"],
+      ["Water", "", "26px", "transparent", "none", "#59B8D6", "#B9C0D0", 400, "▸", "#5C6478", "#5C6478"],
+      ["EnemySpawner", "error", "8px", "transparent", "none", "#E05A5A", "#C89A9A", 400, "", "#E05A5A", "#5C6478"],
+    ].map(o => ({
+      name: o[0], badge: o[1], indent: o[2], bg: o[3], rail: o[4], iconColor: o[5],
+      color: o[6], weight: o[7], twisty: o[8] || "", badgeColor: o[9], eye: o[10],
+    }));
+
+    const sec = (label) => ({
+      h: "26px", display: "flex", twisty: "▾", label, labelSize: "11px", weight: 600,
+      tracking: ".08em", transform: "uppercase", labelColor: "#D8DCE8", labelW: "auto",
+      bg: "#22252F", borderTop: "1px solid #1C1E26", fieldDisplay: "none",
+      fieldBg: "transparent", fieldBorder: "transparent", valueColor: "#D8DCE8", value: "",
+    });
+    const row = (label, value, opts = {}) => ({
+      h: "24px", display: "flex", twisty: opts.dot ? "●" : "", label, labelSize: "12px",
+      weight: 400, tracking: "0", transform: "none",
+      labelColor: opts.dim ? "#5C6478" : "#9AA3B5", labelW: "128px",
+      bg: opts.bg || "transparent", borderTop: "none", fieldDisplay: "flex",
+      fieldBg: opts.dim ? "#1C1E26" : "#12141A",
+      fieldBorder: opts.err ? "#E05A5A" : (opts.focus ? "#949CFF" : (opts.dim ? "#282B36" : "#313543")),
+      valueColor: opts.err ? "#E05A5A" : (opts.dot ? "#B4BAFF" : (opts.dim ? "#5C6478" : "#D8DCE8")),
+      value,
+    });
+    const details = [
+      sec("Transform"),
+      row("Position X", "0.000"), row("Position Y", "118.000", { dot: true }), row("Position Z", "0.000"),
+      row("Rotation Y", "0.000"), row("Scale", "1.000"),
+      sec("Terrain"),
+      row("Resolution", "1024 × 1024", { dim: true }),
+      row("World size", "4096.0 m"), row("Height scale", "620.000", { dot: true }),
+      row("LOD bias", "0.250"), row("Sample radius", "−12.0", { err: true }),
+      row("Hex grid", "Off"), row("Paint enabled", "On", { dot: true }),
+      sec("Material layers"),
+      row("Selected layer", "04 · Cliff", { focus: true }),
+      row("Tint strength", "0.780"), row("Triplanar", "On"),
+      sec("Water"),
+      row("Preset", "Great Lakes", { dim: true }),
+      row("Deep colour", "#12324E"), row("Shallow", "#2F6FA8", { dot: true }),
+      row("SSR", "On"), row("RT reflect", "Off"),
+    ];
+
+    const contentTree = [
+      ["Game", "▾", "10px", "rgba(122,134,255,.10)", "#F2F4FF"],
+      ["foliage", "", "26px", "transparent", "#B9C0D0"],
+      ["Maps", "", "26px", "transparent", "#B9C0D0"],
+      ["models", "", "26px", "transparent", "#B9C0D0"],
+      ["terrain", "▾", "26px", "rgba(122,134,255,.16)", "#F2F4FF"],
+      ["bc7", "", "42px", "transparent", "#7E8698"],
+      ["ocean_pbr", "", "26px", "transparent", "#B9C0D0"],
+    ].map(c => ({ name: c[0], twisty: c[1], indent: c[2], bg: c[3], color: c[4] }));
+
+    const assets = [
+      ["terrain_albedo_00", "texture", "#2E3A2C", "#313543", "#9FB08C", "#59B8D6", "#B9C0D0"],
+      ["terrain_albedo_01", "texture", "#3A342C", "#313543", "#B7A184", "#59B8D6", "#B9C0D0"],
+      ["cliff_surface", "texture", "#33302E", "#7A86FF", "#B0A184", "#7A86FF", "#F2F4FF"],
+      ["materials.json", "material", "#181A20", "#313543", "#7E8698", "#5DCE9A", "#B9C0D0"],
+      ["great_lakes.sidecar", "data", "#181A20", "#313543", "#7E8698", "#5DCE9A", "#B9C0D0"],
+      ["pack_report.txt", "text", "#181A20", "#313543", "#7E8698", "#4A4F5E", "#B9C0D0"],
+      ["bc7_pack_02", "derived", "#181A20", "rgba(230,176,74,.45)", "#E6B04A", "#E6B04A", "#9AA3B5"],
+      ["helmet_normal", "decoding…", "#181A20", "#22252F", "#5C6478", "#313543", "#7E8698"],
+      ["LICENSE.md", "text", "#181A20", "#313543", "#7E8698", "#4A4F5E", "#B9C0D0"],
+    ].map(a => ({ name: a[0], glyph: a[1], bg: a[2], border: a[3], glyphColor: a[4], badge: a[5], labelColor: a[6] }));
+
+    const foliageDetails = [
+      sec("Placement"),
+      row("Density", "180.000", { dot: true }), row("Seed", "40 116"),
+      row("Max slope", "38.000"), row("Align to normal", "On"),
+      row("Scale min", "0.850"), row("Scale max", "1.400", { dot: true }),
+      sec("Rendering"),
+      row("Cast shadows", "On"), row("Wind strength", "0.320"),
+      row("LOD distance", "180.0 m"), row("Cull distance", "420.0 m"),
+      sec("Source asset"),
+      row("Mesh", "island_tree_02", { dim: true }),
+      row("Material", "M_Foliage_02", { dim: true }),
+    ];
+
+    const foliageAssets = [
+      ["island_tree_02.glb", "mesh", "#22252F", "#7A86FF", "#B4BAFF", "#7A86FF", "#F2F4FF", ".6"],
+      ["fir_sapling.glb", "mesh", "#20261F", "#313543", "#8FA184", "#7A86FF", "#B9C0D0", "1"],
+      ["tree_bark_albedo", "texture", "#2A231C", "#313543", "#B08A64", "#59B8D6", "#B9C0D0", "1"],
+      ["tree_leaf_mask", "decoding…", "#181A20", "#22252F", "#5C6478", "#313543", "#7E8698", "1"],
+      ["tree_leaf_normal", "preview unavailable", "#181A20", "rgba(224,90,90,.4)", "#E05A5A", "#E05A5A", "#9AA3B5", "1"],
+      ["M_Foliage_02", "material", "#181A20", "#313543", "#7E8698", "#5DCE9A", "#B9C0D0", "1"],
+    ].map(a => ({ name: a[0], glyph: a[1], bg: a[2], border: a[3], glyphColor: a[4], badge: a[5], labelColor: a[6], opacity: a[7] }));
+
+    const palette = [
+      ["command", "Terrain: Raise tool", "F6 then 1", "rgba(122,134,255,.16)", "inset 2px 0 0 #7A86FF", "#B4BAFF", "#F2F4FF"],
+      ["command", "Terrain: Paint layer…", "F6 then 6", "transparent", "none", "#7E8698", "#B9C0D0"],
+      ["entity", "Terrain", "select · frame F", "transparent", "none", "#5DCE9A", "#B9C0D0"],
+      ["asset", "terrain_albedo_00.png", "/Game/terrain", "transparent", "none", "#59B8D6", "#B9C0D0"],
+      ["panel", "Terrain layers", "open in Details", "transparent", "none", "#C4A574", "#B9C0D0"],
+      ["help", "Terrain sculpting", "F1 · docs/editor", "transparent", "none", "#949CFF", "#B9C0D0"],
+    ].map(p => ({ kind: p[0], label: p[1], hint: p[2], bg: p[3], rail: p[4], kindColor: p[5], color: p[6] }));
+
+    const notices = [
+      ["Shader compile failed", "water_ssr.wgsl:214 — unresolved binding `refl_tex`", "00:41", "#E05A5A"],
+      ["Derived pack out of date", "terrain/bc7 is older than materials.json", "00:38", "#E6B04A"],
+      ["Import complete", "island_tree_02.glb — 4 meshes, 2 materials", "00:22", "#5DCE9A"],
+      ["Building BC7", "62 % — 12 of 19 packs", "running", "#7A86FF"],
+    ].map(n => ({ title: n[0], body: n[1], time: n[2], accent: n[3] }));
+
+    const stackedRows = [
+      ["Position X", "0.000"], ["Position Y", "118.000"], ["Position Z", "0.000"],
+      ["Rotation Y", "0.000"], ["Uniform scale", "1.000"],
+    ].map(s => ({ label: s[0], value: s[1] }));
+
+    const logLines = [
+      ["18:59:39", "info", "Saved package /Game/Maps/L_Demo — 1 export, 5 imports, 282.09 KiB", "#9AA3B5", "#59B8D6", "transparent"],
+      ["18:59:40", "info", "Initializing forward render scene", "#9AA3B5", "#59B8D6", "transparent"],
+      ["18:59:42", "info", "Compiled raw shader in 38.74 ms (thread 3)", "#9AA3B5", "#59B8D6", "transparent"],
+      ["18:59:43", "warn", "terrain/bc7 pack is older than materials.json", "#E6B04A", "#E6B04A", "rgba(230,176,74,.07)"],
+      ["18:59:45", "info", "Foliage instancing rebuilt — 22 296 instances", "#9AA3B5", "#59B8D6", "transparent"],
+      ["18:59:48", "error", "water_ssr.wgsl:214 unresolved binding `refl_tex`", "#E05A5A", "#E05A5A", "rgba(224,90,90,.09)"],
+      ["18:59:48", "info", "Falling back to planar reflection", "#9AA3B5", "#59B8D6", "transparent"],
+      ["18:59:57", "job", "BC7 encode 12/19 · 62 %", "#B4BAFF", "#7A86FF", "transparent"],
+    ].map(l => ({ time: l[0], tag: l[1], text: l[2], color: l[3], tagColor: l[4], bg: l[5] }));
+
+    return { sculptTools, layerSwatches, outliner, details, contentTree, assets, foliageDetails, foliageAssets, palette, notices, stackedRows, logLines };
+  }
+}
+</script>
+</body>
+</html>

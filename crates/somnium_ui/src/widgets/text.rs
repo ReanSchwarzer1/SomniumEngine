@@ -4,6 +4,8 @@ use crate::{
     draw::DrawingContext,
     message::{TextMessage, UiMessage},
     node::{Control, LayoutCtx, UiNode},
+    theme, typography,
+    typography::TextRole,
     widget::{Widget, WidgetBuilder},
 };
 use glam::Vec2;
@@ -14,6 +16,8 @@ pub struct Text {
     pub color: [u8; 4],
     pub font_id: u8,
     pub wrap: bool,
+    /// Extra advance per glyph. Non-zero only for the uppercase header role.
+    pub tracking: f32,
 }
 
 pub fn wrap_lines(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32) -> Vec<String> {
@@ -57,12 +61,15 @@ impl Control for Text {
         } else {
             f32::INFINITY
         };
+        let tracking = self.tracking;
+        let font_id = self.font_id;
+        let px = self.px;
         let lines = wrap_lines(&self.text, max_w, |s| {
-            ctx.measure_text(s, self.px, self.font_id).x
+            ctx.measure_text_tracked(s, px, font_id, tracking).x
         });
         let w = lines
             .iter()
-            .map(|s| ctx.measure_text(s, self.px, self.font_id).x)
+            .map(|s| ctx.measure_text_tracked(s, px, font_id, tracking).x)
             .fold(0.0f32, f32::max);
         Vec2::new(w.min(available.x.max(w)), line_h * lines.len() as f32)
     }
@@ -80,15 +87,18 @@ impl Control for Text {
             f32::INFINITY
         };
         let lines = wrap_lines(&self.text, max_w, |s| {
-            ctx.font_atlas.measure_text(s, self.px, self.font_id).x
+            ctx.font_atlas
+                .measure_text_tracked(s, self.px, self.font_id, self.tracking)
+                .x
         });
         for (i, line) in lines.iter().enumerate() {
-            ctx.push_text(
+            ctx.push_text_tracked(
                 line,
                 Vec2::new(origin.x, origin.y + i as f32 * line_h),
                 self.font_id,
                 self.px,
                 self.color,
+                self.tracking,
             );
         }
     }
@@ -114,6 +124,8 @@ pub struct TextBuilder {
     color: [u8; 4],
     font_id: u8,
     wrap: bool,
+    tracking: f32,
+    role: Option<TextRole>,
 }
 
 impl TextBuilder {
@@ -121,15 +133,34 @@ impl TextBuilder {
         Self {
             widget,
             text: String::new(),
-            px: 14.0,
-            color: [255, 255, 255, 255],
+            px: theme::NOCTURNE.typography.body,
+            color: theme::TEXT_PRIMARY,
             font_id: 0,
             wrap: false,
+            tracking: 0.0,
+            role: None,
         }
     }
 
     pub fn with_text(mut self, t: impl Into<String>) -> Self {
         self.text = t.into();
+        self
+    }
+
+    /// Take size, face, colour, tracking and case from a semantic role.
+    ///
+    /// This is the preferred entry point: a call site that names `Section` or
+    /// `MonoStrong` cannot drift from the token sheet the way a literal
+    /// `with_font_size(11.0)` does. Call it **before** `with_color` /
+    /// `with_font_size` if you need to override one of its parts, and note that
+    /// it supersedes any `with_font_id` — the role owns the face.
+    pub fn with_role(mut self, role: TextRole) -> Self {
+        let style = typography::text_style(role);
+        self.px = style.px;
+        self.color = style.color;
+        self.font_id = style.font_id();
+        self.tracking = style.tracking;
+        self.role = Some(role);
         self
     }
 
@@ -153,15 +184,29 @@ impl TextBuilder {
         self
     }
 
+    pub fn with_tracking(mut self, tracking: f32) -> Self {
+        self.tracking = tracking;
+        self
+    }
+
     pub fn build(self) -> UiNode {
+        // The case transform belongs to the role, not to the caller: an
+        // `update_*` path that later re-sends the label as SetText would
+        // otherwise lose the transform and the header would silently change
+        // case mid-session.
+        let text = match self.role {
+            Some(role) => typography::text_style(role).transform(&self.text),
+            None => self.text,
+        };
         UiNode::new(
             self.widget.build(),
             Box::new(Text {
-                text: self.text,
+                text,
                 px: self.px,
                 color: self.color,
                 font_id: self.font_id,
                 wrap: self.wrap,
+                tracking: self.tracking,
             }),
         )
     }

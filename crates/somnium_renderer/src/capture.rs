@@ -188,6 +188,38 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
         raw.extend_from_slice(&rgb[row..row + width as usize * 3]);
     }
 
+    // Real deflate, via the `image` encoder already in this crate's tree.
+    //
+    // This used to emit *stored* zlib blocks — structurally valid PNG, but with
+    // no compression at all, so every capture was width × height × 3 bytes on
+    // disk. A 1280×720 editor screenshot was 2.7 MB, which is not a size you
+    // want to commit as evidence on every sub-phase.
+    let mut out = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut out,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    match image::ImageEncoder::write_image(
+        encoder,
+        rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    ) {
+        Ok(()) => out,
+        Err(e) => {
+            // Fall back to the hand-rolled stored-block writer rather than
+            // losing the capture: a large PNG beats no PNG when something is
+            // being debugged.
+            tracing::warn!("PNG encode failed ({e}); falling back to stored blocks");
+            encode_png_stored(width, height, &raw)
+        }
+    }
+}
+
+/// Uncompressed-fallback PNG writer. Only reached if the real encoder fails.
+fn encode_png_stored(width: u32, height: u32, raw: &[u8]) -> Vec<u8> {
     let mut zlib = vec![0x78, 0x01];
     let mut offset = 0usize;
     while offset < raw.len() {
@@ -199,7 +231,7 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
         zlib.extend_from_slice(&raw[offset..offset + n]);
         offset += n;
     }
-    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+    zlib.extend_from_slice(&adler32(raw).to_be_bytes());
 
     let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     let mut ihdr = Vec::with_capacity(13);
@@ -293,6 +325,15 @@ fn f16_to_f32(bits: u16) -> f32 {
 pub struct FrameCapture {
     write_to: Option<String>,
     write_png: Option<String>,
+    /// Final display-referred image, captured after tone map/CAS/FXAA but
+    /// before editor overlays. Unlike `write_png`, this can prove display-only
+    /// controls such as CAS and bloom.
+    write_display_png: Option<String>,
+    /// The finished window, editor chrome included. This is the only capture
+    /// that can serve as visual evidence for Phase 26-Zeta: `write_display_png`
+    /// is taken before the UI pass, which is why the Zeta ledger had to say its
+    /// smoke PNG showed no chrome.
+    write_ui_png: Option<String>,
     compare_to: Option<String>,
     target_frame: u64,
     frame: u64,
@@ -300,6 +341,10 @@ pub struct FrameCapture {
     vis_staging: Option<wgpu::Buffer>,
     /// Set by `record`, consumed by `resolve`.
     pending: Option<(u32, u32)>,
+    display_staging: Option<wgpu::Buffer>,
+    display_pending: Option<(u32, u32, wgpu::TextureFormat)>,
+    ui_staging: Option<wgpu::Buffer>,
+    ui_pending: Option<(u32, u32, wgpu::TextureFormat)>,
 }
 
 impl FrameCapture {
@@ -307,6 +352,8 @@ impl FrameCapture {
         Self {
             write_to: std::env::var("SOMNIUM_CAPTURE").ok(),
             write_png: std::env::var("SOMNIUM_CAPTURE_PNG").ok(),
+            write_display_png: std::env::var("SOMNIUM_CAPTURE_DISPLAY_PNG").ok(),
+            write_ui_png: std::env::var("SOMNIUM_CAPTURE_UI_PNG").ok(),
             compare_to: std::env::var("SOMNIUM_CAPTURE_COMPARE").ok(),
             target_frame: std::env::var("SOMNIUM_CAPTURE_FRAME")
                 .ok()
@@ -316,13 +363,29 @@ impl FrameCapture {
             hdr_staging: None,
             vis_staging: None,
             pending: None,
+            display_staging: None,
+            display_pending: None,
+            ui_staging: None,
+            ui_pending: None,
         }
     }
 
     /// Whether anything is configured at all. Keeps the per-frame cost at one
     /// bool test when it is not.
     pub fn active(&self) -> bool {
-        self.write_to.is_some() || self.write_png.is_some() || self.compare_to.is_some()
+        self.write_to.is_some()
+            || self.write_png.is_some()
+            || self.write_display_png.is_some()
+            || self.write_ui_png.is_some()
+            || self.compare_to.is_some()
+    }
+
+    pub fn wants_display(&self) -> bool {
+        self.write_display_png.is_some()
+    }
+
+    pub fn wants_ui(&self) -> bool {
+        self.write_ui_png.is_some()
     }
 
     /// Advance the frame counter and report whether this is the capture frame.
@@ -387,6 +450,99 @@ impl FrameCapture {
         copy(encoder, hdr, self.hdr_staging.as_ref().unwrap(), hdr_row);
         copy(encoder, vis, self.vis_staging.as_ref().unwrap(), vis_row);
         self.pending = Some((width, height));
+    }
+
+    /// Read back the final swapchain image before editor overlays are drawn.
+    pub fn record_display(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        if !self.wants_display() {
+            return;
+        }
+        if let Some((staging, size)) =
+            Self::copy_swapchain(device, encoder, display, width, height, format, "display")
+        {
+            self.display_staging = Some(staging);
+            self.display_pending = Some(size);
+        }
+    }
+
+    /// Read back the swapchain **after** the UI pass - the editor as a user
+    /// sees it. Recorded from `Renderer::render` immediately after
+    /// `UiManager::end_frame`, so chrome, panels and overlays are all present.
+    pub fn record_ui(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        if !self.wants_ui() {
+            return;
+        }
+        if let Some((staging, size)) =
+            Self::copy_swapchain(device, encoder, display, width, height, format, "ui")
+        {
+            self.ui_staging = Some(staging);
+            self.ui_pending = Some(size);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_swapchain(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        what: &str,
+    ) -> Option<(wgpu::Buffer, (u32, u32, wgpu::TextureFormat))> {
+        if !matches!(
+            format,
+            wgpu::TextureFormat::Rgba8Unorm
+                | wgpu::TextureFormat::Rgba8UnormSrgb
+                | wgpu::TextureFormat::Bgra8Unorm
+                | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            tracing::warn!(
+                ?format,
+                "{what} capture skipped: unsupported surface format"
+            );
+            return None;
+        }
+        let row = Self::padded_row(width, 4);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Swapchain Capture LDR"),
+            size: row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            display.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some((staging, (width, height, format)))
     }
 
     /// Map the staging buffers, build the capture, then write and/or compare it.
@@ -521,9 +677,71 @@ impl FrameCapture {
             }
         }
 
+        Self::write_swapchain_png(
+            device,
+            self.write_display_png.as_ref(),
+            self.display_staging.as_ref(),
+            self.display_pending,
+            "display",
+        );
+        Self::write_swapchain_png(
+            device,
+            self.write_ui_png.as_ref(),
+            self.ui_staging.as_ref(),
+            self.ui_pending,
+            "ui",
+        );
+
         self.hdr_staging = None;
         self.vis_staging = None;
+        self.display_staging = None;
+        self.display_pending = None;
+        self.ui_staging = None;
+        self.ui_pending = None;
         CAPTURE_FINISHED.store(true, Ordering::Relaxed);
+    }
+
+    /// Map a swapchain readback and write it as a PNG. The surface may be
+    /// BGRA or RGBA depending on the adapter, so the channel order is decided
+    /// per capture rather than assumed.
+    fn write_swapchain_png(
+        device: &wgpu::Device,
+        path: Option<&String>,
+        staging: Option<&wgpu::Buffer>,
+        pending: Option<(u32, u32, wgpu::TextureFormat)>,
+        what: &str,
+    ) {
+        let (Some(path), Some(staging), Some((dw, dh, format))) = (path, staging, pending) else {
+            return;
+        };
+        let row = Self::padded_row(dw, 4) as usize;
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let data = slice.get_mapped_range();
+        let bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut rgb = vec![0u8; dw as usize * dh as usize * 3];
+        for y in 0..dh as usize {
+            let src = &data[y * row..];
+            for x in 0..dw as usize {
+                let s = x * 4;
+                let d = (y * dw as usize + x) * 3;
+                if bgra {
+                    rgb[d..d + 3].copy_from_slice(&[src[s + 2], src[s + 1], src[s]]);
+                } else {
+                    rgb[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                }
+            }
+        }
+        drop(data);
+        staging.unmap();
+        match std::fs::write(path, encode_png(dw, dh, &rgb)) {
+            Ok(()) => tracing::info!("CAPTURE {what} png written to {path}"),
+            Err(e) => tracing::error!("CAPTURE {what} png write to {path} failed: {e}"),
+        }
     }
 }
 

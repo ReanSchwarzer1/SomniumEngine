@@ -5,6 +5,7 @@ use crate::{
     draw::DrawingContext,
     message::{KeyCode, MessageDirection, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
+    theme,
     types::Rect,
     widget::{Widget, WidgetBuilder},
 };
@@ -44,16 +45,12 @@ impl Control for TextBox {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        let bg = if self.focused {
-            [40, 40, 60, 255]
-        } else {
-            [28, 28, 28, 255]
-        };
+        let bg = theme::BG_INPUT;
         ctx.push_rect_filled(b, bg);
         let border_col = if self.focused {
-            [100, 140, 200, 255]
+            theme::BORDER_FOCUS
         } else {
-            [70, 70, 70, 255]
+            theme::BORDER_MEDIUM
         };
         ctx.push_rect_border(b, 1.0, border_col);
         let text_origin = Vec2::new(b.x + 4.0, b.y + 3.0);
@@ -162,8 +159,8 @@ impl TextBoxBuilder {
         Self {
             widget,
             text: String::new(),
-            px: 13.0,
-            color: [220, 220, 220, 255],
+            px: theme::NOCTURNE.typography.body,
+            color: theme::TEXT_PRIMARY,
             font_id: 0,
         }
     }
