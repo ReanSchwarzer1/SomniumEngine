@@ -1242,3 +1242,60 @@ AccessKit; the raw-literal and licence lints; the component gallery and golden
 screenshot diffing; and the before/after evidence package at every target size
 and scale. The five `MANUAL_ONLY` interaction checks have not been performed —
 they need the user at the keyboard, and this document does not claim otherwise.
+
+### 2026-08-16 (third pass) — polish from live review
+
+Four items from looking at a real capture, plus one defect the audit exposed.
+
+**Content Browser tiles were pixelated.** They draw at `ICON_DRAWER` = 80 px
+from a 32 px atlas cell — a 2.5× upscale that no filtering recovers. The atlas
+now carries **two cuts** of every glyph: the 32 px block for chrome (16/20/24 px,
+where 32 → 16 is an exact 2:1 box filter) and a 96 px block below it for anything
+drawn larger. `IconId::draw_quad` picks from the destination rect it already
+receives, so no call site had to opt in. The atlas grew from 512² to 1024²
+(4 MB); tests pin that the two blocks never overlap, that a 16 px row and an
+80 px tile sample different cells, and that the large block actually carries
+coverage — an allocated-but-unfilled block would show as *invisible* tiles
+rather than pixelated ones.
+
+**Chrome labels sat a pixel or two high.** `labeled_icon_button` and the sculpt
+rail computed a top margin from an assumed 14 px line height. Inter's line box is
+1.21 em, so the assumption was wrong for the Zeta type roles — and it was going
+to be wrong again for any future role. Those margins are gone; the glyph and the
+word both take `VerticalAlignment::Center`, which the arrange pass already
+supported. The same fix applies to the title bar, the menu labels, the play-state
+word and the status bar.
+
+**The engine mark was too small.** `ICON_MARK` was aliased to `icon_action`
+(24 px), so the brand read as one more toolbar glyph beside the wordmark. It is
+now its own 30 px token, centred in the 36 px application band, with a comment
+saying why it is not `icon_action` — a brand element is not a control.
+
+**Details toggles and editables: audited, no dead wiring found.** All 37 toggle
+handles and all 103 numeric bindings are referenced in `process_outgoing`; every
+`InspectorField`, `PostFxToggle` and `ColorField` variant is handled in `app.rs`;
+`CheckBoxMessage` separates `SetChecked` (engine → widget) from `Check` (widget →
+engine), so an inspector refresh cannot re-fire a toggle. A new test arranges the
+whole inspector — including the rows that are hidden until a light type or
+foliage mode reveals them — and fails any control smaller than 8 × 8, because a
+zero-sized control still draws its label and silently swallows clicks. It covers
+the combos, checkboxes and colour swatches as well as the numeric fields.
+
+The likely cause of what was observed is the fifth item:
+
+**Defect — a persisted layout could not survive a change of window size.**
+`ChromeLayout` stored the *viewport* width as an absolute. A file written on a
+wide window held `viewport: 2040`, which on a 1280 px window derives a negative
+Details column, clamps to the 240 px minimum, and pushes every property row
+below the 240 px stacking threshold — so the value controls stacked and clipped,
+which reads exactly like "the editable doesn't work". `ChromeLayout` now stores
+`details`, the value that actually transfers between window sizes, with the
+viewport derived from it; `serde(default)` keeps old files loading. A stored
+column outside the 240–520 range is treated as belonging to a different window
+and falls back to the shipped 340 default rather than pinning to a boundary the
+user never chose. Splitter drags record the column, and three tests cover the
+round-trip, the cross-monitor transfer and the legacy-file case.
+
+Verification: `cargo test -p somnium_ui` 80/80; serial `cargo test --workspace
+-j 1` green; `cargo fmt --all` and `cargo clippy -p somnium_ui --all-targets`
+clean; live capture re-taken.

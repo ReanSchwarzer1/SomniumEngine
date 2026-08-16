@@ -1091,11 +1091,13 @@ impl UiManager {
         }
         self.apply_bottom_panel();
 
-        crate::layout_persist::save(crate::layout_persist::ChromeLayout {
+        self.chrome_layout = crate::layout_persist::ChromeLayout {
             tools: preset.tools,
             viewport: (window_w - preset.tools - preset.details).max(200.0),
+            details: preset.details,
             outliner: preset.outliner,
-        });
+        };
+        crate::layout_persist::save(self.chrome_layout);
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
@@ -3058,7 +3060,12 @@ impl UiManager {
                 if msg.destination == self.inner_h {
                     self.chrome_layout.tools = *size;
                 } else if msg.destination == self.content_split_h {
+                    // The splitter reports the viewport pane; persist the
+                    // *column* it implies, because that is what survives a
+                    // change of window size.
                     self.chrome_layout.viewport = *size;
+                    let available = self.window_size.0 as f32 - self.chrome_layout.tools - 12.0;
+                    self.chrome_layout.details = (available - *size).max(0.0);
                 } else if msg.destination == self.right_split_h {
                     self.chrome_layout.outliner = *size;
                 }
@@ -4084,6 +4091,101 @@ mod must_not_break {
             .expect("handle should remain valid after layout")
             .widget
             .screen_bounds()
+    }
+
+    #[test]
+    fn every_inspector_control_is_actually_hittable() {
+        // Phase 26-Zeta-G moved every inspector row into `PropertyRow`, which
+        // arranges its value control itself. A row that measures to zero height
+        // or zero width still *draws* its label, so a broken control looks
+        // present and silently ignores clicks. This walks the whole handle
+        // bundle and fails on anything that cannot be hit.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let l = build_editor_layout(
+            &mut ui,
+            0,
+            crate::layout_persist::ChromeLayout::default().resolved(1920.0, 1080.0),
+        );
+        // Sections are hidden until something of that type is selected; make
+        // them all visible so their rows get arranged.
+        let h = &l.inspector_handles;
+        for section in [
+            h.light_section,
+            h.camera_section,
+            h.post_section,
+            h.terrain_section,
+            h.foliage_section,
+            h.water_section,
+            h.vessel_section,
+            h.particle_section,
+            h.material_section,
+        ] {
+            ui.set_visibility(section, true);
+        }
+        // Rows revealed conditionally by light type or foliage mode. They are
+        // hidden at rest by design; the test still has to prove they arrange to
+        // something clickable when they are shown.
+        for row in [h.light_width_row, h.light_height_row] {
+            ui.set_visibility(row, true);
+        }
+        if let Some(row) = ui.parent_of(h.foliage_layer) {
+            ui.set_visibility(row, true);
+        }
+        ui.perform_layout();
+
+        let mut broken = Vec::new();
+
+        // Toggles, combos and colour swatches do not appear in
+        // `field_bindings`, so a check that only walked that table would miss
+        // exactly the controls the Details panel is mostly made of.
+        for (name, handle) in [
+            ("post tonemap combo", h.post_tonemap_button),
+            ("foliage kind combo", h.foliage_kind_button),
+            ("water underwater", h.water_underwater),
+            ("camera frustum cull", h.camera_frustum_toggle),
+            ("terrain paint", h.terrain_paint_toggle),
+            ("terrain hex", h.terrain_hex_toggle),
+            ("foliage enabled", h.foliage_toggle),
+            ("foliage paint", h.foliage_paint_toggle),
+            ("foliage erase", h.foliage_erase_toggle),
+            ("foliage single", h.foliage_single_toggle),
+            ("post bloom", h.post_bloom_toggle),
+            ("post vignette", h.post_vig_toggle),
+            ("post fsr", h.post_fsr_toggle),
+            ("light colour", h.light_color),
+            ("water deep colour", h.water_deep),
+            ("water scattering colour", h.water_scatter),
+            ("particle start colour", h.particle_start),
+            ("material base colour", h.material_base),
+        ] {
+            if handle.is_none() {
+                broken.push(format!("{name} (no widget)"));
+                continue;
+            }
+            let b = bounds_of(&ui, handle);
+            if b.w < 8.0 || b.h < 8.0 {
+                broken.push(format!("{name} ({}x{})", b.w, b.h));
+            }
+        }
+
+        for (handle, field) in UiManager::field_bindings(h) {
+            if handle.is_none() {
+                // Retired bindings (the pre-Iris light R/G/B rows) keep their
+                // `InspectorField` so the event contract is stable, but have no
+                // widget.
+                continue;
+            }
+            let b = bounds_of(&ui, handle);
+            if b.w < 8.0 || b.h < 8.0 {
+                broken.push(format!("{field:?} ({}x{})", b.w, b.h));
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "{} inspector controls cannot be clicked: {:?}",
+            broken.len(),
+            broken
+        );
     }
 
     #[test]

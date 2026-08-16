@@ -114,12 +114,14 @@ pub(crate) fn build_editor_layout(
     let title_left_h = ui.add_node(title_left, title_drag);
     let mark = ImageBuilder::new(
         WidgetBuilder::new()
-            .with_width(36.0)
+            .with_width(theme::ICON_MARK + 12.0)
             .with_height(theme::TITLEBAR_HEIGHT)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Center)
             .with_margin(Thickness {
                 left: 10.0,
-                top: 4.0,
-                right: 4.0,
+                top: 0.0,
+                right: 2.0,
                 bottom: 0.0,
             }),
     )
@@ -128,12 +130,16 @@ pub(crate) fn build_editor_layout(
     .with_tint(theme::ACCENT)
     .build();
     ui.add_node(mark, title_left_h);
-    let title_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 4.0,
-        top: 10.0,
-        right: 12.0,
-        bottom: 0.0,
-    }))
+    let title_lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness {
+                left: 4.0,
+                top: 0.0,
+                right: 12.0,
+                bottom: 0.0,
+            }),
+    )
     .with_role(TextRole::BodyStrong)
     .with_text("Somnium Engine")
     .build();
@@ -148,10 +154,14 @@ pub(crate) fn build_editor_layout(
     .build();
     let title_right_h = ui.add_node(title_right, title_grid_h);
     let help_button = icon_tool_button(ui, title_right_h, IconId::HelpCircle, "Help (F1)");
-    let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 10.0)))
-        .with_role(TextRole::Mono)
-        .with_text("— fps")
-        .build();
+    let fps_node = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
+    .with_role(TextRole::Mono)
+    .with_text("— fps")
+    .build();
     let fps_text = ui.add_node(fps_node, title_right_h);
     let win_min = window_chrome_button(ui, title_right_h, IconId::Minimize, "Minimize");
     let win_max = window_chrome_button(ui, title_right_h, IconId::Maximize, "Maximize");
@@ -192,10 +202,14 @@ pub(crate) fn build_editor_layout(
     let file_btn_node =
         MenuBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let file_button = ui.add_node(file_btn_node, menu_stack_h);
-    let file_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-        .with_role(TextRole::Body)
-        .with_text("File")
-        .build();
+    let file_lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(9.0, 0.0)),
+    )
+    .with_role(TextRole::Body)
+    .with_text("File")
+    .build();
     ui.add_node(file_lbl, file_button);
 
     let edit_button = menu_button(ui, menu_stack_h, "Edit", font_id);
@@ -213,10 +227,14 @@ pub(crate) fn build_editor_layout(
     )
     .build();
     let create_button = ui.add_node(create_btn_node, menu_stack_h);
-    let create_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-        .with_role(TextRole::Body)
-        .with_text("Create")
-        .build();
+    let create_lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(9.0, 0.0)),
+    )
+    .with_role(TextRole::Body)
+    .with_text("Create")
+    .build();
     ui.add_node(create_lbl, create_button);
 
     let view_button = menu_button(ui, menu_stack_h, "View", font_id);
@@ -328,11 +346,14 @@ pub(crate) fn build_editor_layout(
     );
     let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "Pause");
     let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "Stop");
-    let play_label_n =
-        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 5.0)))
-            .with_role(TextRole::Caption)
-            .with_text("Stopped")
-            .build();
+    let play_label_n = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(10.0, 0.0)),
+    )
+    .with_role(TextRole::Caption)
+    .with_text("Stopped")
+    .build();
     let play_label = ui.add_node(play_label_n, main_tb_stack_h);
     let pause_label = play_label;
     let stop_label = play_label;
@@ -423,26 +444,33 @@ pub(crate) fn build_editor_layout(
             .with_orientation(Orientation::Horizontal)
             .build();
         let row_h = ui.add_node(row, btn_h);
-        let img = ImageBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 4.0,
-            top: 4.0,
-            right: 2.0,
-            bottom: 0.0,
-        }))
+        let img = ImageBuilder::new(
+            WidgetBuilder::new()
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_margin(Thickness {
+                    left: 6.0,
+                    top: 0.0,
+                    right: 6.0,
+                    bottom: 0.0,
+                }),
+        )
         .with_icon(icon)
         .with_size(16.0)
         .with_tint(theme::TEXT_PRIMARY)
         .build();
         ui.add_node(img, row_h);
-        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 2.0,
-            top: 5.0,
-            right: 4.0,
-            bottom: 0.0,
-        }))
+        let lbl = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_margin(Thickness {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 6.0,
+                    bottom: 0.0,
+                }),
+        )
+        .with_role(TextRole::Label)
         .with_text(label)
-        .with_font_size(11.0)
-        .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)
         .build();
         let lbl_h = ui.add_node(lbl, row_h);
@@ -947,27 +975,37 @@ pub(crate) fn build_editor_layout(
     scope_separator(ui, status_stack_h);
     // Save state. Sentinel colour is set by `set_scene_dirty`; the *word*
     // carries the meaning so the state is not colour-only (§10.3).
-    let status_dirty_n =
-        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(4.0, 7.0)))
-            .with_role(TextRole::Caption)
-            .with_text("Saved")
-            .build();
+    let status_dirty_n = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(6.0, 0.0)),
+    )
+    .with_role(TextRole::Caption)
+    .with_text("Saved")
+    .build();
     let status_dirty = ui.add_node(status_dirty_n, status_stack_h);
     scope_separator(ui, status_stack_h);
-    let status_sel_n =
-        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(4.0, 7.0)))
-            .with_role(TextRole::Caption)
-            .with_text("No selection")
-            .build();
+    let status_sel_n = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(6.0, 0.0)),
+    )
+    .with_role(TextRole::Caption)
+    .with_text("No selection")
+    .build();
     let status_selection = ui.add_node(status_sel_n, status_stack_h);
     // Which panel the drawer row is showing. Kept from the pre-Zeta status bar
     // because Ctrl+Space toggling between two panels needs a readout.
     // Empty at startup because the drawer row starts open; `apply_bottom_panel`
     // fills it with "Ready" once both panels are closed.
-    let status_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 7.0)))
-        .with_role(TextRole::Caption)
-        .with_text("")
-        .build();
+    let status_lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
+    .with_role(TextRole::Caption)
+    .with_text("")
+    .build();
     let status_text = ui.add_node(status_lbl, status_stack_h);
 
     let status_stats_stack = StackPanelBuilder::new(
@@ -980,7 +1018,8 @@ pub(crate) fn build_editor_layout(
     let status_stats_stack_h = ui.add_node(status_stats_stack, status_grid_h);
     let status_stats_n = TextBuilder::new(
         WidgetBuilder::new()
-            .with_margin(Thickness::axes(10.0, 7.0))
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(10.0, 0.0))
             .with_tooltip("Scene objects and frame rate"),
     )
     .with_role(TextRole::Mono)

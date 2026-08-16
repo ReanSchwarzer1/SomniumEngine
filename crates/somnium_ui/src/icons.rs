@@ -11,10 +11,23 @@ use crate::types::Rect;
 /// wgpu texture_id reserved for the icon atlas.
 pub const ICON_ATLAS_TEXTURE_ID: u32 = 1;
 
+/// Small cut. Serves the 16 / 20 / 24 px chrome sizes; 32 → 16 is an exact
+/// 2:1 box filter under linear sampling.
 pub const ICON_CELL: u32 = 32;
-pub const ICON_ATLAS_WIDTH: u32 = 512;
-pub const ICON_ATLAS_HEIGHT: u32 = 512;
+/// Large cut. Content Browser tiles draw at [`crate::theme::ICON_DRAWER`] =
+/// 80 px, and upscaling the 32 px cell by 2.5× is what made them look
+/// pixelated. 96 → 80 is a mild downscale instead.
+pub const ICON_CELL_LARGE: u32 = 96;
+pub const ICON_ATLAS_WIDTH: u32 = 1024;
+pub const ICON_ATLAS_HEIGHT: u32 = 1024;
 const CELLS_PER_ROW: u32 = ICON_ATLAS_WIDTH / ICON_CELL;
+const LARGE_PER_ROW: u32 = ICON_ATLAS_WIDTH / ICON_CELL_LARGE;
+/// The large block starts below the small one. Three rows of 32 px cover all
+/// 84 glyphs, so the large block begins at 96.
+const LARGE_ORIGIN_Y: u32 = 96;
+/// Above this drawn size a glyph samples the large cut. 40 sits between the
+/// 24 px action icons and the 80 px drawer tiles.
+const LARGE_CUT_THRESHOLD: f32 = 40.0;
 
 /// Named glyphs packed into the atlas. Order is the cell index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -198,19 +211,51 @@ impl IconId {
         self as u32
     }
 
-    pub fn uv_rect(self) -> (Vec2, Vec2) {
+    /// Top-left pixel of this glyph's small cell.
+    pub fn cell_px(self) -> (u32, u32) {
         let i = self.index();
-        let col = i % CELLS_PER_ROW;
-        let row = i / CELLS_PER_ROW;
-        let u0 = col as f32 * ICON_CELL as f32 / ICON_ATLAS_WIDTH as f32;
-        let v0 = row as f32 * ICON_CELL as f32 / ICON_ATLAS_HEIGHT as f32;
-        let du = ICON_CELL as f32 / ICON_ATLAS_WIDTH as f32;
-        let dv = ICON_CELL as f32 / ICON_ATLAS_HEIGHT as f32;
+        (
+            (i % CELLS_PER_ROW) * ICON_CELL,
+            (i / CELLS_PER_ROW) * ICON_CELL,
+        )
+    }
+
+    /// Top-left pixel of this glyph's large cell.
+    pub fn cell_px_large(self) -> (u32, u32) {
+        let i = self.index();
+        (
+            (i % LARGE_PER_ROW) * ICON_CELL_LARGE,
+            LARGE_ORIGIN_Y + (i / LARGE_PER_ROW) * ICON_CELL_LARGE,
+        )
+    }
+
+    fn uv_for(origin: (u32, u32), cell: u32) -> (Vec2, Vec2) {
+        let u0 = origin.0 as f32 / ICON_ATLAS_WIDTH as f32;
+        let v0 = origin.1 as f32 / ICON_ATLAS_HEIGHT as f32;
+        let du = cell as f32 / ICON_ATLAS_WIDTH as f32;
+        let dv = cell as f32 / ICON_ATLAS_HEIGHT as f32;
         (Vec2::new(u0, v0), Vec2::new(u0 + du, v0 + dv))
     }
 
-    pub fn draw_quad(self, _dest: Rect) -> ([Vec2; 4], u32) {
-        let (uv0, uv1) = self.uv_rect();
+    pub fn uv_rect(self) -> (Vec2, Vec2) {
+        Self::uv_for(self.cell_px(), ICON_CELL)
+    }
+
+    pub fn uv_rect_large(self) -> (Vec2, Vec2) {
+        Self::uv_for(self.cell_px_large(), ICON_CELL_LARGE)
+    }
+
+    /// Pick the cut that suits the size the glyph is being drawn at.
+    ///
+    /// Callers do not choose: they pass the destination rect they already have,
+    /// so a widget that grows past the chrome sizes picks up the high-resolution
+    /// cut without anyone remembering to ask for it.
+    pub fn draw_quad(self, dest: Rect) -> ([Vec2; 4], u32) {
+        let (uv0, uv1) = if dest.w.max(dest.h) > LARGE_CUT_THRESHOLD {
+            self.uv_rect_large()
+        } else {
+            self.uv_rect()
+        };
         (
             [
                 Vec2::new(uv0.x, uv0.y),
@@ -243,21 +288,32 @@ impl IconAtlas {
             // strokes below stay as the fallback for any glyph without a
             // source, so a new `IconId` variant degrades to hand-drawn art
             // rather than to an empty cell.
-            match crate::icon_svg::source_for(id)
-                .and_then(|svg| crate::icon_svg::rasterize(svg, ICON_CELL))
-            {
-                Some(mask) => atlas.blit_mask(id, &mask),
+            //
+            // Each glyph is rasterized twice, once per cut. Re-rendering the
+            // vector at 96 px is what makes a Content Browser tile crisp;
+            // upscaling the 32 px cell cannot recover the strokes.
+            match crate::icon_svg::source_for(id) {
+                Some(svg) => {
+                    if let Some(mask) = crate::icon_svg::rasterize(svg, ICON_CELL) {
+                        let (ox, oy) = id.cell_px();
+                        atlas.blit_mask(ox as i32, oy as i32, ICON_CELL as usize, &mask);
+                    } else {
+                        atlas.rasterize(id);
+                    }
+                    if let Some(mask) = crate::icon_svg::rasterize(svg, ICON_CELL_LARGE) {
+                        let (ox, oy) = id.cell_px_large();
+                        atlas.blit_mask(ox as i32, oy as i32, ICON_CELL_LARGE as usize, &mask);
+                    }
+                }
                 None => atlas.rasterize(id),
             }
         }
         atlas
     }
 
-    /// Copy a rasterized alpha mask into `id`'s cell. RGB stays white so the UI
+    /// Copy a rasterized alpha mask into the atlas. RGB stays white so the UI
     /// shader tints the glyph with the widget's semantic colour.
-    fn blit_mask(&mut self, id: IconId, mask: &[u8]) {
-        let (ox, oy) = Self::cell_origin(id);
-        let cell = ICON_CELL as usize;
+    fn blit_mask(&mut self, ox: i32, oy: i32, cell: usize, mask: &[u8]) {
         for y in 0..cell {
             for x in 0..cell {
                 let a = mask.get(y * cell + x).copied().unwrap_or(0);
@@ -906,7 +962,7 @@ mod tests {
     #[test]
     fn atlas_covers_every_icon() {
         let atlas = IconAtlas::new();
-        assert_eq!(atlas.width, 512);
+        assert_eq!(atlas.width, ICON_ATLAS_WIDTH);
         let mut painted = 0u32;
         for px in atlas.pixels.chunks(4) {
             if px[3] > 0 {
@@ -945,5 +1001,66 @@ mod tests {
             }
             assert!(painted > 20, "{id:?} should paint its atlas cell");
         }
+    }
+}
+
+#[cfg(test)]
+mod large_cut_tests {
+    use super::*;
+    use crate::theme;
+
+    #[test]
+    fn both_cuts_fit_the_atlas_and_never_overlap() {
+        for &id in IconId::ALL {
+            let (sx, sy) = id.cell_px();
+            assert!(sx + ICON_CELL <= ICON_ATLAS_WIDTH, "{id:?} small cut x");
+            assert!(
+                sy + ICON_CELL <= LARGE_ORIGIN_Y,
+                "{id:?} small cut spills into the large block"
+            );
+            let (lx, ly) = id.cell_px_large();
+            assert!(
+                lx + ICON_CELL_LARGE <= ICON_ATLAS_WIDTH,
+                "{id:?} large cut x"
+            );
+            assert!(
+                ly + ICON_CELL_LARGE <= ICON_ATLAS_HEIGHT,
+                "{id:?} large cut y"
+            );
+            assert!(
+                ly >= LARGE_ORIGIN_Y,
+                "{id:?} large cut overlaps the small block"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drawer_tile_samples_the_large_cut_and_a_row_icon_the_small_one() {
+        let row = IconId::Folder.draw_quad(Rect::new(0.0, 0.0, 16.0, 16.0));
+        let tile =
+            IconId::Folder.draw_quad(Rect::new(0.0, 0.0, theme::ICON_DRAWER, theme::ICON_DRAWER));
+        assert_ne!(row.0[0], tile.0[0], "both sizes sampled the same cell");
+        let (small, _) = IconId::Folder.uv_rect();
+        let (large, _) = IconId::Folder.uv_rect_large();
+        assert_eq!(row.0[0], small);
+        assert_eq!(tile.0[0], large);
+    }
+
+    #[test]
+    fn the_large_cut_carries_real_coverage() {
+        // Guards the case where the large block is allocated but never filled,
+        // which would show as invisible drawer tiles rather than pixelated ones.
+        let atlas = IconAtlas::new();
+        let (ox, oy) = IconId::Folder.cell_px_large();
+        let mut covered = 0;
+        for y in 0..ICON_CELL_LARGE {
+            for x in 0..ICON_CELL_LARGE {
+                let i = (((oy + y) * atlas.width + (ox + x)) * 4 + 3) as usize;
+                if atlas.pixels[i] > 8 {
+                    covered += 1;
+                }
+            }
+        }
+        assert!(covered > 200, "large Folder cut has only {covered} pixels");
     }
 }

@@ -14,6 +14,7 @@ use crate::{
     message::NodeHandle,
     theme,
     types::{HorizontalAlignment, Thickness, VerticalAlignment},
+    typography::TextRole,
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{
@@ -134,14 +135,17 @@ pub(crate) fn menu_button(
     label: &str,
     font_id: u8,
 ) -> NodeHandle {
+    let _ = font_id;
     let node = MenuBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let h = ui.add_node(node, parent);
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-        .with_text(label)
-        .with_font_size(13.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
+    let lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(9.0, 0.0)),
+    )
+    .with_role(TextRole::Body)
+    .with_text(label)
+    .build();
     ui.add_node(lbl, h);
     h
 }
@@ -227,11 +231,15 @@ pub(crate) fn icon_tool_button(
     }
     let btn = ButtonBuilder::new(wb).build();
     let h = ui.add_node(btn, parent);
-    let img = ImageBuilder::new(WidgetBuilder::new())
-        .with_icon(icon)
-        .with_size(theme::ICON_TOOL)
-        .with_tint(theme::TEXT_PRIMARY)
-        .build();
+    let img = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_icon(icon)
+    .with_size(theme::ICON_TOOL)
+    .with_tint(theme::TEXT_PRIMARY)
+    .build();
     ui.add_node(img, h);
     h
 }
@@ -269,6 +277,9 @@ pub(crate) fn labeled_icon_button(
     font_id: u8,
     height: f32,
 ) -> (NodeHandle, NodeHandle) {
+    // The label's face comes from `TextRole::Label` now, not from the threaded
+    // id; the parameter stays so the ~20 call sites did not all have to change.
+    let _ = font_id;
     let btn = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_height(height)
@@ -282,26 +293,38 @@ pub(crate) fn labeled_icon_button(
         .with_orientation(Orientation::Horizontal)
         .build();
     let row_h = ui.add_node(row, h);
-    let img = ImageBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 6.0,
-        top: ((height - 16.0) * 0.5).max(2.0),
-        right: 4.0,
-        bottom: 0.0,
-    }))
+    // Centre both the glyph and the word on the button's axis rather than
+    // computing a top margin from an assumed line height. The assumption was
+    // wrong for the Zeta type roles — Inter's line box is 1.21 em, not the
+    // 14 px this used to guess — which is why chrome labels sat a pixel or two
+    // high.
+    let img = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness {
+                left: 8.0,
+                top: 0.0,
+                right: 5.0,
+                bottom: 0.0,
+            }),
+    )
     .with_icon(icon)
     .with_size(16.0)
     .with_tint(theme::TEXT_PRIMARY)
     .build();
     ui.add_node(img, row_h);
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 0.0,
-        top: ((height - 14.0) * 0.5).max(2.0),
-        right: 8.0,
-        bottom: 0.0,
-    }))
+    let lbl = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 0.0,
+                right: 9.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_role(TextRole::Label)
     .with_text(label)
-    .with_font_size(12.0)
-    .with_font_id(font_id)
     .with_color(theme::TEXT_PRIMARY)
     .build();
     let lbl_h = ui.add_node(lbl, row_h);

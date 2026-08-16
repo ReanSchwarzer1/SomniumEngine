@@ -367,7 +367,10 @@ pub const SPLITTER_THICKNESS: f32 = 6.0;
 pub const TOOLTIP_DELAY_MS: u64 = NOCTURNE.motion.tooltip_delay_ms;
 pub const ICON_TOOL: f32 = NOCTURNE.density.icon_toolbar;
 pub const ICON_TREE: f32 = NOCTURNE.density.icon_row;
-pub const ICON_MARK: f32 = NOCTURNE.density.icon_action;
+/// The engine mark. Larger than `icon_action` because it is a brand element,
+/// not a control: at 24 px it read as one more toolbar glyph beside the
+/// wordmark instead of as the thing the wordmark belongs to.
+pub const ICON_MARK: f32 = 30.0;
 pub const ICON_CHECK: f32 = 16.0;
 pub const ICON_DRAWER: f32 = 80.0;
 
