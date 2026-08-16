@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/somnium_core",
     "crates/somnium_ecs",
+    "crates/somnium_script",
+    "crates/somnium_script_luau",
     "crates/somnium_renderer",
     "crates/somnium_physics_sys",
     "crates/somnium_physics",
@@ -37,6 +39,8 @@ authors = ["Somnium Engine Contributors"]
 # -- Internal crates --------------------------------------------------------
 somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }
+somnium_script   = { path = "crates/somnium_script" }
+somnium_script_luau = { path = "crates/somnium_script_luau" }
 somnium_renderer = { path = "crates/somnium_renderer" }
 somnium_physics_sys = { path = "crates/somnium_physics_sys" }
 somnium_physics  = { path = "crates/somnium_physics" }
@@ -105,6 +109,21 @@ ndshape    = "0.3"
 
 # -- Native file dialogs (editor import, Phase 19B) --------------------------
 rfd = "0.15"
+
+# -- Scripting (Phase 16-B) --------------------------------------------------
+# Luau through mlua, interpreter only. Pinned exactly: bytecode and the
+# sandbox surface are both version-coupled, and `luau-jit` is deliberately
+# absent — the portable interpreter is the Phase 16 baseline and native
+# codegen is not enabled until a benchmark proves script execution, rather
+# than boundary traffic, is the bottleneck.
+#
+# mlua 0.12 declares rust-version 1.88, which is exactly the workspace
+# toolchain. A newer mlua may raise it; check before bumping.
+#
+# Luau is C++, built from source by `mlua-sys`. The MSVC toolchain was
+# already required for Jolt, so this adds build time rather than a new
+# prerequisite.
+mlua = { version = "=0.12.0", features = ["luau", "serde", "send"] }
 
 # -- Utilities ---------------------------------------------------------------
 rand = "0.8"

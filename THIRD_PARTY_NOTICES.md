@@ -69,3 +69,25 @@ engine-specific icons (`assets/icons/somnium/`) are original project assets from
 the approved Phase 26-Zeta design package. They are drawn on Tabler's 24 × 24 /
 2 px construction grid so the two sets are optically consistent; the grid is an
 interoperability constraint, not copied artwork.
+
+## mlua
+
+Rust bindings to Lua and Luau, used by `somnium_script_luau` (Phase 16-B).
+Pinned to `=0.12.0`.
+
+- Upstream: https://github.com/mlua-rs/mlua
+- Licence: MIT
+
+`mlua` builds its Luau runtime from source through `mlua-sys` and
+`luau0-src`; those crates carry the Luau sources listed below.
+
+## Luau
+
+The scripting runtime embedded in the engine, vendored and compiled from
+source by `luau0-src` 0.20.7 (Luau 0.728). Interpreter only — native code
+generation is not enabled.
+
+- Upstream: https://github.com/luau-lang/luau
+- Licence: MIT
+- Luau incorporates portions of Lua 5.x, © 1994–2019 Lua.org, PUC-Rio,
+  also under the MIT licence.

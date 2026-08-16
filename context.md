@@ -494,10 +494,12 @@ SortKey bit layout:
 | Concept | Rust type | Description |
 |---|---|---|
 | Entity | `Entity { index: u32, generation: u32 }` | Lightweight handle, generational to detect stale refs |
-| Component | `trait Component: Send + Sync + 'static` | Any `Copy` + `'static` struct |
+| Component | `trait Component: Send + Sync + 'static` | Any `Send + Sync + 'static` struct. **Not** `Copy` — `Children` ships a `Vec<Entity>`, and `ComponentColumn` runs a `drop_fn` for types that need one. (This row said `Copy` until Phase 16-A; it was never true of the trait.) |
 | Archetype | `Archetype` | Group of entities with identical component sets; data in parallel dense arrays |
 | ComponentSet | `ComponentSet` | Bitmask of component IDs; used for archetype matching |
 | World | `World` | Owns all archetypes and the entity allocator |
+| StableId | `StableId(&'static str)` | Phase 16-A. Durable component name for files and scripts. `ComponentId` stays process-local and lazy; `StableId` is what gets written down. |
+| PersistentId | `PersistentId(u128)` | Phase 16-A. Durable entity identity across save/load. `Entity` stays the runtime handle. |
 
 ### 7.2 Storage Layout
 

@@ -83,6 +83,8 @@
 pub mod archetype;
 pub mod component;
 pub mod entity;
+pub mod persistent;
+pub mod reflect;
 pub mod world;
 
 // ── Re-exports ─────────────────────────────────────────────────────
@@ -90,4 +92,9 @@ pub mod world;
 pub use archetype::{Archetype, ArchetypeId};
 pub use component::{Component, ComponentId, ComponentInfo, ComponentSet};
 pub use entity::{Entity, EntityAllocator};
-pub use world::{ComponentBundle, World};
+pub use persistent::PersistentId;
+pub use reflect::{
+    AssetRef, ComponentSchema, FieldFlags, FieldId, FieldSchema, FieldType, ReflectError,
+    ReflectField, ReflectObject, ReflectValue, StableId, TypeRegistry,
+};
+pub use world::{ComponentBundle, EcsError, World};

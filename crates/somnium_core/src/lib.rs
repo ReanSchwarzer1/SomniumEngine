@@ -55,7 +55,10 @@ pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
 pub mod map;
+pub mod reflect_registry;
 pub mod scene_serial;
+pub mod scene_schema;
+pub mod script_bridge;
 pub mod sun;
 pub mod time;
 
@@ -90,7 +93,7 @@ pub use somnium_ecs::{Component, ComponentBundle, Entity, World};
 pub use somnium_ecs::{ComponentId, ComponentSet};
 
 /// ECS Component for a mesh instance.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MeshComponent {
     /// Base offset of this mesh's vertices in the global vertex buffer.
     pub vertex_offset: u32,
@@ -102,7 +105,7 @@ pub struct MeshComponent {
 impl somnium_ecs::Component for MeshComponent {}
 
 /// ECS Component for a material.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MaterialComponent {
     /// Index into the renderer's material pool.
     pub id: u32,

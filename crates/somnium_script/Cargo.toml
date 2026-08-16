@@ -1,0 +1,14 @@
+[package]
+name        = "somnium_script"
+description = "Language-neutral scripting contract for the Somnium Engine: values, snapshots, commands, and the backend trait."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+
+# NOTE (Phase 16): this crate must never depend on a scripting runtime.
+# `mlua`, and any future backend's crate, belong in `somnium_script_luau`
+# (or its sibling) and nowhere else. See `dev records/phase_16.md` §4.1.
+[dependencies]
+somnium_ecs = { workspace = true }

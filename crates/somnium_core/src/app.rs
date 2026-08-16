@@ -270,6 +270,12 @@ pub struct Engine<G: GameApp> {
     config: EngineConfig,
     time: TimeState,
     world: World,
+    /// Phase 16-A: the engine's one reflected description of its
+    /// components. Built once at startup and shared by scene
+    /// serialization, the script boundary, and (when it exists) the
+    /// reflection inspector — the whole point being that there is exactly
+    /// one of these.
+    type_registry: somnium_ecs::reflect::TypeRegistry,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
     window: Option<Arc<Window>>,
@@ -389,6 +395,7 @@ impl<G: GameApp + 'static> Engine<G> {
             time: TimeState::new(config.target_fps),
             config,
             world: World::new(),
+            type_registry: crate::reflect_registry::component_registry(),
             physics: None,
             audio: None,
             window: None,
@@ -3710,7 +3717,16 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SaveScene => {
                 let path = "scene.somnium";
-                match crate::scene_serial::save_scene(&self.world, path) {
+                // Phase 16-A: the schema-driven format (`version: 3`).
+                // It writes whatever the registry describes, which is how
+                // script attachments and their authored properties reach
+                // the file at all — the hand-written version-1 walk has no
+                // way to express them.
+                match crate::scene_schema::save_scene_schema(
+                    &mut self.world,
+                    &self.type_registry,
+                    path,
+                ) {
                     Ok(()) => {
                         info!("Scene saved to {}", path);
                         self.scene_dirty = false;

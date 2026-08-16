@@ -9,6 +9,7 @@ authors.workspace     = true
 
 [dependencies]
 somnium_ecs = { workspace = true }
+somnium_script = { workspace = true }
 somnium_renderer = { workspace = true }
 somnium_physics = { workspace = true }
 somnium_audio   = { workspace = true }

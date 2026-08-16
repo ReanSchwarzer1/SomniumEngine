@@ -23,6 +23,33 @@ use crate::component::{Component, ComponentId, ComponentInfo, ComponentSet};
 use crate::entity::{Entity, EntityAllocator};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Errors
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Failure modes of the structural world operations.
+///
+/// Structural operations return an error rather than panicking because
+/// their callers include scripts, which routinely hold handles to
+/// entities that have already been destroyed. A stale handle is an
+/// ordinary control-flow outcome, not a bug in the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcsError {
+    /// The entity handle is stale: its slot has been freed, or recycled
+    /// with a newer generation.
+    DeadEntity,
+}
+
+impl fmt::Display for EcsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeadEntity => write!(f, "entity handle is stale"),
+        }
+    }
+}
+
+impl std::error::Error for EcsError {}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Entity Location
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -363,6 +390,217 @@ impl World {
         Some(unsafe { arch.column_mut(col_idx).get_mut::<T>(loc.row) })
     }
 
+    // ── Structural change: runtime component insert / remove ────────
+    //
+    // Phase 16-A. Everything below moves an entity between archetypes.
+    // A component value is moved, never copied and never dropped in
+    // transit; the only drop is the one the caller asked for (replacing
+    // an existing component, or removing one). `MovedComponent` owns each
+    // value while it is between archetypes so that an early return cannot
+    // leak it.
+
+    /// Whether `entity` currently has the component identified by `id`.
+    #[must_use]
+    pub fn has_component(&self, entity: Entity, id: ComponentId) -> bool {
+        self.entities
+            .is_alive(entity)
+            .then(|| self.locations.get(entity.index() as usize).copied().flatten())
+            .flatten()
+            .is_some_and(|loc| {
+                self.archetypes[loc.archetype_id.raw() as usize]
+                    .component_set()
+                    .contains(id)
+            })
+    }
+
+    /// Every component type currently on `entity`, in sorted order.
+    ///
+    /// Sorted order is part of the contract: reflection, serialization and
+    /// script snapshots all walk this list, and they must not vary between
+    /// runs.
+    #[must_use]
+    pub fn component_ids(&self, entity: Entity) -> Option<Vec<ComponentId>> {
+        if !self.entities.is_alive(entity) {
+            return None;
+        }
+        let loc = self.locations.get(entity.index() as usize).copied().flatten()?;
+        Some(
+            self.archetypes[loc.archetype_id.raw() as usize]
+                .component_set()
+                .iter()
+                .collect(),
+        )
+    }
+
+    /// Attach a component to an entity that already exists, migrating it
+    /// to the archetype that includes `T`.
+    ///
+    /// If the entity already has a `T`, the old value is dropped and
+    /// replaced in place — no migration happens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EcsError::DeadEntity`] if the handle is stale. The value
+    /// is dropped in that case rather than leaked.
+    pub fn insert_component<T: Component>(
+        &mut self,
+        entity: Entity,
+        value: T,
+    ) -> Result<(), EcsError> {
+        let info = ComponentInfo::of::<T>();
+        let mut staged = std::mem::ManuallyDrop::new(value);
+        let src = std::ptr::from_mut::<T>(&mut staged).cast::<u8>();
+        // SAFETY: `src` points to a live `T` that nothing else will touch,
+        // and `info` describes exactly `T`.
+        let result = unsafe { self.insert_erased(entity, &info, src) };
+        if result.is_err() {
+            // Ownership never transferred, so it is still ours to drop.
+            unsafe { std::mem::ManuallyDrop::drop(&mut staged) };
+        }
+        result
+    }
+
+    /// Type-erased [`Self::insert_component`], for the reflection registry
+    /// and for scripts, which name component types by stable id rather
+    /// than by Rust type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EcsError::DeadEntity`] if the handle is stale. On error
+    /// the value at `src` is **not** consumed and the caller still owns it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the destination archetype is missing a component its own
+    /// signature declares, which would mean the archetype table is already
+    /// corrupt.
+    ///
+    /// # Safety
+    ///
+    /// `src` must point to a valid, initialised value of the component
+    /// type `info` describes. On success this call takes ownership of that
+    /// value and the caller must not drop or reuse it.
+    pub unsafe fn insert_erased(
+        &mut self,
+        entity: Entity,
+        info: &ComponentInfo,
+        src: *mut u8,
+    ) -> Result<(), EcsError> {
+        let loc = self.location_of(entity)?;
+        let old_idx = loc.archetype_id.raw() as usize;
+
+        // Already present: drop the old value and overwrite the slot. No
+        // archetype change, so no migration.
+        if self.archetypes[old_idx].component_set().contains(info.id) {
+            let col = self.archetypes[old_idx].column_index(info.id).unwrap();
+            let dst = self.archetypes[old_idx].column_mut(col).get_raw_mut(loc.row);
+            unsafe {
+                if let Some(drop_fn) = info.drop_fn {
+                    drop_fn(dst);
+                }
+                if info.layout.size() > 0 {
+                    std::ptr::copy_nonoverlapping(src, dst, info.layout.size());
+                }
+            }
+            return Ok(());
+        }
+
+        let new_set = self.archetypes[old_idx].component_set().with(info.id);
+        let mut infos: Vec<ComponentInfo> = self.archetypes[old_idx].column_infos().cloned().collect();
+        infos.push(info.clone());
+        let new_arch_id = self.get_or_create_archetype(&new_set, &infos);
+
+        let (mut moved, swapped) = self.archetypes[old_idx].move_out_row(loc.row);
+        self.patch_swapped_location(swapped, loc.row);
+
+        let new_arch = &mut self.archetypes[new_arch_id.raw() as usize];
+        let row = new_arch.allocate_row(entity);
+        for (col_idx, id) in new_set.iter().enumerate() {
+            let ptr = if id == info.id {
+                src.cast_const()
+            } else {
+                moved
+                    .iter_mut()
+                    .find(|m| m.id == id)
+                    .expect("migrating archetype lost a component it declared")
+                    .relinquish()
+            };
+            // SAFETY: every pointer here refers to exactly one initialised
+            // value of the column's component type, and each `moved` entry
+            // is relinquished at most once because ids are unique in a set.
+            unsafe { new_arch.column_mut(col_idx).push_moved(ptr) };
+        }
+
+        self.locations[entity.index() as usize] = Some(EntityLocation {
+            archetype_id: new_arch_id,
+            row,
+        });
+        Ok(())
+    }
+
+    /// Detach a component, migrating the entity to the archetype without
+    /// it. The removed value is dropped.
+    ///
+    /// Returns `false` if the entity did not have the component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EcsError::DeadEntity`] if the handle is stale.
+    pub fn remove_component<T: Component>(&mut self, entity: Entity) -> Result<bool, EcsError> {
+        self.remove_erased(entity, ComponentId::of::<T>())
+    }
+
+    /// Type-erased [`Self::remove_component`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EcsError::DeadEntity`] if the handle is stale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the destination archetype is missing a component its own
+    /// signature declares, which would mean the archetype table is already
+    /// corrupt.
+    pub fn remove_erased(&mut self, entity: Entity, id: ComponentId) -> Result<bool, EcsError> {
+        let loc = self.location_of(entity)?;
+        let old_idx = loc.archetype_id.raw() as usize;
+        if !self.archetypes[old_idx].component_set().contains(id) {
+            return Ok(false);
+        }
+
+        let new_set = self.archetypes[old_idx].component_set().without(id);
+        let infos: Vec<ComponentInfo> = self.archetypes[old_idx]
+            .column_infos()
+            .filter(|i| i.id != id)
+            .cloned()
+            .collect();
+        let new_arch_id = self.get_or_create_archetype(&new_set, &infos);
+
+        let (mut moved, swapped) = self.archetypes[old_idx].move_out_row(loc.row);
+        self.patch_swapped_location(swapped, loc.row);
+
+        let new_arch = &mut self.archetypes[new_arch_id.raw() as usize];
+        let row = new_arch.allocate_row(entity);
+        for (col_idx, keep) in new_set.iter().enumerate() {
+            let ptr = moved
+                .iter_mut()
+                .find(|m| m.id == keep)
+                .expect("migrating archetype lost a component it declared")
+                .relinquish();
+            // SAFETY: as in `insert_erased`.
+            unsafe { new_arch.column_mut(col_idx).push_moved(ptr) };
+        }
+        // The entry for `id` is still un-relinquished, so dropping `moved`
+        // here runs exactly that component's destructor and no other.
+        drop(moved);
+
+        self.locations[entity.index() as usize] = Some(EntityLocation {
+            archetype_id: new_arch_id,
+            row,
+        });
+        Ok(true)
+    }
+
     /// Number of alive entities.
     #[must_use]
     pub fn entity_count(&self) -> usize {
@@ -417,6 +655,29 @@ impl World {
     }
 
     // ── Internal helpers ────────────────────────────────────────────
+
+    /// Resolve a live entity's location, or fail with [`EcsError::DeadEntity`].
+    fn location_of(&self, entity: Entity) -> Result<EntityLocation, EcsError> {
+        if !self.entities.is_alive(entity) {
+            return Err(EcsError::DeadEntity);
+        }
+        self.locations
+            .get(entity.index() as usize)
+            .copied()
+            .flatten()
+            .ok_or(EcsError::DeadEntity)
+    }
+
+    /// After a swap-remove moved some other entity into `row`, record its
+    /// new row. Forgetting this is how an archetype migration corrupts an
+    /// unrelated entity, so it is one call rather than repeated inline.
+    fn patch_swapped_location(&mut self, swapped: Option<Entity>, row: usize) {
+        if let Some(swapped) = swapped {
+            if let Some(Some(loc)) = self.locations.get_mut(swapped.index() as usize) {
+                loc.row = row;
+            }
+        }
+    }
 
     /// Find or create an archetype for the given component set.
     fn get_or_create_archetype(
