@@ -48,6 +48,30 @@ override enable_contact: bool = true;
 override enable_clipmap: bool = true;
 override enable_debug: bool = true;
 
+// Phase DOOM-B ablation. 0 = normal; 1 sky, 2 mesh, 3 foliage, 4 terrain shade
+// and everything else returns black. `SOMNIUM_SHADE_ABLATE` drives it and the
+// codes match `pass::shading::ablate`.
+//
+// This deliberately produces a wrong image. It exists because DOOM-A proved the
+// shading pass runs exactly one fragment per pixel, so its 25.8 ms on Coastal
+// ground is entirely per-pixel cost — and the only way to attribute that cost to
+// a class of pixel is to run one class at a time and time it. §17.7 measured 25D
+// the same way, through a debug shader, for the same reason: there was no other
+// instrument that could answer the question.
+//
+// It measures *execution* cost, not occupancy cost. A class that early-outs here
+// still contributes its registers to the pipeline's high-water mark, so the sum
+// of the ablated timings will come out *below* the un-ablated total. That gap is
+// the occupancy tax, and it is the part DOOM-C's separate pipelines recover on
+// top of the execution savings.
+override shade_ablate: u32 = 0u;
+
+const ABLATE_OFF:     u32 = 0u;
+const ABLATE_SKY:     u32 = 1u;
+const ABLATE_MESH:    u32 = 2u;
+const ABLATE_FOLIAGE: u32 = 3u;
+const ABLATE_TERRAIN: u32 = 4u;
+
 /// Scale applied to image-based ambient (Phase 25M-2).
 ///
 /// Set to 1.0 (physically correct). Screen-space ambient occlusion (GTAO),
@@ -330,8 +354,74 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
     let x = f32((in_vertex_index << 1u) & 2u) * 2.0 - 1.0;
     let y = f32(in_vertex_index & 2u) * 2.0 - 1.0;
-    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.clip_pos = vec4<f32>(x, y, tile_params.split_depth, 1.0);
     out.uv = vec2<f32>(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+    return out;
+}
+
+// ─── Tile vertex shader (Phase DOOM-C) ───────────────────────────────────────
+//
+// One instanced quad per classified tile, replacing the fullscreen triangle
+// when binned shading is on. The fragment shader below is unchanged and unaware
+// — it reads `clip_pos.xy` for its pixel and `uv` for its ray, and both come out
+// the same as they did from the fullscreen path, which is what makes the parity
+// gate meaningful rather than a comparison of two rewrites.
+
+struct TileParams {
+    tiles_x: u32,
+    tile_size: u32,
+    /// First tile of this bin's slice of `tile_list`.
+    bin_offset: u32,
+    /// Viewport width in pixels, for the NDC conversion.
+    width: u32,
+    height: u32,
+    /// Phase DOOM-E: clip-space depth of the aerial split, which `vs_main`
+    /// emits so the depth test can decide which half of the screen this
+    /// pipeline covers. Zero on the un-split path, which has no depth
+    /// attachment and ignores it.
+    split_depth: f32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+@group(3) @binding(0) var<storage, read> tile_list: array<u32>;
+@group(3) @binding(1) var<uniform> tile_params: TileParams;
+
+@vertex
+fn vs_tile(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> VertexOutput {
+    let tile = tile_list[tile_params.bin_offset + instance_index];
+    let tx = tile % tile_params.tiles_x;
+    let ty = tile / tile_params.tiles_x;
+
+    // Two triangles covering the tile. Written out rather than derived from bit
+    // tricks on the vertex index: the fullscreen triangle above can afford to
+    // be clever because it has three vertices and one job, and a wrong corner
+    // here would show up as a shifted tile, which is a slow thing to debug.
+    var corners = array<vec2<u32>, 6>(
+        vec2<u32>(0u, 0u),
+        vec2<u32>(1u, 0u),
+        vec2<u32>(0u, 1u),
+        vec2<u32>(0u, 1u),
+        vec2<u32>(1u, 0u),
+        vec2<u32>(1u, 1u),
+    );
+    let corner = corners[vertex_index];
+
+    let px = vec2<f32>(
+        f32((tx + corner.x) * tile_params.tile_size),
+        f32((ty + corner.y) * tile_params.tile_size),
+    );
+    // Not clamped to the viewport: a tile on the right or bottom edge is
+    // partly outside it, and the rasterizer discards those pixels for free.
+    // Clamping instead would shrink the quad and leave the edge unshaded.
+    let uv = px / vec2<f32>(f32(tile_params.width), f32(tile_params.height));
+
+    var out: VertexOutput;
+    out.clip_pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    out.uv = uv;
     return out;
 }
 
@@ -708,12 +798,28 @@ fn compute_depth_slice(view_depth: f32) -> u32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_coords = vec2<i32>(in.clip_pos.xy);
+
+    // Phase DOOM-C: the screen UV is *derived* from the fragment coordinate,
+    // not taken from the interpolator.
+    //
+    // Both vertex shaders produce the same UV analytically, but not to the last
+    // bit: interpolating across a triangle that spans the whole screen and
+    // interpolating across an 8-pixel quad give answers a ULP or two apart. That
+    // is invisible almost everywhere and decisive at a threshold — a mip level,
+    // a hex-tile cell edge, a parallax step count — so the binned path differed
+    // from the fullscreen one on 12 684 terrain pixels until this line existed.
+    // `clip_pos.xy` is the pixel centre and is exact in both, so this is the
+    // only formulation the two paths can agree on.
+    let screen_uv = in.clip_pos.xy / vec2<f32>(textureDimensions(vis_buffer));
     let vis_texel    = textureLoad(vis_buffer, pixel_coords, 0).rg;
     let vis_data     = vis_texel.x;
 
     // ── Sky / background ────────────────────────────────────────────────────
     if vis_data == 0u {
-        let ndc = (in.uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+        if shade_ablate != ABLATE_OFF && shade_ablate != ABLATE_SKY {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        let ndc = (screen_uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
         let near_plane = view.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
         let far_plane  = view.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
         let ray_dir    = normalize(far_plane.xyz / far_plane.w - near_plane.xyz / near_plane.w);
@@ -746,6 +852,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let instance = instances[instance_id];
     let material = materials[instance.material_id];
 
+    // Phase DOOM-B ablation. Placed after the material fetch — which is the
+    // earliest point the class is known — and before the triangle setup, so an
+    // excluded pixel pays two buffer loads and nothing else. The same three
+    // tests `census.wgsl` uses, deliberately: a census and an ablation that
+    // disagreed about what "terrain" means would produce a cost table nobody
+    // could use.
+    if shade_ablate != ABLATE_OFF {
+        var pixel_class = ABLATE_MESH;
+        if material.terrain_index >= 0 {
+            pixel_class = ABLATE_TERRAIN;
+        } else if material.alpha_cutoff > 0.0 {
+            pixel_class = ABLATE_FOLIAGE;
+        }
+        if pixel_class != shade_ablate {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+    }
+
     let i0 = indices[instance.index_offset + prim_id * 3u + 0u];
     let i1 = indices[instance.index_offset + prim_id * 3u + 1u];
     let i2 = indices[instance.index_offset + prim_id * 3u + 2u];
@@ -766,7 +890,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndc1 = c1.xy / c1.w;
     let ndc2 = c2.xy / c2.w;
 
-    let target_ndc = (in.uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+    let target_ndc = (screen_uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
     var bary = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc);
 
     let uv0 = vec2<f32>(v0.u, v0.v);
@@ -1559,7 +1683,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // slice offset (bevy's aerial_view_lut sampling does the same).
         let w = saturate(dist / volumetric_range.x - 0.5 / slices);
         let sample = textureSampleLevel(
-            volumetrics, volumetric_sampler, vec3<f32>(in.uv, w), 0.0);
+            volumetrics, volumetric_sampler, vec3<f32>(screen_uv, w), 0.0);
 
         // Anything nearer than the first slice centre clamps to that slice, so
         // without this fade the full first-slice scattering would be applied
@@ -1597,7 +1721,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(vol_dbg.rgb * 4.0, 1.0);
         }
         if dbg < 28.5 {
-            return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0).rgb * 4.0, 1.0);
+            return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0).rgb * 4.0, 1.0);
         }
         if dbg < 29.5 {
             let vol_dbg = textureSampleLevel(
@@ -1608,11 +1732,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let mip = length(uv_ddx) * 64.0;
             return vec4<f32>(mip, mip * 0.4, 0.1, 1.0) * 4.0;
         }
-        return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0).rgb, 1.0);
+        return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0).rgb, 1.0);
     }
 
     if (bitcast<u32>(lighting_extra.x) & 4u) != 0u {
-        let traced = textureSampleLevel(lighting_aux, default_sampler, in.uv, 0.0);
+        let traced = textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0);
         if traced.a > 0.01 {
             result = traced.rgb;
         }

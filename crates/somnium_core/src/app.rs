@@ -1113,10 +1113,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_t = self
                 .selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
-            let sel_camera = self
+            let sel_camera_settings = self
                 .selected_entity
-                .and_then(|e| self.world.get::<CameraSettingsComponent>(e).copied())
-                .map(|c| c.frustum_cull);
+                .and_then(|e| self.world.get::<CameraSettingsComponent>(e).copied());
+            let sel_camera = sel_camera_settings.map(|c| c.frustum_cull);
+            // Phase DOOM-F.
+            let sel_camera_dynres = sel_camera_settings
+                .map(|c| (c.dynamic_resolution, c.dynamic_target_ms, c.dynamic_floor));
             // Phase 15A1: post-processing settings for the inspector.
             let sel_post = self
                 .selected_entity
@@ -1342,7 +1345,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ui.update_inspector(None, None, None, None);
                 }
                 ui.update_light_inspector(sel_light);
-                ui.update_camera_inspector(sel_camera);
+                ui.update_camera_inspector(sel_camera, sel_camera_dynres);
                 ui.update_post_inspector(sel_post);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_water_inspector(sel_water);
@@ -2180,14 +2183,27 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    /// Push CPU frustum settings from the Camera entity (Phase CR-C).
+    /// Push CPU frustum and dynamic-resolution settings from the Camera entity
+    /// (Phase CR-C, extended by DOOM-F).
     fn apply_camera_settings(&mut self) {
         let settings = self
             .world
             .entities()
             .find_map(|e| self.world.get::<CameraSettingsComponent>(e).copied());
-        if let (Some(cam), Some(r)) = (settings, self.renderer.as_mut()) {
+        let Some(cam) = settings else { return };
+        if let Some(r) = self.renderer.as_mut() {
             r.set_cpu_frustum(cam.frustum_cull);
+        }
+        // Separate borrow because the dynamic-resolution setter needs the
+        // render context as well — switching the controller off resizes the
+        // scene targets back to the base extent there and then.
+        if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+            r.set_dynamic_resolution(
+                c,
+                cam.dynamic_resolution,
+                cam.dynamic_target_ms,
+                cam.dynamic_floor,
+            );
         }
     }
 
@@ -3227,6 +3243,52 @@ impl<G: GameApp> Engine<G> {
                     return;
                 }
 
+                // Phase DOOM-E: the aerial split distance is renderer state.
+                if field == IF::TerrainAerialDistance {
+                    if let Some(r) = &mut self.renderer {
+                        // Below ~20 m the split lands inside the detail the
+                        // player is standing on; above 4 km it is past the far
+                        // plane on every map that exists.
+                        r.aerial_split = value.clamp(20.0, 4000.0);
+                        r.classify_pass.aerial_split = r.aerial_split;
+                    }
+                    return;
+                }
+
+                // Phase DOOM-F: the two dynamic-resolution numbers live on the
+                // Camera singleton next to Frustum Cull.
+                if matches!(field, IF::CameraDynResTargetMs | IF::CameraDynResFloor) {
+                    let mut settings = None;
+                    if let Some(cam) = self.world.get_mut::<CameraSettingsComponent>(entity) {
+                        match field {
+                            // Below ~4 ms the controller would chase a budget
+                            // no scale can reach and sit on its floor; above
+                            // 100 ms it is not a budget.
+                            IF::CameraDynResTargetMs => {
+                                cam.dynamic_target_ms = value.clamp(4.0, 100.0);
+                            }
+                            // Entered as a percentage. 25% is a quarter of the
+                            // linear resolution — about 6% of the pixels — and
+                            // is already well past where FSR can reconstruct.
+                            IF::CameraDynResFloor => {
+                                cam.dynamic_floor = (value / 100.0).clamp(0.25, 1.0);
+                            }
+                            _ => unreachable!(),
+                        }
+                        settings = Some((
+                            cam.dynamic_resolution,
+                            cam.dynamic_target_ms,
+                            cam.dynamic_floor,
+                        ));
+                    }
+                    if let (Some((on, target, floor)), Some(r), Some(c)) =
+                        (settings, &mut self.renderer, &self.render_ctx)
+                    {
+                        r.set_dynamic_resolution(c, on, target, floor);
+                    }
+                    return;
+                }
+
                 // Phase 15A1: post-processing fields edit PostProcessComponent.
                 if matches!(
                     field,
@@ -3911,6 +3973,67 @@ impl<G: GameApp> Engine<G> {
                         r.set_cpu_frustum(on);
                     }
                     info!("CPU frustum cull: {}", if on { "on" } else { "off" });
+                }
+            }
+
+            // Phase DOOM-F. The component is the source of truth so the setting
+            // survives a scene save; the renderer is told the same frame so the
+            // checkbox has a visible effect rather than waiting for a resize.
+            EditorEvent::SetDynamicResolution(on) => {
+                let target = self
+                    .world
+                    .entities()
+                    .find(|e| self.world.get::<CameraSettingsComponent>(*e).is_some());
+                let mut settings = (on, 1000.0 / 60.0, 0.67);
+                if let Some(e) = target
+                    && let Some(cam) = self.world.get_mut::<CameraSettingsComponent>(e)
+                {
+                    cam.dynamic_resolution = on;
+                    settings = (on, cam.dynamic_target_ms, cam.dynamic_floor);
+                }
+                if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx) {
+                    r.set_dynamic_resolution(c, settings.0, settings.1, settings.2);
+                }
+                info!(
+                    "Dynamic resolution: {} (target {:.2} ms, floor {:.0}%)",
+                    if on { "on" } else { "off" },
+                    settings.1,
+                    settings.2 * 100.0
+                );
+            }
+
+            // Phase DOOM-E/B/C. All four are renderer-side switches with no
+            // scene state behind them, so unlike Dynamic Resolution there is no
+            // component to keep in step — the renderer is the source of truth.
+            EditorEvent::SetTerrainAerial(on) => {
+                if let Some(r) = &mut self.renderer {
+                    r.aerial_split_enabled = on;
+                    info!(
+                        "Aerial terrain LOD: {} (past {:.0} m)",
+                        if on { "on" } else { "off" },
+                        r.aerial_split
+                    );
+                }
+            }
+            EditorEvent::SetTerrainAerialHeroBank(on) => {
+                if let Some(r) = &mut self.renderer {
+                    r.aerial_hero_bank = on;
+                    info!(
+                        "Aerial terrain layer scan: {}",
+                        if on { "16 (hero bank)" } else { "full" }
+                    );
+                }
+            }
+            EditorEvent::SetPixelCensus(on) => {
+                if let Some(r) = &mut self.renderer {
+                    r.census_pass.enabled = on;
+                    info!("Pixel census: {}", if on { "on" } else { "off" });
+                }
+            }
+            EditorEvent::SetShadeBins(on) => {
+                if let Some(r) = &mut self.renderer {
+                    r.classify_pass.enabled = on;
+                    info!("Tile-binned shading: {}", if on { "on" } else { "off" });
                 }
             }
 

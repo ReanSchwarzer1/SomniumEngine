@@ -31,6 +31,7 @@ pub mod renderer;
 pub mod shadow;
 pub mod terrain;
 pub mod texture_pool;
+pub mod timing;
 pub mod viewport_resolution;
 pub mod water_body;
 

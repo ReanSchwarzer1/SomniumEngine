@@ -314,11 +314,60 @@ fn apply_kit_view(
     info!(view, score = best.0, height = h, "XV-J kit view placed");
 }
 
+/// The canonical viewpoint a timing run asked for (Phase DOOM-A).
+///
+/// One name rather than a handful of coordinates, because a measurement whose
+/// viewpoint is a pasted position is a measurement nobody can reproduce six
+/// weeks later. The three names match the vocabulary the existing evidence
+/// already uses — DF-A's overview and walk, and the Island recipe.
+///
+/// | `SOMNIUM_TIME_VIEW` | map | camera |
+/// |---|---|---|
+/// | `coastal-overview` | Coastal | the recipe's own seed (XV overview) |
+/// | `coastal-ground` | Coastal | walk / eye height on the terrain |
+/// | `island` | Island | the recipe's own seed, `(0, 28, 115)` |
+/// | `island-ground` | Island | walk / eye height |
+fn timing_view() -> Option<String> {
+    let raw = std::env::var("SOMNIUM_TIME_VIEW").ok()?;
+    let name = raw.trim().to_ascii_lowercase();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// Map implied by `SOMNIUM_MAP`, or failing that by `SOMNIUM_TIME_VIEW`.
+fn timing_view_map() -> Option<MapKind> {
+    if let Ok(explicit) = std::env::var("SOMNIUM_MAP") {
+        match MapKind::parse(&explicit) {
+            Ok(kind) => return Some(kind),
+            Err(e) => tracing::warn!("SOMNIUM_MAP ignored: {e}"),
+        }
+    }
+    let view = timing_view()?;
+    if view.starts_with("island") {
+        Some(MapKind::Island)
+    } else if view.starts_with("coastal") {
+        Some(MapKind::Coastal)
+    } else {
+        tracing::warn!("SOMNIUM_TIME_VIEW={view} does not name a map; using the default");
+        None
+    }
+}
+
 fn apply_capture_camera_overrides(
     camera: &mut EditorCamera,
     terrain: Option<&somnium_renderer::terrain::TerrainData>,
     origin: Vec3,
 ) {
+    // Before the explicit overrides below, so `SOMNIUM_CAMERA_POS` can still
+    // pin a one-off viewpoint on top of a named one.
+    if let Some(view) = timing_view() {
+        if view.ends_with("-ground") || view.ends_with("-walk") {
+            match terrain {
+                Some(terrain) => apply_kit_view(camera, terrain, origin, "walk"),
+                None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
+            }
+        }
+        tracing::info!(view, "DOOM-A timing viewpoint");
+    }
     if let Ok(view) = std::env::var("SOMNIUM_KIT_VIEW") {
         if let Some(terrain) = terrain {
             apply_kit_view(camera, terrain, origin, view.trim());
@@ -969,7 +1018,14 @@ impl GameApp for HelloGame {
         if terrain_mode != "0" && terrain_mode != "none" {
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                 if flat_terrain {
-                    let kind = somnium_core::parse_map_file(somnium_core::DEFAULT_MAP_PATH)
+                    // Phase DOOM-A: `SOMNIUM_MAP=coastal|island` picks the
+                    // startup recipe, and `SOMNIUM_TIME_VIEW` implies it, so a
+                    // timing run can name a canonical viewpoint in one variable
+                    // instead of three. Explicit `SOMNIUM_MAP` wins.
+                    let kind = timing_view_map()
+                        .or_else(|| {
+                            somnium_core::parse_map_file(somnium_core::DEFAULT_MAP_PATH).ok()
+                        })
                         .unwrap_or(MapKind::Coastal);
                     match somnium_core::spawn_map(ctx.world, renderer, render_ctx, kind) {
                         Ok(result) => loaded_map = Some(result),
@@ -1577,6 +1633,16 @@ impl GameApp for HelloGame {
     fn on_render(&mut self, ctx: &mut EngineContext) {
         if std::env::var("SOMNIUM_CAPTURE_QUIT").as_deref() == Ok("1")
             && somnium_renderer::capture::finished()
+        {
+            ctx.exit();
+            return;
+        }
+        // Phase DOOM-A: same contract for a timing run. Default on rather than
+        // opt-in — a run has a fixed frame count, so there is nothing left to
+        // measure once it is written, and leaving the window up only invites
+        // someone to read fps off it.
+        if std::env::var("SOMNIUM_TIME_QUIT").as_deref() != Ok("0")
+            && somnium_renderer::timing::finished()
         {
             ctx.exit();
             return;

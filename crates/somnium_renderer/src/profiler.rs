@@ -51,6 +51,37 @@ const RING: usize = 3;
 /// Samples in the rolling average.
 const WINDOW: usize = 30;
 
+/// Passes that may opt into pipeline statistics in one frame (Phase DOOM-A).
+///
+/// Small on purpose. Unlike a timestamp, a statistics query has to be opened
+/// and closed *inside* the pass, so every entry here is a pass someone edited
+/// by hand, and the list is meant to stay short enough to read.
+pub const MAX_STATS: usize = 8;
+
+/// Statistics gathered per query, in the order wgpu writes them.
+///
+/// The order is fixed by the bitflags declaration order, not by this constant —
+/// see `PipelineStatisticsTypes`. Changing the set means changing
+/// [`StatsResult`] to match, and the two are easy to desynchronise silently,
+/// which is why the mapping is written out in [`Timeline::resolve_stats`]
+/// rather than inferred.
+pub const STATS_SLOTS: usize = 4;
+
+/// One pass's pipeline statistics, as reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatsResult {
+    pub name: &'static str,
+    /// Vertex shader invocations (post vertex-cache for indexed draws).
+    pub vertex_invocations: u64,
+    /// Primitives that survived the clipper — what actually got rasterized.
+    pub clipper_primitives: u64,
+    /// Fragment shader invocations. For a fullscreen pass this is the pixel
+    /// count; for a geometry pass the excess over the pixel count is overdraw.
+    pub fragment_invocations: u64,
+    /// Compute shader invocations.
+    pub compute_invocations: u64,
+}
+
 /// Timings so large they can only be a driver artefact.
 ///
 /// Wicked hits this on Apple TBDR when a pass draws no pixels and the timestamp
@@ -113,6 +144,9 @@ pub struct Timeline {
     next_query: u32,
     /// Scopes that did not fit in the query set this frame.
     dropped: u32,
+    /// Passes that opened a pipeline-statistics query this frame, in the order
+    /// their slots were handed out (Phase DOOM-A).
+    stats: Vec<&'static str>,
 }
 
 impl Timeline {
@@ -162,11 +196,50 @@ impl Timeline {
         self.stack.len()
     }
 
+    /// Reserve a pipeline-statistics slot for `name`, or `None` when the small
+    /// stats set is full. The caller opens and closes the query itself, because
+    /// wgpu only allows that from inside the pass.
+    pub fn reserve_stats(&mut self, name: &'static str) -> Option<u32> {
+        if self.stats.len() >= MAX_STATS {
+            return None;
+        }
+        let index = u32::try_from(self.stats.len()).ok()?;
+        self.stats.push(name);
+        Some(index)
+    }
+
+    pub fn stats_count(&self) -> u32 {
+        u32::try_from(self.stats.len()).unwrap_or(0)
+    }
+
+    /// Turn resolved statistics values into per-pass counters.
+    ///
+    /// `values` is the flat slot array: `STATS_SLOTS` `u64`s per query, in the
+    /// order `PipelineStatisticsTypes` declares them.
+    #[must_use]
+    pub fn resolve_stats(&self, values: &[u64]) -> Vec<StatsResult> {
+        self.stats
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                let base = i * STATS_SLOTS;
+                Some(StatsResult {
+                    name,
+                    vertex_invocations: *values.get(base)?,
+                    clipper_primitives: *values.get(base + 1)?,
+                    fragment_invocations: *values.get(base + 2)?,
+                    compute_invocations: *values.get(base + 3)?,
+                })
+            })
+            .collect()
+    }
+
     pub fn clear(&mut self) {
         self.scopes.clear();
         self.stack.clear();
         self.next_query = 0;
         self.dropped = 0;
+        self.stats.clear();
     }
 
     /// Turn raw timestamp ticks into per-scope milliseconds.
@@ -269,6 +342,11 @@ struct Frame {
 /// rendering and ray tracing.
 pub struct GpuProfiler {
     query_set: Option<wgpu::QuerySet>,
+    /// Phase DOOM-A. Separate from the timestamp set because a query set has
+    /// exactly one type. Resolved into the same readback buffer at a fixed
+    /// offset, so there is still one `map_async` and one ready flag per frame.
+    stats_set: Option<wgpu::QuerySet>,
+    stats_results: Vec<StatsResult>,
     frames: Vec<Frame>,
     current: usize,
     period_ns: f32,
@@ -278,6 +356,16 @@ pub struct GpuProfiler {
     /// half-recorded query set and one frame of nonsense.
     enable_request: bool,
     results: Vec<ScopeResult>,
+    /// The same frame before smoothing (Phase DOOM-A).
+    ///
+    /// The overlay wants the average — a single frame's GPU timing is too noisy
+    /// to read. The timing harness wants the opposite: it has to know the
+    /// *spread*, because "is this 3% change real" is a question about variance,
+    /// and a 30-frame average has already thrown that away.
+    raw_results: Vec<ScopeResult>,
+    /// Bumped every time `collect` harvests a frame, so a consumer can tell a
+    /// fresh sample from the same one read twice.
+    raw_serial: u64,
     smoother: Smoother,
     cpu_open: Vec<(&'static str, std::time::Instant, u8)>,
     cpu_acc: Vec<ScopeResult>,
@@ -297,11 +385,44 @@ pub struct GpuProfiler {
 
 impl GpuProfiler {
     /// Bytes one frame of timestamps occupies.
+    ///
+    /// Also the offset the statistics block starts at, which must stay a
+    /// multiple of `QUERY_RESOLVE_BUFFER_ALIGNMENT` (256). `MAX_SCOPES * 2 * 8`
+    /// is 1024 and satisfies that; a `MAX_SCOPES` that does not would fail at
+    /// `resolve_query_set` rather than here.
     const BYTES: u64 = (MAX_SCOPES * 2 * std::mem::size_of::<u64>()) as u64;
+
+    /// Bytes one frame of pipeline statistics occupies.
+    const STATS_BYTES: u64 = (MAX_STATS * STATS_SLOTS * std::mem::size_of::<u64>()) as u64;
+
+    /// Total readback per frame slot: timestamps, then statistics.
+    const TOTAL_BYTES: u64 = Self::BYTES + Self::STATS_BYTES;
+
+    /// The counters asked for, in the order `PipelineStatisticsTypes` declares
+    /// them — which is also the order they are written and the order
+    /// [`Timeline::resolve_stats`] unpacks them.
+    const STATS_TYPES: wgpu::PipelineStatisticsTypes =
+        wgpu::PipelineStatisticsTypes::VERTEX_SHADER_INVOCATIONS
+            .union(wgpu::PipelineStatisticsTypes::CLIPPER_PRIMITIVES_OUT)
+            .union(wgpu::PipelineStatisticsTypes::FRAGMENT_SHADER_INVOCATIONS)
+            .union(wgpu::PipelineStatisticsTypes::COMPUTE_SHADER_INVOCATIONS);
 
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, features: wgpu::Features) -> Self {
         let available = features.contains(wgpu::Features::TIMESTAMP_QUERY)
             && features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+
+        // Phase DOOM-A: independent of `available`. Statistics are useful on an
+        // adapter with no timestamps at all — "how many fragments" answers a
+        // different question from "how many milliseconds".
+        let stats_set = if features.contains(wgpu::Features::PIPELINE_STATISTICS_QUERY) {
+            Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("Profiler Pipeline Statistics"),
+                ty: wgpu::QueryType::PipelineStatistics(Self::STATS_TYPES),
+                count: u32::try_from(MAX_STATS).expect("stats count fits u32"),
+            }))
+        } else {
+            None
+        };
 
         let (query_set, frames) = if available {
             let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -313,13 +434,13 @@ impl GpuProfiler {
                 .map(|i| Frame {
                     resolve: device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Profiler Resolve {i}")),
-                        size: Self::BYTES,
+                        size: Self::TOTAL_BYTES,
                         usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     }),
                     readback: device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Profiler Readback {i}")),
-                        size: Self::BYTES,
+                        size: Self::TOTAL_BYTES,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -337,9 +458,14 @@ impl GpuProfiler {
 
         let enabled = std::env::var("SOMNIUM_PROFILE").as_deref() == Ok("1")
             || std::env::var("SOMNIUM_CAPTURE_PNG").is_ok()
-            || std::env::var("SOMNIUM_CAPTURE").is_ok();
+            || std::env::var("SOMNIUM_CAPTURE").is_ok()
+            // Phase DOOM-A: a timing run with the profiler off would measure
+            // nothing and write a file of zeros, which is worse than failing.
+            || std::env::var("SOMNIUM_TIME").is_ok();
         Self {
             query_set,
+            stats_set,
+            stats_results: Vec::new(),
             frames,
             current: 0,
             period_ns: queue.get_timestamp_period(),
@@ -347,6 +473,8 @@ impl GpuProfiler {
             enabled: false,
             enable_request: enabled,
             results: Vec::new(),
+            raw_results: Vec::new(),
+            raw_serial: 0,
             smoother: Smoother::default(),
             cpu_open: Vec::new(),
             cpu_acc: Vec::new(),
@@ -381,6 +509,20 @@ impl GpuProfiler {
         self.enable_request = on;
     }
 
+    /// Throw away the rolling windows (Phase DOOM-F).
+    ///
+    /// For a consumer that has just changed the workload it is measuring. The
+    /// windows are thirty frames deep, so after a resolution change the average
+    /// describes a mixture of two resolutions for the next thirty frames — and
+    /// a controller reading that mixture concludes something untrue about the
+    /// size it is currently rendering. This is the same reasoning as the clear
+    /// in `begin_frame` when the profiler is toggled, exposed so dynamic
+    /// resolution can use it.
+    pub fn reset_smoothing(&mut self) {
+        self.smoother.clear();
+        self.results.clear();
+    }
+
     pub fn toggle(&mut self) {
         self.set_enabled(!self.enable_request);
     }
@@ -393,6 +535,17 @@ impl GpuProfiler {
     /// CPU scopes from the last completed frame (Phase 29).
     pub fn cpu_results(&self) -> &[ScopeResult] {
         &self.cpu_results
+    }
+
+    /// The last harvested frame **before** smoothing, and a serial that
+    /// changes only when a genuinely new frame lands (Phase DOOM-A).
+    ///
+    /// Readback arrives a few frames late and not necessarily once per frame,
+    /// so a consumer that sampled every rendered frame would count the same
+    /// measurement several times and report a variance far below the truth.
+    /// The serial is how it avoids that.
+    pub fn raw_sample(&self) -> (u64, &[ScopeResult]) {
+        (self.raw_serial, &self.raw_results)
     }
 
     /// Open a CPU-timed zone. Pairs with [`GpuProfiler::cpu_end`].
@@ -499,6 +652,36 @@ impl GpuProfiler {
         }
     }
 
+    /// Reserve a pipeline-statistics slot for a pass that is about to record
+    /// (Phase DOOM-A).
+    ///
+    /// Two-call rather than bracketed, because `begin_pipeline_statistics_query`
+    /// only exists on a render or compute pass — there is no encoder-level form
+    /// the way `TIMESTAMP_QUERY_INSIDE_ENCODERS` gives for timestamps. Call this
+    /// *before* the pass is created, then pass the index and
+    /// [`GpuProfiler::stats_query_set`] into it: reserving first is what keeps
+    /// the `&mut self` borrow from colliding with the pass's borrows of the
+    /// render targets.
+    ///
+    /// `None` means "do not query" — no statistics support, profiler off, or
+    /// the small set is full.
+    pub fn reserve_stats(&mut self, name: &'static str) -> Option<u32> {
+        if !self.enabled || self.stats_set.is_none() || self.current == usize::MAX {
+            return None;
+        }
+        self.frames.get_mut(self.current)?.timeline.reserve_stats(name)
+    }
+
+    /// The statistics query set, for a pass that reserved a slot.
+    pub fn stats_query_set(&self) -> Option<&wgpu::QuerySet> {
+        self.stats_set.as_ref()
+    }
+
+    /// Per-pass counters from the most recently collected frame.
+    pub fn stats_results(&self) -> &[StatsResult] {
+        &self.stats_results
+    }
+
     /// Close the innermost open scope.
     pub fn end(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if !self.recording() {
@@ -541,7 +724,32 @@ impl GpuProfiler {
         let Some(qs) = &self.query_set else { return };
         let frame = &self.frames[i];
         encoder.resolve_query_set(qs, 0..count, &frame.resolve, 0);
+
+        // Phase DOOM-A: statistics land in the same buffer, after the
+        // timestamps, so one copy and one map serve both. A frame where no pass
+        // opted in resolves nothing and leaves the block untouched — which is
+        // safe because `resolve_stats` only reads as many entries as were
+        // reserved.
+        let stats_count = frame.timeline.stats_count();
+        let stats_bytes = if stats_count > 0
+            && let Some(ss) = &self.stats_set
+        {
+            encoder.resolve_query_set(ss, 0..stats_count, &frame.resolve, Self::BYTES);
+            u64::from(stats_count) * (STATS_SLOTS * 8) as u64
+        } else {
+            0
+        };
+
         encoder.copy_buffer_to_buffer(&frame.resolve, 0, &frame.readback, 0, u64::from(count) * 8);
+        if stats_bytes > 0 {
+            encoder.copy_buffer_to_buffer(
+                &frame.resolve,
+                Self::BYTES,
+                &frame.readback,
+                Self::BYTES,
+                stats_bytes,
+            );
+        }
     }
 
     /// Start the asynchronous read. Must be called *after* the submit that
@@ -565,10 +773,13 @@ impl GpuProfiler {
         let ready = Arc::clone(&self.frames[i].ready);
         ready.store(false, Ordering::Release);
         self.frames[i].state = Slot::InFlight;
-        let bytes = u64::from(self.frames[i].queries) * 8;
+        // The whole slot, not just the timestamps written this frame: the
+        // statistics block lives at a fixed offset above them and `map_async`
+        // needs one contiguous range. 1280 bytes — the cost of being able to
+        // read both with one callback.
         self.frames[i]
             .readback
-            .slice(0..bytes)
+            .slice(0..Self::TOTAL_BYTES)
             .map_async(wgpu::MapMode::Read, move |res| {
                 if res.is_ok() {
                     ready.store(true, Ordering::Release);
@@ -586,16 +797,40 @@ impl GpuProfiler {
             }
             let bytes = u64::from(self.frames[i].queries) * 8;
             {
-                let view = self.frames[i].readback.slice(0..bytes).get_mapped_range();
+                let view = self.frames[i]
+                    .readback
+                    .slice(0..Self::TOTAL_BYTES)
+                    .get_mapped_range();
                 let mut ticks = self.scratch.lock().expect("profiler scratch");
                 ticks.clear();
                 ticks.extend(
-                    view.chunks_exact(8)
+                    view[0..bytes as usize]
+                        .chunks_exact(8)
                         .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes"))),
                 );
                 let mut results = self.frames[i].timeline.resolve(&ticks, self.period_ns);
+                self.raw_results.clear();
+                self.raw_results.extend_from_slice(&results);
+                self.raw_serial = self.raw_serial.wrapping_add(1);
                 self.smoother.push(&mut results);
                 self.results = results;
+
+                // Phase DOOM-A. Not smoothed: these are exact integer counts,
+                // and averaging them would only invent fractional fragments.
+                let stats_count = self.frames[i].timeline.stats_count() as usize;
+                if stats_count > 0 {
+                    let start = Self::BYTES as usize;
+                    let end = start + stats_count * STATS_SLOTS * 8;
+                    ticks.clear();
+                    ticks.extend(
+                        view[start..end]
+                            .chunks_exact(8)
+                            .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes"))),
+                    );
+                    self.stats_results = self.frames[i].timeline.resolve_stats(&ticks);
+                } else {
+                    self.stats_results.clear();
+                }
             }
             self.frames[i].readback.unmap();
             self.frames[i].ready.store(false, Ordering::Release);
@@ -649,6 +884,19 @@ impl GpuProfiler {
             for r in &self.cpu_results {
                 let indent = "  ".repeat(r.depth as usize);
                 out.push(format!("{indent}{:<26} {:>7.3} ms", r.name, r.ms));
+            }
+        }
+        // Phase DOOM-A: the "why" beside the "how long". A fullscreen pass whose
+        // fragment invocations exceed its pixel count is running the 2×2
+        // derivative quads at every silhouette; a geometry pass whose count
+        // exceeds it is overdrawing.
+        if !self.stats_results.is_empty() {
+            out.push("counters".to_string());
+            for s in &self.stats_results {
+                out.push(format!(
+                    "  {:<24} {} frag / {} prim / {} cs",
+                    s.name, s.fragment_invocations, s.clipper_primitives, s.compute_invocations
+                ));
             }
         }
         let graph = self

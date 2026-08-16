@@ -11,6 +11,13 @@
 
 use wgpu;
 
+/// Depth format for the scene buffer this pass fills.
+///
+/// Named (Phase DOOM-E) because the shading pass now attaches the same buffer
+/// read-only for its depth split, and a pipeline whose depth format disagrees
+/// with the attachment fails at creation rather than at the wrong pixel.
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
 /// Represents the high-resolution texture used to store the
 /// Instance ID and Triangle ID.
 pub struct VisibilityBufferPass {

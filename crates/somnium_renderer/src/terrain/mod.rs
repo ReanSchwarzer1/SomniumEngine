@@ -336,7 +336,11 @@ pub struct TerrainData {
     /// switched off. With photographed layers the tiling grid is immediately
     /// visible as bands marching to the horizon, and hex-tiling removes them —
     /// the same code, the same parameters, opposite verdict, decided by the
-    /// content. `SOMNIUM_HEXTILE=0` turns it off.
+    /// content.
+    ///
+    /// **Default off on every map.** Island already switched it off through
+    /// `apply_hero_bank_gpu_budget`; Coastal now matches. `SOMNIUM_HEXTILE=1`
+    /// turns it on, and the Terrain details checkbox still works either way.
     pub hex_tiling: bool,
     /// Phase 25C: morph chunk vertices toward the coarser LOD across the last
     /// fraction of each range so ridge lines do not pop. Default off;
@@ -370,6 +374,9 @@ pub struct TerrainData {
     pub height_blend: bool,
     /// Phase 25H. Multiplies every layer's authored relief depth; 0 disables
     /// parallax entirely, which is the A/B.
+    ///
+    /// **Default 0 on every map**, matching hex tiling above.
+    /// `SOMNIUM_TERRAIN_PARALLAX=1` restores the 1.0 scale.
     pub parallax_scale: f32,
     /// Last non-zero scale, so the Details Parallax toggle can restore Relief.
     pub parallax_held: f32,
@@ -499,7 +506,7 @@ impl TerrainData {
             material_id: 0,
             terrain_index: 0,
             hero_bank_only: false,
-            hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() != Ok("0"),
+            hex_tiling: std::env::var("SOMNIUM_HEXTILE").as_deref() == Ok("1"),
             lod_morph: std::env::var("SOMNIUM_LOD_MORPH").as_deref() == Ok("1"),
             lod_morph_start: 0.7,
             macro_mode: macro_map::MacroBlendMode::Lerp,
@@ -525,10 +532,10 @@ impl TerrainData {
             detail_fade_end: 400.0,
             macro_dirty: true,
             height_blend: std::env::var("SOMNIUM_TERRAIN_HEIGHT_BLEND").as_deref() != Ok("0"),
-            parallax_scale: if std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("0") {
-                0.0
-            } else {
+            parallax_scale: if std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("1") {
                 1.0
+            } else {
+                0.0
             },
             parallax_held: 1.0,
             parallax_steps: 24,

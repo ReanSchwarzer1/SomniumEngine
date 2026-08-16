@@ -27,6 +27,14 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
+> - **Phase DOOM — id Tech (plan, 2026-08-16):** `dev records/phase_DOOM.md`.
+>   Optimization with no change to the look. Premise is CR-A's verdict —
+>   GPU-bound, shading ~40–50 ms at maximized Native. Spine is tile-classified
+>   **compute** shading (`ShadingSpec` per tile, not per frame), plus shadow
+>   cascade caching, opt-in dynamic resolution, a real job system and parallel
+>   command encoding. **DOOM-A (the clock) and DOOM-B (the pixel census) are
+>   gates — do them before anything else.** Non-goals include turning Clipmap
+>   default on (DF-E owns that) and any retune of water / XV / foliage.
 > - **Clipmap audit (required, other model):** `dev records/phase_DF.md` §12 —
 >   defect-hunt the in-engine path before more “make clipmap run better” work
 >   or default-on. Do not reintroduce per-pixel sample-count LOD.
