@@ -43,7 +43,6 @@ The engine is organized around three deliberate commitments:
 
 ![The Somnium editor](media/editor.png)
 ![The Somnium editor with foliage](media/editor_foliage.png)
-![The Somnium editor with foliage](media/editor_foliage.png)
 ![The Somnium editor with boat and sea](media/editor_boatsea.png)
 ![The Somnium editor with sunset and sea](media/sunset_sea.png)
 
