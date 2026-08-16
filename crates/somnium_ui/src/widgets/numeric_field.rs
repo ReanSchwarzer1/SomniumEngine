@@ -206,14 +206,9 @@ impl Control for NumericField {
             theme::ACCENT,
         );
 
-        let bg = theme::BG_INPUT;
-        let bdr = if self.focused {
-            theme::BORDER_FOCUS
-        } else {
-            theme::BORDER_DARK
-        };
-        ctx.push_rect_filled(field, bg);
-        ctx.push_rect_border(field, 1.0, bdr);
+        let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
+        ctx.push_rect_filled(field, paint.background);
+        ctx.push_rect_border(field, paint.border_thickness.max(1.0), paint.border);
         let text = self.display_text();
         let origin = Vec2::new(field.x + 4.0, field.y + 3.0);
         if self.focused && self.select_all && !text.is_empty() {
@@ -428,12 +423,18 @@ pub struct NumericFieldBuilder {
 
 impl NumericFieldBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
+        // Phase 26-Zeta-D: numeric values default to the mono_strong role.
+        // fontdue applies no OpenType features, so the tabular figures the
+        // token sheet asks for come from the face rather than from `tnum` —
+        // JetBrains Mono's digits are all one advance wide, which is what
+        // stops a row twitching under a scrub.
+        let style = crate::typography::text_style(crate::typography::TextRole::MonoStrong);
         Self {
             widget,
             value: 0.0,
-            px: 12.0,
-            color: theme::TEXT_PRIMARY,
-            font_id: 0,
+            px: style.px,
+            color: style.color,
+            font_id: style.font_id(),
             drag_step: 0.05,
             slider_range: None,
         }

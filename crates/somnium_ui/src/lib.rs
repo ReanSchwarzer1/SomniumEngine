@@ -10,8 +10,10 @@ pub mod node;
 pub mod pass;
 pub mod pool;
 pub mod runtime;
+pub mod style;
 pub mod theme;
 pub mod types;
+pub mod typography;
 pub mod ui;
 pub mod widget;
 pub mod widgets;
@@ -19,6 +21,7 @@ pub mod widgets;
 pub use editor_event::{ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle};
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
+pub use typography::{FontRole, TextRole};
 
 use crate::{
     editor_event::InspectorField as IF,
@@ -43,6 +46,7 @@ use crate::{
         menu::{MenuBuilder, MenuMessage},
         numeric_field::{NumericFieldBuilder, NumericFieldMessage},
         popup::{PopupBuilder, PopupMessage, PopupPlacement},
+        property_row::PropertyRowBuilder,
         scroll_viewer::ScrollViewerBuilder,
         search_box::{
             BreadcrumbBuilder, BreadcrumbMessage, SearchBoxBuilder, SearchBoxMessage,
@@ -466,6 +470,13 @@ struct EditorLayout {
     profiler_values: Vec<NodeHandle>,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
+    status_dirty: NodeHandle,
+    status_selection: NodeHandle,
+    status_stats: NodeHandle,
+    /// Floating viewport-context scope; a child of the viewport, not a grid row.
+    /// Held for the layout regression test that pins the 68 px scene budget.
+    #[allow(dead_code)]
+    vp_bar_h: NodeHandle,
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -600,6 +611,9 @@ pub struct UiManager {
     last_outliner_state: Option<(Vec<(u32, String)>, Option<u32>)>,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
+    status_dirty: NodeHandle,
+    status_selection: NodeHandle,
+    status_stats: NodeHandle,
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -697,6 +711,100 @@ pub struct UiManager {
     immersive_restore_maximized: bool,
 }
 
+/// Load the bundled Nocturne faces and publish the [`FontRole`] table.
+///
+/// Phase 26-Zeta-D. Order is fixed so a capture at 100 % and one at 200 %
+/// resolve the same ids. Any cut that fails to load is aliased onto one that
+/// did rather than left pointing at an unloaded id — a missing SemiBold should
+/// cost the header its weight, not its glyphs. Returns the UI Regular id, which
+/// is what the existing `font_id` parameter threaded through `build_*` means.
+fn load_fonts(ui: &mut UserInterface) -> u8 {
+    use typography::{FontRegistry, FontRole};
+
+    const FACES: [(FontRole, &[u8], &str); 5] = [
+        (
+            FontRole::UiRegular,
+            include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+            "Inter Regular",
+        ),
+        (
+            FontRole::UiMedium,
+            include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+            "Inter Medium",
+        ),
+        (
+            FontRole::UiSemiBold,
+            include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+            "Inter SemiBold",
+        ),
+        (
+            FontRole::Mono,
+            include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+            "JetBrains Mono Regular",
+        ),
+        (
+            FontRole::MonoMedium,
+            include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+            "JetBrains Mono Medium",
+        ),
+    ];
+
+    let mut registry = FontRegistry::uniform(0);
+    let mut base: Option<u8> = None;
+    let mut missing: Vec<FontRole> = Vec::new();
+
+    for (role, bytes, name) in FACES {
+        match ui.add_font(bytes) {
+            Ok(id) => {
+                if base.is_none() {
+                    base = Some(id);
+                }
+                registry.set(role, id);
+            }
+            Err(e) => {
+                warn!("Native UI: bundled {name} failed to load ({e})");
+                missing.push(role);
+            }
+        }
+    }
+
+    let base = match base {
+        Some(id) => id,
+        None => {
+            // Every bundled cut failed — fall back to a system face so the
+            // editor still has glyphs. Weight hierarchy is lost; the shell
+            // stays usable.
+            warn!("Native UI: no bundled face loaded; trying system fonts");
+            let fallback = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
+                .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\arial.ttf"))
+                .or_else(|_| {
+                    std::fs::read("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+                })
+                .ok();
+            let id = fallback
+                .and_then(|b| ui.add_font(&b).ok())
+                .unwrap_or_default();
+            registry = FontRegistry::uniform(id);
+            id
+        }
+    };
+
+    for role in missing {
+        registry.set(role, base);
+    }
+
+    info!(
+        "Native UI: Nocturne faces loaded — ui {}/{}/{}, mono {}/{}",
+        registry.id(FontRole::UiRegular),
+        registry.id(FontRole::UiMedium),
+        registry.id(FontRole::UiSemiBold),
+        registry.id(FontRole::Mono),
+        registry.id(FontRole::MonoMedium),
+    );
+    typography::install_fonts(registry);
+    registry.id(FontRole::UiRegular)
+}
+
 impl UiManager {
     pub fn new(
         device: &wgpu::Device,
@@ -711,27 +819,7 @@ impl UiManager {
         let (sw, sh) = (size.width as f32, size.height as f32);
         let mut native_ui = UserInterface::new(sw, sh);
 
-        let font_bytes = include_bytes!("../assets/fonts/Inter-Regular.ttf");
-        let font_id: u8 = match native_ui.add_font(font_bytes) {
-            Ok(id) => {
-                info!("Native UI: bundled Inter loaded (id={})", id);
-                id
-            }
-            Err(e) => {
-                warn!("Native UI: bundled Inter failed ({e}); trying system fonts");
-                let fallback = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
-                    .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\arial.ttf"))
-                    .or_else(|_| {
-                        std::fs::read(
-                            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                        )
-                    })
-                    .ok();
-                fallback
-                    .and_then(|b| native_ui.add_font(&b).ok())
-                    .unwrap_or(0)
-            }
-        };
+        let font_id = load_fonts(&mut native_ui);
 
         let mut layout_sizes = crate::layout_persist::load();
         if layout_sizes.tools < 120.0 {
@@ -792,6 +880,9 @@ impl UiManager {
             last_outliner_state: None,
             outer_grid: layout.outer_grid,
             menu_bar_h: layout.menu_bar_h,
+            status_dirty: layout.status_dirty,
+            status_selection: layout.status_selection,
+            status_stats: layout.status_stats,
             inner_h: layout.inner_h,
             content_split_h: layout.content_split_h,
             right_split_h: layout.right_split_h,
@@ -1078,6 +1169,30 @@ impl UiManager {
 
     pub fn set_scene_dirty(&mut self, dirty: bool) {
         self.scene_dirty = dirty;
+        self.native_ui.send(TextMessage::set_text(
+            self.status_dirty,
+            if dirty { "Unsaved changes" } else { "Saved" },
+        ));
+    }
+
+    /// Name of the current selection, shown in the status bar. `None` clears
+    /// it to "No selection" rather than to an empty gap, so the slot does not
+    /// silently vanish.
+    pub fn set_status_selection(&mut self, name: Option<&str>) {
+        self.native_ui.send(TextMessage::set_text(
+            self.status_selection,
+            name.unwrap_or("No selection"),
+        ));
+    }
+
+    /// Right-hand statistics cluster. Object count is what the editor can
+    /// state honestly today; triangles and memory join it when the renderer
+    /// reports them per frame (Zeta-G).
+    pub fn set_status_stats(&mut self, objects: usize, fps: f64) {
+        self.native_ui.send(TextMessage::set_text(
+            self.status_stats,
+            format!("{objects} objects · {fps:.0} fps"),
+        ));
     }
 
     pub fn prompt_unsaved_new(&mut self) {
@@ -1190,15 +1305,11 @@ impl UiManager {
                 },
             ),
         ));
+        // Naming the open panel next to the button that opened it is a
+        // duplicate, so the slot only speaks when the drawer row is closed.
         self.native_ui.send(TextMessage::set_text(
             self.status_text,
-            if self.drawer_open {
-                "Content Drawer".to_string()
-            } else if self.log_open {
-                "Output Log".to_string()
-            } else {
-                "Ready".to_string()
-            },
+            if show { "" } else { "Ready" },
         ));
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
@@ -3362,7 +3473,9 @@ fn build_editor_layout(
         .add_row(Row::strict(theme::TITLEBAR_HEIGHT))
         .add_row(Row::strict(0.0))
         .add_row(Row::strict(theme::TOOLBAR_HEIGHT))
-        .add_row(Row::strict(theme::NOCTURNE.density.toolbar))
+        // Retired: the viewport context scope now floats over the render.
+        // The row stays at index 3 so existing GridMessage row indices hold.
+        .add_row(Row::strict(0.0))
         .add_row(Row::stretch())
         .add_row(Row::strict(theme::BOTTOM_DRAWER_HEIGHT))
         .add_row(Row::strict(theme::STATUS_HEIGHT))
@@ -3430,10 +3543,8 @@ fn build_editor_layout(
         right: 12.0,
         bottom: 0.0,
     }))
+    .with_role(TextRole::BodyStrong)
     .with_text("Somnium Engine")
-    .with_font_size(13.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
     .build();
     ui.add_node(title_lbl, title_left_h);
 
@@ -3447,10 +3558,8 @@ fn build_editor_layout(
     let title_right_h = ui.add_node(title_right, title_grid_h);
     let help_button = icon_tool_button(ui, title_right_h, IconId::HelpCircle, "Help (F1)");
     let fps_node = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 10.0)))
+        .with_role(TextRole::Mono)
         .with_text("— fps")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
         .build();
     let fps_text = ui.add_node(fps_node, title_right_h);
     let win_min = window_chrome_button(ui, title_right_h, IconId::Minimize, "Minimize");
@@ -3493,10 +3602,8 @@ fn build_editor_layout(
         MenuBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let file_button = ui.add_node(file_btn_node, menu_stack_h);
     let file_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
+        .with_role(TextRole::Body)
         .with_text("File")
-        .with_font_size(13.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
         .build();
     ui.add_node(file_lbl, file_button);
 
@@ -3516,10 +3623,8 @@ fn build_editor_layout(
     .build();
     let create_button = ui.add_node(create_btn_node, menu_stack_h);
     let create_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
+        .with_role(TextRole::Body)
         .with_text("Create")
-        .with_font_size(13.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
         .build();
     ui.add_node(create_lbl, create_button);
 
@@ -3579,153 +3684,67 @@ fn build_editor_layout(
             .with_orientation(Orientation::Horizontal)
             .build();
     let main_tb_stack_h = ui.add_node(main_tb_stack, main_tb_h);
-    let save_button = icon_tool_button(ui, main_tb_stack_h, IconId::Save, "Save (Ctrl+S)");
-    let select_button = icon_tool_button(ui, main_tb_stack_h, IconId::Select, "Select (T)");
-    let landscape_button =
-        icon_tool_button(ui, main_tb_stack_h, IconId::Landscape, "Landscape (F6)");
-    let foliage_toolbar_button =
-        icon_tool_button(ui, main_tb_stack_h, IconId::Foliage, "Foliage (F8)");
-    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "");
+    // Nocturne Atelier §01: "icon-only controls without tooltips" is a
+    // forbidden motif, and phase_26 §2.4 already required recognition over
+    // recall for the mode commands. Save and the three editing modes carry
+    // their names; only the transport triple stays glyph-only, because ▶ ❚❚ ■
+    // are the one set of symbols every DCC user already reads, and the mode
+    // scope says "Stopped"/"Playing" beside them in words regardless.
+    let (save_button, _) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Save,
+        "Save",
+        "Save scene (Ctrl+S)",
+        font_id,
+        theme::NOCTURNE.density.row_chrome,
+    );
+    scope_separator(ui, main_tb_stack_h);
+    let (select_button, _) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Select,
+        "Select",
+        "Select and transform entities",
+        font_id,
+        theme::NOCTURNE.density.row_chrome,
+    );
+    let (landscape_button, _) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Landscape,
+        "Landscape",
+        "Terrain sculpt and paint (F6)",
+        font_id,
+        theme::NOCTURNE.density.row_chrome,
+    );
+    let (foliage_toolbar_button, _) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Foliage,
+        "Foliage",
+        "Foliage placement (F8)",
+        font_id,
+        theme::NOCTURNE.density.row_chrome,
+    );
+    scope_separator(ui, main_tb_stack_h);
+    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "Play (simulate)");
     let immersive_button = icon_tool_button(
         ui,
         main_tb_stack_h,
         IconId::ImmersivePlay,
         "Immersive play (Esc to exit)",
     );
-    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "");
-    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "");
+    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "Pause");
+    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "Stop");
     let play_label_n =
         TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 5.0)))
+            .with_role(TextRole::Caption)
             .with_text("Stopped")
-            .with_font_size(11.0)
-            .with_font_id(font_id)
-            .with_color(theme::TEXT_SECONDARY)
             .build();
     let play_label = ui.add_node(play_label_n, main_tb_stack_h);
     let pause_label = play_label;
     let stop_label = play_label;
-
-    // ── Row 3: viewport toolbar — camera speed (Phase 20B) ───────────────────
-    let vp_bar = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_row(3)
-            .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
-    )
-    .with_stroke_thickness(Thickness {
-        left: 0.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 1.0,
-    })
-    .build();
-    let vp_bar_h = ui.add_node(vp_bar, outer_h);
-
-    let vp_stack = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .with_orientation(Orientation::Horizontal)
-        .build();
-    let vp_stack_h = ui.add_node(vp_stack, vp_bar_h);
-
-    let cam_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 10.0,
-        top: 6.0,
-        right: 6.0,
-        bottom: 0.0,
-    }))
-    .with_text("Camera Speed")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    ui.add_node(cam_lbl, vp_stack_h);
-
-    let cam_slider_node = SliderBuilder::new(WidgetBuilder::new().with_width(140.0).with_margin(
-        Thickness {
-            left: 0.0,
-            top: 4.0,
-            right: 8.0,
-            bottom: 0.0,
-        },
-    ))
-    .with_value(0.5)
-    .build();
-    let camera_speed_slider = ui.add_node(cam_slider_node, vp_stack_h);
-
-    // Numeric readout, updated as the slider (or RMB+wheel) changes speed.
-    let cam_val = TextBuilder::new(
-        WidgetBuilder::new()
-            .with_width(84.0)
-            .with_margin(Thickness {
-                left: 0.0,
-                top: 6.0,
-                right: 0.0,
-                bottom: 0.0,
-            }),
-    )
-    .with_text("5.0 m/s")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
-    .build();
-    let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
-
-    // Play/Pause/Stop live on the main toolbar (Phase 26-C).
-
-    // Phase 29: the profiler switch lives on the viewport toolbar rather than
-    // in a menu, because it is a thing you flick on and off while looking at
-    // the scene — the same reason UE5 puts its stat toggles there.
-    let (profiler_toggle, profiler_toggle_lbl) = labeled_icon_button(
-        ui,
-        vp_stack_h,
-        IconId::Profiler,
-        "Profiler",
-        "Toggle GPU profiler overlay",
-        font_id,
-        22.0,
-    );
-
-    let res_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 14.0,
-        top: 6.0,
-        right: 6.0,
-        bottom: 0.0,
-    }))
-    .with_text("Resolution")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    ui.add_node(res_lbl, vp_stack_h);
-
-    let viewport_res_combo_node = ComboBoxBuilder::new(
-        WidgetBuilder::new()
-            .with_width(118.0)
-            .with_margin(Thickness {
-                left: 0.0,
-                top: 2.0,
-                right: 8.0,
-                bottom: 0.0,
-            }),
-    )
-    .with_items(VIEWPORT_RESOLUTION_NAMES)
-    .with_selected(0)
-    .with_font_id(font_id)
-    .build();
-    let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
-
-    let hint = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 4.0,
-        top: 6.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_text("(RMB + scroll wheel)")
-    .with_font_size(10.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
-    .build();
-    ui.add_node(hint, vp_stack_h);
 
     // ── Row 4: resizable columns — tools | viewport | details ────────────────
     let tools_split = SplitterBuilder::new(
@@ -3756,12 +3775,14 @@ fn build_editor_layout(
     .build();
     let toolbar_h = ui.add_node(toolbar, inner_h);
 
+    // Redline §06: Details is min 240 / default 340. 180 was narrow enough that
+    // every property row hit the stacking rule and the panel looked broken.
     let content_split =
         SplitterBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
             .with_orientation(SplitterOrientation::Horizontal)
             .with_first_size(layout.viewport)
             .with_min_first(200.0)
-            .with_min_second(180.0)
+            .with_min_second(240.0)
             .build();
     let content_split_h = ui.add_node(content_split, inner_h);
 
@@ -3779,10 +3800,8 @@ fn build_editor_layout(
         right: 0.0,
         bottom: 4.0,
     }))
+    .with_role(TextRole::SectionCaps)
     .with_text("Sculpt")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(ter_lbl, tool_stack_h);
 
@@ -3850,6 +3869,117 @@ fn build_editor_layout(
     .build();
     let viewport_handle = ui.add_node(viewport_border, content_split_h);
 
+    // ── Viewport context scope — floats over the render ─────────────────────
+    //
+    // Zeta redline §06: the third command scope is not a fourth horizontal
+    // band. It is a 32 px bar inset 12 px over the viewport, so the scene
+    // starts 68 px from the top instead of 100, and camera / shading / snap /
+    // profiler controls sit next to the thing they change. Being a child of
+    // the viewport also means it is hit-tested normally while the transparent
+    // region around it still passes clicks through to the 3D pick.
+    let vp_bar = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_height(theme::NOCTURNE.density.toolbar)
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_margin(Thickness::uniform(12.0))
+            // Translucent over the render so the scene stays readable behind
+            // the bar; the hairline is what keeps it legible on a bright sky.
+            .with_background(theme::with_alpha(theme::BG_VOID, 0xB8))
+            .with_foreground(theme::BORDER_MEDIUM),
+    )
+    .with_stroke_thickness(Thickness::uniform(theme::NOCTURNE.geometry.stroke_hairline))
+    .build();
+    let vp_bar_h = ui.add_node(vp_bar, viewport_handle);
+
+    let vp_stack = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_orientation(Orientation::Horizontal)
+        .build();
+    let vp_stack_h = ui.add_node(vp_stack, vp_bar_h);
+
+    let cam_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 10.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_role(TextRole::Label)
+    .with_text("Camera Speed")
+    .build();
+    ui.add_node(cam_lbl, vp_stack_h);
+
+    let cam_slider_node = SliderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(140.0)
+            .with_tooltip("Camera speed - also RMB + scroll wheel in the viewport")
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 4.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_value(0.5)
+    .build();
+    let camera_speed_slider = ui.add_node(cam_slider_node, vp_stack_h);
+
+    // Numeric readout, updated as the slider (or RMB+wheel) changes speed.
+    let cam_val = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_width(84.0)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 6.0,
+                right: 0.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_role(TextRole::MonoStrong)
+    .with_text("5.0 m/s")
+    .build();
+    let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
+
+    // Play/Pause/Stop live on the main toolbar (Phase 26-C).
+
+    // Phase 29: the profiler switch lives on the viewport toolbar rather than
+    // in a menu, because it is a thing you flick on and off while looking at
+    // the scene — the same reason UE5 puts its stat toggles there.
+    let (profiler_toggle, profiler_toggle_lbl) = labeled_icon_button(
+        ui,
+        vp_stack_h,
+        IconId::Profiler,
+        "Profiler",
+        "Toggle GPU profiler overlay",
+        font_id,
+        22.0,
+    );
+
+    let res_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 14.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_role(TextRole::Label)
+    .with_text("Resolution")
+    .build();
+    ui.add_node(res_lbl, vp_stack_h);
+
+    let viewport_res_combo_node = ComboBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_width(118.0)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 2.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_items(VIEWPORT_RESOLUTION_NAMES)
+    .with_selected(0)
+    .with_font_id(font_id)
+    .build();
+    let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
+
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
     // instead of stealing layout from it. Rows are built once and rewritten
@@ -3858,9 +3988,10 @@ fn build_editor_layout(
     let prof_panel = BorderBuilder::new(
         WidgetBuilder::new()
             .with_width(300.0)
+            // Below the floating context bar (12 inset + 32 bar + 12 gap).
             .with_margin(Thickness {
-                left: 10.0,
-                top: 10.0,
+                left: 12.0,
+                top: 56.0,
                 right: 0.0,
                 bottom: 0.0,
             })
@@ -3887,10 +4018,8 @@ fn build_editor_layout(
             bottom: 2.0,
         },
     ))
+    .with_role(TextRole::SectionCaps)
     .with_text("GPU PROFILER")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(prof_hdr, prof_stack_h);
 
@@ -4000,10 +4129,8 @@ fn build_editor_layout(
         right: 0.0,
         bottom: 0.0,
     }))
+    .with_role(TextRole::SectionCaps)
     .with_text("OUTLINER")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(out_hdr_txt, out_hdr_h);
 
@@ -4058,10 +4185,8 @@ fn build_editor_layout(
         right: 0.0,
         bottom: 0.0,
     }))
+    .with_role(TextRole::SectionCaps)
     .with_text("DETAILS")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(ins_hdr_txt, ins_hdr_h);
 
@@ -4155,10 +4280,8 @@ fn build_editor_layout(
         right: 0.0,
         bottom: 0.0,
     }))
+    .with_role(TextRole::SectionCaps)
     .with_text("Output Log")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_SECONDARY)
     .build();
     ui.add_node(log_header, log_hdr_h);
 
@@ -4193,11 +4316,25 @@ fn build_editor_layout(
     })
     .build();
     let status_h = ui.add_node(status_bar, outer_h);
-    let status_stack =
-        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-            .with_orientation(Orientation::Horizontal)
-            .build();
-    let status_stack_h = ui.add_node(status_stack, status_h);
+    // Two clusters: drawer/log entry points and live state on the left, scene
+    // statistics right-aligned. Redline §06 drops the right cluster's items
+    // right to left as width runs out; FPS and dirty state never drop, which is
+    // why they sit at the two ends rather than in the middle.
+    let status_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let status_grid_h = ui.add_node(status_grid, status_h);
+    let status_stack = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_column(0)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let status_stack_h = ui.add_node(status_stack, status_grid_h);
     let (drawer_button, _) = labeled_icon_button(
         ui,
         status_stack_h,
@@ -4216,13 +4353,49 @@ fn build_editor_layout(
         font_id,
         theme::STATUS_HEIGHT,
     );
-    let status_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-        .with_text("Content Drawer")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
+    scope_separator(ui, status_stack_h);
+    // Save state. Sentinel colour is set by `set_scene_dirty`; the *word*
+    // carries the meaning so the state is not colour-only (§10.3).
+    let status_dirty_n =
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(4.0, 7.0)))
+            .with_role(TextRole::Caption)
+            .with_text("Saved")
+            .build();
+    let status_dirty = ui.add_node(status_dirty_n, status_stack_h);
+    scope_separator(ui, status_stack_h);
+    let status_sel_n =
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(4.0, 7.0)))
+            .with_role(TextRole::Caption)
+            .with_text("No selection")
+            .build();
+    let status_selection = ui.add_node(status_sel_n, status_stack_h);
+    // Which panel the drawer row is showing. Kept from the pre-Zeta status bar
+    // because Ctrl+Space toggling between two panels needs a readout.
+    // Empty at startup because the drawer row starts open; `apply_bottom_panel`
+    // fills it with "Ready" once both panels are closed.
+    let status_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 7.0)))
+        .with_role(TextRole::Caption)
+        .with_text("")
         .build();
     let status_text = ui.add_node(status_lbl, status_stack_h);
+
+    let status_stats_stack = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_column(2)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let status_stats_stack_h = ui.add_node(status_stats_stack, status_grid_h);
+    let status_stats_n = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::axes(10.0, 7.0))
+            .with_tooltip("Scene objects and frame rate"),
+    )
+    .with_role(TextRole::Mono)
+    .with_text("— objects · — fps")
+    .build();
+    let status_stats = ui.add_node(status_stats_n, status_stats_stack_h);
 
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
@@ -4395,10 +4568,8 @@ fn build_editor_layout(
             .build();
     let unsaved_stack_h = ui.add_node(unsaved_stack, unsaved_border_h);
     let unsaved_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(12.0)))
+        .with_role(TextRole::Body)
         .with_text("Save changes to the current scene?")
-        .with_font_id(font_id)
-        .with_font_size(13.0)
-        .with_color(theme::TEXT_PRIMARY)
         .build();
     ui.add_node(unsaved_lbl, unsaved_stack_h);
     let unsaved_row =
@@ -4488,6 +4659,10 @@ fn build_editor_layout(
         profiler_values,
         outer_grid: outer_h,
         menu_bar_h,
+        status_dirty,
+        status_selection,
+        status_stats,
+        vp_bar_h,
         inner_h,
         content_split_h,
         right_split_h,
@@ -4560,72 +4735,49 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // `label_w` widens the gutter for the light section's longer labels.
     // Returns `(row, field)`. The row handle is what a caller needs to hide a
     // whole line, label included.
+    //
+    // Phase 26-Zeta: rows are `PropertyRow`s, so the label column, the 14 px
+    // modified gutter and the narrow-panel stacking rule are computed once from
+    // the redline rather than repeated as a per-section `label_w`. `label_w` is
+    // now ignored; it stays in the signature because every call site passes it
+    // and the widths were only ever a workaround for the missing grammar.
     let make_row_rw = |ui: &mut UserInterface,
                        label: &str,
                        label_w: f32,
                        font_id: u8,
                        parent: NodeHandle,
                        drag_step: f32| {
-        let row = StackPanelBuilder::new(
+        let _ = (label_w, font_id);
+        let row = PropertyRowBuilder::new(
             WidgetBuilder::new()
-                .with_height(theme::ROW_HEIGHT)
+                .with_clip_to_bounds(false)
                 .with_background(theme::TRANSPARENT),
         )
-        .with_orientation(Orientation::Horizontal)
+        .with_label(label)
         .build();
         let row_h = ui.add_node(row, parent);
 
-        let lbl = TextBuilder::new(WidgetBuilder::new().with_width(label_w).with_margin(
-            Thickness {
-                left: 6.0,
-                top: 4.0,
-                right: 4.0,
-                bottom: 0.0,
-            },
-        ))
-        .with_text(label)
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
-        .build();
-        ui.add_node(lbl, row_h);
-
         let field = NumericFieldBuilder::new(WidgetBuilder::new().with_margin(Thickness {
             left: 0.0,
-            top: 2.0,
-            right: 4.0,
-            bottom: 0.0,
+            top: 1.0,
+            right: 0.0,
+            bottom: 1.0,
         }))
-        .with_font_size(12.0)
-        .with_font_id(font_id)
         .with_drag_step(drag_step)
         .build();
         (row_h, ui.add_node(field, row_h))
     };
     let make_color =
         |ui: &mut UserInterface, label: &str, label_w: f32, font_id: u8, parent: NodeHandle| {
-            let row = StackPanelBuilder::new(
+            let _ = (label_w, font_id);
+            let row = PropertyRowBuilder::new(
                 WidgetBuilder::new()
-                    .with_height(theme::ROW_HEIGHT)
+                    .with_clip_to_bounds(false)
                     .with_background(theme::TRANSPARENT),
             )
-            .with_orientation(Orientation::Horizontal)
+            .with_label(label)
             .build();
             let row_h = ui.add_node(row, parent);
-            let lbl = TextBuilder::new(WidgetBuilder::new().with_width(label_w).with_margin(
-                Thickness {
-                    left: 6.0,
-                    top: 4.0,
-                    right: 4.0,
-                    bottom: 0.0,
-                },
-            ))
-            .with_text(label)
-            .with_font_size(11.0)
-            .with_font_id(font_id)
-            .with_color(theme::TEXT_SECONDARY)
-            .build();
-            ui.add_node(lbl, row_h);
             let swatch = ColorSwatchBuilder::new(WidgetBuilder::new()).build();
             ui.add_node(swatch, row_h)
         };
@@ -4646,19 +4798,35 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_row_w(ui, label, 20.0, font_id, parent)
     };
 
+    // Section headers are a 26 px band on `surface.header`, not a floating
+    // caption: the band is what separates one group of rows from the next now
+    // that the rows themselves have no borders.
     let sec_label = |ui: &mut UserInterface, text: &str, font_id: u8, parent: NodeHandle| {
-        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 6.0,
-            top: 6.0,
+        let _ = font_id;
+        let band = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_height(theme::NOCTURNE.density.row_tree)
+                .with_background(theme::BG_HEADER)
+                .with_foreground(theme::BORDER_DARK),
+        )
+        .with_stroke_thickness(Thickness {
+            left: 0.0,
             right: 0.0,
-            bottom: 2.0,
-        }))
-        .with_text(text)
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
+            top: 1.0,
+            bottom: 1.0,
+        })
         .build();
-        ui.add_node(lbl, parent);
+        let band_h = ui.add_node(band, parent);
+        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 10.0,
+            top: 7.0,
+            right: 0.0,
+            bottom: 0.0,
+        }))
+        .with_role(TextRole::SectionCaps)
+        .with_text(text)
+        .build();
+        ui.add_node(lbl, band_h);
     };
 
     sec_label(ui, "Position", font_id, parent);
@@ -4687,22 +4855,25 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let light_section = ui.add_node(light_panel, parent);
 
     sec_label(ui, "Light", font_id, light_section);
-    let light_intensity = make_row_w(ui, "Int", 34.0, font_id, light_section);
+    let light_intensity = make_row_w(ui, "Intensity", 34.0, font_id, light_section);
     let light_color = make_color(ui, "Color", 34.0, font_id, light_section);
     let light_col_r = NodeHandle::NONE;
     let light_col_g = NodeHandle::NONE;
     let light_col_b = NodeHandle::NONE;
     let light_temp_k = make_row_step(ui, "Kelvin", 34.0, font_id, light_section, 5.0);
-    let (light_range_row, light_range) = make_row_rw(ui, "Rng", 34.0, font_id, light_section, 0.1);
-    let (light_inner_row, light_inner) = make_row_rw(ui, "In°", 34.0, font_id, light_section, 0.2);
-    let (light_outer_row, light_outer) = make_row_rw(ui, "Out°", 34.0, font_id, light_section, 0.2);
+    let (light_range_row, light_range) =
+        make_row_rw(ui, "Range", 34.0, font_id, light_section, 0.1);
+    let (light_inner_row, light_inner) =
+        make_row_rw(ui, "Inner angle", 34.0, font_id, light_section, 0.2);
+    let (light_outer_row, light_outer) =
+        make_row_rw(ui, "Outer angle", 34.0, font_id, light_section, 0.2);
     let (light_moon_row, light_moon_int) =
-        make_row_rw(ui, "Moon", 34.0, font_id, light_section, 0.005);
+        make_row_rw(ui, "Moon intensity", 34.0, font_id, light_section, 0.005);
     let light_radius = make_row_step(ui, "Radius", 34.0, font_id, light_section, 0.01);
     let (light_width_row, light_width) =
-        make_row_rw(ui, "Half W", 34.0, font_id, light_section, 0.05);
+        make_row_rw(ui, "Half width", 34.0, font_id, light_section, 0.05);
     let (light_height_row, light_height) =
-        make_row_rw(ui, "Half H", 34.0, font_id, light_section, 0.05);
+        make_row_rw(ui, "Half height", 34.0, font_id, light_section, 0.05);
     ui.set_visibility(light_width_row, false);
     ui.set_visibility(light_height_row, false);
     ui.set_visibility(light_section, false);
@@ -4733,18 +4904,18 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     // is right but the shot wants to be a stop darker.
     let (post_auto_exp_toggle, post_auto_exp_label) =
         make_toggle(ui, "Auto Exposure", font_id, post_section);
-    let post_exposure = make_row_step(ui, "EV", 34.0, font_id, post_section, 0.05);
-    let post_exp_comp = make_row_step(ui, "EC", 34.0, font_id, post_section, 0.05);
+    let post_exposure = make_row_step(ui, "Exposure EV", 34.0, font_id, post_section, 0.05);
+    let post_exp_comp = make_row_step(ui, "Exposure comp.", 34.0, font_id, post_section, 0.05);
     // Phase 24A. With this on, EV above is computed from the three rows under
     // it, so a scene is lit by picking a real exposure triangle instead of a
     // number with no units. Aperture drives the DoF blur either way.
     let (post_phys_toggle, post_phys_label) =
         make_toggle(ui, "Physical Camera", font_id, post_section);
-    let post_aperture = make_row_step(ui, "f/", 34.0, font_id, post_section, 0.05);
+    let post_aperture = make_row_step(ui, "Aperture f/", 34.0, font_id, post_section, 0.05);
     // Shown as the denominator a photographer reads — 100 means 1/100 s —
     // because the seconds themselves are a third of a hundredth and no scrub
     // rate makes that row usable.
-    let post_shutter = make_row_step(ui, "1/s", 34.0, font_id, post_section, 1.0);
+    let post_shutter = make_row_step(ui, "Shutter 1/s", 34.0, font_id, post_section, 1.0);
     let post_iso = make_row_step(ui, "ISO", 34.0, font_id, post_section, 2.0);
     let (post_tonemap_button, post_tonemap_label) = {
         let tonemap_combo = ComboBoxBuilder::new(WidgetBuilder::new())
@@ -4756,27 +4927,27 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     };
     // Indirect-light strength. Low values give contrasty shadows, high values a
     // flatter, brighter scene — see `PostProcessComponent::ibl_intensity`.
-    let post_ibl = make_row_step(ui, "IBL", 34.0, font_id, post_section, 0.005);
+    let post_ibl = make_row_step(ui, "IBL intensity", 34.0, font_id, post_section, 0.005);
     let (post_vig_toggle, post_vig_label) = make_toggle(ui, "Vignette", font_id, post_section);
-    let post_vig_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.01);
+    let post_vig_str = make_row_step(ui, "Vignette amount", 34.0, font_id, post_section, 0.01);
     let (post_ca_toggle, post_ca_label) = make_toggle(ui, "Chromatic Ab.", font_id, post_section);
-    let post_ca_str = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.0002);
+    let post_ca_str = make_row_step(ui, "Aberration amount", 34.0, font_id, post_section, 0.0002);
     let (post_fxaa_toggle, post_fxaa_label) = make_toggle(ui, "FXAA", font_id, post_section);
     // Phase 24AC. Next to FXAA because they are the two filters that run on the
     // finished LDR image, and because the pair is what a reader is comparing.
     let (post_cas_toggle, post_cas_label) = make_toggle(ui, "Sharpen (CAS)", font_id, post_section);
-    let post_cas_sharp = make_row_step(ui, "Sharp", 34.0, font_id, post_section, 0.01);
-    let post_cas_strength = make_row_step(ui, "Amount", 34.0, font_id, post_section, 0.01);
+    let post_cas_sharp = make_row_step(ui, "CAS sharpness", 34.0, font_id, post_section, 0.01);
+    let post_cas_strength = make_row_step(ui, "CAS amount", 34.0, font_id, post_section, 0.01);
     // Phase 24Z. Below the two AA/sharpen filters because it is the other
     // camera-motion effect, and its shutter is a photographic quantity like the
     // exposure rows at the top.
     let (post_mb_toggle, post_mb_label) = make_toggle(ui, "Motion Blur", font_id, post_section);
-    let post_mb_shutter = make_row_step(ui, "Shutter", 34.0, font_id, post_section, 0.01);
+    let post_mb_shutter = make_row_step(ui, "Blur shutter", 34.0, font_id, post_section, 0.01);
     let (post_cel_toggle, post_cel_label) = make_toggle(ui, "Cel Shading", font_id, post_section);
 
     // FSR 3 temporal reconstruct. Default on; owns AA (and RCAS) while enabled.
     let (post_fsr_toggle, post_fsr_label) = make_toggle(ui, "FSR", font_id, post_section);
-    let post_fsr_sharp = make_row_step(ui, "FSR Sharp", 34.0, font_id, post_section, 0.01);
+    let post_fsr_sharp = make_row_step(ui, "FSR sharpness", 34.0, font_id, post_section, 0.01);
 
     // Phase 24F/24I/24K/24T/24Z. Ordered roughly the way the frame runs, so the
     // list reads as a pipeline rather than an unsorted pile of switches.
@@ -4785,8 +4956,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_gtao_toggle, post_gtao_label) = make_toggle(ui, "GTAO", font_id, post_section);
     // Radius is in metres and is the control that decides whether AO reads as
     // contact darkening under an object or as a broad smear across a hillside.
-    let post_ao_radius = make_row_step(ui, "AO Rad", 34.0, font_id, post_section, 0.02);
-    let post_ao_intensity = make_row_step(ui, "AO Amt", 34.0, font_id, post_section, 0.02);
+    let post_ao_radius = make_row_step(ui, "AO radius", 34.0, font_id, post_section, 0.02);
+    let post_ao_intensity = make_row_step(ui, "AO intensity", 34.0, font_id, post_section, 0.02);
     let (post_restir_toggle, post_restir_label) =
         make_toggle(ui, "RT Direct Light", font_id, post_section);
     // Phase 24L. Directly under the direct-light switch, because it is the
@@ -4799,22 +4970,22 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
         make_toggle(ui, "RT Refraction", font_id, post_section);
     // Phase 24L. Directly under its toggle, matching every other effect that
     // pairs a switch with an amount.
-    let post_gi_intensity = make_row_step(ui, "GI Amt", 34.0, font_id, post_section, 0.01);
+    let post_gi_intensity = make_row_step(ui, "GI intensity", 34.0, font_id, post_section, 0.01);
     let (post_pcss_toggle, post_pcss_label) =
         make_toggle(ui, "Soft Shadows", font_id, post_section);
     let (post_contact_toggle, post_contact_label) =
         make_toggle(ui, "Contact Shadows", font_id, post_section);
     let (post_bloom_toggle, post_bloom_label) = make_toggle(ui, "Bloom", font_id, post_section);
-    let post_bloom_amt = make_row_step(ui, "Amt", 34.0, font_id, post_section, 0.002);
+    let post_bloom_amt = make_row_step(ui, "Bloom amount", 34.0, font_id, post_section, 0.002);
     let (post_dof_toggle, post_dof_label) =
         make_toggle(ui, "Depth of Field", font_id, post_section);
-    let post_dof_focus = make_row_step(ui, "Focus", 34.0, font_id, post_section, 0.1);
-    let post_temperature = make_row_step(ui, "Temp", 34.0, font_id, post_section, 0.01);
+    let post_dof_focus = make_row_step(ui, "Focus distance", 34.0, font_id, post_section, 0.1);
+    let post_temperature = make_row_step(ui, "Temperature", 34.0, font_id, post_section, 0.01);
     // The other white-balance axis; without it "Temp" can only slide a scene
     // between orange and blue and never correct a green cast.
     let post_tint = make_row_step(ui, "Tint", 34.0, font_id, post_section, 0.01);
-    let post_contrast = make_row_step(ui, "Contr", 34.0, font_id, post_section, 0.01);
-    let post_saturation = make_row_step(ui, "Sat", 34.0, font_id, post_section, 0.01);
+    let post_contrast = make_row_step(ui, "Contrast", 34.0, font_id, post_section, 0.01);
+    let post_saturation = make_row_step(ui, "Saturation", 34.0, font_id, post_section, 0.01);
     // Phase 24Y lift/gamma/gain: shadows, midtones, highlights.
     let post_lift = make_row_step(ui, "Lift", 34.0, font_id, post_section, 0.005);
     let post_gamma = make_row_step(ui, "Gamma", 34.0, font_id, post_section, 0.01);
@@ -4827,25 +4998,26 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let (post_vol_toggle, post_vol_label) = make_toggle(ui, "Volumetrics", font_id, post_section);
     let (post_shafts_toggle, post_shafts_label) =
         make_toggle(ui, "Light Shafts", font_id, post_section);
-    let post_shaft_amt = make_row_step(ui, "Shaft Amt", 34.0, font_id, post_section, 0.05);
+    let post_shaft_amt = make_row_step(ui, "Light shafts", 34.0, font_id, post_section, 0.05);
     // Fog density is tiny — a visible haze is ~1e-3 per metre — so the scrub
     // rate has to be far finer than the other rows or one pixel of drag takes
     // the scene from clear to opaque.
-    let post_fog_density = make_row_step(ui, "Fog", 34.0, font_id, post_section, 0.00005);
-    let post_fog_height = make_row_step(ui, "FogH", 34.0, font_id, post_section, 1.0);
-    let post_fog_asym = make_row_step(ui, "FogG", 34.0, font_id, post_section, 0.01);
+    let post_fog_density = make_row_step(ui, "Fog density", 34.0, font_id, post_section, 0.00005);
+    let post_fog_height = make_row_step(ui, "Fog height", 34.0, font_id, post_section, 1.0);
+    let post_fog_asym = make_row_step(ui, "Fog anisotropy", 34.0, font_id, post_section, 0.01);
     let (post_world_cache_toggle, post_world_cache_label) =
         make_toggle(ui, "World Cache", font_id, post_section);
-    let post_cache_intensity = make_row_step(ui, "Cache Amt", 34.0, font_id, post_section, 0.02);
-    let post_cache_cell = make_row_step(ui, "Cell m", 34.0, font_id, post_section, 0.05);
+    let post_cache_intensity = make_row_step(ui, "Cache blend", 34.0, font_id, post_section, 0.02);
+    let post_cache_cell = make_row_step(ui, "Cell size m", 34.0, font_id, post_section, 0.05);
     let (post_specular_toggle, post_specular_label) =
         make_toggle(ui, "RT Specular", font_id, post_section);
-    let post_spec_rough = make_row_step(ui, "Spec Rgh", 34.0, font_id, post_section, 0.01);
+    let post_spec_rough = make_row_step(ui, "Specular rough", 34.0, font_id, post_section, 0.01);
     let (post_path_toggle, post_path_label) = make_toggle(ui, "Path Tracer", font_id, post_section);
     let post_path_bounces = make_row_step(ui, "Bounces", 34.0, font_id, post_section, 1.0);
     let (post_sdf_toggle, post_sdf_label) = make_toggle(ui, "Mesh SDF", font_id, post_section);
     let (post_probes_toggle, post_probes_label) = make_toggle(ui, "Probes", font_id, post_section);
-    let post_probe_intensity = make_row_step(ui, "Probe Amt", 34.0, font_id, post_section, 0.02);
+    let post_probe_intensity =
+        make_row_step(ui, "Probe intensity", 34.0, font_id, post_section, 0.02);
     let (post_analytic_toggle, post_analytic_label) =
         make_toggle(ui, "Analytic Mips", font_id, post_section);
     ui.set_visibility(post_section, false);
@@ -4875,23 +5047,23 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
     let foliage_kind_label = foliage_kind_button;
     // Density is per square metre and lives well under 1, so it needs a far
     // finer drag rate than a position.
-    let foliage_density = make_row_step(ui, "Dens", 34.0, font_id, foliage_section, 0.02);
+    let foliage_density = make_row_step(ui, "Density", 34.0, font_id, foliage_section, 0.02);
     let foliage_seed = make_row_step(ui, "Size", 34.0, font_id, foliage_section, 0.05);
-    let foliage_slope = make_row_step(ui, "Slp\u{b0}", 34.0, font_id, foliage_section, 0.2);
+    let foliage_slope = make_row_step(ui, "Max slope", 34.0, font_id, foliage_section, 0.2);
     // Kept only so the engine's field routing still has a handle. Hiding the
     // whole row matters, not just the field — the label lives in the row, and
     // hiding the field alone leaves a stray "Type" caption behind.
     let (foliage_layer_row, foliage_layer) =
         make_row_rw(ui, "Type", 34.0, font_id, foliage_section, 0.02);
     ui.set_visibility(foliage_layer_row, false);
-    let foliage_smin = make_row_step(ui, "Sc Mn", 34.0, font_id, foliage_section, 0.01);
-    let foliage_smax = make_row_step(ui, "Sc Mx", 34.0, font_id, foliage_section, 0.01);
+    let foliage_smin = make_row_step(ui, "Scale min", 34.0, font_id, foliage_section, 0.01);
+    let foliage_smax = make_row_step(ui, "Scale max", 34.0, font_id, foliage_section, 0.01);
     // Phase 24AE. Metres, so a whole-number step: this is the dial that decides
     // how much of the shadow pass a grass field is allowed to cost, and the
     // profiler's `shadow casters` row is the readout for it.
-    let foliage_shadow = make_row_step(ui, "Sh Dst", 34.0, font_id, foliage_section, 1.0);
-    let foliage_cull = make_row_step(ui, "Cull", 34.0, font_id, foliage_section, 1.0);
-    let foliage_lod = make_row_step(ui, "LOD", 34.0, font_id, foliage_section, 1.0);
+    let foliage_shadow = make_row_step(ui, "Shadow distance", 34.0, font_id, foliage_section, 1.0);
+    let foliage_cull = make_row_step(ui, "Cull distance", 34.0, font_id, foliage_section, 1.0);
+    let foliage_lod = make_row_step(ui, "LOD distance", 34.0, font_id, foliage_section, 1.0);
     let foliage_impostor = make_row_step(ui, "Impostor", 34.0, font_id, foliage_section, 1.0);
     ui.set_visibility(foliage_section, false);
 
@@ -4910,10 +5082,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             bottom: 2.0,
         },
     ))
+    .with_role(TextRole::Caption)
     .with_text("Active: none")
-    .with_font_size(11.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
     .build();
     let terrain_mode_label = ui.add_node(terrain_mode_label, terrain_section);
     let (terrain_paint_toggle, terrain_paint_label) =
@@ -4959,14 +5129,14 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             terrain_palette_labels[i] = lbl;
         }
     }
-    let terrain_tile = make_row_step(ui, "Tile", 34.0, font_id, terrain_section, 0.01);
+    let terrain_tile = make_row_step(ui, "Tile scale", 34.0, font_id, terrain_section, 0.01);
     // Phase 25H: multiplies the relief depth every layer authors for itself, so
     // one dial covers the whole terrain without flattening the differences
     // between gravel and mud. 0 switches parallax off.
     let terrain_relief = make_row_step(ui, "Relief", 34.0, font_id, terrain_section, 0.05);
-    let terrain_wetness = make_row_step(ui, "Wet", 34.0, font_id, terrain_section, 0.02);
-    let terrain_macro = make_row_step(ui, "Macro", 34.0, font_id, terrain_section, 0.02);
-    let terrain_debug = make_row_step(ui, "Dbg", 34.0, font_id, terrain_section, 1.0);
+    let terrain_wetness = make_row_step(ui, "Wetness", 34.0, font_id, terrain_section, 0.02);
+    let terrain_macro = make_row_step(ui, "Macro variation", 34.0, font_id, terrain_section, 0.02);
+    let terrain_debug = make_row_step(ui, "Debug view", 34.0, font_id, terrain_section, 1.0);
     ui.set_visibility(terrain_section, false);
 
     let water_panel =
@@ -4975,36 +5145,37 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             .build();
     let water_section = ui.add_node(water_panel, parent);
     sec_label(ui, "Water Body", font_id, water_section);
-    let water_surface = make_row_step(ui, "Level", 34.0, font_id, water_section, 0.05);
+    let water_surface = make_row_step(ui, "Water level", 34.0, font_id, water_section, 0.05);
     let water_depth = make_row_step(ui, "Depth", 34.0, font_id, water_section, 0.05);
-    let water_clarity = make_row_step(ui, "Clear", 34.0, font_id, water_section, 0.01);
-    let water_amplitude = make_row_step(ui, "Waves", 34.0, font_id, water_section, 0.01);
-    let water_roughness = make_row_step(ui, "Rough", 34.0, font_id, water_section, 0.01);
+    let water_clarity = make_row_step(ui, "Clarity", 34.0, font_id, water_section, 0.01);
+    let water_amplitude = make_row_step(ui, "Wave height", 34.0, font_id, water_section, 0.01);
+    let water_roughness = make_row_step(ui, "Roughness", 34.0, font_id, water_section, 0.01);
     let water_ssr = make_row_step(ui, "SSR", 34.0, font_id, water_section, 0.01);
     let water_rt_reflect = make_row_step(ui, "RT Reflect", 34.0, font_id, water_section, 0.01);
     let water_reflect_debug = make_row_step(ui, "Reflect Debug", 34.0, font_id, water_section, 1.0);
     let water_wave_a = make_row_step(ui, "Wave A", 34.0, font_id, water_section, 0.25);
     let water_wave_b = make_row_step(ui, "Wave B", 34.0, font_id, water_section, 0.25);
-    let water_speed = make_row_step(ui, "Speed", 34.0, font_id, water_section, 0.05);
-    let water_steepness = make_row_step(ui, "Steep", 34.0, font_id, water_section, 0.01);
+    let water_speed = make_row_step(ui, "Wave speed", 34.0, font_id, water_section, 0.05);
+    let water_steepness = make_row_step(ui, "Steepness", 34.0, font_id, water_section, 0.01);
     let water_wind_speed = make_row_step(ui, "Wind", 34.0, font_id, water_section, 0.5);
     let water_foam_decay = make_row_step(ui, "Foam", 34.0, font_id, water_section, 0.05);
     let water_foam_threshold = make_row_step(ui, "Whitecap", 34.0, font_id, water_section, 0.01);
-    let water_spectrum_blend = make_row_step(ui, "Spect", 34.0, font_id, water_section, 0.01);
-    let water_edge_scale = make_row_step(ui, "Edge", 34.0, font_id, water_section, 0.05);
-    let water_anisotropy = make_row_step(ui, "Aniso", 34.0, font_id, water_section, 0.01);
-    let water_caustic = make_row_step(ui, "Caustic", 34.0, font_id, water_section, 0.05);
-    let water_deep = make_color(ui, "Deep", 34.0, font_id, water_section);
-    let water_shallow = make_color(ui, "Shallow", 34.0, font_id, water_section);
-    let water_edge = make_color(ui, "Edge", 34.0, font_id, water_section);
-    let water_abs = make_color(ui, "Abs", 34.0, font_id, water_section);
-    let water_abs_mag = make_row_step(ui, "Abs Mag", 34.0, font_id, water_section, 0.005);
-    let water_scatter = make_color(ui, "Scatter", 34.0, font_id, water_section);
-    let water_scatter_mag = make_row_step(ui, "Sc Mag", 34.0, font_id, water_section, 0.005);
-    let water_dir_ax = make_row_step(ui, "DirAX", 34.0, font_id, water_section, 0.01);
-    let water_dir_az = make_row_step(ui, "DirAZ", 34.0, font_id, water_section, 0.01);
-    let water_dir_bx = make_row_step(ui, "DirBX", 34.0, font_id, water_section, 0.01);
-    let water_dir_bz = make_row_step(ui, "DirBZ", 34.0, font_id, water_section, 0.01);
+    let water_spectrum_blend = make_row_step(ui, "Spectrum", 34.0, font_id, water_section, 0.01);
+    let water_edge_scale = make_row_step(ui, "Edge fade", 34.0, font_id, water_section, 0.05);
+    let water_anisotropy = make_row_step(ui, "Anisotropy", 34.0, font_id, water_section, 0.01);
+    let water_caustic = make_row_step(ui, "Caustics", 34.0, font_id, water_section, 0.05);
+    let water_deep = make_color(ui, "Deep colour", 34.0, font_id, water_section);
+    let water_shallow = make_color(ui, "Shallow colour", 34.0, font_id, water_section);
+    let water_edge = make_color(ui, "Edge colour", 34.0, font_id, water_section);
+    let water_abs = make_color(ui, "Absorption", 34.0, font_id, water_section);
+    let water_abs_mag = make_row_step(ui, "Absorption mag.", 34.0, font_id, water_section, 0.005);
+    let water_scatter = make_color(ui, "Scattering", 34.0, font_id, water_section);
+    let water_scatter_mag =
+        make_row_step(ui, "Scattering mag.", 34.0, font_id, water_section, 0.005);
+    let water_dir_ax = make_row_step(ui, "Wave A dir X", 34.0, font_id, water_section, 0.01);
+    let water_dir_az = make_row_step(ui, "Wave A dir Z", 34.0, font_id, water_section, 0.01);
+    let water_dir_bx = make_row_step(ui, "Wave B dir X", 34.0, font_id, water_section, 0.01);
+    let water_dir_bz = make_row_step(ui, "Wave B dir Z", 34.0, font_id, water_section, 0.01);
     let (water_underwater, _) = {
         let cb = CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
             .with_label("Underwater")
@@ -5020,8 +5191,8 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             .build();
     let particle_section = ui.add_node(particle_panel, parent);
     sec_label(ui, "Particles", font_id, particle_section);
-    let particle_start = make_color(ui, "Start", 34.0, font_id, particle_section);
-    let particle_end = make_color(ui, "End", 34.0, font_id, particle_section);
+    let particle_start = make_color(ui, "Start colour", 34.0, font_id, particle_section);
+    let particle_end = make_color(ui, "End colour", 34.0, font_id, particle_section);
     ui.set_visibility(particle_section, false);
 
     let material_panel =
@@ -5030,7 +5201,7 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             .build();
     let material_section = ui.add_node(material_panel, parent);
     sec_label(ui, "Material", font_id, material_section);
-    let material_base = make_color(ui, "Base", 34.0, font_id, material_section);
+    let material_base = make_color(ui, "Base colour", 34.0, font_id, material_section);
     ui.set_visibility(material_section, false);
 
     let vessel_panel =
@@ -5039,12 +5210,12 @@ fn build_inspector(ui: &mut UserInterface, parent: NodeHandle, font_id: u8) -> I
             .build();
     let vessel_section = ui.add_node(vessel_panel, parent);
     sec_label(ui, "Vessel", font_id, vessel_section);
-    let vessel_buoyancy = make_row_step(ui, "Buoy", 34.0, font_id, vessel_section, 250.0);
+    let vessel_buoyancy = make_row_step(ui, "Buoyancy", 34.0, font_id, vessel_section, 250.0);
     let vessel_drag = make_row_step(ui, "Drag", 34.0, font_id, vessel_section, 50.0);
-    let vessel_angular_drag = make_row_step(ui, "YawD", 34.0, font_id, vessel_section, 50.0);
+    let vessel_angular_drag = make_row_step(ui, "Yaw damping", 34.0, font_id, vessel_section, 50.0);
     let vessel_thrust = make_row_step(ui, "Thrust", 34.0, font_id, vessel_section, 250.0);
     let vessel_draft = make_row_step(ui, "Draft", 34.0, font_id, vessel_section, 0.05);
-    let vessel_righting = make_row_step(ui, "Right", 34.0, font_id, vessel_section, 250.0);
+    let vessel_righting = make_row_step(ui, "Righting", 34.0, font_id, vessel_section, 250.0);
     ui.set_visibility(vessel_section, false);
 
     InspectorHandles {
@@ -5413,6 +5584,27 @@ fn popup_items(
     (popup_h, handles)
 }
 
+/// A hairline between two groups inside one command scope.
+///
+/// The scopes are separated vertically by their own bands; within a band the
+/// groups (save · modes · transport) need a seam, not a gap, or the strip reads
+/// as one undifferentiated row of glyphs.
+fn scope_separator(ui: &mut UserInterface, parent: NodeHandle) -> NodeHandle {
+    let sep = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(theme::NOCTURNE.geometry.stroke_hairline)
+            .with_height(theme::NOCTURNE.density.icon_action)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(theme::NOCTURNE.geometry.inset_panel, 0.0))
+            .with_hit_test_visibility(false)
+            .with_background(theme::BORDER_MEDIUM)
+            .with_foreground(theme::TRANSPARENT),
+    )
+    .with_stroke_thickness(Thickness::ZERO)
+    .build();
+    ui.add_node(sep, parent)
+}
+
 fn icon_tool_button(
     ui: &mut UserInterface,
     parent: NodeHandle,
@@ -5620,10 +5812,8 @@ fn build_help_overlay(
         right: 0.0,
         bottom: 0.0,
     }))
+    .with_role(TextRole::Title)
     .with_text("Editor Help")
-    .with_font_size(14.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
     .build();
     ui.add_node(title, header_grid_h);
     let close_col = StackPanelBuilder::new(
@@ -5872,7 +6062,7 @@ mod zeta_layout_tests {
     }
 
     #[test]
-    fn application_mode_and_viewport_scopes_use_the_100px_budget() {
+    fn application_and_mode_scopes_cost_68px_and_the_context_bar_floats() {
         let mut ui = UserInterface::new(1920.0, 1080.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
@@ -5881,15 +6071,31 @@ mod zeta_layout_tests {
         let menu = bounds(&ui, layout.menu_bar_h);
         let search = bounds(&ui, layout.palette_button);
         let viewport = bounds(&ui, layout.viewport_handle);
+        let context = bounds(&ui, layout.vp_bar_h);
 
         assert!(menu.y < theme::TITLEBAR_HEIGHT);
         assert!(menu.y + menu.h <= theme::TITLEBAR_HEIGHT + 0.1);
         assert!(search.w > 0.0 && search.y + search.h <= theme::TITLEBAR_HEIGHT + 0.1);
+
+        // Redline §06: only two scopes take layout space — application 36 and
+        // mode 32. The scene starts at 68 px, not the 122 px of the four-band
+        // shell or the 100 px of the docked-context intermediate.
         assert!(
-            (viewport.y - 100.0).abs() < 0.1,
-            "viewport should begin after the 36 + 32 + 32 scope budget, got {}",
+            (viewport.y - 68.0).abs() < 0.1,
+            "viewport should begin after the 36 + 32 scope budget, got {}",
             viewport.y
         );
+
+        // The third scope floats *inside* the viewport at a 12 px inset.
+        assert!(
+            context.y >= viewport.y + 11.9 && context.y <= viewport.y + 12.1,
+            "context bar should be inset 12 px into the viewport, got {} vs {}",
+            context.y,
+            viewport.y
+        );
+        assert!((context.h - theme::NOCTURNE.density.toolbar).abs() < 0.1);
+        assert!(context.x >= viewport.x + 11.9);
+        assert!(context.x + context.w <= viewport.x + viewport.w - 11.9);
     }
 
     #[test]

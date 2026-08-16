@@ -297,6 +297,11 @@ pub struct FrameCapture {
     /// before editor overlays. Unlike `write_png`, this can prove display-only
     /// controls such as CAS and bloom.
     write_display_png: Option<String>,
+    /// The finished window, editor chrome included. This is the only capture
+    /// that can serve as visual evidence for Phase 26-Zeta: `write_display_png`
+    /// is taken before the UI pass, which is why the Zeta ledger had to say its
+    /// smoke PNG showed no chrome.
+    write_ui_png: Option<String>,
     compare_to: Option<String>,
     target_frame: u64,
     frame: u64,
@@ -306,6 +311,8 @@ pub struct FrameCapture {
     pending: Option<(u32, u32)>,
     display_staging: Option<wgpu::Buffer>,
     display_pending: Option<(u32, u32, wgpu::TextureFormat)>,
+    ui_staging: Option<wgpu::Buffer>,
+    ui_pending: Option<(u32, u32, wgpu::TextureFormat)>,
 }
 
 impl FrameCapture {
@@ -314,6 +321,7 @@ impl FrameCapture {
             write_to: std::env::var("SOMNIUM_CAPTURE").ok(),
             write_png: std::env::var("SOMNIUM_CAPTURE_PNG").ok(),
             write_display_png: std::env::var("SOMNIUM_CAPTURE_DISPLAY_PNG").ok(),
+            write_ui_png: std::env::var("SOMNIUM_CAPTURE_UI_PNG").ok(),
             compare_to: std::env::var("SOMNIUM_CAPTURE_COMPARE").ok(),
             target_frame: std::env::var("SOMNIUM_CAPTURE_FRAME")
                 .ok()
@@ -325,6 +333,8 @@ impl FrameCapture {
             pending: None,
             display_staging: None,
             display_pending: None,
+            ui_staging: None,
+            ui_pending: None,
         }
     }
 
@@ -334,11 +344,16 @@ impl FrameCapture {
         self.write_to.is_some()
             || self.write_png.is_some()
             || self.write_display_png.is_some()
+            || self.write_ui_png.is_some()
             || self.compare_to.is_some()
     }
 
     pub fn wants_display(&self) -> bool {
         self.write_display_png.is_some()
+    }
+
+    pub fn wants_ui(&self) -> bool {
+        self.write_ui_png.is_some()
     }
 
     /// Advance the frame counter and report whether this is the capture frame.
@@ -418,6 +433,47 @@ impl FrameCapture {
         if !self.wants_display() {
             return;
         }
+        if let Some((staging, size)) =
+            Self::copy_swapchain(device, encoder, display, width, height, format, "display")
+        {
+            self.display_staging = Some(staging);
+            self.display_pending = Some(size);
+        }
+    }
+
+    /// Read back the swapchain **after** the UI pass - the editor as a user
+    /// sees it. Recorded from `Renderer::render` immediately after
+    /// `UiManager::end_frame`, so chrome, panels and overlays are all present.
+    pub fn record_ui(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        if !self.wants_ui() {
+            return;
+        }
+        if let Some((staging, size)) =
+            Self::copy_swapchain(device, encoder, display, width, height, format, "ui")
+        {
+            self.ui_staging = Some(staging);
+            self.ui_pending = Some(size);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_swapchain(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        display: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        what: &str,
+    ) -> Option<(wgpu::Buffer, (u32, u32, wgpu::TextureFormat))> {
         if !matches!(
             format,
             wgpu::TextureFormat::Rgba8Unorm
@@ -427,13 +483,13 @@ impl FrameCapture {
         ) {
             tracing::warn!(
                 ?format,
-                "display capture skipped: unsupported surface format"
+                "{what} capture skipped: unsupported surface format"
             );
-            return;
+            return None;
         }
         let row = Self::padded_row(width, 4);
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Display Capture LDR"),
+            label: Some("Swapchain Capture LDR"),
             size: row as u64 * height as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -454,8 +510,7 @@ impl FrameCapture {
                 depth_or_array_layers: 1,
             },
         );
-        self.display_staging = Some(staging);
-        self.display_pending = Some((width, height, format));
+        Some((staging, (width, height, format)))
     }
 
     /// Map the staging buffers, build the capture, then write and/or compare it.
@@ -590,46 +645,71 @@ impl FrameCapture {
             }
         }
 
-        if let (Some(path), Some(staging), Some((dw, dh, format))) = (
+        Self::write_swapchain_png(
+            device,
             self.write_display_png.as_ref(),
             self.display_staging.as_ref(),
             self.display_pending,
-        ) {
-            let row = Self::padded_row(dw, 4) as usize;
-            let slice = staging.slice(..);
-            slice.map_async(wgpu::MapMode::Read, |_| {});
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-            let data = slice.get_mapped_range();
-            let bgra = matches!(
-                format,
-                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-            );
-            let mut rgb = vec![0u8; dw as usize * dh as usize * 3];
-            for y in 0..dh as usize {
-                let src = &data[y * row..];
-                for x in 0..dw as usize {
-                    let s = x * 4;
-                    let d = (y * dw as usize + x) * 3;
-                    if bgra {
-                        rgb[d..d + 3].copy_from_slice(&[src[s + 2], src[s + 1], src[s]]);
-                    } else {
-                        rgb[d..d + 3].copy_from_slice(&src[s..s + 3]);
-                    }
-                }
-            }
-            drop(data);
-            staging.unmap();
-            match std::fs::write(path, encode_png(dw, dh, &rgb)) {
-                Ok(()) => tracing::info!("CAPTURE display png written to {path}"),
-                Err(e) => tracing::error!("CAPTURE display png write to {path} failed: {e}"),
-            }
-        }
+            "display",
+        );
+        Self::write_swapchain_png(
+            device,
+            self.write_ui_png.as_ref(),
+            self.ui_staging.as_ref(),
+            self.ui_pending,
+            "ui",
+        );
 
         self.hdr_staging = None;
         self.vis_staging = None;
         self.display_staging = None;
         self.display_pending = None;
+        self.ui_staging = None;
+        self.ui_pending = None;
         CAPTURE_FINISHED.store(true, Ordering::Relaxed);
+    }
+
+    /// Map a swapchain readback and write it as a PNG. The surface may be
+    /// BGRA or RGBA depending on the adapter, so the channel order is decided
+    /// per capture rather than assumed.
+    fn write_swapchain_png(
+        device: &wgpu::Device,
+        path: Option<&String>,
+        staging: Option<&wgpu::Buffer>,
+        pending: Option<(u32, u32, wgpu::TextureFormat)>,
+        what: &str,
+    ) {
+        let (Some(path), Some(staging), Some((dw, dh, format))) = (path, staging, pending) else {
+            return;
+        };
+        let row = Self::padded_row(dw, 4) as usize;
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let data = slice.get_mapped_range();
+        let bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut rgb = vec![0u8; dw as usize * dh as usize * 3];
+        for y in 0..dh as usize {
+            let src = &data[y * row..];
+            for x in 0..dw as usize {
+                let s = x * 4;
+                let d = (y * dw as usize + x) * 3;
+                if bgra {
+                    rgb[d..d + 3].copy_from_slice(&[src[s + 2], src[s + 1], src[s]]);
+                } else {
+                    rgb[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                }
+            }
+        }
+        drop(data);
+        staging.unmap();
+        match std::fs::write(path, encode_png(dw, dh, &rgb)) {
+            Ok(()) => tracing::info!("CAPTURE {what} png written to {path}"),
+            Err(e) => tracing::error!("CAPTURE {what} png write to {path} failed: {e}"),
+        }
     }
 }
 

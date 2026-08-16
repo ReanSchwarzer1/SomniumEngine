@@ -1322,6 +1322,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
                 ui.set_fps(self.time.fps());
+                // Phase 26-Zeta: the status bar is an instrument panel, so it
+                // gets the same per-frame facts the Outliner does.
+                ui.set_status_stats(tree.len(), self.time.fps());
+                ui.set_status_selection(
+                    selected_idx
+                        .and_then(|idx| tree.iter().find(|(id, ..)| *id == idx))
+                        .map(|(_, name, ..)| name.as_str()),
+                );
                 if let Some(t) = sel_t {
                     let (rx, ry, rz) = t.rotation.to_euler(glam::EulerRot::XYZ);
                     ui.update_inspector(

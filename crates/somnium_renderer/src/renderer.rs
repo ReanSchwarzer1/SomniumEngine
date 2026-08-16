@@ -3227,6 +3227,25 @@ impl SomniumRenderer {
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
         }
 
+        // Editor evidence (Phase 26-Zeta). Unlike the display capture above,
+        // this runs *after* the UI pass, so it is the only capture that can
+        // show chrome. Phase 26-Zeta §10 asks for visual evidence that is not
+        // a fabricated screenshot; this is where it comes from.
+        if capture_now && self.capture.wants_ui() {
+            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.capture.record_ui(
+                    &ctx.device,
+                    &mut encoder,
+                    &output.texture,
+                    ctx.config.width,
+                    ctx.config.height,
+                    ctx.config.format,
+                );
+            } else {
+                tracing::warn!("ui capture skipped: surface lacks COPY_SRC usage");
+            }
+        }
+
         let stats_draws = if self.cull_stats {
             self.indirect.len()
         } else {

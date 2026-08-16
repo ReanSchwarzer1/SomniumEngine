@@ -155,6 +155,26 @@ impl DrawingContext {
     /// Glyphs are rasterized on first use and cached in the atlas permanently.
     /// Emits `DrawCommand` entries with `texture_id = Some(FONT_ATLAS_TEXTURE_ID)`.
     pub fn push_text(&mut self, text: &str, origin: Vec2, font_id: u8, px: f32, color: [u8; 4]) {
+        self.push_text_tracked(text, origin, font_id, px, color, 0.0);
+    }
+
+    /// [`push_text`](Self::push_text) with extra advance between glyphs.
+    ///
+    /// Only the uppercase header role uses a non-zero value; letter-spacing is
+    /// what makes an 11 px caps label read as a designed header rather than as
+    /// shouting. Tracking is added after every glyph including the last, which
+    /// matches how CSS `letter-spacing` measures, so
+    /// [`crate::font::FontAtlas::measure_text_tracked`] can stay a pure
+    /// `advance + tracking * count` calculation.
+    pub fn push_text_tracked(
+        &mut self,
+        text: &str,
+        origin: Vec2,
+        font_id: u8,
+        px: f32,
+        color: [u8; 4],
+        tracking: f32,
+    ) {
         // Ascent: distance from top-of-line to baseline (positive).
         let ascent = self.font_atlas.ascent(px, font_id);
         let mut baseline_y = origin.y + ascent;
@@ -167,12 +187,12 @@ impl DrawingContext {
                 continue;
             }
             let Some(info) = self.font_atlas.get_or_rasterize(ch, px, font_id) else {
-                cursor_x += px * 0.5;
+                cursor_x += px * 0.5 + tracking;
                 continue;
             };
             // Zero-size glyphs (space, etc.) — advance cursor only
             if info.px_w == 0.0 {
-                cursor_x += info.advance;
+                cursor_x += info.advance + tracking;
                 continue;
             }
             // Glyph top-left in screen space:
@@ -188,7 +208,37 @@ impl DrawingContext {
                 Vec2::new(info.uv_min[0], info.uv_max[1]), // BL
             ];
             self.push_textured_rect(rect, uv, color, FONT_ATLAS_TEXTURE_ID);
-            cursor_x += info.advance;
+            cursor_x += info.advance + tracking;
+        }
+    }
+
+    /// Layered drop shadow beneath `rect`, used to mark z-order for popups,
+    /// drawers and modals.
+    ///
+    /// The renderer has no blur pass, so the falloff is approximated with
+    /// concentric translucent rings — cheap, no extra bind group, and visually
+    /// sufficient at the 12–32 px spreads the elevation tokens ask for.
+    /// Panels never call this: elevation marks layering, not decoration.
+    pub fn push_drop_shadow(&mut self, rect: Rect, elevation: crate::theme::Elevation) {
+        const RINGS: usize = 6;
+        for i in 0..RINGS {
+            // Outermost ring first so the darker inner rings composite on top.
+            let t = (RINGS - i) as f32 / RINGS as f32;
+            let grow = elevation.spread * t;
+            let alpha = elevation.alpha * (1.0 - t) * (1.0 / RINGS as f32) * 4.0;
+            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if a == 0 {
+                continue;
+            }
+            self.push_rect_filled(
+                Rect::new(
+                    rect.x - grow,
+                    rect.y - grow + elevation.offset_y * t,
+                    rect.w + grow * 2.0,
+                    rect.h + grow * 2.0,
+                ),
+                [0, 0, 0, a],
+            );
         }
     }
 

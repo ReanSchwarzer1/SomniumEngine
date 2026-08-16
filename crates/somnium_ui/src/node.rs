@@ -92,11 +92,23 @@ impl LayoutCtx {
     /// Measure text using the font atlas (no rasterization, uses font metrics only).
     /// Returns (total_advance_width, line_height) in logical pixels.
     pub fn measure_text(&self, text: &str, px: f32, font_id: u8) -> glam::Vec2 {
+        self.measure_text_tracked(text, px, font_id, 0.0)
+    }
+
+    /// [`measure_text`](Self::measure_text) with letter-spacing, so a tracked
+    /// header measures the width it will actually draw.
+    pub fn measure_text_tracked(
+        &self,
+        text: &str,
+        px: f32,
+        font_id: u8,
+        tracking: f32,
+    ) -> glam::Vec2 {
         unsafe {
             (*self.ui_ptr)
                 .draw_ctx
                 .font_atlas
-                .measure_text(text, px, font_id)
+                .measure_text_tracked(text, px, font_id, tracking)
         }
     }
 }

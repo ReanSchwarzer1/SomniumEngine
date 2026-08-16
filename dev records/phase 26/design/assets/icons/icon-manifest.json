@@ -1,0 +1,182 @@
+{
+  "$meta": {
+    "family": "Tabler Icons 24×24 / 2px + Somnium extension",
+    "license_core": "MIT",
+    "pipeline": "SVG -> resvg -> DPI-aware monochrome alpha atlas (16/20/24 @1x,1.25,1.5,2) -> semantic tint in UiPass",
+    "rule": "IconId order is append-only; ImmersivePlay must remain last until the atlas is regenerated"
+  },
+  "sources": {
+    "tabler": {
+      "url": "https://github.com/tabler/tabler-icons",
+      "license": "MIT",
+      "vendored": "assets/icons/tabler/"
+    },
+    "somnium": {
+      "origin": "original, drawn on the Tabler 24×24 / 2px grid",
+      "license": "project license",
+      "vendored": "assets/icons/somnium/"
+    }
+  },
+  "icons": [
+    {
+      "id": "sculpt-raise",
+      "source": "somnium",
+      "file": "assets/icons/somnium/sculpt-raise.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "sculpt-lower",
+      "source": "somnium",
+      "file": "assets/icons/somnium/sculpt-lower.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "sculpt-smooth",
+      "source": "somnium",
+      "file": "assets/icons/somnium/sculpt-smooth.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "sculpt-flatten",
+      "source": "somnium",
+      "file": "assets/icons/somnium/sculpt-flatten.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "sculpt-noise",
+      "source": "somnium",
+      "file": "assets/icons/somnium/sculpt-noise.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "paint-layer",
+      "source": "somnium",
+      "file": "assets/icons/somnium/paint-layer.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "foliage-paint",
+      "source": "somnium",
+      "file": "assets/icons/somnium/foliage-paint.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "foliage-erase",
+      "source": "somnium",
+      "file": "assets/icons/somnium/foliage-erase.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "foliage-single",
+      "source": "somnium",
+      "file": "assets/icons/somnium/foliage-single.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "water-body",
+      "source": "somnium",
+      "file": "assets/icons/somnium/water-body.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "vessel",
+      "source": "somnium",
+      "file": "assets/icons/somnium/vessel.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "voxel-terrain",
+      "source": "somnium",
+      "file": "assets/icons/somnium/voxel-terrain.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "post-fx",
+      "source": "somnium",
+      "file": "assets/icons/somnium/post-fx.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "light-probe",
+      "source": "somnium",
+      "file": "assets/icons/somnium/light-probe.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "material-graph",
+      "source": "somnium",
+      "file": "assets/icons/somnium/material-graph.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    },
+    {
+      "id": "ray-trace",
+      "source": "somnium",
+      "file": "assets/icons/somnium/ray-trace.svg",
+      "sizes": [
+        16,
+        20,
+        24
+      ]
+    }
+  ]
+}

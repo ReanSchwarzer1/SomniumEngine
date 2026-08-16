@@ -108,9 +108,11 @@ pub struct TypographyTokens {
     pub title: f32,
     pub section: f32,
     pub body: f32,
+    pub body_strong: f32,
     pub label: f32,
     pub caption: f32,
     pub mono: f32,
+    pub mono_strong: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,13 +135,43 @@ pub struct GeometryTokens {
     pub space_base: f32,
     pub inset_panel: f32,
     pub gap_group: f32,
+    pub gap_section: f32,
     pub radius_input: f32,
     pub radius_chrome: f32,
     pub radius_popup: f32,
     pub radius_modal: f32,
+    pub radius_tile: f32,
     pub stroke_hairline: f32,
     pub stroke_focus: f32,
     pub stroke_rail: f32,
+}
+
+/// Opacity ladder. Straight alpha, expressed 0..1 and applied to a token's
+/// alpha channel rather than to a whole widget subtree.
+#[derive(Clone, Copy, Debug)]
+pub struct OpacityTokens {
+    pub disabled: f32,
+    pub ghost: f32,
+    pub scrim: f32,
+    pub drop_valid: f32,
+}
+
+/// Elevation marks z-order, never decoration — panels never cast. Each level
+/// is a vertical offset, a spread and a peak alpha; [`crate::draw::DrawingContext`]
+/// approximates the blur with concentric translucent rings, which is enough at
+/// these radii and costs no extra bind group.
+#[derive(Clone, Copy, Debug)]
+pub struct Elevation {
+    pub offset_y: f32,
+    pub spread: f32,
+    pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ElevationTokens {
+    pub popup: Elevation,
+    pub drawer: Elevation,
+    pub modal: Elevation,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -159,6 +191,8 @@ pub struct Theme {
     pub density: DensityTokens,
     pub geometry: GeometryTokens,
     pub motion: MotionTokens,
+    pub opacity: OpacityTokens,
+    pub elevation: ElevationTokens,
 }
 
 pub const NOCTURNE: Theme = Theme {
@@ -210,9 +244,11 @@ pub const NOCTURNE: Theme = Theme {
         title: 16.0,
         section: 13.0,
         body: 13.0,
+        body_strong: 13.0,
         label: 12.0,
         caption: 11.0,
         mono: 12.0,
+        mono_strong: 12.0,
     },
     density: DensityTokens {
         row_dense: 24.0,
@@ -231,10 +267,12 @@ pub const NOCTURNE: Theme = Theme {
         space_base: 4.0,
         inset_panel: 8.0,
         gap_group: 12.0,
+        gap_section: 16.0,
         radius_input: 2.0,
         radius_chrome: 2.0,
         radius_popup: 4.0,
         radius_modal: 6.0,
+        radius_tile: 3.0,
         stroke_hairline: 1.0,
         stroke_focus: 1.0,
         stroke_rail: 2.0,
@@ -245,6 +283,29 @@ pub const NOCTURNE: Theme = Theme {
         popup_ms: 140,
         drawer_ms: 200,
         tooltip_delay_ms: 400,
+    },
+    opacity: OpacityTokens {
+        disabled: 0.38,
+        ghost: 0.60,
+        scrim: 0.62,
+        drop_valid: 0.18,
+    },
+    elevation: ElevationTokens {
+        popup: Elevation {
+            offset_y: 8.0,
+            spread: 12.0,
+            alpha: 0.45,
+        },
+        drawer: Elevation {
+            offset_y: -12.0,
+            spread: 16.0,
+            alpha: 0.40,
+        },
+        modal: Elevation {
+            offset_y: 24.0,
+            spread: 32.0,
+            alpha: 0.60,
+        },
     },
 };
 
@@ -278,6 +339,10 @@ pub const ACCENT_DIM: Color = NOCTURNE.semantic.accent.selected_bg.bytes();
 pub const ACCENT_BLUE: Color = ACCENT;
 pub const FOLDER_SAND: Color = NOCTURNE.semantic.folder.bytes();
 
+/// Palette `moon` — the one step above `text.primary`, reserved for the label
+/// of a selected or hovered row so selection reads as a lift, not a recolour.
+pub const MOON: Color = [0xF2, 0xF4, 0xFF, 0xFF];
+
 pub const TEXT_PRIMARY: Color = NOCTURNE.semantic.text.primary.bytes();
 pub const TEXT_SECONDARY: Color = NOCTURNE.semantic.text.secondary.bytes();
 pub const TEXT_MUTED: Color = NOCTURNE.semantic.text.muted.bytes();
@@ -305,6 +370,27 @@ pub const ICON_TREE: f32 = NOCTURNE.density.icon_row;
 pub const ICON_MARK: f32 = NOCTURNE.density.icon_action;
 pub const ICON_CHECK: f32 = 16.0;
 pub const ICON_DRAWER: f32 = 80.0;
+
+/// Replace a token's alpha channel. Alpha stays straight — the pipeline
+/// premultiplies at blend time (see [`crate::pass::UiPass`]).
+pub const fn with_alpha(color: Color, alpha: u8) -> Color {
+    [color[0], color[1], color[2], alpha]
+}
+
+/// Scale a token's alpha by a factor from [`OpacityTokens`].
+pub fn scaled_alpha(color: Color, factor: f32) -> Color {
+    let a = (color[3] as f32 * factor.clamp(0.0, 1.0)).round();
+    with_alpha(color, a as u8)
+}
+
+/// Blend `top` over `bottom` in authored sRGB space using `top`'s straight
+/// alpha. Used where a translucent wash has to be flattened into one opaque
+/// fill because the widget below it is drawn in the same pass.
+pub fn flatten(bottom: Color, top: Color) -> Color {
+    let a = top[3] as f32 / 255.0;
+    let ch = |i: usize| ((top[i] as f32 * a) + (bottom[i] as f32 * (1.0 - a))).round() as u8;
+    [ch(0), ch(1), ch(2), bottom[3]]
+}
 
 #[cfg(test)]
 mod tests {

@@ -24,16 +24,9 @@
 > will keep needing inspector sections, menus, drawers, and Help pages. Treat
 > Metaphor as living chrome, not a finished product.
 > **Professional identity extension:** Phase 26-Zeta — Nocturne Atelier is
-> specified in [`phase_26_Zeta.md`](phase_26_Zeta.md), and the approved design
-> package is vendored at `phase 26/design/`. In tree as of 2026-08-16: exact UI
-> colour-space transfer; typed Nocturne tokens plus a component style-recipe
-> layer; five bundled OFL faces behind semantic typography roles (Inter
-> Regular/Medium/SemiBold, JetBrains Mono Regular/Medium); the measured Details
-> property-row grammar; and the three command scopes with the viewport-context
-> bar floating over the render, which takes the pre-scene budget to 68 px.
-> Editor screenshots are now real — `SOMNIUM_CAPTURE_UI_PNG` captures the
-> swapchain after the UI pass. The icon pipeline, workspaces, workflow
-> surfaces, accessibility and sign-off remain open.
+> researched and planned in [`phase_26_Zeta.md`](phase_26_Zeta.md). Its first
+> execution gate is an approved Claude Design system; colour-space correctness
+> precedes any palette retuning or editor repaint.
 > **Next GPU track is not a re-implementation of Halcyon.** Phase VV-A–H is
 > in the tree. **Start-here:**
 > [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md). Remaining
