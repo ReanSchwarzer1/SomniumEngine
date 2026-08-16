@@ -42,6 +42,11 @@ The engine is organized around three deliberate commitments:
 ## Screenshots
 
 ![The Somnium editor](media/editor.png)
+![The Somnium editor with foliage](media/editor_foliage.png)
+![The Somnium editor with foliage](media/editor_foliage.png)
+![The Somnium editor with boat and sea](media/editor_boatsea.png)
+![The Somnium editor with sunset and sea](media/sunset_sea.png)
+
 
 *The editor at 1280×720: three command scopes, the viewport-context bar floating
 over the render, the Outliner and Details columns, and the Content Drawer. Every
