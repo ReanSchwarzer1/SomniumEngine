@@ -133,6 +133,17 @@ impl WorldView for EngineWorldView<'_> {
         (schema.read_field)(self.world, entity, field)
     }
 
+    fn field_type(
+        &self,
+        component: StableId,
+        field: FieldId,
+    ) -> Option<somnium_ecs::reflect::FieldType> {
+        self.registry
+            .by_stable_id(component)?
+            .field(field)
+            .map(|schema| schema.ty.clone())
+    }
+
     fn script_fields(&self, component: StableId) -> Vec<(String, FieldId, bool)> {
         self.registry
             .by_stable_id(component)
@@ -214,8 +225,10 @@ pub struct ApplyOutcome {
     pub despawned: Vec<Entity>,
     /// Forces for the caller to hand to physics.
     pub forces: Vec<(Entity, [f32; 3], ForceMode)>,
-    /// Sounds for the caller to hand to audio.
-    pub audio: Vec<(ScriptAssetId, f32)>,
+    /// Sounds for the caller to hand to audio, tagged with the attachment
+    /// that asked — a playing voice is an owned resource, and teardown can
+    /// only stop it if it knows whose it is.
+    pub audio: Vec<(OrderKey, ScriptAssetId, f32)>,
     /// Events for the caller to dispatch.
     pub events: Vec<PendingEvent>,
     /// Log lines, attributed to their attachment.
@@ -347,7 +360,7 @@ pub fn apply_commands(
                 if !volume.is_finite() || volume < 0.0 {
                     outcome.reject(order, RejectReason::InvalidValue, "volume");
                 } else {
-                    outcome.audio.push((asset, volume));
+                    outcome.audio.push((order, asset, volume));
                     outcome.applied += 1;
                 }
             }

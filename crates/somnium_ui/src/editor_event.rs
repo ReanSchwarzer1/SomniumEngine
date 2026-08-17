@@ -280,6 +280,74 @@ pub enum PostFxToggle {
     Fsr,
 }
 
+// ── Phase 16-D: scripting ───────────────────────────────────────────────────
+//
+// The Details panel's Scripts section is **generated** from whatever the
+// script declared, so unlike every other section above it has no fixed
+// field enum and no fixed row count. That is deliberate: hand-writing a
+// per-script field UI is the failure mode Phase 16 exists to avoid, and it
+// is a review failure rather than a shortcut.
+//
+// These types are plain data with no dependency on `somnium_script`, so
+// the UI crate stays below the scripting crates in the graph. `app.rs`
+// translates one into the other.
+
+/// How one exported property is edited.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScriptFieldKind {
+    /// A number, with the bounds the script declared.
+    Number {
+        /// Current value.
+        value: f32,
+        /// Declared minimum, if any.
+        min: Option<f32>,
+        /// Declared maximum, if any.
+        max: Option<f32>,
+    },
+    /// A checkbox.
+    Bool(bool),
+    /// Read-only text. Used for the property kinds the editor cannot yet
+    /// author — a string, an entity reference, an asset reference — so
+    /// they are *visible* rather than silently missing.
+    Text(String),
+}
+
+/// One exported property row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptFieldRow {
+    /// The name the script declared. Also the key the value is stored
+    /// under, and what the editor sends back.
+    pub name: String,
+    /// How to edit it.
+    pub kind: ScriptFieldKind,
+    /// The script's own description, shown as a tooltip.
+    pub description: Option<String>,
+}
+
+/// One attachment in the Details panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptAttachmentRow {
+    /// File name of the script asset.
+    pub asset_name: String,
+    /// Lifecycle state, or why there is none.
+    pub status: String,
+    /// The author's enable flag.
+    pub enabled: bool,
+    /// Whether the error quarantine switched it off. Shown differently
+    /// from an authored disable, because one is a bug report and the other
+    /// is a choice.
+    pub quarantined: bool,
+    /// Declared properties, in declaration order.
+    pub fields: Vec<ScriptFieldRow>,
+}
+
+/// The whole Scripts section for the current selection.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScriptInspectorState {
+    /// Attachments in authored order.
+    pub attachments: Vec<ScriptAttachmentRow>,
+}
+
 /// High-level editor commands produced by the native UI layer.
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
@@ -393,4 +461,57 @@ pub enum EditorEvent {
     ToggleWaterUnderwater,
     /// Title-bar close — same path as the native window X.
     CloseWindow,
+
+    // ── Phase 16-D: scripting ───────────────────────────────────────────
+    /// Attach the `.luau` file at this path to the selected entity.
+    AttachScript(String),
+    /// Create a new `.luau` file in the current content folder from the
+    /// strict-mode template, and attach it to the selection if there is
+    /// one.
+    CreateScript,
+    /// Remove the attachment at this position in the selected entity's
+    /// authored list.
+    DetachScript(usize),
+    /// Move an attachment earlier (`-1`) or later (`+1`) in execution
+    /// order.
+    ReorderScript {
+        /// Position in the authored list.
+        index: usize,
+        /// Which way to move it.
+        delta: i32,
+    },
+    /// Switch an attachment on or off. Carries the value rather than
+    /// toggling, so refreshing the panel is idempotent.
+    SetScriptEnabled {
+        /// Position in the authored list.
+        index: usize,
+        /// The checkbox value.
+        enabled: bool,
+    },
+    /// Edit one exported number. `live` follows the same convention as
+    /// [`EditorEvent::SetInspectorValue`]: a drag is applied but not
+    /// recorded, and the gesture's final value is one undo step.
+    SetScriptNumber {
+        /// Position in the authored list.
+        index: usize,
+        /// Declared property name.
+        field: String,
+        /// New value.
+        value: f32,
+        /// Mid-drag.
+        live: bool,
+    },
+    /// Edit one exported boolean.
+    SetScriptBool {
+        /// Position in the authored list.
+        index: usize,
+        /// Declared property name.
+        field: String,
+        /// New value.
+        value: bool,
+    },
+    /// Recompile every script asset from disk, carrying declared state
+    /// across. A file that no longer compiles leaves its instances
+    /// running and publishes diagnostics.
+    ReloadScripts,
 }

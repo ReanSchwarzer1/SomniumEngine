@@ -3,10 +3,12 @@
 > *Devil May Cry: the engine keeps the world; the script only ever asks for it.*
 
 > **Codename:** Devil May Cry
-> **Status:** **16-A and 16-B COMPLETE (2026-08-16).** 16-C not started.
-> §10 records session one; §11 records session two. Three throughput
-> budgets were missed on the first pass and fixed; the one still over is
-> over a ceiling shown to be arithmetically unreachable (§11.4).
+> **Status:** **16-A, 16-B, 16-C and 16-D COMPLETE (2026-08-17).**
+> 16-E and 16-F remain.
+> §10 records session one; §11 session two; §12 session three. Three
+> throughput budgets were missed on the first pass and fixed; the one
+> still over is over a ceiling shown to be arithmetically unreachable
+> (§11.4).
 > **Language decision:** **Luau, embedded through `mlua` 0.12, interpreter only.**
 > **Record:** this file, plus
 > [`phase 16/16-B_budgets.md`](phase%2016/16-B_budgets.md) for the measured
@@ -851,3 +853,143 @@ rather than on performance.
    `app.rs`'s existing fixed-step loop before `physics.step`.
 4. Error quarantine end to end.
 5. The `hello_engine` gate.
+
+---
+
+## 12. Status — end of session three (2026-08-17)
+
+**16-C and 16-D are complete.** `cargo test --workspace`: **738 passed,
+0 failed** (66 of them new). `somnium_script`, `somnium_script_luau` and
+the new `somnium_core` modules are clippy-clean under `pedantic`.
+
+### 12.1 What is in the tree
+
+| Piece | Where | Tests |
+|---|---|---|
+| Lifecycle state machine | [`lifecycle.rs`](../crates/somnium_script/src/lifecycle.rs) | 7 |
+| Ownership ledger | [`ownership.rs`](../crates/somnium_script/src/ownership.rs) | 5 |
+| Instance registry, scheduler, quarantine, reload halves | [`runtime.rs`](../crates/somnium_script/src/runtime.rs) | 4 unit + all of the below |
+| The engine-side driver | [`script_host.rs`](../crates/somnium_core/src/script_host.rs) | 21, in `tests/script_lifecycle.rs` |
+| Script input and the Play/Stop checkpoint | [`script_input.rs`](../crates/somnium_core/src/script_input.rs) | 8 |
+| Frame-loop hooks, editor events, inspector state | [`app.rs`](../crates/somnium_core/src/app.rs) | — |
+| Undo commands for attach/detach/reorder/enable/property | [`editor_commands.rs`](../crates/somnium_core/src/editor_commands.rs) | 11, in `tests/script_editor.rs` |
+| Generated Scripts section | [`inspector.rs`](../crates/somnium_ui/src/editor/inspector.rs), [`lib.rs`](../crates/somnium_ui/src/lib.rs) | — |
+| The gate script | [`demo_rotator.luau`](../assets/scripts/demo_rotator.luau) | 8, in `tests/script_gate.rs` |
+| Help page | [`docs/editor/scripting.md`](../docs/editor/scripting.md) | 1 |
+
+### 12.2 Gate 16-C — assessed
+
+The plan asks for a `.luau` file attached to an entity that "rotates it at
+fixed step, reads input, applies a force, spawns and despawns, emits and
+receives an event, and persists its exported fields through a save/load
+cycle", plus a `while true do end` that is interrupted and quarantined
+with a normal frame after it.
+
+All of it holds, and **it is asserted rather than eyeballed**:
+`hello_engine` attaches `assets/scripts/demo_rotator.luau` to a cube on
+startup, and `crates/somnium_core/tests/script_gate.rs` drives *the same
+file* through the same `ScriptHost` with one test per clause. Running it
+in the app proves it renders; running it in CI proves it is correct.
+
+### 12.3 Four defects the gate found
+
+Each was found by writing the acceptance test, not by reading the code.
+
+| Defect | Effect | Fix |
+|---|---|---|
+| `Quat` fields refuse a `Vec4` | **A script could not write a rotation at all.** Four numbers narrow to `Vec4` by shape; nothing in `{x,y,z,w}` says "quaternion", and `FieldType::accepts` is strict | `FieldType::coerce` re-tags at the boundary from the *declared* type. `accepts` stays strict, so scene files are unaffected |
+| A phase the module does not implement counted as a success | A script that threw in `onFixedUpdate` and had no `onUpdate` had its failure count cleared every frame and **never reached the quarantine threshold** | Only a phase the VM was actually entered for settles the counter |
+| …and it cleared the spawn results too | `ctx:spawn()` handed back a token whose entity was wiped by the update phase the script did not have, one phase before it could be read | Same rule |
+| An event emitted from `onStart` was dropped | Delivery required `Enabled`; `onStart` runs one phase earlier, while every instance is still `Started` | Delivery is gated on *wanting* to be enabled; dispatch stays gated on being enabled |
+
+Two things the plan did not mention that the gate needed: `ctx.spawns`,
+without which a spawn token resolves to nothing a script can use, and a
+key-code numbering — `InputSnapshot` carries `u32`, and casting winit's
+`#[non_exhaustive]` `KeyCode` would bind the script-facing numbers to an
+enum free to renumber itself. Letters and digits are their ASCII values so
+`string.byte("W")` is right; named keys start at 256 and are tabulated in
+the help page.
+
+### 12.4 Where the init fixed point actually lives
+
+The plan puts the bounded init loop in the runtime. It cannot go there: a
+script spawned during `onInit` does not exist in the world until its spawn
+command has been *applied*, so only something holding `&mut World` can
+answer "what is attached now". The loop is in `ScriptHost::sync`; the cap
+(`MAX_INIT_CYCLES = 64`) and the diagnostic that names the offending chain
+stay in the runtime, so the number is stated once. `run_to_fixed_point` is
+extracted so the cap is provable without a VM.
+
+A related correction: the loop cannot key on "did reconcile create
+anything". A hot reload puts existing attachments back into `Loaded`
+without creating one, and a loop keyed on creation left every reloaded
+script permanently un-started. It keys on `has_pending_init()`.
+
+### 12.5 Play/Stop, and why it is not a scene round-trip
+
+Stop has to restore the authored world exactly. Round-tripping through
+`.somnium` is the obvious answer and the wrong one — loading an entity dump
+needs GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars,
+renderer uploads), and none of that is what Stop is for.
+
+`WorldCheckpoint` captures every registered component of every entity,
+keyed by `PersistentId`, at the moment Play is pressed. Stop writes the
+fields back, respawns what a script destroyed, destroys what it created,
+and removes components it attached. Scripts can only touch what the
+`TypeRegistry` describes, so capturing exactly that is both sufficient and
+free of the renderer.
+
+Resuming from Pause deliberately does **not** recapture: that would make
+everything a script had done so far the new "authored" state.
+
+### 12.6 16-D, and the one thing in it that is a review criterion
+
+The Details panel's Scripts section has **no rows in the widget tree**.
+Every row is built from what the script declared, at refresh time, by
+`UiManager::update_script_inspector`. Nothing in `somnium_ui` names a
+script property, and adding one to a `.luau` file changes no Rust. That is
+the plan's fourth goal and §8 risk 4; hand-written per-script field UI
+would be a review failure rather than a shortcut, and 26-J is meant to
+adopt this code path rather than grow a second one.
+
+Two judgement calls worth writing down:
+
+1. **A script asset's id comes from its path, not its content.** "Content-
+   hash-stable" is the plan's phrase and is right for the *cook*, where the
+   question is "is this bytecode still valid". For the id an attachment
+   writes into a scene it would be a disaster: every attachment in every
+   scene would break the first time someone saved the script.
+2. **The up/down arrows renumber `execution_order` to match list
+   position.** An author moving a row expects the list order to *be* the
+   run order. It is the one gesture that overwrites a value they may have
+   typed, so undo restores the authored numbers rather than a tidy 0,1,2,
+   and the help page says so.
+
+### 12.7 What 16-D did not close
+
+- **A saved `scene.somnium` still cannot be opened from the editor.**
+  `EditorEvent::LoadScene` routes to `map::load_map`, which only accepts
+  version-2 map recipes. §11.0 guessed this belonged with 16-D; it does
+  not — it is a renderer-reconstruction problem (meshes, terrain sidecars,
+  uploads) with nothing scripting-specific in it, and §6's 16-D list never
+  contained it. It remains open and is not made worse by this session.
+- **Diagnostics are positioned, not clickable.** The Output Log is a text
+  list; messages carry `file:line:column` and nothing turns that into a
+  jump. Claiming otherwise would be the kind of thing §9 exists to
+  prevent.
+- **No file watcher.** Reload is F5. 16-E is where debounce, the
+  dependency-graph blast radius and the rollback generation go.
+
+### 12.8 Next session — 16-E and 16-F
+
+1. **16-E:** the watcher, the debounce, the static dependency graph, and
+   the transaction around the swap — steps 1, 2, 3 and 9 of §6's list. The
+   *middle* of that list (4–8: export state, disable, teardown,
+   instantiate, migrate, import, replay) is already implemented and
+   proven by `an_in_process_module_swap_carries_declared_state_across` and
+   the hundred-cycle leak test.
+2. **16-F:** cook to bytecode behind a runtime fingerprint, the capability
+   manifest, the adversarial suite against every row of §4.6, profiler
+   rows, and the generated `.d.luau` declarations.
+3. Worth doing early in either: the ~75–100 ns/call the budgets record
+   flags as "known, quantified, not done" (§4 of the budgets file).

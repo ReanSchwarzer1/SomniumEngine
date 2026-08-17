@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# Phase 16-C: attaching a script and routing its forces is game-layer work,
+# so the example names the neutral scripting crate. It does not — and must
+# not — name `somnium_script_luau`.
+somnium_script = { workspace = true }
 somnium_core       = { workspace = true }
 somnium_ecs = { workspace = true }
 somnium_renderer = { workspace = true }

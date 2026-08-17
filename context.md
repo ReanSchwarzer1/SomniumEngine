@@ -296,6 +296,7 @@ hello_engine
 | `renderer` | `Option<&mut SomniumRenderer>` | yes | High-level draw API |
 | `selected_entity` | `&mut Option<Entity>` | yes | Editor selection state |
 | `ui` | `&mut UiManager` | yes | IPC send/recv |
+| `scripts` | `&mut ScriptHost` | yes | Phase 16-C. Import `.luau` assets and install the entity-to-rigid-body mapping `applyForce` needs. The *phases* are driven by the engine — calling them from a callback would run every script twice |
 | `should_exit` | `bool` | yes | Set to request shutdown |
 
 ### 5.3 Event Translation
@@ -515,6 +516,7 @@ SortKey bit layout:
 | World | `World` | Owns all archetypes and the entity allocator |
 | StableId | `StableId(&'static str)` | Phase 16-A. Durable component name for files and scripts. `ComponentId` stays process-local and lazy; `StableId` is what gets written down. |
 | PersistentId | `PersistentId(u128)` | Phase 16-A. Durable entity identity across save/load. `Entity` stays the runtime handle. |
+| ScriptSet | `ScriptSet { attachments: Vec<ScriptAttachment> }` | Phase 16-A. **Authored data only** — asset id, enable flag, execution order, typed properties. Never a VM pointer, a closure or a coroutine; that is what makes a scene portable and the language replaceable. Live VM state lives in `ScriptRuntime`, keyed by `InstanceUuid`. |
 
 ### 7.2 Storage Layout
 
@@ -844,8 +846,20 @@ Every frame, `about_to_wait()` runs in this exact sequence:
 1. time.tick()
       Updates delta_time, elapsed, frame_count, EMA FPS
 
-2. physics.step(dt)
-      Advances Jolt simulation by one delta
+1.5. scripts.sync()   (Phase 16-C, only while Playing)
+      Reconcile the live script set with the authored ScriptSets, then run
+      onInit / onStart to a fixed point (capped at 64 cycles), then the
+      onEnable / onDisable diff, then teardown for anything retired.
+
+2. Fixed-step loop, while accumulator >= fixed_dt:
+      ├── game.on_fixed_update(ctx)
+      ├── scripts.fixed_update()  (Phase 16-C, only while Playing)
+      │     onFixedUpdate → commands → validate → apply → route forces
+      │     then onEvent for whatever this step emitted.
+      │     Deliberately BEFORE physics.step, so a force a script applies
+      │     is integrated by the step that applied it.
+      └── physics.step(fixed_dt)
+            Advances Jolt simulation by one fixed delta
 
 2.5. Gizmo drag update  (Phase 11.5B)
       If gizmo_drag is Some, reproject cursor ray onto constrained axis/plane,
@@ -855,6 +869,11 @@ Every frame, `about_to_wait()` runs in this exact sequence:
       ├── Sync physics → ECS transforms  (query PhysicsBody + Transform)
       ├── EditorCamera.update(dt)        (WASD movement if RMB held)
       └── log_timer update
+
+3.5. scripts.update()  (Phase 16-C, only while Playing), then the script
+      log, diagnostics and rejections are drained into the Output Log —
+      that drain runs every frame, including while stopped, so a compile
+      error from an import is not stuck in a buffer until the next Play.
 
 4. Process queued editor events
       while let Some(ev) = ui.poll_editor_event() → handle_editor_event(ev)
@@ -1410,6 +1429,10 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 | FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
 | DF | 🔧 In engine; **audit required** | **Phase DF — Daggerfall:** nested material clipmaps. Fragment generate; shade taps the cache; POM **not** on clipmap height. Default **off**. Walk luminance gate not passed. **Next:** audit (`phase_DF.md` §12), then remeasure DF-E at maximized Native. `SOMNIUM_TERRAIN_CLIPMAP=1` to enable. |
+| 16-A | ✅ Complete | **Scripting foundation, no VM.** Runtime component insert/remove with archetype migration (`world.rs`, `archetype.rs`); durable component schemas and the `component_schema!` macro (`somnium_ecs::reflect`); `PersistentId` durable entity identity; the neutral scripting contract (`somnium_script` — values, snapshots, commands, `ScriptBackend`); built-in component registration (`somnium_core::reflect_registry`); `WorldView` + the command applier (`script_bridge.rs`); the schema-driven scene format. `mlua` appeared in no `Cargo.toml`. |
+| 16-B | ✅ Complete | **The Luau adapter.** `somnium_script_luau` — the only crate that names `mlua` (0.12.0 / Luau 0.728, interpreter only, exact-pinned). One VM per trust domain, engine API installed *before* `sandbox(true)`, a private environment per attachment, callbacks resolved once, bytecode from the embedded compiler only, a wall-clock deadline on the Luau interrupt. Eight base-library globals removed (`getfenv`/`setfenv` are the serious ones). Budgets measured in [`dev records/phase 16/16-B_budgets.md`](dev%20records/phase%2016/16-B_budgets.md); four defects found by measurement and fixed, one row over a ceiling shown to be arithmetically unreachable. |
+| 16-C | ✅ Complete | **Lifecycle, scheduler, frame hooks.** `LifecycleState` (`Loaded → Initialized → Started → Enabled ⇄ Disabled → Destroyed`) with a transition table; `ScriptRuntime` — instance registry, deterministic order, error quarantine, ownership ledger, the reload halves; `ScriptHost` in `somnium_core` — world reads, command apply, force/audio routing, the bounded init fixed point (64 cycles, after Fyrox). `onFixedUpdate` runs inside the existing accumulator **before** `physics.step`; `onUpdate` in the variable phase. Gate: `assets/scripts/demo_rotator.luau` rotates, reads input, applies a force, spawns and despawns what it spawned, emits and hears an event, and carries its state through a reload — asserted in `crates/somnium_core/tests/script_gate.rs`. |
+| 16-D | ✅ Complete | **Editor workflow.** `.luau` files are content (script icon, click-to-attach, **New Script** writes a strict-mode template); the Details panel's **Scripts** section is *generated from each script's declared schema* — no per-script UI is hand-written anywhere; attach / remove / reorder / enable / property edits are all `EditorCommand`s on the existing `UndoStack`, with the live-scrub convention `SetInspectorValue` established; diagnostics reach the Output Log positioned as `file:line:column`, with a blocking-error count in the status cluster; **F5** recompiles every script from disk and a file that no longer compiles leaves its instances running; Play captures the authored world and Stop restores it exactly, so a script cannot dirty the edit-time scene. Help: [`docs/editor/scripting.md`](docs/editor/scripting.md). |
 | CR | ✅ In engine | **Phase CR — Crysis:** CPU AABB frustum early-out for terrain vis (default on, Camera Details **Frustum Cull**, `SOMNIUM_CPU_FRUSTUM=0`). GPU 15B stays F10. Off-screen casters keep shadowing via cascade volumes (`shadow_only_queue`). Rayon job helper above 512 chunks (256-chunk default stays serial — CR-A GPU-bound). Record: `dev records/phase_CR.md`. |
 
 ---

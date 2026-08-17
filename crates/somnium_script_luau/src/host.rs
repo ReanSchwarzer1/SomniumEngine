@@ -551,6 +551,11 @@ pub fn build_ctx<'scope, 'env>(
                     )));
                 }
                 let parsed = convert::from_lua(&value).map_err(mlua::Error::RuntimeError)?;
+                // The declared type is the only thing that can tell a
+                // quaternion from four numbers; see `FieldType::coerce`.
+                let parsed = world
+                    .field_type(stable, field_id)
+                    .map_or(parsed.clone(), |ty| ty.coerce(parsed));
                 let mut record = ReflectObject::new();
                 record.insert(field_id, parsed);
                 commands.borrow_mut().push(ScriptCommand::SetFields {

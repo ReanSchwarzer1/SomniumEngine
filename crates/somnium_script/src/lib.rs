@@ -54,7 +54,10 @@ pub mod attachment;
 pub mod backend;
 pub mod command;
 pub mod ids;
+pub mod lifecycle;
 pub mod order;
+pub mod ownership;
+pub mod runtime;
 pub mod snapshot;
 pub mod value;
 
@@ -70,6 +73,12 @@ pub use command::{
     CommandBuffer, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken,
 };
 pub use ids::{InstanceUuid, LanguageTag, ScriptAssetId, ScriptInstanceId};
+pub use lifecycle::LifecycleState;
 pub use order::OrderKey;
+pub use ownership::{OwnedResource, OwnershipToken, ResourceLedger};
+pub use runtime::{
+    AttachmentView, InstanceFailure, MAX_INIT_CYCLES, PhaseInput, PhaseReport, ReconcileReport,
+    ScriptRuntime,
+};
 pub use snapshot::{InputSnapshot, ScriptEvent, ScriptSnapshot, TimeSnapshot, WorldView};
 pub use value::{ScriptObject, ScriptValue};

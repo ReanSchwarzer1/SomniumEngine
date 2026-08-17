@@ -12,6 +12,7 @@ pub const HELP_OUTLINER: &str = include_str!("../../../docs/editor/outliner.md")
 pub const HELP_TERRAIN: &str = include_str!("../../../docs/editor/terrain.md");
 pub const HELP_WATER: &str = include_str!("../../../docs/editor/water.md");
 pub const HELP_LIGHTING: &str = include_str!("../../../docs/editor/lighting.md");
+pub const HELP_SCRIPTING: &str = include_str!("../../../docs/editor/scripting.md");
 
 pub fn help_page(id: u8) -> &'static str {
     match id {
@@ -23,6 +24,7 @@ pub fn help_page(id: u8) -> &'static str {
         6 => HELP_TERRAIN,
         7 => HELP_WATER,
         8 => HELP_LIGHTING,
+        9 => HELP_SCRIPTING,
         _ => HELP_WELCOME,
     }
 }
@@ -38,6 +40,7 @@ pub fn help_titles() -> &'static [&'static str] {
         "Terrain",
         "Water",
         "Lighting",
+        "Scripting",
     ]
 }
 
@@ -117,7 +120,10 @@ pub fn icon_for_path(path: &Path, is_dir: bool) -> IconId {
         "ttf" | "otf" => IconId::Font,
         "wav" | "ogg" | "mp3" => IconId::Audio,
         "md" => IconId::License,
-        "rs" => IconId::Script,
+        // Phase 16-D: a `.luau` file is content, and the drawer is where an
+        // author finds it. `.rs` was already here; `.luau` is the one they
+        // will actually double-click.
+        "rs" | "luau" | "lua" => IconId::Script,
         "somnium" => IconId::Scene,
         _ => IconId::Unknown,
     }
@@ -254,8 +260,13 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 9);
+        assert_eq!(help_titles().len(), 10);
         assert_eq!(help_page(4), HELP_ABOUT);
+        assert_eq!(help_page(9), HELP_SCRIPTING);
+        // Phase 16-D: the two rules an author most needs and is most
+        // likely to be surprised by.
+        assert!(HELP_SCRIPTING.contains("visibility rule"));
+        assert!(HELP_SCRIPTING.contains("only while Play is running"));
         assert!(HELP_WATER.contains("RT Reflect"));
         assert!(HELP_WATER.contains("RT Refraction"));
         assert!(HELP_LIGHTING.contains("Disc Light"));

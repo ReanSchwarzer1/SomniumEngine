@@ -46,6 +46,20 @@ pub struct TimeSnapshot {
     pub step: u64,
 }
 
+impl Default for TimeSnapshot {
+    /// A stopped 60 Hz clock. `fixed_delta` is never zero even at rest,
+    /// because a script that divides by it would otherwise produce
+    /// infinities the moment a caller forgot to fill this in.
+    fn default() -> Self {
+        Self {
+            fixed_delta: 1.0 / 60.0,
+            delta: 1.0 / 60.0,
+            simulation_time: 0.0,
+            step: 0,
+        }
+    }
+}
+
 /// Input state as scripts see it.
 ///
 /// Keys are engine key codes, already translated out of the windowing
@@ -199,6 +213,20 @@ pub trait WorldView {
     /// Called once per attachment when its mirror is built, never per
     /// frame, so returning owned strings is fine here.
     fn script_fields(&self, component: StableId) -> Vec<(String, FieldId, bool)>;
+
+    /// A field's declared type.
+    ///
+    /// The shape converter cannot tell a quaternion from four numbers —
+    /// nothing in the value says which it is — so the boundary asks the
+    /// schema and re-tags through
+    /// [`FieldType::coerce`](somnium_ecs::reflect::FieldType::coerce). This
+    /// is the method that makes writing a rotation from a script possible
+    /// without loosening the type check for scene files.
+    fn field_type(
+        &self,
+        component: StableId,
+        field: FieldId,
+    ) -> Option<somnium_ecs::reflect::FieldType>;
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
@@ -225,7 +225,7 @@ enum LifecycleState {
 /// project has imported, which is why the brush stores a palette *index* rather
 /// than anything about the mesh itself.
 ///
-/// All four are CC0 from Poly Haven — see ATTRIBUTION.md.
+/// All four are CC0 from Poly Haven â€” see ATTRIBUTION.md.
 pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
     (
         "Grass Medium",
@@ -257,7 +257,7 @@ struct FoliagePart {
     index_count: u32,
     material_id: u32,
     local: glam::Mat4,
-    /// Cutout / foliage material — the part LOD should drop first (leaves,
+    /// Cutout / foliage material â€” the part LOD should drop first (leaves,
     /// twigs). Bark stays until the impostor band, then we keep only this
     /// being false. Index-count is the fallback when the glTF did not mark
     /// any part this way.
@@ -273,7 +273,7 @@ pub struct Engine<G: GameApp> {
     /// Phase 16-A: the engine's one reflected description of its
     /// components. Built once at startup and shared by scene
     /// serialization, the script boundary, and (when it exists) the
-    /// reflection inspector — the whole point being that there is exactly
+    /// reflection inspector â€” the whole point being that there is exactly
     /// one of these.
     type_registry: somnium_ecs::reflect::TypeRegistry,
     physics: Option<PhysicsWorld>,
@@ -297,7 +297,7 @@ pub struct Engine<G: GameApp> {
     /// collapses into one undo entry instead of one per pixel of travel.
     /// `(entity index, value before the drag)`.
     /// Uploaded geometry per palette entry, filled in the first time each one
-    /// is painted — loading four scanned models up front would add seconds to
+    /// is painted â€” loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
     foliage_meshes: [Option<Vec<FoliagePart>>; FOLIAGE_PALETTE.len()],
     /// Palette entries whose import failed, so we stop retrying them.
@@ -359,6 +359,22 @@ pub struct Engine<G: GameApp> {
     ui_wants_exit: bool,
     /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
     pending_map_load: Option<crate::MapLoadResult>,
+    // â”€â”€ Phase 16-C: scripting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    /// Live scripts: the lifecycle, the scheduler and the command applier.
+    ///
+    /// Public so game code can load assets and install the entity-to-body
+    /// mapping `applyForce` needs; the engine drives the phases.
+    pub scripts: crate::script_host::ScriptHost,
+    /// Held keys and buttons as scripts see them. Separate from the
+    /// editor's own input handling because a script's view is a *sampled*
+    /// snapshot per fixed step, not an event stream.
+    script_input: crate::script_input::ScriptInputTracker,
+    /// The authored world as it was when Play was pressed. Stop restores
+    /// it, which is what stops a script dirtying the edit-time scene.
+    play_checkpoint: Option<crate::script_input::WorldCheckpoint>,
+    /// Fixed steps elapsed in this play session. Part of the deterministic
+    /// clock a script sees, and reset by Stop.
+    script_step: u64,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -440,6 +456,10 @@ impl<G: GameApp + 'static> Engine<G> {
             scene_dirty: false,
             ui_wants_exit: false,
             pending_map_load: None,
+            scripts: crate::script_host::ScriptHost::default(),
+            script_input: crate::script_input::ScriptInputTracker::new(),
+            play_checkpoint: None,
+            script_step: 0,
         };
 
         event_loop
@@ -450,6 +470,346 @@ impl<G: GameApp + 'static> Engine<G> {
         Ok(())
     }
 }
+
+impl<G: GameApp> Engine<G> {
+    // â”€â”€ Phase 16-C: driving scripts from the frame loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// The clock a script sees. Fixed-step callbacks are handed
+    /// `fixed_delta` and simulation time and nothing else, because those
+    /// are the only two values that are the same on a replay.
+    fn script_time(
+        &self,
+        fixed_dt: f32,
+        dt: f32,
+    ) -> somnium_script::snapshot::TimeSnapshot {
+        somnium_script::snapshot::TimeSnapshot {
+            fixed_delta: fixed_dt,
+            delta: dt,
+            simulation_time: f64::from(self.simulation_clock.elapsed_seconds),
+            step: self.script_step,
+        }
+    }
+
+    fn sync_scripts(&mut self, dt: f32) {
+        let phase = somnium_script::runtime::PhaseInput {
+            time: self.script_time(self.simulation_clock.fixed_delta_seconds, dt),
+            input: self.script_input.snapshot(),
+        };
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        let report = self.scripts.sync(&mut self.world, &phase, &mut services);
+        if report.hit_cap {
+            warn!("script initialisation hit its cycle cap; see the Output Log");
+        }
+    }
+
+    fn script_fixed_update(&mut self, fixed_dt: f32, dt: f32) {
+        let time = self.script_time(fixed_dt, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts
+            .fixed_update(&mut self.world, time, &input, &mut services);
+    }
+
+    fn script_update(&mut self, dt: f32) {
+        let time = self.script_time(self.simulation_clock.fixed_delta_seconds, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts
+            .update(&mut self.world, time, &input, &mut services);
+    }
+
+    /// Move everything scripts produced into the editor's Output Log.
+    ///
+    /// Always drained, even while stopped, so a compile error raised by an
+    /// import is not stuck in a buffer until the next Play.
+    fn drain_script_output(&mut self) {
+        let logs = self.scripts.take_logs();
+        let diagnostics = self.scripts.take_diagnostics();
+        let rejections = self.scripts.take_rejections();
+        if logs.is_empty() && diagnostics.is_empty() && rejections.is_empty() {
+            return;
+        }
+        let errors = diagnostics
+            .iter()
+            .filter(|d| d.severity == somnium_script::backend::Severity::Error)
+            .count();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            for line in logs {
+                ui.append_log(&line.to_string());
+            }
+            for diagnostic in &diagnostics {
+                ui.append_log(&format!("[script] {diagnostic}"));
+            }
+            for rejection in rejections {
+                ui.append_log(&format!("[script rejected] {rejection}"));
+            }
+            if errors > 0 {
+                ui.set_script_error_count(errors);
+            }
+        }
+    }
+
+    // ── Phase 16-D: the editor's scripting actions ───────────────────────
+
+    /// How many attachments the selection carries, if it carries a
+    /// `ScriptSet` at all.
+    fn selected_script_count(&self) -> Option<usize> {
+        let entity = self.selected_entity?;
+        self.world
+            .get::<somnium_script::attachment::ScriptSet>(entity)
+            .map(somnium_script::attachment::ScriptSet::len)
+    }
+
+    /// Run one script `EditorCommand` against the selection.
+    ///
+    /// Every scripting edit goes through the undo stack, so Ctrl+Z covers
+    /// attaching a behaviour the same way it covers moving an object.
+    fn push_script_command(
+        &mut self,
+        build: impl FnOnce(u32) -> Box<dyn crate::editor_commands::EditorCommand>,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        let command = build(entity.index());
+        self.undo_stack
+            .push(command, &mut self.world, &mut self.selected_entity);
+        self.scene_dirty = true;
+    }
+
+    /// Import a `.luau` file and attach it to the selection.
+    fn attach_script(&mut self, path: &std::path::Path) {
+        match self.scripts.import_script_file(path) {
+            Ok(asset) => {
+                if self.selected_entity.is_none() {
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.push_toast("Select an entity first, then click the script");
+                    }
+                    return;
+                }
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::AttachScriptCmd::new(entity, asset))
+                });
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast(&format!(
+                        "Attached {}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+            Err(diagnostics) => {
+                let errors = diagnostics.messages.len();
+                if let Some(ui) = &mut self.ui_manager {
+                    for message in &diagnostics.messages {
+                        ui.append_log(&format!("[script] {message}"));
+                    }
+                    ui.set_script_error_count(errors);
+                    ui.push_toast("Script failed to compile — see the Output Log");
+                }
+            }
+        }
+        self.drain_script_output();
+    }
+
+    /// Write a new `.luau` file from the template and attach it.
+    ///
+    /// Never overwrites: a name that exists gets a numeric suffix. Losing
+    /// someone's script to a menu click is not a recoverable mistake.
+    fn create_script(&mut self) {
+        let folder = std::env::current_dir()
+            .unwrap_or_default()
+            .join("assets")
+            .join("scripts");
+        if let Err(error) = std::fs::create_dir_all(&folder) {
+            error!("cannot create {}: {error}", folder.display());
+            return;
+        }
+        let mut path = folder.join("NewScript.luau");
+        let mut suffix = 1;
+        while path.exists() {
+            path = folder.join(format!("NewScript{suffix}.luau"));
+            suffix += 1;
+        }
+        if let Err(error) = std::fs::write(&path, crate::script_host::NEW_SCRIPT_TEMPLATE) {
+            error!("cannot write {}: {error}", path.display());
+            return;
+        }
+        info!("Created {}", path.display());
+        self.attach_script(&path);
+        if let Some(ui) = &mut self.ui_manager {
+            ui.refresh_content();
+        }
+    }
+
+    /// Apply one property edit, recording it only when the gesture ends.
+    fn set_script_property(
+        &mut self,
+        index: usize,
+        field: String,
+        value: somnium_script::value::ScriptValue,
+        live: bool,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        if live {
+            // Mid-drag: apply it, do not record it. The gesture's final
+            // value arrives once with `live == false` and becomes the one
+            // undo step — the same convention `SetInspectorValue` uses.
+            if let Some(set) = self
+                .world
+                .get_mut::<somnium_script::attachment::ScriptSet>(entity)
+            {
+                if let Some(attachment) = set.attachments.get_mut(index) {
+                    attachment.properties.insert(field, value);
+                }
+            }
+            self.scene_dirty = true;
+            return;
+        }
+        self.push_script_command(|entity_index| {
+            Box::new(crate::editor_commands::SetScriptPropertyCmd::new(
+                entity_index,
+                index,
+                field,
+                value,
+            ))
+        });
+    }
+
+    /// Describe the selection's attachments for the Details panel.
+    ///
+    /// Every row here comes from the script's own declaration. Nothing in
+    /// this function names a property, and adding one to a `.luau` file
+    /// changes nothing in Rust.
+    fn script_inspector_state(&self) -> Option<somnium_ui::ScriptInspectorState> {
+        let entity = self.selected_entity?;
+        let set = self
+            .world
+            .get::<somnium_script::attachment::ScriptSet>(entity)?;
+
+        let mut attachments = Vec::with_capacity(set.attachments.len());
+        for attachment in &set.attachments {
+            let schema = self.scripts.runtime().asset_schema(attachment.asset);
+            let asset_name = self
+                .scripts
+                .script_path(attachment.asset)
+                .and_then(|path| path.file_name())
+                .map_or_else(
+                    || attachment.asset.to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+
+            let quarantined = self.scripts.runtime().is_quarantined(attachment.instance);
+            let status = match self.scripts.state_of(attachment.instance) {
+                Some(state) if quarantined => {
+                    format!("{} — quarantined after repeated errors", state.name())
+                }
+                Some(state) => state.name().to_string(),
+                None if schema.is_none() => "asset not imported".to_string(),
+                None => "not running (press Play)".to_string(),
+            };
+
+            let fields = schema.map_or_else(Vec::new, |schema| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let authored = attachment.properties.get(&field.name);
+                        let value = authored.unwrap_or(&field.default);
+                        somnium_ui::ScriptFieldRow {
+                            name: field.name.clone(),
+                            kind: script_field_kind(value, field),
+                            description: field.description.clone(),
+                        }
+                    })
+                    .collect()
+            });
+
+            attachments.push(somnium_ui::ScriptAttachmentRow {
+                asset_name,
+                status,
+                enabled: attachment.enabled,
+                quarantined,
+                fields,
+            });
+        }
+        Some(somnium_ui::ScriptInspectorState { attachments })
+    }
+
+    /// Capture the authored world so Stop can put it back, and start the
+    /// script clock from zero.
+    fn begin_play_session(&mut self) {
+        self.play_checkpoint = Some(crate::script_input::WorldCheckpoint::capture(
+            &mut self.world,
+            &self.type_registry,
+        ));
+        self.script_step = 0;
+        self.scripts.runtime_mut().set_world_seed(SCRIPT_WORLD_SEED);
+    }
+
+    /// Tear every script down and restore the world exactly as it was.
+    fn end_play_session(&mut self) {
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts.shutdown(&mut self.world, &mut services);
+        if let Some(checkpoint) = self.play_checkpoint.take() {
+            checkpoint.restore(&mut self.world, &self.type_registry);
+        }
+        self.script_step = 0;
+        self.drain_script_output();
+    }
+}
+
+/// How one declared property is drawn.
+///
+/// Numbers and booleans are editable; everything else is shown read-only
+/// rather than hidden, because an absent row looks like the script forgot
+/// to declare the property and a visible one says "not authorable yet".
+fn script_field_kind(
+    value: &somnium_script::value::ScriptValue,
+    field: &somnium_script::backend::ScriptFieldSchema,
+) -> somnium_ui::ScriptFieldKind {
+    use somnium_script::value::ScriptValue as V;
+    match value {
+        #[allow(clippy::cast_possible_truncation)]
+        V::F64(v) => somnium_ui::ScriptFieldKind::Number {
+            value: *v as f32,
+            min: field.min.map(|m| m as f32),
+            max: field.max.map(|m| m as f32),
+        },
+        #[allow(clippy::cast_precision_loss)]
+        V::I64(v) => somnium_ui::ScriptFieldKind::Number {
+            value: *v as f32,
+            min: field.min.map(|m| m as f32),
+            max: field.max.map(|m| m as f32),
+        },
+        V::Bool(v) => somnium_ui::ScriptFieldKind::Bool(*v),
+        V::Str(v) => somnium_ui::ScriptFieldKind::Text(v.clone()),
+        V::Nil => somnium_ui::ScriptFieldKind::Text("unset".into()),
+        other => somnium_ui::ScriptFieldKind::Text(other.kind().to_string()),
+    }
+}
+
+/// The seed every play session's script random streams derive from.
+///
+/// Fixed rather than clock-derived: Phase 16 promises that the same build
+/// on the same platform replays identically, and a wall-clock seed would
+/// break that on the first frame.
+const SCRIPT_WORLD_SEED: u64 = 0x536F_6D6E_6975_6D01;
 
 impl<G: GameApp> ApplicationHandler for Engine<G> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -478,6 +838,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Resumed);
             return;
@@ -535,6 +896,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
+                    &mut self.scripts,
                 );
                 self.game.on_init(&mut ctx);
 
@@ -566,6 +928,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Suspended);
         }
@@ -610,7 +973,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 1. Handle global Ctrl+ shortcuts FIRST (never for text widgets) ────
+        // â”€â”€ 1. Handle global Ctrl+ shortcuts FIRST (never for text widgets) â”€â”€â”€â”€
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = &event {
             if key_ev.state == winit::event::ElementState::Pressed
                 && !key_ev.repeat
@@ -650,7 +1013,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 2. Other shortcuts (non-Ctrl) ──────────────────────────────────────
+        // â”€â”€ 2. Other shortcuts (non-Ctrl) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = &event {
             if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
                 use winit::keyboard::{KeyCode as WKC, PhysicalKey};
@@ -678,7 +1041,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         WKC::F5 => {
                             self.handle_editor_event(EditorEvent::ToggleShadingMode);
                         }
-                        // ── Phase 14F: terrain edit mode + brush shortcuts ──
+                        // â”€â”€ Phase 14F: terrain edit mode + brush shortcuts â”€â”€
                         WKC::F6 => {
                             self.handle_editor_event(EditorEvent::ToggleTerrainEdit);
                         }
@@ -744,7 +1107,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 3. Route to native UI; return early if consumed ──────────────────
+        // â”€â”€ 3. Route to native UI; return early if consumed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let ui_consumed = if let Some(ui) = &mut self.ui_manager {
             ui.process_os_event(&event)
         } else {
@@ -754,7 +1117,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
-        // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
+        // â”€â”€ 3.4 Foliage brush (Phase 17F) â€” takes priority over sculpting â”€â”€â”€â”€
         if !self.play_session_active && self.foliage_paint_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
@@ -788,7 +1151,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 3.5 Terrain brush stroke (Phase 14D) — takes priority over gizmo ──
+        // â”€â”€ 3.5 Terrain brush stroke (Phase 14D) â€” takes priority over gizmo â”€â”€
         if !self.play_session_active && self.terrain_edit_active {
             if let WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
@@ -812,7 +1175,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 4. Gizmo LMB pick / drag-end ────────────────────────────────────
+        // â”€â”€ 4. Gizmo LMB pick / drag-end â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let mut gizmo_consumed = false;
 
         if !self.play_session_active {
@@ -864,8 +1227,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
-        // ── 5. Forward remaining events to game ──────────────────────────────
+        // â”€â”€ 5. Forward remaining events to game â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if let Some(engine_event) = translate_window_event(&event) {
+            // Phase 16-C: scripts see a sampled snapshot per fixed step
+            // rather than the event stream, so the tracker folds every
+            // event in here and the phase reads it later.
+            self.script_input.observe(&engine_event);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -878,6 +1245,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &engine_event);
             let speed_request = ctx.camera_speed_request;
@@ -922,6 +1290,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         };
 
         if let Some(ev) = engine_event {
+            self.script_input.observe(&ev);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -934,6 +1303,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &ev);
         }
@@ -962,6 +1332,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Editor-world simulations (water, buoyancy, particles, previews) run
         // in ordinary Edit mode. Pause is the only state that freezes time;
         // Play remains a game-state distinction, not an animation power switch.
+        // Phase 16-C: reconcile the live script set with the authored one
+        // before any phase runs, so an attachment added this frame is
+        // initialised this frame. Only while Play is running â€” scripts are
+        // not allowed to dirty the edit-time scene.
+        if self.simulation_clock.state == SimulationState::Playing {
+            self.sync_scripts(dt);
+        }
+
         if self.simulation_clock.state != SimulationState::Paused {
             self.simulation_accumulator += dt.min(0.1);
             let fixed_dt = self.simulation_clock.fixed_delta_seconds;
@@ -979,8 +1357,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.ui_manager.as_mut().unwrap(),
                         crate::camera_speed_from_normalized(self.camera_speed_norm),
                         self.simulation_clock,
+                        &mut self.scripts,
                     );
                     self.game.on_fixed_update(&mut ctx);
+                }
+                // `onFixedUpdate` runs here, inside the accumulator and
+                // **before** `physics.step`, so a force a script applies is
+                // integrated by the same step that applied it. This is the
+                // deterministic hook; nothing about the loop needed
+                // restructuring to get it.
+                if self.simulation_clock.state == SimulationState::Playing {
+                    self.script_fixed_update(fixed_dt, dt);
+                    self.script_input.end_step();
+                    self.script_step += 1;
                 }
                 if let Some(physics) = self.physics.as_mut() {
                     physics.step(fixed_dt);
@@ -990,7 +1379,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── Gizmo drag: update entity transform each frame while dragging ────
+        // â”€â”€ Gizmo drag: update entity transform each frame while dragging â”€â”€â”€â”€
         let drag_result: Option<(u32, Transform)> = self.gizmo_drag.as_ref().and_then(|drag| {
             let (cam, inv_vp) = self
                 .renderer
@@ -1024,9 +1413,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_update(&mut ctx);
         }
+
+        // Phase 16-C: the variable-rate script phase, and the one place
+        // script output reaches the editor's Output Log.
+        if self.simulation_clock.state == SimulationState::Playing {
+            self.script_update(dt);
+        }
+        self.drain_script_output();
 
         // Phase IV-C: ECS membership is authoritative for renderer-owned water
         // data. Delete drops textures; undo/redo recreates them from the small
@@ -1054,7 +1451,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             renderer.water_bodies.retain_ids(&active);
         }
 
-        // ── Update native UI panels with current frame state ─────────────────
+        // â”€â”€ Update native UI panels with current frame state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
             let mut names: Vec<(u32, String, Option<u32>)> = all_entities
@@ -1329,6 +1726,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     show_width: matches!(lc.light_type, LightType::Rect | LightType::Tube),
                     show_height: lc.light_type == LightType::Rect,
                 });
+            // Phase 16-D: the Scripts section, built from what each
+            // attached script declared. Computed before the `ui` borrow
+            // because it reads the world and the script host.
+            let sel_scripts = self.script_inspector_state();
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
                 ui.set_fps(self.time.fps());
@@ -1389,6 +1790,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .map(|m| m.base_color)
                 });
                 ui.update_material_inspector(material);
+                ui.update_script_inspector(sel_scripts);
                 ui.set_scene_dirty(self.scene_dirty);
                 // Phase 26-Zeta-G. Must run after the update_* writes above:
                 // the first value a field is seen holding becomes its revert
@@ -1400,7 +1802,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // Phase 29: the overlay is refreshed every frame rather than on
-        // selection changes like the inspectors above it — the numbers move
+        // selection changes like the inspectors above it â€” the numbers move
         // whether or not anything was clicked.
         {
             let rows = self
@@ -1411,7 +1813,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     let p = &r.profiler;
                     let mut rows: Vec<somnium_ui::ProfilerRow> = Vec::new();
                     rows.push(somnium_ui::ProfilerRow {
-                        label: "— GPU —".to_string(),
+                        label: "â€” GPU â€”".to_string(),
                         value: String::new(),
                         depth: 0,
                     });
@@ -1422,7 +1824,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     }));
                     if p.results().is_empty() {
                         rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
+                            label: "collectingâ€¦".to_string(),
                             value: String::new(),
                             depth: 1,
                         });
@@ -1433,7 +1835,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         depth: 1,
                     });
                     rows.push(somnium_ui::ProfilerRow {
-                        label: "— Graph —".to_string(),
+                        label: "â€” Graph â€”".to_string(),
                         value: String::new(),
                         depth: 0,
                     });
@@ -1443,10 +1845,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .filter(|s| s.depth <= 1)
                         .map(|s| s.name)
                         .collect::<Vec<_>>()
-                        .join(" → ");
+                        .join(" â†’ ");
                     if graph.is_empty() {
                         rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
+                            label: "collectingâ€¦".to_string(),
                             value: String::new(),
                             depth: 1,
                         });
@@ -1458,13 +1860,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         });
                     }
                     rows.push(somnium_ui::ProfilerRow {
-                        label: "— CPU —".to_string(),
+                        label: "â€” CPU â€”".to_string(),
                         value: String::new(),
                         depth: 0,
                     });
                     if p.cpu_results().is_empty() {
                         rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
+                            label: "collectingâ€¦".to_string(),
                             value: String::new(),
                             depth: 1,
                         });
@@ -1537,6 +1939,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_render(&mut ctx);
 
@@ -1546,7 +1949,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── Particle simulation (Phase 11.5J) ────────────────────────────────
+        // â”€â”€ Particle simulation (Phase 11.5J) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             let frame = self.time.frame_count();
             let particle_dt = if self.simulation_clock.state != SimulationState::Paused {
@@ -1560,7 +1963,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── Terrain editing + submission (Phase 14) ──────────────────────────
+        // â”€â”€ Terrain editing + submission (Phase 14) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         self.apply_terrain_restores();
         if self.play_session_active {
             self.gizmo_drag = None;
@@ -1578,12 +1981,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.submit_foliage();
         self.sync_terrain_colliders();
 
-        // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
+        // â”€â”€ Light gizmos (Phase 13E) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if !self.play_session_active {
             self.submit_light_gizmos();
         }
 
-        // ── Post-processing settings (Phase 15A1) ────────────────────────────
+        // â”€â”€ Post-processing settings (Phase 15A1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         self.apply_post_process();
         self.apply_camera_settings();
 
@@ -1598,7 +2001,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             r.render(c, ui, window);
         }
 
-        // ── Drain editor events and apply to ECS ──────────────────────────────
+        // â”€â”€ Drain editor events and apply to ECS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             let mut events: Vec<EditorEvent> = Vec::new();
             if let Some(ui) = &mut self.ui_manager {
@@ -1622,6 +2025,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
+                    &mut self.scripts,
                 );
                 self.game.on_map_loaded(&mut ctx, &result);
             }
@@ -1631,7 +2035,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
-        // ── Forward log entries to the output log panel ───────────────────────
+        // â”€â”€ Forward log entries to the output log panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             let mut entries: Vec<String> = Vec::new();
             if let Some(rx) = &self.log_rx {
@@ -1655,7 +2059,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if self.state != LifecycleState::ShuttingDown {
-            warn!("Engine exiting without explicit shutdown — calling on_shutdown");
+            warn!("Engine exiting without explicit shutdown â€” calling on_shutdown");
             self.game.on_shutdown();
         }
         self.state = LifecycleState::ShuttingDown;
@@ -1678,7 +2082,7 @@ impl<G: GameApp> Engine<G> {
         event_loop.exit();
     }
 
-    // ── Phase 14: terrain editing helpers ────────────────────────────────────
+    // â”€â”€ Phase 14: terrain editing helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// The selected entity's terrain component, if it has one.
     fn selected_terrain(&self) -> Option<TerrainComponent> {
@@ -1778,7 +2182,7 @@ impl<G: GameApp> Engine<G> {
     /// Apply the active stroke each frame and update the brush cursor uniform.
     fn update_terrain_editing(&mut self, dt: f32) {
         // Phase 17F: the foliage brush gets the same ring. Painting blind was
-        // the single worst thing about the first cut of it — you could not see
+        // the single worst thing about the first cut of it â€” you could not see
         // where a stroke would land until after it landed.
         if self.foliage_paint_active {
             let Some(tc) = self.selected_terrain() else {
@@ -1919,7 +2323,7 @@ impl<G: GameApp> Engine<G> {
                 self.terrain_restore_queue.clone(),
             ))
         };
-        // Stroke effects are already applied — record for undo only.
+        // Stroke effects are already applied â€” record for undo only.
         self.undo_stack.push_silent(cmd);
         if stroke.is_paint {
             if let Some(r) = self.renderer.as_mut() {
@@ -2202,7 +2606,7 @@ impl<G: GameApp> Engine<G> {
             r.set_cpu_frustum(cam.frustum_cull);
         }
         // Separate borrow because the dynamic-resolution setter needs the
-        // render context as well — switching the controller off resizes the
+        // render context as well â€” switching the controller off resizes the
         // scene targets back to the base extent there and then.
         if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
             r.set_dynamic_resolution(
@@ -2302,7 +2706,7 @@ impl<G: GameApp> Engine<G> {
     /// Submit every painted foliage instance (Phase 17F).
     ///
     /// Instances are ordinary draw commands, so they inherit the Phase 15
-    /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
+    /// pipeline â€” indirect draws, frustum, Hi-Z and per-cluster culling â€”
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
         let camera_ws = self
@@ -2394,7 +2798,7 @@ impl<G: GameApp> Engine<G> {
                 let casts = d.x * d.x + d.z * d.z <= shadow_sq;
                 let dist = (d.x * d.x + d.z * d.z).sqrt();
                 // Three mesh LODs. The old "impostor" was an untextured ground
-                // plane rotated toward the camera — a black triangle that FSR
+                // plane rotated toward the camera â€” a black triangle that FSR
                 // then ghosted. Past impostor_distance keep the solid parts
                 // (trunk / branches). Past lod_distance drop the leaf/twig
                 // cutouts. Index-count is only the fallback when the glTF did
@@ -2489,13 +2893,13 @@ impl<G: GameApp> Engine<G> {
             }
         };
 
-        // Vegetation is almost always exported as BLEND — Poly Haven's grass
+        // Vegetation is almost always exported as BLEND â€” Poly Haven's grass
         // and leaves are. Left that way it goes through the sorted forward
         // pass: per-object-sorted draws with no depth write, so blades sort
         // wrongly against each other, cast no shadows, and skip GPU culling.
         // Re-tagging as MASK moves them to the visibility buffer where they
         // belong. These particular models are modelled blades with JPEG
-        // textures and carry no alpha, so the cutout never fires — the win is
+        // textures and carry no alpha, so the cutout never fires â€” the win is
         // the opaque path. Alpha-carded assets get the clipping for free.
         for m in &mut scene.materials {
             if m.alpha_mode == somnium_asset::AlphaMode::Blend {
@@ -2527,7 +2931,7 @@ impl<G: GameApp> Engine<G> {
         // with no trunk, and for the island tree picked a 714k-triangle leaf
         // mesh that renders as nothing.
         //
-        // Meanwhile these models are also *collections* — the grass files hold
+        // Meanwhile these models are also *collections* â€” the grass files hold
         // seventeen separate tufts, and instancing all of them would multiply
         // every dab by seventeen. So: group primitives by node, take the one
         // node with the most geometry, and keep all of its primitives.
@@ -2616,7 +3020,7 @@ impl<G: GameApp> Engine<G> {
         };
         // `raycast` marches in terrain-local space but transforms the result
         // back to world before returning. Painted instances are stored local,
-        // because `submit_foliage` composes them with the terrain's transform —
+        // because `submit_foliage` composes them with the terrain's transform â€”
         // so the hit has to come back down. Skipping this applied the terrain
         // offset twice and dropped every stroke a terrain-width away from the
         // cursor.
@@ -3275,7 +3679,7 @@ impl<G: GameApp> Engine<G> {
                                 cam.dynamic_target_ms = value.clamp(4.0, 100.0);
                             }
                             // Entered as a percentage. 25% is a quarter of the
-                            // linear resolution — about 6% of the pixels — and
+                            // linear resolution â€” about 6% of the pixels â€” and
                             // is already well past where FSR can reconstruct.
                             IF::CameraDynResFloor => {
                                 cam.dynamic_floor = (value / 100.0).clamp(0.25, 1.0);
@@ -3410,7 +3814,7 @@ impl<G: GameApp> Engine<G> {
                         return;
                     }
                     // Phase 25H: a terrain-wide multiplier, not a per-layer
-                    // value — the layers already author their own relief and
+                    // value â€” the layers already author their own relief and
                     // this scales all of them together.
                     if field == IF::TerrainRelief {
                         let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
@@ -3591,7 +3995,7 @@ impl<G: GameApp> Engine<G> {
                                     .clamp(new_light.inner_angle, std::f32::consts::FRAC_PI_2);
                             }
                             // Colour is linear RGB and separate from intensity,
-                            // so it is not clamped to 1 — values above white are
+                            // so it is not clamped to 1 â€” values above white are
                             // how you get a tinted, over-bright key light.
                             IF::LightColorR => new_light.color.x = value.max(0.0),
                             IF::LightColorG => new_light.color.y = value.max(0.0),
@@ -3720,7 +4124,7 @@ impl<G: GameApp> Engine<G> {
                 // Phase 16-A: the schema-driven format (`version: 3`).
                 // It writes whatever the registry describes, which is how
                 // script attachments and their authored properties reach
-                // the file at all — the hand-written version-1 walk has no
+                // the file at all â€” the hand-written version-1 walk has no
                 // way to express them.
                 match crate::scene_schema::save_scene_schema(
                     &mut self.world,
@@ -3861,7 +4265,7 @@ impl<G: GameApp> Engine<G> {
                         wt: Some(WorldTransform::identity()),
                         mesh_kind,
                         is_particle_emitter,
-                        // Terrains are not duplicated — two entities sharing
+                        // Terrains are not duplicated â€” two entities sharing
                         // one terrain_id would draw the same terrain twice.
                         terrain: None,
                         voxel_terrain: None,
@@ -4020,7 +4424,7 @@ impl<G: GameApp> Engine<G> {
 
             // Phase DOOM-E/B/C. All four are renderer-side switches with no
             // scene state behind them, so unlike Dynamic Resolution there is no
-            // component to keep in step — the renderer is the source of truth.
+            // component to keep in step â€” the renderer is the source of truth.
             EditorEvent::SetTerrainAerial(on) => {
                 if let Some(r) = &mut self.renderer {
                     r.aerial_split_enabled = on;
@@ -4090,10 +4494,97 @@ impl<G: GameApp> Engine<G> {
                     .get(self.viewport_resolution)
                     .copied()
                     .unwrap_or("Native");
-                info!("Viewport 3D {label} ({sw}×{sh})");
+                info!("Viewport 3D {label} ({sw}Ã—{sh})");
+            }
+
+            // ── Phase 16-D: scripting ────────────────────────────────────
+            EditorEvent::AttachScript(path) => self.attach_script(&std::path::PathBuf::from(path)),
+
+            EditorEvent::CreateScript => self.create_script(),
+
+            EditorEvent::DetachScript(index) => {
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::DetachScriptCmd::new(entity, index))
+                });
+            }
+
+            EditorEvent::ReorderScript { index, delta } => {
+                let Some(count) = self.selected_script_count() else {
+                    return;
+                };
+                let target = i64::try_from(index).unwrap_or(0) + i64::from(delta);
+                if target < 0 || target >= i64::try_from(count).unwrap_or(0) {
+                    // Already at the end of the list. Silently doing
+                    // nothing is right here — the arrow is visible on every
+                    // row and clamping is what a list is expected to do.
+                    return;
+                }
+                let to = usize::try_from(target).unwrap_or(0);
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::ReorderScriptCmd::new(
+                        entity, index, to,
+                    ))
+                });
+            }
+
+            EditorEvent::SetScriptEnabled { index, enabled } => {
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::SetScriptEnabledCmd::new(
+                        entity, index, enabled,
+                    ))
+                });
+            }
+
+            EditorEvent::SetScriptNumber {
+                index,
+                field,
+                value,
+                live,
+            } => {
+                self.set_script_property(
+                    index,
+                    field,
+                    somnium_script::value::ScriptValue::F64(f64::from(value)),
+                    live,
+                );
+            }
+
+            EditorEvent::SetScriptBool {
+                index,
+                field,
+                value,
+            } => {
+                self.set_script_property(
+                    index,
+                    field,
+                    somnium_script::value::ScriptValue::Bool(value),
+                    false,
+                );
+            }
+
+            EditorEvent::ReloadScripts => {
+                let (ok, failed) = self.scripts.reload_all_from_disk();
+                self.drain_script_output();
+                if let Some(ui) = &mut self.ui_manager {
+                    if failed == 0 {
+                        ui.clear_script_errors();
+                        ui.push_toast(&format!("Reloaded {ok} script(s)"));
+                    } else {
+                        ui.push_toast(&format!(
+                            "Reloaded {ok} script(s); {failed} still failing — see the Output Log"
+                        ));
+                    }
+                }
             }
 
             EditorEvent::PlaySimulation => {
+                // Phase 16-D: the authored world is captured on the way in,
+                // once per session. Resuming from Pause must not recapture
+                // it â€” that would silently make everything a script has
+                // done so far the new "authored" state.
+                if !self.play_session_active {
+                    self.begin_play_session();
+                }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
                 self.gizmo_drag = None;
@@ -4125,6 +4616,12 @@ impl<G: GameApp> Engine<G> {
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
                 self.simulation_accumulator = 0.0;
+                // Phase 16-D: tear the scripts down and put the authored
+                // world back before anything else observes it, so Stop is
+                // exact rather than approximately exact.
+                if self.play_session_active {
+                    self.end_play_session();
+                }
                 self.play_session_active = false;
                 if let Some(r) = &mut self.renderer {
                     r.set_editor_overlays_enabled(true);
@@ -4414,11 +4911,11 @@ impl<G: GameApp> Engine<G> {
     }
 }
 
-// ─── Gizmo picking / drag math ────────────────────────────────────────────────
+// â”€â”€â”€ Gizmo picking / drag math â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Place a newly created entity a few metres in front of the camera.
 ///
-/// Origin is usually underground on the default landscape, so Create → Disc /
+/// Origin is usually underground on the default landscape, so Create â†’ Disc /
 /// Tube / Cube at (0,0,0) looks like the feature never spawned. `look` is the
 /// camera forward (the direction a disc/spot/rect should emit); `right` is the
 /// camera's horizontal axis (a tube's length so it reads as a line in view).

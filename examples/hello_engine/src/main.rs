@@ -1317,6 +1317,9 @@ impl GameApp for HelloGame {
 
         ctx.physics.optimize_broad_phase();
 
+        // Phase 16-C: import the demo script and attach it to a cube.
+        setup_scripting(self, ctx);
+
         // Send initial content browser listing
         ctx.ui.send_message(
             "update_content_browser",
@@ -2194,6 +2197,96 @@ fn build_outliner_payload(ctx: &EngineContext) -> Vec<OutlinerEntity> {
     }
 
     result
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Phase 16-C — the scripting gate
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Where the demo script lives, relative to the working directory.
+const DEMO_SCRIPT_PATH: &str = "assets/scripts/demo_rotator.luau";
+
+/// The same file, compiled in, so the gate runs from any working
+/// directory. The on-disk copy is the one the editor's content drawer
+/// lists and the one a hot reload watches; this is the fallback.
+const DEMO_SCRIPT_SOURCE: &str = include_str!("../../../assets/scripts/demo_rotator.luau");
+
+/// Import the demo script, teach the engine how to route a force, and
+/// attach the script to a cube.
+///
+/// This is the whole of what game code has to do for scripting: the
+/// lifecycle, the ordering, the command applier and the frame hooks are
+/// the engine's. Press Play to run it.
+fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
+    // ── The force router ─────────────────────────────────────────────
+    //
+    // `applyForce` names an entity; Jolt wants a body id. The mapping is
+    // this game's `PhysicsBody` component, which `somnium_core` has never
+    // heard of — so the engine asks rather than guessing.
+    ctx.scripts
+        .set_force_router(Box::new(|world, physics, entity, force, mode| {
+            let Some(body) = world.get::<PhysicsBody>(entity).copied() else {
+                return;
+            };
+            match mode {
+                somnium_script::command::ForceMode::Impulse => {
+                    physics.add_impulse(body.id, force);
+                }
+                somnium_script::command::ForceMode::Force => {
+                    physics.add_force(body.id, force);
+                }
+            }
+        }));
+
+    // ── The asset ────────────────────────────────────────────────────
+    let text = std::fs::read_to_string(DEMO_SCRIPT_PATH)
+        .unwrap_or_else(|_| DEMO_SCRIPT_SOURCE.to_string());
+    let asset = somnium_script::ids::ScriptAssetId::mint();
+    if let Err(diagnostics) = ctx.scripts.load_script(asset, DEMO_SCRIPT_PATH, text) {
+        tracing::error!("demo script failed to compile:\n{diagnostics}");
+        return;
+    }
+
+    // ── The scripted entity ──────────────────────────────────────────
+    let mut transform = Transform::from_translation(Vec3::new(3.0, 1.5, 0.0));
+    transform.scale = Vec3::splat(0.6);
+    let entity = match (game.default_cube_alloc, game.default_material_id) {
+        (Some(alloc), Some(material)) => ctx.world.spawn((
+            transform,
+            MeshComponent {
+                vertex_offset: alloc.vertex_offset,
+                index_offset: alloc.index_offset,
+                index_count: alloc.index_count,
+            },
+            MaterialComponent { id: material },
+            Name::new("Scripted Rotator"),
+            WorldTransform::identity(),
+            MeshKind::Cube,
+            somnium_script::attachment::ScriptSet::new(),
+        )),
+        // The glTF scene loaded, so there is no procedural cube to borrow
+        // geometry from. The entity is still real and the script still
+        // runs on it; it simply has nothing to draw.
+        _ => ctx.world.spawn((
+            transform,
+            Name::new("Scripted Rotator"),
+            WorldTransform::identity(),
+            somnium_script::attachment::ScriptSet::new(),
+        )),
+    };
+
+    let mut attachment = somnium_script::attachment::ScriptAttachment::new(asset);
+    attachment
+        .properties
+        .insert("spinSpeed".into(), somnium_script::value::ScriptValue::F64(2.0));
+    if let Some(set) = ctx
+        .world
+        .get_mut::<somnium_script::attachment::ScriptSet>(entity)
+    {
+        set.attach(attachment);
+    }
+
+    info!("Phase 16-C: `Scripted Rotator` attached to {DEMO_SCRIPT_PATH} — press Play to run it");
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

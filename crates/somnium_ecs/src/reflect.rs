@@ -257,6 +257,25 @@ impl FieldType {
         }
     }
 
+    /// Re-tag a value the shape converter could not have got right.
+    ///
+    /// A script writes a rotation as four numbers, and four numbers are a
+    /// [`ReflectValue::Vec4`] by shape — there is nothing in
+    /// `{x=0,y=0,z=0,w=1}` that says "quaternion". The declared type is the
+    /// only thing that knows, so the boundary asks the field rather than
+    /// guessing, and [`Self::accepts`] stays strict.
+    ///
+    /// Deliberately narrow: this is the one ambiguity the value model has,
+    /// and widening it into a general coercion table would turn every
+    /// mistyped write into a silent reinterpretation.
+    #[must_use]
+    pub fn coerce(&self, value: ReflectValue) -> ReflectValue {
+        match (self, value) {
+            (Self::Quat, ReflectValue::Vec4(v)) => ReflectValue::Quat(v),
+            (_, value) => value,
+        }
+    }
+
     /// Human-readable name, for diagnostics and generated declarations.
     #[must_use]
     pub fn name(&self) -> String {

@@ -95,6 +95,48 @@ impl ScriptAssetId {
     pub fn parse_hex(text: &str) -> Option<Self> {
         u128::from_str_radix(text.trim(), 16).ok().map(Self)
     }
+
+    /// The id of the script at a project-relative path.
+    ///
+    /// # Why the path and not the content
+    ///
+    /// "Content-hash-stable" is the obvious reading of the plan's phrase
+    /// and the wrong one for *this* id: an attachment written into a scene
+    /// names an asset, and hashing the file's bytes would give it a new
+    /// name every time the author saved the script. Every attachment in
+    /// every scene would break on the first edit.
+    ///
+    /// The path is what is stable across an edit, and it is what a
+    /// human-readable scene diff should show a rename of. A content hash
+    /// belongs on the *cook* side, where the question is "is this bytecode
+    /// still valid", and 16-F is where that lives.
+    ///
+    /// Case and separators are normalised, so the same file resolves to
+    /// the same id on Windows and Linux.
+    #[must_use]
+    pub fn from_path(path: &str) -> Self {
+        // FNV-1a, widened to 128 bits. Not cryptographic and does not need
+        // to be: this maps a project's own file names to ids, and a
+        // collision would be a name collision.
+        const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+        const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+        let mut hash = OFFSET;
+        for byte in path
+            .chars()
+            .map(|c| if c == '\\' { '/' } else { c.to_ascii_lowercase() })
+            .flat_map(|c| {
+                let mut buffer = [0_u8; 4];
+                let encoded = c.encode_utf8(&mut buffer).as_bytes().to_vec();
+                encoded.into_iter()
+            })
+        {
+            hash ^= u128::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        // Zero is reserved for "no asset"; nudge the one input that would
+        // produce it rather than letting a real file be unnameable.
+        Self(if hash == 0 { 1 } else { hash })
+    }
 }
 
 impl fmt::Display for ScriptAssetId {
@@ -205,6 +247,24 @@ mod tests {
         assert!(InstanceUuid::NONE.is_none());
         assert!(!ScriptAssetId::mint().is_none());
         assert!(!InstanceUuid::mint().is_none());
+    }
+
+    #[test]
+    fn a_scripts_id_follows_its_path_and_survives_an_edit() {
+        let a = ScriptAssetId::from_path("scripts/rotator.luau");
+        assert_eq!(
+            a,
+            ScriptAssetId::from_path("scripts/rotator.luau"),
+            "the same path must always give the same id, or every saved \
+             attachment breaks on restart"
+        );
+        assert_eq!(
+            a,
+            ScriptAssetId::from_path("Scripts\\Rotator.luau"),
+            "case and separators are normalised across platforms"
+        );
+        assert_ne!(a, ScriptAssetId::from_path("scripts/walker.luau"));
+        assert!(!a.is_none());
     }
 
     #[test]

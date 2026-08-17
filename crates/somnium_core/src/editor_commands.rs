@@ -697,6 +697,320 @@ impl EditorCommand for TerrainEditCmd {
     }
 }
 
+// ─── Script attachments (Phase 16-D) ──────────────────────────────────────
+//
+// Attaching, removing, reordering and property edits are ordinary
+// `EditorCommand`s, so Ctrl+Z covers scripting the way it covers every
+// other authoring action. They all mutate the `ScriptSet` component; the
+// runtime notices on its next reconcile and rebuilds the instance, which
+// is why none of them has to know a VM exists.
+
+use somnium_script::attachment::{ScriptAttachment, ScriptSet};
+use somnium_script::ids::ScriptAssetId;
+use somnium_script::value::ScriptValue;
+
+/// Read the `ScriptSet` off an entity, run `edit` on it, and write it back.
+///
+/// `ScriptSet` is not `Copy` and the entity may not have one yet, so every
+/// command below goes through this rather than repeating the dance.
+fn edit_script_set(
+    world: &mut World,
+    entity_index: u32,
+    edit: impl FnOnce(&mut ScriptSet),
+) -> bool {
+    let Some(entity) = world.find_entity_by_index(entity_index) else {
+        return false;
+    };
+    let mut set = world.get::<ScriptSet>(entity).cloned().unwrap_or_default();
+    edit(&mut set);
+    world.insert_component(entity, set).is_ok()
+}
+
+/// Renumber `execution_order` to match list position.
+///
+/// The up/down arrows move a row in a list, and an author expects the list
+/// order to *be* the run order. Authored `execution_order` values are
+/// therefore rewritten by a reorder — documented in the help page, because
+/// it is the one place this gesture overwrites something the author may
+/// have typed.
+fn renumber(set: &mut ScriptSet) {
+    for (index, attachment) in set.attachments.iter_mut().enumerate() {
+        attachment.execution_order = i32::try_from(index).unwrap_or(i32::MAX);
+    }
+}
+
+/// Attach a script asset to an entity.
+pub struct AttachScriptCmd {
+    entity_index: u32,
+    asset: ScriptAssetId,
+    /// Minted once and reused on redo, so a redo restores the *same*
+    /// attachment identity — which is what any migrated state is keyed by.
+    attachment: ScriptAttachment,
+}
+
+impl AttachScriptCmd {
+    pub fn new(entity_index: u32, asset: ScriptAssetId) -> Self {
+        Self {
+            entity_index,
+            asset,
+            attachment: ScriptAttachment::new(asset),
+        }
+    }
+
+    /// The asset being attached.
+    pub fn asset(&self) -> ScriptAssetId {
+        self.asset
+    }
+}
+
+impl EditorCommand for AttachScriptCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let attachment = self.attachment.clone();
+        edit_script_set(world, self.entity_index, |set| {
+            set.attach(attachment);
+        });
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let instance = self.attachment.instance;
+        edit_script_set(world, self.entity_index, |set| {
+            set.detach(instance);
+        });
+    }
+
+    fn description(&self) -> &str {
+        "Attach Script"
+    }
+}
+
+/// Remove one attachment, keeping enough to put it back.
+pub struct DetachScriptCmd {
+    entity_index: u32,
+    index: usize,
+    removed: Option<ScriptAttachment>,
+}
+
+impl DetachScriptCmd {
+    pub fn new(entity_index: u32, index: usize) -> Self {
+        Self {
+            entity_index,
+            index,
+            removed: None,
+        }
+    }
+}
+
+impl EditorCommand for DetachScriptCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let index = self.index;
+        let mut taken = None;
+        edit_script_set(world, self.entity_index, |set| {
+            if index < set.attachments.len() {
+                taken = Some(set.attachments.remove(index));
+            }
+        });
+        self.removed = taken;
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let Some(attachment) = self.removed.take() else {
+            return;
+        };
+        let index = self.index;
+        edit_script_set(world, self.entity_index, |set| {
+            let at = index.min(set.attachments.len());
+            set.attachments.insert(at, attachment);
+        });
+    }
+
+    fn description(&self) -> &str {
+        "Remove Script"
+    }
+}
+
+/// Move one attachment earlier or later in execution order.
+pub struct ReorderScriptCmd {
+    entity_index: u32,
+    from: usize,
+    to: usize,
+    /// The `execution_order` values before the renumber, so undo restores
+    /// what the author had rather than a tidy 0,1,2.
+    previous_orders: Vec<i32>,
+}
+
+impl ReorderScriptCmd {
+    pub fn new(entity_index: u32, from: usize, to: usize) -> Self {
+        Self {
+            entity_index,
+            from,
+            to,
+            previous_orders: Vec::new(),
+        }
+    }
+}
+
+impl EditorCommand for ReorderScriptCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let (from, to) = (self.from, self.to);
+        let mut before = Vec::new();
+        edit_script_set(world, self.entity_index, |set| {
+            if from >= set.attachments.len() || to >= set.attachments.len() {
+                return;
+            }
+            before = set
+                .attachments
+                .iter()
+                .map(|a| a.execution_order)
+                .collect();
+            let moved = set.attachments.remove(from);
+            set.attachments.insert(to, moved);
+            renumber(set);
+        });
+        if !before.is_empty() {
+            self.previous_orders = before;
+        }
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let (from, to) = (self.from, self.to);
+        let orders = std::mem::take(&mut self.previous_orders);
+        edit_script_set(world, self.entity_index, |set| {
+            if from >= set.attachments.len() || to >= set.attachments.len() {
+                return;
+            }
+            let moved = set.attachments.remove(to);
+            set.attachments.insert(from, moved);
+            for (attachment, order) in set.attachments.iter_mut().zip(&orders) {
+                attachment.execution_order = *order;
+            }
+        });
+        self.previous_orders = orders;
+    }
+
+    fn description(&self) -> &str {
+        "Reorder Script"
+    }
+}
+
+/// Switch one attachment on or off.
+pub struct SetScriptEnabledCmd {
+    entity_index: u32,
+    index: usize,
+    enabled: bool,
+    was: bool,
+}
+
+impl SetScriptEnabledCmd {
+    pub fn new(entity_index: u32, index: usize, enabled: bool) -> Self {
+        Self {
+            entity_index,
+            index,
+            enabled,
+            was: !enabled,
+        }
+    }
+}
+
+impl EditorCommand for SetScriptEnabledCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let (index, enabled) = (self.index, self.enabled);
+        let mut was = None;
+        edit_script_set(world, self.entity_index, |set| {
+            if let Some(attachment) = set.attachments.get_mut(index) {
+                was = Some(attachment.enabled);
+                attachment.enabled = enabled;
+            }
+        });
+        if let Some(was) = was {
+            self.was = was;
+        }
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let (index, was) = (self.index, self.was);
+        edit_script_set(world, self.entity_index, |set| {
+            if let Some(attachment) = set.attachments.get_mut(index) {
+                attachment.enabled = was;
+            }
+        });
+    }
+
+    fn description(&self) -> &str {
+        "Toggle Script"
+    }
+}
+
+/// Edit one of a script's declared properties.
+///
+/// Follows the live-scrub convention `SetInspectorValue` established: a
+/// drag is applied to the world and never recorded, and the gesture's
+/// final value arrives once as a command. So this type only ever exists
+/// for a committed edit.
+pub struct SetScriptPropertyCmd {
+    entity_index: u32,
+    index: usize,
+    field: String,
+    value: ScriptValue,
+    /// `None` when the property had no authored override and was showing
+    /// the script's own default — undo has to remove the key, not write a
+    /// copy of the default into the scene.
+    previous: Option<ScriptValue>,
+    captured: bool,
+}
+
+impl SetScriptPropertyCmd {
+    pub fn new(entity_index: u32, index: usize, field: String, value: ScriptValue) -> Self {
+        Self {
+            entity_index,
+            index,
+            field,
+            value,
+            previous: None,
+            captured: false,
+        }
+    }
+}
+
+impl EditorCommand for SetScriptPropertyCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let (index, value) = (self.index, self.value.clone());
+        let field = self.field.clone();
+        let capture = !self.captured;
+        let mut previous = None;
+        edit_script_set(world, self.entity_index, |set| {
+            if let Some(attachment) = set.attachments.get_mut(index) {
+                previous = attachment.properties.insert(field, value);
+            }
+        });
+        if capture {
+            self.previous = previous;
+            self.captured = true;
+        }
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let index = self.index;
+        let field = self.field.clone();
+        let previous = self.previous.clone();
+        edit_script_set(world, self.entity_index, |set| {
+            if let Some(attachment) = set.attachments.get_mut(index) {
+                match previous {
+                    Some(value) => {
+                        attachment.properties.insert(field, value);
+                    }
+                    None => {
+                        attachment.properties.remove(&field);
+                    }
+                }
+            }
+        });
+    }
+
+    fn description(&self) -> &str {
+        "Set Script Property"
+    }
+}
+
 // ─── Shared reparent helper ───────────────────────────────────────────────
 
 fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {

@@ -27,7 +27,10 @@ use crate::editor::{
     inspector::build_inspector,
     shell::build_editor_layout,
 };
-pub use editor_event::{ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle};
+pub use editor_event::{
+    ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle, ScriptAttachmentRow,
+    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState,
+};
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
 
@@ -69,6 +72,25 @@ use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window};
+
+/// What one generated widget in the Scripts section does.
+///
+/// Carried beside the handle rather than encoded in a field enum, because
+/// the rows are built from a script's declaration and there is no fixed
+/// set of them to enumerate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScriptWidgetAction {
+    /// The attachment's enable checkbox.
+    Enable(usize),
+    /// Move it earlier or later in execution order.
+    Reorder(usize, i32),
+    /// Remove it.
+    Detach(usize),
+    /// A declared numeric property.
+    Number(usize, String),
+    /// A declared boolean property.
+    Bool(usize, String),
+}
 
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
@@ -203,6 +225,12 @@ struct InspectorHandles {
     particle_end: NodeHandle,
     material_section: NodeHandle,
     material_base: NodeHandle,
+    /// Phase 16-D. The Scripts section holds a header, a "New Script"
+    /// button and `script_list`; every row inside the list is built from a
+    /// script's declared schema at refresh time, not here.
+    script_section: NodeHandle,
+    script_add: NodeHandle,
+    script_list: NodeHandle,
     vessel_section: NodeHandle,
     vessel_buoyancy: NodeHandle,
     vessel_drag: NodeHandle,
@@ -741,7 +769,21 @@ pub struct UiManager {
     color_target: Option<crate::ColorField>,
     color_original: [f32; 4],
     color_live: [f32; 4],
+    /// Phase 16-D: the Scripts section as it was last built.
+    ///
+    /// Rebuilding a widget tree per frame would be wasteful and would eat
+    /// the focus of any field being typed into, so the section is rebuilt
+    /// only when this differs from what the engine offers.
+    script_state: ScriptInspectorState,
+    /// What each generated widget in the Scripts section does. Rebuilt
+    /// alongside the widgets, so a handle can never outlive its meaning.
+    script_widgets: Vec<(NodeHandle, ScriptWidgetAction)>,
     scene_dirty: bool,
+    /// Phase 16-D: blocking script diagnostics since the last clear, shown
+    /// in the status cluster. A count rather than a light, because "three
+    /// scripts are broken" and "one script is broken" are different
+    /// situations and the log is one click away either way.
+    script_errors: usize,
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
     title_drag: NodeHandle,
@@ -1014,7 +1056,10 @@ impl UiManager {
             color_target: None,
             color_original: [1.0, 1.0, 1.0, 1.0],
             color_live: [1.0, 1.0, 1.0, 1.0],
+            script_state: ScriptInspectorState::default(),
+            script_widgets: Vec::new(),
             scene_dirty: false,
+            script_errors: 0,
             chrome_layout: layout_sizes,
             log_open: false,
             title_drag: layout.title_drag,
@@ -1240,6 +1285,14 @@ impl UiManager {
                         self.toggle_help(None);
                         return true;
                     }
+                    // Phase 16-D. Safe to lean on: a script that no longer
+                    // compiles leaves its live instances running and only
+                    // publishes diagnostics, so a reload can never be the
+                    // thing that breaks a play session.
+                    KeyCode::F5 if pressed => {
+                        self.editor_events.push_back(EditorEvent::ReloadScripts);
+                        return true;
+                    }
                     KeyCode::Space if pressed && self.ctrl_held => {
                         self.toggle_drawer();
                         return true;
@@ -1357,13 +1410,42 @@ impl UiManager {
         // Redline §06: items drop right to left as width runs out, and FPS
         // never drops.
         let rules = CollapseRules::for_width(self.window_size.0 as f32);
-        let text = if rules.status_objects {
+        let mut text = if rules.status_objects {
             format!("{objects} objects · {fps:.0} fps")
         } else {
             format!("{fps:.0} fps")
         };
+        // Phase 16-D. Prepended, not appended: it is the item that must
+        // survive the narrowest window, because a broken script is the one
+        // thing in this cluster that needs acting on.
+        if self.script_errors > 0 {
+            let plural = if self.script_errors == 1 { "" } else { "s" };
+            text = format!("{} script error{plural} · {text}", self.script_errors);
+        }
         self.native_ui
             .send(TextMessage::set_text(self.status_stats, text));
+    }
+
+    /// Re-read the content folder. Called after the editor writes a file
+    /// into it — a new script that does not appear in the drawer until the
+    /// next unrelated refresh looks like the create failed.
+    pub fn refresh_content(&mut self) {
+        self.refresh_content_list();
+    }
+
+    /// Phase 16-D: how many blocking script diagnostics are outstanding.
+    ///
+    /// Accumulates rather than replaces, because diagnostics arrive a
+    /// batch at a time and the status area is reporting the session, not
+    /// the last batch. [`Self::clear_script_errors`] is the reset.
+    pub fn set_script_error_count(&mut self, errors: usize) {
+        self.script_errors += errors;
+    }
+
+    /// Reset the script error count — on a successful reload, or when the
+    /// author clears the Output Log.
+    pub fn clear_script_errors(&mut self) {
+        self.script_errors = 0;
     }
 
     pub fn prompt_unsaved_new(&mut self) {
@@ -2263,6 +2345,201 @@ impl UiManager {
                 TreeViewMessage::SetSelected(selected),
             ));
         }
+    }
+
+    /// Phase 16-D: rebuild the Details panel's Scripts section.
+    ///
+    /// `None` hides it — the selection carries no `ScriptSet`. An empty
+    /// state shows the section with just its "New Script" button, which is
+    /// how an entity that *could* have scripts differs from one that
+    /// cannot.
+    ///
+    /// The rows are built from what each script declared. Nothing in this
+    /// function names a property; adding a field to a script is a one-line
+    /// edit in the `.luau` file and nothing here changes.
+    pub fn update_script_inspector(&mut self, state: Option<ScriptInspectorState>) {
+        let section = self.inspector_handles.script_section;
+        let Some(state) = state else {
+            self.native_ui.set_visibility(section, false);
+            if !self.script_state.attachments.is_empty() {
+                self.script_state = ScriptInspectorState::default();
+                self.script_widgets.clear();
+                let list = self.inspector_handles.script_list;
+                self.native_ui.clear_children(list);
+            }
+            return;
+        };
+        self.native_ui.set_visibility(section, true);
+        if state == self.script_state && !self.script_widgets.is_empty() {
+            return;
+        }
+        if state == self.script_state && state.attachments.is_empty() {
+            return;
+        }
+        self.script_state = state;
+        self.rebuild_script_rows();
+    }
+
+    /// Build one widget per declared property, plus the per-attachment
+    /// controls.
+    fn rebuild_script_rows(&mut self) {
+        let list = self.inspector_handles.script_list;
+        self.native_ui.clear_children(list);
+        self.script_widgets.clear();
+        let font_id = self.font_id;
+
+        // Cloned because the builders below borrow `self.native_ui`
+        // mutably, and the state is small — a handful of rows per entity.
+        let attachments = self.script_state.attachments.clone();
+        for (index, attachment) in attachments.iter().enumerate() {
+            let card = crate::widgets::border::BorderBuilder::new(
+                WidgetBuilder::new()
+                    .with_margin(Thickness::axes(4.0, 3.0))
+                    .with_background(theme::BG_PANEL)
+                    .with_foreground(theme::BORDER_DARK),
+            )
+            .with_stroke_thickness(Thickness::uniform(1.0))
+            .build();
+            let card = self.native_ui.add_node(card, list);
+            let column = StackPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Vertical)
+            .build();
+            let column = self.native_ui.add_node(column, card);
+
+            // Header: name, state, and the three structural controls.
+            let header = StackPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Horizontal)
+            .build();
+            let header = self.native_ui.add_node(header, column);
+
+            let enable = crate::widgets::check_box::CheckBoxBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::ROW_HEIGHT)
+                    .with_margin(Thickness::axes(4.0, 0.0)),
+            )
+            .with_label(&attachment.asset_name)
+            .with_checked(attachment.enabled)
+            .with_font_id(font_id)
+            .with_font_size(12.0)
+            .build();
+            let enable = self.native_ui.add_node(enable, header);
+            self.script_widgets
+                .push((enable, ScriptWidgetAction::Enable(index)));
+
+            for (glyph, action) in [
+                ("↑", ScriptWidgetAction::Reorder(index, -1)),
+                ("↓", ScriptWidgetAction::Reorder(index, 1)),
+                ("✕", ScriptWidgetAction::Detach(index)),
+            ] {
+                let button = ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(22.0)
+                        .with_height(theme::ROW_HEIGHT)
+                        .with_background(theme::TRANSPARENT),
+                )
+                .build();
+                let button = self.native_ui.add_node(button, header);
+                let label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 6.0,
+                    top: 3.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                }))
+                .with_text(glyph)
+                .with_font_size(12.0)
+                .with_font_id(font_id)
+                .with_color(theme::TEXT_SECONDARY)
+                .build();
+                self.native_ui.add_node(label, button);
+                self.script_widgets.push((button, action));
+            }
+
+            // Status. Quarantine reads differently from an authored
+            // disable, so it says which one it is.
+            let status = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                left: 10.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 2.0,
+            }))
+            .with_role(TextRole::Caption)
+            .with_text(&attachment.status)
+            .with_color(if attachment.quarantined {
+                theme::STATUS_WARN
+            } else {
+                theme::TEXT_SECONDARY
+            })
+            .build();
+            self.native_ui.add_node(status, column);
+
+            // Declared properties.
+            for field in &attachment.fields {
+                match &field.kind {
+                    ScriptFieldKind::Number { value, .. } => {
+                        let row = crate::widgets::property_row::PropertyRowBuilder::new(
+                            WidgetBuilder::new()
+                                .with_clip_to_bounds(false)
+                                .with_background(theme::TRANSPARENT),
+                        )
+                        .with_label(&field.name)
+                        .build();
+                        let row = self.native_ui.add_node(row, column);
+                        let numeric = crate::widgets::numeric_field::NumericFieldBuilder::new(
+                            WidgetBuilder::new().with_margin(Thickness::axes(0.0, 1.0)),
+                        )
+                        .with_drag_step(0.05)
+                        .build();
+                        let numeric = self.native_ui.add_node(numeric, row);
+                        self.native_ui
+                            .send(NumericFieldMessage::set_value(numeric, *value));
+                        self.script_widgets.push((
+                            numeric,
+                            ScriptWidgetAction::Number(index, field.name.clone()),
+                        ));
+                    }
+                    ScriptFieldKind::Bool(on) => {
+                        let check = crate::widgets::check_box::CheckBoxBuilder::new(
+                            WidgetBuilder::new()
+                                .with_height(theme::ROW_HEIGHT)
+                                .with_margin(Thickness::axes(10.0, 0.0)),
+                        )
+                        .with_label(&field.name)
+                        .with_checked(*on)
+                        .with_font_id(font_id)
+                        .with_font_size(12.0)
+                        .build();
+                        let check = self.native_ui.add_node(check, column);
+                        self.script_widgets.push((
+                            check,
+                            ScriptWidgetAction::Bool(index, field.name.clone()),
+                        ));
+                    }
+                    ScriptFieldKind::Text(text) => {
+                        // Shown, not editable. A property kind the editor
+                        // cannot author yet is better visible than absent:
+                        // absent looks like the script failed to declare it.
+                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(
+                            Thickness {
+                                left: 10.0,
+                                top: 2.0,
+                                right: 0.0,
+                                bottom: 2.0,
+                            },
+                        ))
+                        .with_role(TextRole::Caption)
+                        .with_text(format!("{}: {text}", field.name))
+                        .build();
+                        self.native_ui.add_node(label, column);
+                    }
+                }
+            }
+        }
+        self.native_ui
+            .invalidate_ancestors(self.inspector_handles.script_list);
     }
 
     /// Update inspector NumericFields from a Transform.
@@ -3453,7 +3730,47 @@ impl UiManager {
                             self.editor_events
                                 .push_back(EditorEvent::CreateEntity(kind));
                         }
+                    } else if entry
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
+                    {
+                        // Phase 16-D: clicking a script attaches it to the
+                        // selection. `app.rs` refuses with a toast if there
+                        // is nothing selected, rather than silently doing
+                        // nothing.
+                        self.editor_events.push_back(EditorEvent::AttachScript(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
                     }
+                    continue;
+                }
+                // Phase 16-D: the Scripts section's generated controls.
+                if let Some((_, action)) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    match action {
+                        ScriptWidgetAction::Reorder(index, delta) => {
+                            self.editor_events
+                                .push_back(EditorEvent::ReorderScript { index, delta });
+                        }
+                        ScriptWidgetAction::Detach(index) => {
+                            self.editor_events.push_back(EditorEvent::DetachScript(index));
+                        }
+                        // Enable and the property widgets are not buttons;
+                        // they arrive as CheckBox and NumericField messages.
+                        ScriptWidgetAction::Enable(_)
+                        | ScriptWidgetAction::Number(_, _)
+                        | ScriptWidgetAction::Bool(_, _) => {}
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.script_add {
+                    self.editor_events.push_back(EditorEvent::CreateScript);
                     continue;
                 }
                 // Create popup item
@@ -3561,6 +3878,32 @@ impl UiManager {
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
                     self.refresh_content_list();
+                    continue;
+                }
+                // Phase 16-D: an attachment's enable box, or one of its
+                // declared boolean properties.
+                if let Some((_, action)) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    match action {
+                        ScriptWidgetAction::Enable(index) => {
+                            self.editor_events.push_back(EditorEvent::SetScriptEnabled {
+                                index,
+                                enabled: *on,
+                            });
+                        }
+                        ScriptWidgetAction::Bool(index, field) => {
+                            self.editor_events.push_back(EditorEvent::SetScriptBool {
+                                index,
+                                field,
+                                value: *on,
+                            });
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 // Inspector checkboxes share the same destinations as the old buttons.
@@ -3890,6 +4233,24 @@ impl UiManager {
                             value: v,
                             live,
                         });
+                    continue;
+                }
+                // Phase 16-D: a script's declared numeric property. Same
+                // live/commit convention as every other inspector field —
+                // a drag is applied and not recorded, and the gesture's
+                // final value is one undo step.
+                if let Some((_, ScriptWidgetAction::Number(index, field))) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    self.editor_events.push_back(EditorEvent::SetScriptNumber {
+                        index,
+                        field,
+                        value: v,
+                        live,
+                    });
                 }
             }
         }

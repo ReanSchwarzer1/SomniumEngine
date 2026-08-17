@@ -59,6 +59,8 @@ pub mod reflect_registry;
 pub mod scene_serial;
 pub mod scene_schema;
 pub mod script_bridge;
+pub mod script_host;
+pub mod script_input;
 pub mod sun;
 pub mod time;
 
@@ -82,6 +84,8 @@ pub use map::{
     spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
+pub use script_host::{HostServices, ScriptHost, ScriptLogLine, SyncReport};
+pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;
 
 // Re-export input types so game code does not need a direct `winit` dependency.

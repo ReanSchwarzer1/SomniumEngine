@@ -120,6 +120,12 @@ struct MirrorField {
     /// this costs nothing after the first frame.
     key: mlua::LuaString,
     writable: bool,
+    /// The declared type, resolved once when the mirror is built.
+    ///
+    /// Needed because a shape conversion cannot distinguish a quaternion
+    /// from four numbers, and the schema is the only thing that can. See
+    /// [`somnium_ecs::reflect::FieldType::coerce`].
+    ty: somnium_ecs::reflect::FieldType,
 }
 
 /// One component mirrored onto `ctx.self` for an attachment.
@@ -179,6 +185,7 @@ fn mirror_key(stable_name: &str) -> String {
 struct Keys {
     entity: mlua::LuaString,
     zelf: mlua::LuaString,
+    spawns: mlua::LuaString,
 }
 
 /// The Luau backend.
@@ -235,6 +242,7 @@ impl LuauBackend {
         let keys = Keys {
             entity: lua.create_string("entity").map_err(host::to_script_error)?,
             zelf: lua.create_string("self").map_err(host::to_script_error)?,
+            spawns: lua.create_string("spawns").map_err(host::to_script_error)?,
         };
 
         Ok(Self {
@@ -368,6 +376,7 @@ impl LuauBackend {
                         id: field_id,
                         key: self.lua.create_string(&field_name).ok()?,
                         writable,
+                        ty: world.field_type(component, field_id)?,
                     })
                 })
                 .collect();
@@ -596,6 +605,27 @@ impl ScriptBackend for LuauBackend {
                 };
 
                 ctx.raw_set(&keys.entity, entity)?;
+
+                // ── Spawn results ────────────────────────────────────
+                //
+                // A spawn cannot return an entity: the entity does not
+                // exist until the commit point. The script gets a token
+                // straight away and finds `ctx.spawns[token]` filled in on
+                // the next phase. Per attachment, so it is rebound here
+                // rather than built with the rest of `ctx` — and only when
+                // there is something to report, since the common case is
+                // an empty list and a table per attachment per phase is
+                // exactly the kind of cost §11.4 was spent removing.
+                if call.snapshot.spawn_results.is_empty() {
+                    ctx.raw_set(&keys.spawns, Value::Nil)?;
+                } else {
+                    let spawns = lua.create_table()?;
+                    for (token, spawned) in &call.snapshot.spawn_results {
+                        spawns.raw_set(token.0, convert::EntityHandle(*spawned))?;
+                    }
+                    ctx.raw_set(&keys.spawns, spawns)?;
+                }
+
                 command_ref.borrow_mut().begin(call.order);
 
                 // ── Mirror in ────────────────────────────────────────
@@ -659,6 +689,12 @@ impl ScriptBackend for LuauBackend {
                                 let Ok(after) = convert::from_lua(&raw) else {
                                     continue;
                                 };
+                                // Re-tag before comparing: a rotation read
+                                // out as `Quat` and written back as a table
+                                // narrows to `Vec4`, and without this every
+                                // frame would look like a change *and* be
+                                // rejected by the schema.
+                                let after = field.ty.coerce(after);
                                 if after != *before {
                                     changed.insert(field.id, after);
                                 }
