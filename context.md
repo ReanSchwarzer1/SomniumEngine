@@ -1,7 +1,11 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-14  
-> **Current phase:** Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
+> **Last updated:** 2026-08-16  
+> **Current phase:** Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
+> D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
+> 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
+> default **off**. Terrain hex/parallax now default **off** on both maps.
+> Previously: Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
 > **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
@@ -18,7 +22,8 @@
 > **Phase XV live contract** (do not silently retune): 32 global layers /
 > strongest-four local; sidecar v4; `GpuTerrainMaterial` 1664 bytes; unique
 > colour from splat (512²); biome v3 / landscape v4; snow cap `relief * 0.48`;
-> aerial hex/POM off when the camera is > 80 m above the heightfield
+> hex/POM now default **off** (Phase DOOM, 2026-08-16); still forced off when
+> the camera is > 80 m above the heightfield
 > (`gpu_material_for_camera`). Do not reintroduce a per-pixel terrain
 > sample-count LOD. Water: `WaterComponent::great_lakes` stays frozen.
 > BC7: `encode_terrain_bc7` writes gitignored `assets/terrain/bc7/`; runtime
@@ -27,14 +32,24 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
-> - **Phase DOOM — id Tech (plan, 2026-08-16):** `dev records/phase_DOOM.md`.
->   Optimization with no change to the look. Premise is CR-A's verdict —
->   GPU-bound, shading ~40–50 ms at maximized Native. Spine is tile-classified
->   **compute** shading (`ShadingSpec` per tile, not per frame), plus shadow
->   cascade caching, opt-in dynamic resolution, a real job system and parallel
->   command encoding. **DOOM-A (the clock) and DOOM-B (the pixel census) are
->   gates — do them before anything else.** Non-goals include turning Clipmap
->   default on (DF-E owns that) and any retune of water / XV / foliage.
+> - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
+>   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
+>   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
+>   (`unattributed` 13% → 0.4%), the pixel census + shading ablation, and opt-in
+>   **dynamic resolution** (Camera details) — **Frame 38.4 → 19.9 ms**.
+>   **Built but default off, both measured slower:** tile-binned shading
+>   (`SOMNIUM_SHADE_BINS=1`) and the aerial terrain pipeline (Terrain details).
+>   **Deferred:** DOOM-D (shadow cache — `Shadows` is only 0.958 ms) and G–M.
+>   The plan's §1 thesis is **superseded**: DOOM-B measured terrain at 97.6% of
+>   the shading pass, so per-tile binning was worth ~0.4 ms, not double digits.
+>   The levers that worked were pixel count and deleting terrain material work.
+> - **Terrain hex tiling and parallax now default OFF on both maps**
+>   (2026-08-16, user request). Coastal ground Frame 37.6 → 29.4 ms, Shading
+>   24.9 → 18.2. This is a **visible look change on the ground** and it departs
+>   from the XV walking defaults recorded below and in
+>   `dev records/terrain_shading_occupancy_2026-08-14.md`. Both are still
+>   Terrain-details checkboxes; `SOMNIUM_HEXTILE=1` / `SOMNIUM_TERRAIN_PARALLAX=1`
+>   restore the old defaults.
 > - **Clipmap audit (required, other model):** `dev records/phase_DF.md` §12 —
 >   defect-hunt the in-engine path before more “make clipmap run better” work
 >   or default-on. Do not reintroduce per-pixel sample-count LOD.

@@ -4,7 +4,9 @@
 > cycle on anything the player could not see, and measuring before believing.*
 
 > **Codename:** DOOM (id Tech 6/7/8)
-> **Status:** PLAN (2026-08-16). Nothing in the tree.
+> **Status:** **A, B, C, E, F IN TREE** (2026-08-16). D and G–M deferred.
+> See **§15 As shipped** at the end of this file before reading the plan above:
+> §1's thesis did not survive DOOM-B, and C and E are default **off**.
 > **Predecessor:** Phase CR (Crysis) established *where* the frame goes.
 > CR-A's verdict — **GPU-bound, shading dominates** — is this phase's premise.
 > **Record:** this file. Evidence folder `dev records/phase DOOM/` is created by
@@ -801,3 +803,43 @@ Cite in `ATTRIBUTION.md` as each is actually used.
    commit message.
 5. `context.md` and `ATTRIBUTION.md` after every sub-task, per
    `feedback_approach.md` §2.
+
+---
+
+## 15. As shipped — 2026-08-16
+
+Evidence and all numbers: [`phase DOOM/README.md`](phase%20DOOM/README.md).
+`cargo test --workspace` green (314 renderer + 14 shader validation).
+
+| Stage | Status |
+|---|---|
+| **DOOM-A** clock | **Done.** `unattributed` 13% → **0.4%**. New scopes (cull 1/2, vis 2, Hi-Z 2, TLAS, ReSTIR DI/clear, editor overlays, UI, auto-exposure, DoF); TAA no longer bills three other passes. `PIPELINE_STATISTICS_QUERY` detected. `timing.rs` writes `.somtime` with a stddev per row and calls anything inside the band `~ noise`. Baselines committed. |
+| **DOOM-B** census | **Done.** `SOMNIUM_CENSUS=1` / Post FX → Pixel Census, 0.083 ms. `SOMNIUM_SHADE_ABLATE` times one pixel class at a time. Verdict: **terrain is 97.6% of the shading pass**, sky 0.3%. |
+| **DOOM-C** tile binning | **Built, correct, default OFF — measured slower.** Parity to 2 px of 2 615 044; slower at 8/16/32/64 px tiles (32.5 / 27.8 / 27.0 / 26.1 vs 24.9 fullscreen). Instanced-quad setup costs more than binning saves; this is why the references use compute. Kept as `SOMNIUM_SHADE_BINS=1`. Lasting fix from it: `fs_main` derives screen UV from `clip_pos` instead of the interpolator. |
+| **DOOM-E** aerial terrain | **Built, default OFF.** Depth-split pair of fullscreen draws. Dropping hex/POM past a distance is **invisible (925 px) and costs 2.3 ms** — `gpu_material_for_camera` already did it above 80 m. Only the 16-layer variant pays (−6.9% overview) and that is a real look change (36% of terrain px). |
+| **DOOM-F** dynamic resolution | **Done**, opt-in on Camera details. **Frame 38.4 → 19.9 ms**, Shading 25.8 → 11.3 at the 67% floor. Shipped with an oscillation bug, found and fixed: the controller now remembers the lowest over-budget scale and will not climb back to it. |
+| **hex/parallax default off** (both maps, user request) | **Done.** Coastal ground Frame 37.6 → **29.4**, Shading 24.9 → **18.2**. Visible look change on the ground; Details checkboxes still turn them on. |
+
+### Deferred
+
+| Stage | Why |
+|---|---|
+| **DOOM-D** shadow cache | Not started. DOOM-A measured `Shadows` at **0.958 ms** — the whole ceiling is ~2.5% of the frame, against the several ms §6.4 assumed. |
+| **DOOM-G** draw submission | Not started. Culling is already 0.025 ms across both phases. |
+| **DOOM-H/I** job system, streaming | Not started. Frame is still GPU-bound; CPU zones total <0.06 ms. |
+| **DOOM-J/K/L** bandwidth, fp16, subgroups | Not started. |
+| **DOOM-M** close-out | Not started; §9 budgets not met. |
+
+### What the phase actually learned
+
+§1's thesis — that per-tile specialisation was the win — **was wrong, and DOOM-B
+is what showed it.** Terrain is 97.6% of the pass, so binning's whole prize was
+~0.4 ms. The two levers that moved the frame were **pixel count** (DOOM-F) and
+**deleting terrain material work** (hex/parallax off). Both are per-pixel-cost
+levers, which is what DOOM-A's `Shading.frag = 3 563 520` — exactly one fragment
+per pixel, no overdraw — said on the first day.
+
+Anything further on Coastal ground is the terrain material's 8 splatmap fetches,
+32-wide scan and four layer samples. Distance does not reduce them (DOOM-E
+proved that). The designed cheap path remains Phase DF's clipmap, still default
+off and still gated on DF-E.

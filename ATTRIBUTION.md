@@ -1135,9 +1135,13 @@ engine is only the shape of the solution.
 ## 13C. Phase DOOM — visibility-buffer shade binning (plan reconnaissance, 2026-08-16)
 
 Read while writing [`dev records/phase_DOOM.md`](dev%20records/phase_DOOM.md).
-**Architecture studied, not code copied.** Nothing from this section is in the
-tree yet; the entries exist so the implementing session does not re-derive the
-provenance. Update the "Somnium implementation" column as DOOM-C lands.
+**Architecture studied, not code copied.** DOOM-C shipped as
+`pass/classify.rs` + `shaders/classify.wgsl` and is **default off**: the binning
+is correct (parity to 2 px of 2 615 044) but drawing one instanced quad per tile
+costs more in primitive setup than binning saves, at every tile size tried. That
+is the practical reason the two references below are compute — a dispatch has no
+vertex shader, no primitive setup and no rasterizer. See
+`dev records/phase DOOM/README.md`.
 
 ### 13C.1 Wicked Engine — visibility tile binning
 
