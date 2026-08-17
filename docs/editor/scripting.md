@@ -40,6 +40,51 @@ A value you set in the editor overrides the script's own default. Deleting
 a property from the script drops the authored value and says so in the
 Output Log; it does not stop the scene loading.
 
+## State that survives a reload
+
+Write `self.x = self.x or default` in `onInit`, never `self.x = default`.
+
+A reload calls `loadState` **before** `onInit` replays, so an
+unconditional assignment throws away the state that was just restored.
+The symptom is subtle and annoying: editing a script snaps the player back
+to looking north, or resets a counter, every time you save.
+
+```luau
+onInit = function(self, ctx)
+    self.yaw = self.yaw or 0.0
+end,
+saveState = function(self) return { yaw = self.yaw } end,
+loadState = function(self, state) self.yaw = state.yaw end,
+```
+
+## Physics
+
+An entity with a `somnium.RigidBody` exposes `velocity` to scripts, and
+that is how a character moves — set the velocity you want, do not push:
+
+```luau
+uses = { ["somnium.RigidBody"] = { "velocity", "grounded" } },
+
+onFixedUpdate = function(self, ctx, dt)
+    local body = ctx.self.rigidBody
+    body.velocity = vector.create(wishX * speed, body.velocity.y, wishZ * speed)
+end,
+```
+
+Leave `velocity.y` alone unless you are jumping — writing all three
+cancels gravity every step and leaves you hovering.
+
+The engine reads Jolt into the component before your script runs and
+writes it back after, so `body.velocity` is what physics actually gave
+you last step, not what you asked for. `ctx:applyForce` is still there and
+is still the right tool for a push, an explosion or thrust.
+
+**`grounded` is a vertical-speed heuristic, not a ground cast.** It reads
+true for a few frames at the apex of a jump, where vertical speed also
+passes through zero. Edge-trigger your jump on `isKeyPressed` rather than
+`isKeyDown`, and add a cooldown that outlasts the jump — see
+`assets/scripts/first_person_controller.luau`, which does both.
+
 ## The lifecycle
 
 ```

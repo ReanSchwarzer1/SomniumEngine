@@ -777,8 +777,8 @@ impl ScriptBackend for LuauBackend {
         // looking it up in a hash map three times per call.
         //
         // Those three lookups were measured at ~75–100 ns per call, about
-        // 12% of the mirror overhead; `dev records/phase 16/16-B_budgets.md`
-        // §4 flagged hoisting them as the first thing to do here.
+        // 12% of the mirror overhead; `context.md` §17.18.3 records the
+        // per-callback cost model these come out of.
         for call in calls {
             if self.instances.contains_key(&call.instance) {
                 self.entity_handle(call.instance, call.snapshot.self_entity);

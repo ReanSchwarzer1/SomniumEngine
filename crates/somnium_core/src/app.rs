@@ -1415,7 +1415,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 // deterministic hook; nothing about the loop needed
                 // restructuring to get it.
                 if self.simulation_clock.state == SimulationState::Playing {
+                    // Jolt → components, so a script sees the velocity it
+                    // actually has after last step's collisions rather
+                    // than the one it asked for.
+                    if let Some(physics) = self.physics.as_ref() {
+                        crate::character::read_physics_into_world(&mut self.world, physics);
+                    }
                     self.script_fixed_update(fixed_dt, dt);
+                    // Components → Jolt, after the command apply, so a
+                    // script's write is the last word before integration.
+                    if let Some(physics) = self.physics.as_mut() {
+                        crate::character::write_world_into_physics(&self.world, physics);
+                    }
                     self.script_input.end_step();
                     self.script_step += 1;
                 }

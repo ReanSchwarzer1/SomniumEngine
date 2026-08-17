@@ -3806,6 +3806,247 @@ serial because CR-A occupancy is GPU-bound (~50 ms shading vs ~1.5% CPU).
 `dev records/phase_CR.md`. Occupancy:
 `dev records/phase CR/CR-A_occupancy.md`.
 
+## 17.19 The scripted first-person character (2026-08-17)
+
+The first real gameplay written in Luau, and the exercise that showed
+whether the scripting system is usable rather than merely correct.
+Two files, `assets/scripts/`:
+
+| File | Owns |
+|---|---|
+| `first_person_controller.luau` | Yaw, WASD movement, run, jump |
+| `first_person_camera.luau` | Pitch, eye offset |
+
+The camera is a **child entity** of the player. The controller writes yaw
+to the player's transform, the camera writes pitch to its own, and
+`propagate_transforms` multiplies them — so neither script knows the other
+exists and either can be replaced alone. Every declared field
+(`walkSpeed`, `runSpeed`, `jumpSpeed`, `airControl`, `mouseSensitivity`,
+`eyeHeight`, `pitchLimit`, the invert flags) appears in the Details panel
+automatically, because the panel is generated from the schema.
+
+`hello_engine` spawns the pair on the transition into Play, at the editor
+camera's position minus an eye height, so pressing Play leaves you looking
+from exactly where you were standing. Stop destroys the Jolt body; the
+entities go with the play-session checkpoint, because anything created
+after Play was pressed is not part of the authored world.
+
+### 17.19.1 `RigidBodyComponent` — why `applyForce` was not enough
+
+Phase 16 gave scripts one way to touch physics: queue a force. That is
+right for a push and wrong for a character. A walking character sets its
+velocity outright — that is what makes it stop dead when you release the
+key instead of skating, and expressing it through forces means fighting
+the integrator with a PD controller that never feels right.
+
+So `somnium.RigidBody` is a registered component whose `velocity` is
+script-readable and script-writable, and the engine brackets the script
+phase with a sync:
+
+```
+read Jolt → components     (before scripts: see what physics did to you)
+     scripts read and write velocity
+components → write Jolt    (after the command apply: your write is last)
+physics.step
+```
+
+`body`, the Jolt index, is script-readable but **not** writable and not
+saved: a script that could set it could point one entity's controls at
+another's body, and an index from the last run names a different body in
+this one.
+
+The write-back also zeroes angular velocity for script-driven bodies —
+a rotation lock, which is what an upright capsule needs and what Jolt's
+`AllowedDOFs` would give if `somnium_physics` exposed it. Without it a
+character tips over on the first slope and rolls.
+
+### 17.19.2 `grounded` is a heuristic and says so
+
+Jolt's shape cast is not exposed through `somnium_physics`, so there is no
+honest "is there floor under me" query. `grounded` is derived from
+vertical speed: a resting body has gravity cancelled by contact and sits
+near zero. **The known false positive is the apex of a jump**, where
+vertical speed also passes through zero.
+
+Two things in the controller cover that, and both are in the tests:
+jumping is edge-triggered on the key rather than level-triggered, and a
+cooldown sized to the jump's whole flight time (`2·v/g`) closes the window
+until you would have landed. Landing early on a ledge means a short wait —
+that goes away when a real ground test replaces the heuristic, and the
+field's meaning does not change when it does.
+
+### 17.19.3 Proven headlessly
+
+`crates/somnium_core/tests/first_person.rs` runs **the same two `.luau`
+files** on a real Jolt world through the real `ScriptHost`: walking speed,
+stopping dead on key release, run vs walk, diagonal movement not being
+1.41× faster, mouse turning changing which way forward is, pitch clamping,
+the camera riding at eye height, jump height, the anti-staircase cooldown
+under adversarial input, and look direction surviving a reload.
+
+Two defects it caught, both in the scripts:
+
+- **The jump cooldown was a guessed constant (12 steps) and expired before
+  the apex** — holding Space climbed to 6 m. Now derived from the jump's
+  own flight time.
+- **`onInit` assigned `self.yaw = 0`**, which threw away the state
+  `loadState` had just restored, so editing the file spun the player
+  round. The idiom is `self.yaw = self.yaw or 0.0`, and it is now in both
+  scripts and in the help page.
+
+---
+
+## 17.18 Phase 16 — scripting (complete, 2026-08-17)
+
+> **Note on records.** `dev records/` is local-only and is not pushed.
+> Everything from it that outlives its session lives here; study citations
+> live in `ATTRIBUTION.md` §13D. Source comments that name a file under
+> `dev records/` are pointing at a local working note, not a repo file.
+
+### 17.18.1 The shape
+
+```
+somnium_ecs        reflect: schemas, StableId, PersistentId, patches
+      ▼            world: runtime component insert/remove + migration
+somnium_script     NEUTRAL. values / snapshots / commands / capabilities /
+      │            ScriptBackend / lifecycle / scheduler / instance registry
+      ├──────────────┐
+      ▼              ▼
+somnium_script_luau  somnium_core
+  the ONLY crate     ScriptHost drives phases from the frame loop, applies
+  that names mlua    commands, routes physics/audio, owns the cook + decls
+```
+
+**The boundary rule.** No `mlua` type may appear outside
+`somnium_script_luau`. `somnium_core` names that crate in exactly one
+place — `ScriptHost::new`, to install the backend. Replacing the language
+is writing a sibling crate, not editing the ECS, the scene format, the
+undo stack or a line of gameplay API.
+
+**Runtime:** `mlua` 0.12.0 / Luau 0.728, interpreter only, exact-pinned.
+Clean build including the vendored C++ runtime: 38 s.
+
+### 17.18.2 Ownership: snapshot in, commands out
+
+A script never receives `&mut World`. It reads a snapshot plus a
+copy-out `WorldView`, and emits a `CommandBuffer` that is validated and
+applied at a phase boundary. Three things follow, and all three are
+load-bearing: structural change cannot invalidate a live archetype
+iteration; a stale handle is a typed rejection rather than a panic; and
+the design survives parallel script workers because commands are already
+a merge point with a total order.
+
+Ordering is always `(execution_order, persistent_entity_guid,
+attachment_instance_uuid)` — authored data only, never archetype
+traversal, `ComponentId` order or hash-map iteration.
+
+**Visibility rule:** one script's writes are invisible to another until
+the commit point; a script sees its *own* writes because its declared
+components are mirrored into a plain Luau table. Documented for authors in
+`docs/editor/scripting.md`, not just implemented.
+
+### 17.18.3 Measured budgets
+
+RTX 5080 laptop, medians of five settled release runs, via
+`cargo test -p somnium_script_luau --release --test budgets -- --nocapture`.
+
+| Measurement | 16-B record | after 16-F | Ceiling |
+|---|---|---|---|
+| 1,000 empty lifecycle callbacks | 0.515 ms | **0.485** | 0.5 |
+| 10,000 reads + writes (1,000 × 10) | 2.684 ms | **3.431** | 1.5 |
+| 1,000 representative entities @ 60 Hz | 1.541 ms | **1.946** | 2.0 |
+| compile + check + instantiate 1,000 lines | 0.79 ms | **1.50** | 250 |
+| interrupt latency past deadline | 0.05 ms | 0.16 | 2 |
+| 100 instantiate/teardown cycles retained | 16 KiB | 16 KiB | < 1 MiB |
+
+**The two columns are not comparable.** A three-build `git worktree` A/B
+on one afternoon measured the *16-B commit itself* at 0.671 ms on a row
+its record puts at 0.515 — the machine is ~30% slower than the day the
+first column was taken. Scaled by that factor every "after" row lands on
+its recorded number, and the working tree beat both committed builds on
+every row. A number is only comparable to another taken on the same
+machine on the same day.
+
+**The reads+writes ceiling is arithmetically unreachable and is reported
+against rather than relaxed.** 10,000 entities running an *empty*
+callback with no mirror costs 6.5 ms against a 1.5 ms budget for the same
+10,000 doing a read and a write each; the ceiling implies 150 ns per
+callback and the Luau call alone is 116 ns. It was written before there
+was a per-callback cost model. The useful model:
+
+| Component | Measured |
+|---|---|
+| per attachment per phase, no mirror | ~0.55 µs |
+| per mirrored field, in + out | ~0.64 µs |
+| per script-side field read or write | ~0.03 µs |
+| Luau function call | 0.12 µs |
+| cheapest possible host call | 0.03 µs |
+
+**None of this falsified the language choice.** Every defect found by
+measurement was in engine code, and would have cost the same or more in
+any other runtime — more in Wasm, where each argument crosses a sandbox
+boundary. Compilation runs 250× inside its ceiling, which is the number
+that governs editor iteration speed.
+
+### 17.18.4 Sandbox and threat model
+
+`StdLib::ALL_SAFE` is `u32::MAX` under the `luau` feature, so `Lua::new()`
+hands scripts `os` and `debug`. This crate never calls it. Beyond library
+selection, the base library still arrives carrying `getfenv`, `setfenv`,
+`loadstring`, `require`, `collectgarbage`, `gcinfo`, `print` and `_G` —
+all removed *before* `sandbox(true)`, which is what freezes the table.
+`getfenv`/`setfenv` are the serious ones: they rewrite another function's
+environment, which is the entire mechanism keeping one attachment's
+globals private. `tests/sandbox.rs` enumerates the surviving surface so a
+Luau upgrade cannot widen it silently.
+
+The threat model is 22 tests in
+`crates/somnium_core/tests/script_threat_model.rs`, one per row, plus a
+28-case malformed corpus **and every prefix of every case** — half-written
+files are exactly what a file watcher sees.
+
+### 17.18.5 Decisions worth not re-litigating
+
+- **A script asset's id comes from its path, not its content.** A content
+  hash would give every attachment in every scene a new name the first
+  time someone saved the script. Content hashing belongs to the cook,
+  where the question is "is this bytecode still valid".
+- **The cook's runtime fingerprint is a hash of a probe chunk's compiled
+  bytecode**, not a version string. A version string is a constant someone
+  forgets to bump, and stale bytecode handed to Luau is undefined
+  behaviour rather than a load error — the VM does not validate its input.
+- **`require` takes a string literal and nothing else**, enforced by a
+  source scanner. Not a variable, not a concatenation, not even a bare
+  mention. The dependency graph has to be a fact about the file for hot
+  reload to know an edit's blast radius, for the cook to know what to
+  bundle, and for cycles to be caught once.
+- **A required module is evaluated once per trust domain and frozen.**
+  Once per attachment would mean a shared helper is not shared; unfrozen
+  would let one attachment rewrite a helper for everyone.
+- **Capabilities are enforced at the command boundary, once.** Per-binding
+  enforcement means every new host function is another place to remember.
+  `ScriptCommand::required_capability` is an exhaustive match.
+- **Stop restores the authored world from a component checkpoint, not a
+  scene round-trip.** Scripts can only touch what the `TypeRegistry`
+  describes, so capturing exactly that is sufficient and needs no
+  renderer involvement.
+- **The Details panel's Scripts section has no rows in the widget tree.**
+  Every row is generated from the script's declared schema. Hand-written
+  per-script field UI is a review failure, not a shortcut.
+
+### 17.18.6 Not done
+
+- **Diagnostics are positioned, not clickable.** Messages carry
+  `file:line:column`; the Output Log does not turn that into a jump.
+- No debugger (breakpoints, stepping). No mod tier loading untrusted
+  packages into their own VM — the capability manifest a mod tier needs
+  exists and is enforced, but nothing yet uses it that way.
+- Determinism is promised **same build, same platform** only. Jolt and
+  cross-platform float behaviour are unaudited and the stronger claim is
+  not made.
+
+---
+
 ## 18. Known Issues & Active Bugs
 
 **RESOLVED — finite water coverage and query contract (IV-D).** The renderer

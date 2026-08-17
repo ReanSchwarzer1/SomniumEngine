@@ -523,6 +523,14 @@ pub fn build_ctx<'scope, 'env>(
                 Ok(mouse_down.binary_search(&button).is_ok())
             })?,
         )?;
+        // Plain numbers rather than a call, because look code reads them
+        // every step and a host call for a value already sitting in the
+        // snapshot would be two hundred nanoseconds for nothing.
+        //
+        // Pixels since the previous fixed step, already accumulated — a
+        // script must not have to know the frame rate to aim.
+        input.set("mouseDeltaX", snapshot.input.mouse_delta[0])?;
+        input.set("mouseDeltaY", snapshot.input.mouse_delta[1])?;
     }
     ctx.set("input", input)?;
 

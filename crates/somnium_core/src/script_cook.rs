@@ -16,7 +16,7 @@
 //! # What it buys, honestly
 //!
 //! Compilation was measured at **0.79 ms for a thousand lines**, 250×
-//! inside its budget (`dev records/phase 16/16-B_budgets.md`). This is
+//! inside its budget (`context.md` §17.18.3). This is
 //! therefore not a frame-time optimisation and is not sold as one. It is
 //! here because a shipped game should not have to carry a compiler pass on
 //! every startup for every script, and because the plan asks for the

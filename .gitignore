@@ -38,6 +38,19 @@ somnium_phase*.md
 m2.md
 m25.md
 
+# Per-phase working records: plans, session hand-offs, measurement tables.
+# Useful while a phase is in flight, and superseded by context.md once it
+# closes — every conclusion that outlives the session it was written in is
+# folded into context.md (and ATTRIBUTION.md for the study citations),
+# which ARE committed. Keeping both would mean two accounts of the same
+# decision drifting apart.
+dev records/
+
+# Stray build output from a cargo invocation with the wrong working
+# directory. `target/` at the root is already ignored; this catches the
+# per-crate ones.
+crates/*/target/
+
 # ── Reference repositories (see ATTRIBUTION.md) ──────────────────────────────
 # example_repo/ holds ~6 GB of third-party engines studied for architectural
 # patterns only. It is excluded from the Cargo workspace and must NOT be pushed

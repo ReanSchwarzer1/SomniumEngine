@@ -46,6 +46,7 @@
 
 /// Core application lifecycle and event loop management.
 pub mod app;
+pub mod character;
 pub mod config;
 pub mod context;
 pub mod editor_commands;
@@ -86,6 +87,7 @@ pub use map::{
     spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
+pub use character::RigidBodyComponent;
 pub use script_host::{HostServices, ScriptHost, ScriptLogLine, SyncReport};
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;

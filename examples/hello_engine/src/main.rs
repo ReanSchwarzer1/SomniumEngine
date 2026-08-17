@@ -1,4 +1,4 @@
-//! # Hello Somnium Engine — glTF Demo
+//! # Hello Somnium Engine â€” glTF Demo
 //!
 //! Loads a glTF scene from `assets/test_scene.glb`, uploads it to the
 //! Visibility Buffer pipeline, and renders it with PBR + sky lighting.
@@ -32,9 +32,9 @@ use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
 use somnium_physics::shape::ColliderShape;
 use tracing::info;
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Components
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 #[derive(Debug, Clone, Copy)]
 struct PhysicsBody {
@@ -70,9 +70,9 @@ struct OutlinerEntity {
     depth: u32,
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Camera
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 struct EditorCamera {
     position: Vec3,
@@ -108,7 +108,7 @@ impl EditorCamera {
     }
 
     /// `base_speed` is the editor camera speed from the viewport toolbar
-    /// (Phase 20B) — the camera no longer owns it, so the slider and the
+    /// (Phase 20B) â€” the camera no longer owns it, so the slider and the
     /// RMB+wheel shortcut both drive movement directly.
     fn update(&mut self, dt: f32, base_speed: f32) {
         if !self.is_rmb_down {
@@ -195,8 +195,25 @@ fn scene_camera_world(world: &somnium_ecs::World) -> Option<glam::Mat4> {
     })
 }
 
-fn active_view(ctx: &EngineContext, editor: &EditorCamera) -> (glam::Mat4, Vec3) {
+fn active_view(
+    ctx: &EngineContext,
+    editor: &EditorCamera,
+    player: Option<&PlayerRuntime>,
+) -> (glam::Mat4, Vec3) {
     if play_session(ctx) {
+        // The scripted character's camera wins over the scene's Camera
+        // actor. Both carry `CameraSettingsComponent`, so picking by
+        // component alone would be a coin toss decided by archetype
+        // order â€” this is explicit instead.
+        if let Some(runtime) = player {
+            if let Some(world) = ctx
+                .world
+                .get::<WorldTransform>(runtime.camera)
+                .map(|wt| wt.0)
+            {
+                return camera_view_from_world(world);
+            }
+        }
         if let Some(world) = scene_camera_world(ctx.world) {
             return camera_view_from_world(world);
         }
@@ -319,7 +336,7 @@ fn apply_kit_view(
 /// One name rather than a handful of coordinates, because a measurement whose
 /// viewpoint is a pasted position is a measurement nobody can reproduce six
 /// weeks later. The three names match the vocabulary the existing evidence
-/// already uses — DF-A's overview and walk, and the Island recipe.
+/// already uses â€” DF-A's overview and walk, and the Island recipe.
 ///
 /// | `SOMNIUM_TIME_VIEW` | map | camera |
 /// |---|---|---|
@@ -395,13 +412,13 @@ fn apply_capture_camera_overrides(
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Editor mode
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Voxel terrain driver (Phase 14)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 /// Bridges the streaming `somnium_voxel::VoxelWorld` to the renderer.
 ///
@@ -423,7 +440,7 @@ struct VoxelTerrain {
 
 impl VoxelTerrain {
     /// Create the palette texture/material and seed a few `set_voxel` edits
-    /// that prove the edit-overlay → remesh path works.
+    /// that prove the edit-overlay â†’ remesh path works.
     fn new(
         renderer: &mut somnium_renderer::SomniumRenderer,
         render_ctx: &somnium_renderer::context::RenderContext,
@@ -457,7 +474,7 @@ impl VoxelTerrain {
             &palette_bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: None, // single row — no alignment requirement
+                bytes_per_row: None, // single row â€” no alignment requirement
                 rows_per_image: None,
             },
             wgpu::Extent3d {
@@ -551,7 +568,7 @@ impl VoxelTerrain {
 
     /// Release every chunk's GPU allocation back to the geometry pool.
     ///
-    /// Called when the voxel-terrain entity is deleted — without this the
+    /// Called when the voxel-terrain entity is deleted â€” without this the
     /// chunk meshes would leak the pool until the app exits.
     fn free_all(&mut self, renderer: &mut somnium_renderer::SomniumRenderer) {
         for (_, entry) in self.chunks.drain() {
@@ -583,9 +600,9 @@ impl VoxelTerrain {
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Game struct
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 struct HelloGame {
     log_timer: f32,
@@ -599,6 +616,14 @@ struct HelloGame {
     default_cube_alloc: Option<somnium_renderer::geometry::MeshAllocation>,
     /// Phase 14: streaming voxel terrain.
     voxel_terrain: Option<VoxelTerrain>,
+    /// The scripted first-person character, while Play is running.
+    player: Option<PlayerRuntime>,
+    /// Whether the last frame was a play session, so the transitions in
+    /// and out can be spotted without the engine having to announce them.
+    was_playing: bool,
+    /// The character scripts, imported once at startup.
+    controller_asset: Option<somnium_script::ids::ScriptAssetId>,
+    camera_asset: Option<somnium_script::ids::ScriptAssetId>,
 }
 
 impl HelloGame {
@@ -612,6 +637,10 @@ impl HelloGame {
             default_material_id: None,
             default_cube_alloc: None,
             voxel_terrain: None,
+            player: None,
+            was_playing: false,
+            controller_asset: None,
+            camera_asset: None,
         }
     }
 
@@ -840,7 +869,7 @@ impl HelloGame {
         });
 
         match (wants_voxel, self.voxel_terrain.is_some()) {
-            // Entity appeared — spin up the streaming driver.
+            // Entity appeared â€” spin up the streaming driver.
             (true, false) => {
                 if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
                     let vt = VoxelTerrain::new(renderer, render_ctx);
@@ -851,7 +880,7 @@ impl HelloGame {
                     self.voxel_terrain = Some(vt);
                 }
             }
-            // Entity deleted — free the chunk meshes and drop the driver.
+            // Entity deleted â€” free the chunk meshes and drop the driver.
             (false, true) => {
                 if let (Some(vt), Some(renderer)) = (&mut self.voxel_terrain, &mut ctx.renderer) {
                     vt.free_all(renderer);
@@ -866,7 +895,7 @@ impl HelloGame {
 
 impl GameApp for HelloGame {
     fn on_init(&mut self, ctx: &mut EngineContext) {
-        info!("HelloGame initialised — loading scene...");
+        info!("HelloGame initialised â€” loading scene...");
 
         let gltf_loaded =
             if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
@@ -913,12 +942,12 @@ impl GameApp for HelloGame {
             self.default_cube_alloc = Some(alloc);
         }
 
-        // Phase 14: the voxel world is no longer spawned automatically — create
+        // Phase 14: the voxel world is no longer spawned automatically â€” create
         // it from the editor via Create > Voxel Terrain. `sync_voxel_terrain`
         // builds the streaming driver when that entity appears.
 
         // Phase 24K: shadow smoke test. A wide ground plane with a cube above
-        // it, both through the visibility buffer — which is what the traced
+        // it, both through the visibility buffer â€” which is what the traced
         // path can currently see, since terrain and water write depth in their
         // own later passes.
         //
@@ -992,22 +1021,22 @@ impl GameApp for HelloGame {
             self.camera.pitch = -3.0;
         }
 
-        // Phase 14 (SSS): heightmap terrain smoke test — exercises chunk
+        // Phase 14 (SSS): heightmap terrain smoke test â€” exercises chunk
         // meshing, LODs, sculpt brushes, and auto-splat without editor input.
         // Normally terrain is created via Create > Terrain in the editor.
         // `SOMNIUM_TERRAIN=flat` reproduces **Create > Terrain** instead: the
         // default 16x16-chunk descriptor, no sculpting, spawned at y = 0. The
-        // sculpted 4x4 variant is not a substitute — it was the only thing
+        // sculpted 4x4 variant is not a substitute â€” it was the only thing
         // 25A-2 was verified against, and the editor-created terrain turned out
         // not to render even though that one did.
         // Terrain is part of the default scene (Phase 25L). `SOMNIUM_TERRAIN`
         // now selects a variant rather than enabling it:
-        //   unset / "flat" — load `assets/Maps/Coastal.somnium` (Great Lakes +
+        //   unset / "flat" â€” load `assets/Maps/Coastal.somnium` (Great Lakes +
         //       32-layer Appalachia). Double-click Island in the Content Drawer
         //       for the 512 m / 16-material map.
-        //   "1"            — the legacy sculpted 4x4 smoke test, kept because it
+        //   "1"            â€” the legacy sculpted 4x4 smoke test, kept because it
         //       is what exercises the brush paths without editor input.
-        //   "0" / "none"   — no terrain, for isolating everything else.
+        //   "0" / "none"   â€” no terrain, for isolating everything else.
         //
         // The sculpted variant is deliberately not the default: it was the only
         // thing 25A-2 was verified against, and the editor-created terrain
@@ -1065,7 +1094,7 @@ impl GameApp for HelloGame {
                             // editor (Phase 17E). Painting by hand was the only way
                             // to get a plant on screen, which meant the foliage
                             // shading work could not be *seen*, let alone measured
-                            // — the reason the 17E remainder sat open. Strokes are
+                            // â€” the reason the 17E remainder sat open. Strokes are
                             // deterministic, so an A/B of a shading change is a
                             // like-for-like comparison.
                             if std::env::var("SOMNIUM_FOLIAGE").as_deref() == Ok("1") {
@@ -1119,7 +1148,7 @@ impl GameApp for HelloGame {
                             // judging the ground itself. Every terrain texturing
                             // phase since 25F has had to be judged on a hillside a
                             // kilometre away, where a material transition is a few
-                            // pixels wide and a height blend is invisible — the
+                            // pixels wide and a height blend is invisible â€” the
                             // features live at metres and the demo camera does not.
                             if std::env::var("SOMNIUM_TERRAIN_EYE").as_deref() == Ok("1") {
                                 let [wx, wz] = desc.world_size();
@@ -1206,7 +1235,7 @@ impl GameApp for HelloGame {
         // Phase 25M: `SOMNIUM_SUN_ELEVATION` (degrees above the horizon) and
         // `SOMNIUM_SUN_AZIMUTH` place the sun at startup. Rotating it by hand
         // with the gizmo is how the night bug was found, and reproducing that by
-        // hand is not a test — this makes dusk and night a capture like any
+        // hand is not a test â€” this makes dusk and night a capture like any
         // other. It is also the only way to give 24U's light shafts the low sun
         // behind a ridge they have never been verified against.
         if !map_actors_spawned {
@@ -1239,7 +1268,7 @@ impl GameApp for HelloGame {
         }
 
         // Phase 13C/13E: a point and a spot light so clustered local lighting is
-        // visible in the demo — and so the light gizmos (L) have something to
+        // visible in the demo â€” and so the light gizmos (L) have something to
         // draw beyond the sun. Both sit near the origin scene.
         ctx.world.spawn((
             Transform::from_translation(Vec3::new(4.0, 3.0, 2.0)),
@@ -1297,7 +1326,7 @@ impl GameApp for HelloGame {
         }
 
         // Phase 15A1: scene-wide post-processing settings, selectable in the
-        // outliner. All effects start off — the viewport shows the raw image
+        // outliner. All effects start off â€” the viewport shows the raw image
         // until a look is dialled in.
         if !map_actors_spawned {
             ctx.world.spawn((
@@ -1371,7 +1400,7 @@ impl GameApp for HelloGame {
                         }
                     }
                     // F9: A/B the GPU-driven indirect draw path (Phase 15A).
-                    // Both paths must render identically — if the image changes,
+                    // Both paths must render identically â€” if the image changes,
                     // the indirect arguments are wrong.
                     KeyCode::F9 if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {
@@ -1391,7 +1420,7 @@ impl GameApp for HelloGame {
                         }
                     }
                     // F10: A/B GPU frustum culling (Phase 15B). A correct cull
-                    // is invisible — if geometry pops, the cull is wrong.
+                    // is invisible â€” if geometry pops, the cull is wrong.
                     // CPU Frustum Cull is the Camera Details toggle (Phase CR-C).
                     KeyCode::F10 if pressed => {
                         if let Some(renderer) = &mut ctx.renderer {
@@ -1438,7 +1467,7 @@ impl GameApp for HelloGame {
             }
 
             EngineEvent::WindowResized { width, height } => {
-                info!("Window resized to {width}×{height}");
+                info!("Window resized to {width}Ã—{height}");
             }
 
             _ => {}
@@ -1587,6 +1616,19 @@ impl GameApp for HelloGame {
         }
         self.last_simulation_time = ctx.simulation.elapsed_seconds;
 
+        // The scripted first-person character exists only during a play
+        // session, and spawns where the editor camera was standing.
+        // Watched here rather than announced by the engine, because
+        // "spawn my player on Play" is a game-layer decision and every
+        // game will want a different one.
+        let playing = play_session(ctx);
+        if playing && !self.was_playing {
+            spawn_player(self, ctx);
+        } else if !playing && self.was_playing {
+            despawn_player(self, ctx);
+        }
+        self.was_playing = playing;
+
         // Propagate after physics/editor synchronization so render transforms
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
@@ -1619,7 +1661,7 @@ impl GameApp for HelloGame {
         // stream chunks around the camera (async generation; finished meshes
         // are uploaded here, freed allocations recycled).
         self.sync_voxel_terrain(ctx);
-        let eye = active_view(ctx, &self.camera).1;
+        let eye = active_view(ctx, &self.camera, self.player.as_ref()).1;
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
@@ -1641,7 +1683,7 @@ impl GameApp for HelloGame {
             return;
         }
         // Phase DOOM-A: same contract for a timing run. Default on rather than
-        // opt-in — a run has a fixed frame count, so there is nothing left to
+        // opt-in â€” a run has a fixed frame count, so there is nothing left to
         // measure once it is written, and leaving the window up only invites
         // someone to read fps off it.
         if std::env::var("SOMNIUM_TIME_QUIT").as_deref() != Ok("0")
@@ -1668,7 +1710,7 @@ impl GameApp for HelloGame {
                     [speed, wake_strength, 110.0, 3.0],
                 )
             });
-        let (view_mat, eye) = active_view(ctx, &self.camera);
+        let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
         if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
@@ -1696,12 +1738,12 @@ impl GameApp for HelloGame {
                         let light = unsafe { archetype.column(l_col).get::<LightComponent>(row) };
 
                         // Two different conventions, easy to mix up:
-                        //  * `forward` — the direction light TRAVELS (entity -Z).
+                        //  * `forward` â€” the direction light TRAVELS (entity -Z).
                         //    This is the spot cone's axis: the shader tests
-                        //    dot(-L, direction_ws) with -L pointing light→surface.
-                        //  * `to_light` — the direction TOWARD the light, which is
-                        //    what the directional BRDF wants for N·L.
-                        // Passing `to_light` as the spot axis aimed the cone 180°
+                        //    dot(-L, direction_ws) with -L pointing lightâ†’surface.
+                        //  * `to_light` â€” the direction TOWARD the light, which is
+                        //    what the directional BRDF wants for NÂ·L.
+                        // Passing `to_light` as the spot axis aimed the cone 180Â°
                         // away from where the gizmo (correctly) drew it.
                         let forward = transform.rotation.mul_vec3(glam::Vec3::NEG_Z);
                         let to_light = -forward;
@@ -1712,7 +1754,7 @@ impl GameApp for HelloGame {
                                 // survives the trip through the atmosphere, so
                                 // it reddens as the sun drops and reaches zero
                                 // once it is below the horizon. Applied here,
-                                // to the one value every consumer reads —
+                                // to the one value every consumer reads â€”
                                 // shading, shadows, ReSTIR, the froxel volume
                                 // and the sky's own moon blending all take the
                                 // light buffer, so there is nowhere for them to
@@ -2099,7 +2141,7 @@ impl GameApp for HelloGame {
     }
 
     fn on_shutdown(&mut self) {
-        info!("HelloGame shutting down — goodbye!");
+        info!("HelloGame shutting down â€” goodbye!");
     }
 
     fn on_map_loaded(&mut self, ctx: &mut EngineContext, result: &MapLoadResult) {
@@ -2107,9 +2149,9 @@ impl GameApp for HelloGame {
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Outliner payload builder (Phase 11.5A-3)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 fn build_outliner_payload(ctx: &EngineContext) -> Vec<OutlinerEntity> {
     // Collect name map and parent map.
@@ -2199,12 +2241,124 @@ fn build_outliner_payload(ctx: &EngineContext) -> Vec<OutlinerEntity> {
     result
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Phase 16-C — the scripting gate
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
+// Phase 16-C â€” the scripting gate
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 /// Where the demo script lives, relative to the working directory.
 const DEMO_SCRIPT_PATH: &str = "assets/scripts/demo_rotator.luau";
+
+/// The two scripts that make up the first-person character.
+const CONTROLLER_SCRIPT_PATH: &str = "assets/scripts/first_person_controller.luau";
+const CAMERA_SCRIPT_PATH: &str = "assets/scripts/first_person_camera.luau";
+
+/// A capsule 1.8 m tall: `half_height` is the *cylinder* half, so the
+/// total is `2 * (half_height + radius)`.
+const PLAYER_HALF_HEIGHT: f32 = 0.6;
+const PLAYER_RADIUS: f32 = 0.3;
+
+/// Where the eye sits above the capsule's centre. Must match the camera
+/// script's `eyeHeight` default, or pressing Play moves the view.
+const PLAYER_EYE_HEIGHT: f32 = 0.72;
+
+/// The player, its camera child, and the Jolt body underneath.
+struct PlayerRuntime {
+    player: Entity,
+    camera: Entity,
+    body: BodyId,
+}
+
+/// Spawn the first-person character where the editor camera is standing.
+///
+/// Called on the transition into Play. The capsule's centre goes an eye
+/// height *below* the editor camera, so the view does not jump when you
+/// press Play â€” you carry on looking from where you were.
+///
+/// Nothing here is scripting-specific except the two attachments: the
+/// movement, the look and the jump all live in Luau, which is the point of
+/// the exercise.
+fn spawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
+    let (Some(controller), Some(camera_script)) = (game.controller_asset, game.camera_asset) else {
+        tracing::warn!("character scripts did not import; not spawning a player");
+        return;
+    };
+
+    let eye = game.camera.position;
+    let centre = eye - Vec3::Y * PLAYER_EYE_HEIGHT;
+
+    let body = ctx.physics.create_body(RigidBodyDescriptor {
+        shape: ColliderShape::Capsule {
+            half_height: PLAYER_HALF_HEIGHT,
+            radius: PLAYER_RADIUS,
+        },
+        position: centre,
+        motion_type: MotionType::Dynamic,
+        object_layer: LAYER_MOVING,
+        // A character does not bounce and does not skid: the script owns
+        // horizontal velocity outright, so friction and restitution would
+        // only fight it.
+        friction: 0.0,
+        restitution: 0.0,
+        linear_damping: 0.0,
+        angular_damping: 1.0,
+        // A sleeping character stops responding to the keyboard.
+        allow_sleeping: false,
+        ..Default::default()
+    });
+
+    let mut player_scripts = somnium_script::attachment::ScriptSet::new();
+    player_scripts.attach(somnium_script::attachment::ScriptAttachment::new(controller));
+    let player = ctx.world.spawn((
+        Transform::from_translation(centre),
+        WorldTransform::identity(),
+        Name::new("Player"),
+        somnium_core::RigidBodyComponent::driven(body),
+        player_scripts,
+        Children::empty(),
+    ));
+
+    let mut camera_scripts = somnium_script::attachment::ScriptSet::new();
+    camera_scripts.attach(somnium_script::attachment::ScriptAttachment::new(camera_script));
+    let camera = ctx.world.spawn((
+        Transform::from_translation(Vec3::Y * PLAYER_EYE_HEIGHT),
+        WorldTransform::identity(),
+        Name::new("PlayerCamera"),
+        // Makes it a camera the renderer will accept; `active_view`
+        // prefers the player's when one exists.
+        CameraSettingsComponent::from_env(),
+        Parent { entity: player },
+        camera_scripts,
+    ));
+    if let Some(children) = ctx.world.get_mut::<Children>(player) {
+        children.push(camera);
+    }
+
+    game.player = Some(PlayerRuntime {
+        player,
+        camera,
+        body,
+    });
+    info!("Player spawned at {centre:?} â€” WASD, Shift to run, Space to jump");
+}
+
+/// Tear the character down on Stop.
+///
+/// The *entities* are removed by the engine's play-session checkpoint â€”
+/// anything spawned after Play was pressed is not part of the authored
+/// world. The Jolt body is ours, and nothing else would ever free it.
+fn despawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
+    let Some(runtime) = game.player.take() else {
+        return;
+    };
+    ctx.physics.destroy_body(runtime.body);
+    // Belt and braces: if the checkpoint did not exist (a headless run,
+    // say) the entities would otherwise outlive the body they refer to.
+    for entity in [runtime.camera, runtime.player] {
+        if ctx.world.is_alive(entity) {
+            ctx.world.despawn(entity);
+        }
+    }
+}
 
 /// The same file, compiled in, so the gate runs from any working
 /// directory. The on-disk copy is the one the editor's content drawer
@@ -2218,11 +2372,11 @@ const DEMO_SCRIPT_SOURCE: &str = include_str!("../../../assets/scripts/demo_rota
 /// lifecycle, the ordering, the command applier and the frame hooks are
 /// the engine's. Press Play to run it.
 fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
-    // ── The force router ─────────────────────────────────────────────
+    // â”€â”€ The force router â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //
     // `applyForce` names an entity; Jolt wants a body id. The mapping is
     // this game's `PhysicsBody` component, which `somnium_core` has never
-    // heard of — so the engine asks rather than guessing.
+    // heard of â€” so the engine asks rather than guessing.
     ctx.scripts
         .set_force_router(Box::new(|world, physics, entity, force, mode| {
             let Some(body) = world.get::<PhysicsBody>(entity).copied() else {
@@ -2238,7 +2392,29 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
             }
         }));
 
-    // ── The asset ────────────────────────────────────────────────────
+    // â”€â”€ The character scripts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    //
+    // Imported from disk so the file watcher picks up edits: change the
+    // walk speed in the `.luau` and it takes effect without a restart.
+    for (path, slot) in [
+        (CONTROLLER_SCRIPT_PATH, 0),
+        (CAMERA_SCRIPT_PATH, 1),
+    ] {
+        match ctx.scripts.import_script_file(std::path::Path::new(path)) {
+            Ok(id) => {
+                if slot == 0 {
+                    game.controller_asset = Some(id);
+                } else {
+                    game.camera_asset = Some(id);
+                }
+            }
+            Err(diagnostics) => {
+                tracing::error!("{path} failed to import:\n{diagnostics}");
+            }
+        }
+    }
+
+    // â”€â”€ The rotator demo asset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let text = std::fs::read_to_string(DEMO_SCRIPT_PATH)
         .unwrap_or_else(|_| DEMO_SCRIPT_SOURCE.to_string());
     let asset = somnium_script::ids::ScriptAssetId::mint();
@@ -2247,7 +2423,7 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
         return;
     }
 
-    // ── The scripted entity ──────────────────────────────────────────
+    // â”€â”€ The scripted entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let mut transform = Transform::from_translation(Vec3::new(3.0, 1.5, 0.0));
     transform.scale = Vec3::splat(0.6);
     let entity = match (game.default_cube_alloc, game.default_material_id) {
@@ -2286,12 +2462,12 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
         set.attach(attachment);
     }
 
-    info!("Phase 16-C: `Scripted Rotator` attached to {DEMO_SCRIPT_PATH} — press Play to run it");
+    info!("Phase 16-C: `Scripted Rotator` attached to {DEMO_SCRIPT_PATH} â€” press Play to run it");
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Procedural fallback scene
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 fn spawn_procedural_scene(
     ctx: &mut EngineContext,
@@ -2432,9 +2608,9 @@ fn spawn_procedural_scene(
     (mat_blue, cube_alloc)
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Content browser helper
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 fn list_assets_dir() -> Vec<serde_json::Value> {
     let Ok(entries) = std::fs::read_dir("assets") else {
@@ -2455,9 +2631,9 @@ fn list_assets_dir() -> Vec<serde_json::Value> {
         .collect()
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 // Entry point
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 fn main() -> Result<(), somnium_core::EngineError> {
     let config = EngineConfig {

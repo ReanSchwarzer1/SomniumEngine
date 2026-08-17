@@ -346,6 +346,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(mesh_kind_schema());
     registry.register(name_schema());
     registry.register(parent_schema());
+    crate::character::register(&mut registry);
     registry.register(terrain_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
@@ -525,7 +526,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 12);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -537,6 +538,7 @@ mod tests {
                 "somnium.MeshKind",
                 "somnium.Name",
                 "somnium.Parent",
+                "somnium.RigidBody",
                 "somnium.Terrain",
                 "somnium.Transform",
                 "somnium.VoxelTerrain",

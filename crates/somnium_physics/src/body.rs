@@ -21,6 +21,17 @@ impl BodyId {
     pub fn index(self) -> u32 {
         self.0
     }
+
+    /// Rebuild a handle from a raw index.
+    ///
+    /// For components that store the index rather than the handle — a
+    /// body id is process-local, so anything that survives a frame stores
+    /// the number and reconstitutes it here. Not validated, for the same
+    /// reason Jolt does not: an index that names nothing is answered by
+    /// the body interface, not by this constructor.
+    pub fn from_index(index: u32) -> Self {
+        Self(index)
+    }
 }
 
 /// Motion type for rigid bodies.
