@@ -98,6 +98,8 @@ struct Fleet {
     world: World,
     registry: somnium_ecs::reflect::TypeRegistry,
     entities: Vec<(somnium_ecs::Entity, PersistentId, ScriptInstanceId, OrderKey)>,
+    /// (invoke, sort, apply) from the most recent phase.
+    last_split: (Duration, Duration, Duration),
 }
 
 impl Fleet {
@@ -134,6 +136,7 @@ impl Fleet {
             world,
             registry: component_registry(),
             entities,
+            last_split: (Duration::ZERO, Duration::ZERO, Duration::ZERO),
         }
     }
 
@@ -163,7 +166,11 @@ impl Fleet {
                 .backend
                 .invoke_phase(callback, &calls, &view, &mut commands);
         }
-        let _ = apply_commands(&mut self.world, &self.registry, commands.drain_sorted());
+        let invoked = started.elapsed();
+        let sorted = commands.drain_sorted();
+        let drained = started.elapsed();
+        let _ = apply_commands(&mut self.world, &self.registry, sorted);
+        self.last_split = (invoked, drained - invoked, started.elapsed() - drained);
         started.elapsed()
     }
 }
@@ -212,11 +219,15 @@ fn budget_table() {
         let mut fleet = Fleet::new(
             r#"
             return Script.define({
+                uses = { ["somnium.Transform"] = { "translation" } },
                 onFixedUpdate = function(self, ctx, dt)
+                    -- Hoisted, as any Lua author writes it: the component
+                    -- table is resolved once, and the loop below still
+                    -- performs ten reads and ten writes of the field.
+                    local t = ctx.self.transform
                     for i = 1, 10 do
-                        local p = ctx:get(ctx.entity, "somnium.Transform", "translation")
-                        ctx:set(ctx.entity, "somnium.Transform", "translation",
-                                vector.create(p.x + 0.001, p.y, p.z))
+                        local p = t.translation
+                        t.translation = vector.create(p.x + 0.001, p.y, p.z)
                     end
                 end,
             })
@@ -236,17 +247,88 @@ fn budget_table() {
         }
     }
 
+    // ── Isolate the mirror from the script ─────────────────────────
+    {
+        for (label, script) in [
+            ("mirror declared, callback empty", r#"
+                return Script.define({
+                    uses = { ["somnium.Transform"] = { "translation" } },
+                    onFixedUpdate = function() end,
+                })
+            "#),
+            ("no mirror, callback empty", r#"
+                return Script.define({ onFixedUpdate = function() end })
+            "#),
+        ] {
+            let mut fleet = Fleet::new(script, 10_000);
+            for _ in 0..5 {
+                fleet.phase(Callback::FixedUpdate);
+            }
+            let samples: Vec<Duration> =
+                (0..20).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+            let (invoke, _, apply) = fleet.last_split;
+            println!(
+                "  {label:<50} total {:>7.3} ms  invoke {:>7.3}  apply {:>6.3}",
+                p95(samples).as_secs_f64() * 1000.0,
+                invoke.as_secs_f64() * 1000.0,
+                apply.as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    // ── The same budget, read the other way ────────────────────────
+    //
+    // "10,000 component reads plus 10,000 queued writes" does not say how
+    // they are distributed. The block above puts ten of each on a thousand
+    // entities; this one puts one of each on ten thousand, which is what a
+    // real scene looks like. Both are reported because picking the
+    // flattering reading is how a budget stops meaning anything.
+    {
+        let mut fleet = Fleet::new(
+            r#"
+            return Script.define({
+                uses = { ["somnium.Transform"] = { "translation" } },
+                onFixedUpdate = function(self, ctx, dt)
+                    local t = ctx.self.transform
+                    local p = t.translation
+                    t.translation = vector.create(p.x + 0.001, p.y, p.z)
+                end,
+            })
+            "#,
+            10_000,
+        );
+        for _ in 0..5 {
+            fleet.phase(Callback::FixedUpdate);
+        }
+        let samples: Vec<Duration> = (0..40).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+        let (invoke, sort, apply) = fleet.last_split;
+        println!(
+            "      split: invoke {:.3} ms | sort {:.3} ms | apply {:.3} ms",
+            invoke.as_secs_f64() * 1000.0,
+            sort.as_secs_f64() * 1000.0,
+            apply.as_secs_f64() * 1000.0
+        );
+        if !budget(
+            "  ...as 10,000 entities x 1 read + 1 write",
+            p95(samples),
+            Duration::from_micros(1_500),
+        ) {
+            over.push("10,000 entities x 1 read + 1 write");
+        }
+    }
+
     // ── 1,000 representative scripted entities: p95 < 2.0 ms ───────
     {
         let mut fleet = Fleet::new(
             r#"
             return Script.define({
+                uses = { ["somnium.Transform"] = { "translation" } },
                 fields = { speed = Field.number(4.0) },
                 onFixedUpdate = function(self, ctx, dt)
-                    local p = ctx:get(ctx.entity, "somnium.Transform", "translation")
+                    local p = ctx.self.transform.translation
                     local bob = math.sin(ctx.time + p.x) * 0.25
-                    ctx:set(ctx.entity, "somnium.Transform", "translation",
-                            vector.create(p.x + self.speed * dt, p.y + bob, p.z))
+                    ctx.self.transform.translation =
+                        vector.create(p.x + self.speed * dt, p.y + bob, p.z)
                 end,
             })
             "#,
@@ -323,14 +405,15 @@ fn an_infinite_loop_is_isolated_within_two_milliseconds_of_its_deadline() {
     let entity = world.spawn((Transform::default(),));
     let persistent = world.ensure_persistent_id(entity).unwrap();
     let registry = component_registry();
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
     let mut commands = CommandBuffer::new();
-    commands.begin(OrderKey::new(0, persistent, InstanceUuid::mint()));
 
     let started = Instant::now();
     {
         let view = EngineWorldView::new(&world, &registry);
         let _ = backend.invoke(
             instance,
+            order,
             Callback::FixedUpdate,
             &snapshot(entity, persistent),
             &view,
@@ -399,13 +482,14 @@ fn a_fixed_step_replay_produces_identical_state_across_runs() {
         let mut fleet = Fleet::new(
             r#"
             return Script.define({
+                uses = { ["somnium.Transform"] = { "translation" } },
                 fields = { speed = Field.number(3.0) },
                 onFixedUpdate = function(self, ctx, dt)
-                    local p = ctx:get(ctx.entity, "somnium.Transform", "translation")
-                    ctx:set(ctx.entity, "somnium.Transform", "translation",
-                            vector.create(p.x + self.speed * dt,
-                                          p.y + math.sin(p.x) * dt,
-                                          p.z))
+                    local p = ctx.self.transform.translation
+                    ctx.self.transform.translation =
+                        vector.create(p.x + self.speed * dt,
+                                      p.y + math.sin(p.x) * dt,
+                                      p.z)
                 end,
             })
             "#,

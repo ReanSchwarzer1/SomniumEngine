@@ -184,6 +184,21 @@ pub trait WorldView {
     /// engine-owned" are different mistakes and deserve different
     /// messages.
     fn is_field_writable(&self, component: StableId, field: &str) -> bool;
+
+    /// Copy out one field by id, skipping name resolution.
+    ///
+    /// The mirrored-property path resolves names once when an attachment
+    /// is first called and then reads by id every frame, so this is the
+    /// form that runs in the hot loop.
+    fn read_field_id(&self, entity: Entity, component: StableId, field: FieldId)
+    -> Option<ScriptValue>;
+
+    /// Every script-visible field of a component: name, id, and whether a
+    /// script may write it.
+    ///
+    /// Called once per attachment when its mirror is built, never per
+    /// frame, so returning owned strings is fine here.
+    fn script_fields(&self, component: StableId) -> Vec<(String, FieldId, bool)>;
 }
 
 #[cfg(test)]

@@ -124,6 +124,19 @@ pub struct ScriptSchema {
     pub fields: Vec<ScriptFieldSchema>,
     /// Which callbacks exist.
     pub callbacks: CallbackMask,
+    /// Components this script wants mirrored onto `ctx.self`, in
+    /// declaration order, each with the fields it actually touches.
+    ///
+    /// Declaring them is what lets the engine resolve names once per
+    /// attachment instead of once per access, and what keeps a script that
+    /// touches nothing from paying for the machinery at all.
+    ///
+    /// An empty field list means "every readable field", which is the
+    /// convenient default and the expensive one: mirroring a field costs
+    /// a conversion in each direction every frame, so a script that names
+    /// `translation` should not be paying to marshal a rotation
+    /// quaternion it never reads.
+    pub uses: Vec<ComponentUse>,
 }
 
 impl ScriptSchema {
@@ -427,6 +440,15 @@ impl Default for Budget {
 // The backend
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// One component a script declared it uses, and which of its fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentUse {
+    /// Stable component name, as the script wrote it.
+    pub component: String,
+    /// Field names to mirror. Empty means every readable field.
+    pub fields: Vec<String>,
+}
+
 /// One attachment's slot in a phase.
 #[derive(Debug, Clone, Copy)]
 pub struct PhaseCall<'a> {
@@ -481,26 +503,6 @@ pub trait ScriptBackend: Send {
         properties: &PropertyBag,
     ) -> Result<(), ScriptError>;
 
-    /// Call one lifecycle entry point.
-    ///
-    /// Reads go through `world`; writes go into `commands`. The backend
-    /// must not retain either beyond the call.
-    ///
-    /// Convenient, and the slow path — see [`Self::invoke_phase`], which
-    /// is what the scheduler actually uses.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the script raised, or the budget it blew.
-    fn invoke(
-        &mut self,
-        id: ScriptInstanceId,
-        callback: Callback,
-        snapshot: &ScriptSnapshot,
-        world: &dyn WorldView,
-        commands: &mut CommandBuffer,
-    ) -> Result<(), ScriptError>;
-
     /// Call the same entry point on many instances, as one phase.
     ///
     /// # Why this exists
@@ -528,25 +530,56 @@ pub trait ScriptBackend: Send {
     /// must not stop the others — that is error quarantine, and it is why
     /// this returns a list rather than a `Result`.
     ///
-    /// The default implementation loops [`Self::invoke`], so a backend
-    /// gets correct behaviour for free and overrides this only for speed.
+    /// The backend attributes each call's commands itself, via
+    /// [`CommandBuffer::begin`] and [`CommandBuffer::end`]; the caller
+    /// must not have a batch open.
+    ///
+    /// Two absences are treated differently, on purpose:
+    ///
+    /// * **the module does not define this callback** — a silent no-op.
+    ///   Normal, and the reason [`CallbackMask`] exists; making it an
+    ///   error would force the scheduler to filter twice and would fill
+    ///   the log every frame with attachments that simply have no
+    ///   `onUpdate`.
+    /// * **no such live instance** — reported as a failure. It is either a
+    ///   bug or a stale id surviving a reload, and both are worth seeing.
     fn invoke_phase(
         &mut self,
         callback: Callback,
         calls: &[PhaseCall<'_>],
         world: &dyn WorldView,
         commands: &mut CommandBuffer,
-    ) -> Vec<(ScriptInstanceId, ScriptError)> {
-        let mut failures = Vec::new();
-        for call in calls {
-            commands.begin(call.order);
-            if let Err(err) = self.invoke(call.instance, callback, call.snapshot, world, commands) {
-                commands.discard_from(call.order);
-                failures.push((call.instance, err));
-            }
-            commands.end();
-        }
-        failures
+    ) -> Vec<(ScriptInstanceId, ScriptError)>;
+
+    /// Call one lifecycle entry point.
+    ///
+    /// Sugar over [`Self::invoke_phase`] with a single call, and
+    /// deliberately **not** a second implementation: when these were two
+    /// code paths they drifted, and a feature that existed in the phase
+    /// path was simply absent from this one. Tests and one-off callers use
+    /// this; the scheduler uses the phase form directly.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the script raised, or the budget it blew.
+    fn invoke(
+        &mut self,
+        id: ScriptInstanceId,
+        order: OrderKey,
+        callback: Callback,
+        snapshot: &ScriptSnapshot,
+        world: &dyn WorldView,
+        commands: &mut CommandBuffer,
+    ) -> Result<(), ScriptError> {
+        let calls = [PhaseCall {
+            instance: id,
+            order,
+            snapshot,
+        }];
+        self.invoke_phase(callback, &calls, world, commands)
+            .into_iter()
+            .next()
+            .map_or(Ok(()), |(_, err)| Err(err))
     }
 
     /// Ask an instance for its declared, pure-data state.
@@ -617,6 +650,7 @@ mod tests {
             callbacks: CallbackMask::default()
                 .with(Callback::FixedUpdate)
                 .with(Callback::Init),
+            uses: Vec::new(),
         }
     }
 

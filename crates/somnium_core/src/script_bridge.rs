@@ -122,6 +122,36 @@ impl WorldView for EngineWorldView<'_> {
             .and_then(|schema| schema.field_by_name(field))
             .is_some_and(|f| f.flags.contains(FieldFlags::SCRIPT_WRITE))
     }
+
+    fn read_field_id(
+        &self,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+    ) -> Option<ScriptValue> {
+        let schema = self.registry.by_stable_id(component)?;
+        (schema.read_field)(self.world, entity, field)
+    }
+
+    fn script_fields(&self, component: StableId) -> Vec<(String, FieldId, bool)> {
+        self.registry
+            .by_stable_id(component)
+            .map(|schema| {
+                schema
+                    .fields
+                    .iter()
+                    .filter(|f| f.flags.contains(FieldFlags::SCRIPT_READ))
+                    .map(|f| {
+                        (
+                            f.name.to_owned(),
+                            f.id,
+                            f.flags.contains(FieldFlags::SCRIPT_WRITE),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

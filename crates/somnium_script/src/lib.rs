@@ -62,7 +62,8 @@ pub mod value;
 
 pub use attachment::{CURRENT_API_VERSION, PropertyBag, ScriptAttachment, ScriptSet};
 pub use backend::{
-    Budget, Callback, CallbackMask, CompiledModule, Diagnostic, Diagnostics, PhaseCall,
+    Budget, Callback, CallbackMask, ComponentUse, CompiledModule, Diagnostic, Diagnostics,
+    PhaseCall,
     ScriptBackend, ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
 };
 pub use command::{

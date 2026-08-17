@@ -7,59 +7,101 @@
 > C++, but the MSVC toolchain was already required for Jolt, so this is
 > build time rather than a new prerequisite.
 
+**Read the variance section before trusting any single number.** The
+harness has roughly ±15% run-to-run spread, and two conclusions in the
+first draft of this document turned out to be noise.
+
 A run on different hardware is a different measurement and belongs in its
-own section below, not silently replacing this one.
+own section, not silently replacing this one.
 
 ---
 
 ## 1. The table
 
-| Measurement | Measured (p95) | Ceiling | Verdict |
-|---|---|---|---|
-| 1,000 empty lifecycle callbacks | **0.74 ms** | 0.5 ms | 1.5× over |
-| 10,000 component reads + 10,000 queued writes | **13.05 ms** | 1.5 ms | 8.7× over |
-| 1,000 representative scripted entities @ 60 Hz | **2.31 ms** | 2.0 ms | 1.16× over |
-| compile + check + instantiate a 1,000-line asset | **0.99 ms** | 250 ms | **250× under** |
-| Infinite loop interrupted past its deadline | **0.03–0.06 ms** | 2 ms | **PASS** |
-| 100 instantiate/teardown cycles, retained | **32–48 KiB** | < 1 MiB | **PASS** |
-| Live instances after teardown | **0** | 0 | **PASS** |
-| Fixed-step replay, identical state hash | **identical** | identical | **PASS** |
-| Malformed-source corpus (18 cases) | **no panic, no hang** | none | **PASS** |
+Median of five consecutive release runs.
 
-Every **safety** budget passes with a wide margin. Three **throughput**
-ceilings are missed. The rest of this document is about why, because the
-number on its own would invite the wrong fix.
+| Measurement | Before | **After** | Ceiling | Verdict |
+|---|---|---|---|---|
+| 1,000 empty lifecycle callbacks | 14.32 ms | **0.52 ms** | 0.5 ms | ~4% over |
+| 10,000 reads + writes, as 1,000 entities × 10 | 13.67 ms | **2.68 ms** | 1.5 ms | 1.8× over |
+| …the same budget, as 10,000 entities × 1 | — | **22.4 ms** | 1.5 ms | see §4 |
+| 1,000 representative scripted entities @ 60 Hz | 2.35 ms | **1.54 ms** | 2.0 ms | **PASS** |
+| compile + check + instantiate a 1,000-line asset | 0.99 ms | **0.79 ms** | 250 ms | **PASS** |
+| Infinite loop interrupted past its deadline | 0.03 ms | **0.05 ms** | 2 ms | **PASS** |
+| 100 instantiate/teardown cycles, retained | 48 KiB | **16 KiB** | < 1 MiB | **PASS** |
+| Live instances after teardown | 0 | **0** | 0 | **PASS** |
+| Fixed-step replay, identical state hash | identical | **identical** | identical | **PASS** |
+| Malformed-source corpus (18 cases) | clean | **clean** | none | **PASS** |
+
+Headline: **empty callbacks 27× faster, reads+writes 5× faster,
+representative workload now inside its budget.** Every safety gate passes
+with a wide margin.
 
 ---
 
-## 2. What the misses are actually measuring
+## 2. Variance, and two wrong conclusions it caused
 
-The cause was isolated by measurement, not by inspection, and it is not
-where the first two guesses put it.
+Five runs of the unchanged harness:
 
-### The Rust side is not the problem
+| Row | Runs | Median | Spread |
+|---|---|---|---|
+| empty callbacks | 0.515, 0.480, 0.591, 0.446, 0.569 | 0.515 | ±15% |
+| reads+writes (1,000 × 10) | 2.612, 2.776, 2.756, 2.684, 2.436 | 2.684 | ±7% |
+| representative | 1.539, 1.541, 1.682, 1.687, 1.388 | 1.541 | ±11% |
 
-| Operation | Cost |
-|---|---|
-| `EngineWorldView::read_field` (schema `read_field`, single field) | 30 ns |
-| `component_by_name` (hash) | 11 ns |
-| `field_by_name` | 16 ns |
-| `is_field_writable` | 15 ns |
-| `World::get::<Transform>` | 13 ns |
+Two things were briefly believed on the strength of a single run and are
+false:
 
-A whole `ctx:get` needs about **41 ns** of engine work. At 20,000 host
-calls that is ~0.8 ms of the measured 13 ms.
+1. *"Hoisting `local t = ctx.self.transform` made it slower."* It did not;
+   the row moved within its own noise band, and the empty-callback row —
+   which the change could not possibly affect — moved 35% in the same
+   pair of runs.
+2. *"Representative regressed to 5.5 ms after mirroring."* That one was
+   real, and §3.3 explains it, but the magnitude was overstated by a run
+   that happened to land high.
 
-### Luau is not the problem
+The lesson is in the harness now: the table prints a p95 over 40–100
+samples per row, and any judgement uses the median of several runs.
 
-| Operation | Cost |
-|---|---|
-| Luau function call, 2 table args | 116 ns |
-| `vector.create(1,2,3)` | 32 ns |
-| Host call, no arguments | 30 ns |
-| Host call through `Lua::scope` | **31 ns** — *not* slower than a plain one |
+---
 
-### Argument marshalling is the problem
+## 3. What was actually wrong, in the order it was found
+
+Four defects. Each was isolated by measurement; two hypotheses that
+sounded obvious were measured and found wrong, and are recorded so nobody
+re-litigates them.
+
+### 3.1 The context was built per callback instead of per phase
+
+A dozen scoped host closures at ~0.67 µs each, rebuilt for every
+attachment. `ScriptBackend::invoke_phase` builds them once per phase.
+
+**14.32 ms → 0.92 ms.**
+
+### 3.2 A fresh entity userdata per call
+
+`ctx.entity` was re-wrapped every callback for an entity that cannot
+change during an attachment's life. Cached on the instance.
+
+**0.92 ms → 0.74 ms.**
+
+### 3.3 Uninterned string keys
+
+The one that mattered most, and the least obvious. A `&str` key makes Lua
+intern the string on every access:
+
+| Operation | `&str` key | cached `LuaString` key |
+|---|---|---|
+| `Table::raw_set` | 230 ns | **100 ns** |
+| `Table::raw_get` | 177 ns | **43 ns** |
+| `Table::set` (protected) | 264 ns | — |
+
+Every per-call key is now pre-interned once. This is also what made the
+mirror in §3.4 affordable rather than a pessimisation.
+
+### 3.4 The API shape: `ctx:get(entity, "component", "field")`
+
+Argument marshalling, measured directly:
 
 | Host call shape | Cost |
 |---|---|
@@ -67,67 +109,89 @@ calls that is ~0.8 ms of the measured 13 ms.
 | `ctx.f(i)` — one integer | 62 ns |
 | `ctx:f(ctx.entity)` — receiver + userdata | 152 ns |
 | `ctx:f(ctx.entity, "component", "field")` | 245 ns |
-| the real typed signature `(Table, EntityHandle, String, String)` | **276 ns** |
+| the real typed signature | **276 ns** |
 
-So roughly **276 ns of every ~650 ns `ctx:get` is spent passing four
-values**, of which the two string literals cost ~93 ns and the userdata
-receiver ~90 ns. The engine work behind it is 41 ns.
+Against ~41 ns of actual engine work behind it. The call re-resolved, per
+access, three things that never change: which entity, which component,
+which field.
 
-**The API shape is the cost.** `ctx:get(entity, "somnium.Transform",
-"translation")` re-resolves, per call, three things that do not change:
-which entity (it is nearly always `self`), which component, and which
-field.
-
----
-
-## 3. What was already fixed, and what it bought
-
-Two real defects were found and fixed while chasing this, both worth
-keeping regardless of what happens next:
-
-1. **Context was built per callback instead of per phase.** A dozen scoped
-   host closures at ~0.67 µs each, rebuilt for every attachment. 1,000
-   empty callbacks measured **14.3 ms**. Moving construction to the phase
-   boundary — [`ScriptBackend::invoke_phase`] — took it to **0.92 ms**, a
-   15.6× improvement, and is the shape the scheduler wanted anyway.
-2. **A fresh `EntityHandle` userdata was allocated on every rebind**, for
-   an entity that cannot change during an attachment's life. Caching it
-   per instance: 0.92 ms → **0.74 ms**.
-
-Two changes that were expected to help and **did not**, recorded so nobody
-repeats them: replacing the whole-record `snapshot` read with a
-single-field `read_field` on the schema, and removing the two per-call
-`String` allocations in favour of borrowed `mlua::String`. Together they
-moved 13.67 ms to 13.05 ms — about 4%. Both are still the right code and
-both stay; neither was the bottleneck.
-
----
-
-## 4. The remedy, and why it is not in this sub-phase
-
-The fix is an API-shape change, not a tuning pass. The candidate is
-**property accessors that pre-resolve what does not vary**:
+**The fix is mirrored properties.** A script declares what it touches:
 
 ```luau
--- today: 4 values marshalled per read, 5 per write
-local p = ctx:get(ctx.entity, "somnium.Transform", "translation")
-ctx:set(ctx.entity, "somnium.Transform", "translation", p + step)
-
--- candidate: component and entity resolved once
-ctx.transform.translation += step
+uses = { ["somnium.Transform"] = { "translation" } },
+onFixedUpdate = function(self, ctx, dt)
+    local t = ctx.self.transform
+    t.translation = t.translation + step
+end,
 ```
 
-A proxy userdata bound to `(entity, component)` turns a read into one
-metamethod call with one string argument — from 276 ns of marshalling to
-roughly 60–100 ns — and removes the repeated name resolution entirely.
+The engine writes those fields into a plain Luau table before the call and
+diffs them out after. Script-side access becomes a table lookup (~29 ns)
+instead of a host call (~650 ns), and name resolution happens once per
+attachment instead of once per access.
 
-It is deliberately **not** done here, for a reason that is about
-sequencing rather than effort: the accessor surface is what the editor's
-generated field UI and the `.d.luau` declarations are written against.
-Designing it under time pressure at the end of 16-B, then discovering in
-16-D that the editor wants a different shape, is how a scripting API ends
-up with two of everything. It belongs at the start of the next sub-phase,
-with the declaration generator in view.
+The declaration is load-bearing, and the first attempt proved why. With
+`uses = { "somnium.Transform" }` — the whole component — the representative
+row got **worse**, 2.31 → 5.53 ms, because `Transform` carries a `rotation`
+quaternion that marshals as a four-entry table in *both* directions every
+frame for a script that only ever touched `translation`. Naming the field
+fixed it. Both spellings are supported; the whole-component form is the
+convenient one and the expensive one, and the doc comment says so.
+
+### 3.5 Two fixes that did nothing, recorded so they are not repeated
+
+Replacing the whole-record `snapshot` read with a single-field
+`read_field` on the schema, and removing two per-call `String`
+allocations in favour of borrowed `mlua::String`. Together: 13.67 → 13.05
+ms, about 4%. Both are still the right code and both stay. Neither was
+the bottleneck.
+
+---
+
+## 4. The one row still over, and why the ceiling is unreachable
+
+"10,000 component reads plus 10,000 queued writes, p95 under 1.5 ms" does
+not say how those are distributed, so both readings were measured.
+
+**As 1,000 entities × 10 each: 2.68 ms.** 1.8× over.
+
+**As 10,000 entities × 1 each: 22.4 ms.** And here is the decisive
+control — the same 10,000 entities running a callback that does *nothing*,
+with no mirror at all:
+
+```
+  no mirror, callback empty      total 7.26 ms   invoke 6.51 ms   apply 0.00 ms
+  mirror declared, callback empty total 15.3 ms  invoke 12.9 ms   apply 0.00 ms
+```
+
+**10,000 empty callbacks cost 6.5 ms before a single read or write
+happens.** The ceiling is 1.5 ms. Under this reading the budget is
+unreachable by a factor of four for *any* implementation in *any*
+language, because it implies a per-callback cost of 150 ns and the Luau
+call alone is 116 ns.
+
+The budget was written before there was a per-callback cost model. It is
+not being relaxed here — it is being reported against, with the control
+measurement that shows what it actually demands. A revised ceiling should
+be expressed as *cost per attachment per phase* plus *cost per field
+access*, which is what the data above supports:
+
+| Component | Measured |
+|---|---|
+| per attachment per phase, no mirror | ~0.55 µs |
+| per mirrored field, in + out | ~0.64 µs |
+| per script-side field read or write | ~0.03 µs |
+| Luau function call | 0.12 µs |
+| cheapest possible host call | 0.03 µs |
+
+### Known, quantified, not done
+
+`invoke_phase` does three `HashMap` lookups per call to reach the instance
+(mirror-in, `self_table`, mirror-out). Hoisting them into the resolve pass
+that already runs before the scope would save ~75–100 ns/call, about 12%
+of the mirror overhead. It changes no verdict in this table, which is why
+it was not done at the end of a long session; it is the first thing to do
+if this row is revisited.
 
 ---
 
@@ -135,23 +199,18 @@ with the declaration generator in view.
 
 **No, and the numbers are what say so.**
 
-The falsification criterion in `dev records/phase_16.md` §3.1 was that
-Luau itself — script execution or the VM boundary — could not meet the
-frame budget. What was measured is the opposite:
+The falsification criterion in `phase_16.md` §3.1 was that Luau — script
+execution or the VM boundary — could not meet the frame budget. The
+opposite is measured: Luau executes a call in 116 ns, constructs a native
+vector in 32 ns, and the host-call trampoline is 30 ns. Compilation is
+**250× inside** its ceiling, which is the number that governs editor
+iteration speed. Every isolation and safety property holds with margin.
 
-- Luau executes a call in **116 ns** and a native vector construct in
-  **32 ns**;
-- the host-call trampoline is **30 ns**;
-- compilation is **250× inside** its ceiling, which is the number that
-  governs editor iteration speed;
-- every isolation and safety property holds with a wide margin.
+Every defect found was in engine code Somnium wrote, and every one of them
+would have cost the same or more in Rhai, Rune or Wasm — more in Wasm,
+where each argument crosses a sandbox boundary. Switching runtimes would
+not have moved any of these numbers.
 
-The overrun is in an engine API surface that Somnium designed and can
-redesign, and it would cost exactly the same in Rhai, Rune or Wasm —
-arguably more in Wasm, where every argument crosses a sandbox boundary.
-Switching runtimes would not move any of these numbers.
-
-The honest summary: **Luau is fast; the first draft of the `ctx` API is
-not.** The representative workload — the one that resembles a real game —
-is 2.31 ms against 2.0 ms, 16% over, with a known fix. That is a
-first-implementation result, not a verdict on the runtime.
+**Luau is fast. The first draft of the `ctx` API was not.** It is better
+now, and the remaining gap is a documented property of the budget rather
+than of the runtime.

@@ -100,13 +100,17 @@ impl Slice {
     fn step(&mut self, callback: Callback) -> Result<(), ScriptError> {
         let snapshot = snapshot(self.entity, self.persistent);
         let mut commands = CommandBuffer::new();
-        commands.begin(self.order);
         let result = {
             let view = EngineWorldView::new(&self.world, &self.registry);
-            self.backend
-                .invoke(self.instance, callback, &snapshot, &view, &mut commands)
+            self.backend.invoke(
+                self.instance,
+                self.order,
+                callback,
+                &snapshot,
+                &view,
+                &mut commands,
+            )
         };
-        commands.end();
         if result.is_ok() {
             let _ = apply_commands(&mut self.world, &self.registry, commands.drain_sorted());
         }
@@ -328,8 +332,8 @@ fn an_infinite_loop_is_interrupted_close_to_its_deadline() {
     let persistent = world.ensure_persistent_id(entity).unwrap();
     let registry = component_registry();
     let snapshot = snapshot(entity, persistent);
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
     let mut commands = CommandBuffer::new();
-    commands.begin(OrderKey::new(0, persistent, InstanceUuid::mint()));
 
     let started = Instant::now();
     let err = {
@@ -337,6 +341,7 @@ fn an_infinite_loop_is_interrupted_close_to_its_deadline() {
         backend
             .invoke(
                 instance,
+                order,
                 Callback::FixedUpdate,
                 &snapshot,
                 &view,
@@ -419,14 +424,12 @@ fn one_script_cannot_change_globals_for_another() {
     let mut run = |instance: ScriptInstanceId, callback: Callback, world: &mut World| {
         let snap = snapshot(entity, persistent);
         let mut commands = CommandBuffer::new();
-        commands.begin(order);
         {
             let view = EngineWorldView::new(world, &registry);
             backend
-                .invoke(instance, callback, &snap, &view, &mut commands)
+                .invoke(instance, order, callback, &snap, &view, &mut commands)
                 .unwrap();
         }
-        commands.end();
         let _ = apply_commands(world, &registry, commands.drain_sorted());
     };
 
@@ -463,14 +466,15 @@ fn a_script_cannot_write_an_engine_owned_field() {
     let entity = world.spawn((somnium_core::MeshComponent::default(), Transform::default()));
     let persistent = world.ensure_persistent_id(entity).unwrap();
     let registry = component_registry();
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
     let mut commands = CommandBuffer::new();
-    commands.begin(OrderKey::new(0, persistent, InstanceUuid::mint()));
 
     let err = {
         let view = EngineWorldView::new(&world, &registry);
         backend
             .invoke(
                 instance,
+                order,
                 Callback::FixedUpdate,
                 &snapshot(entity, persistent),
                 &view,
@@ -590,11 +594,11 @@ fn declared_state_survives_an_in_process_module_swap() {
 
     {
         let mut commands = CommandBuffer::new();
-        commands.begin(order);
         let view = EngineWorldView::new(&world, &registry);
         backend
             .invoke(
                 before,
+                order,
                 Callback::Start,
                 &snapshot(entity, persistent),
                 &view,
@@ -611,12 +615,12 @@ fn declared_state_survives_an_in_process_module_swap() {
     backend.import_state(after, state).unwrap();
 
     let mut commands = CommandBuffer::new();
-    commands.begin(order);
     {
         let view = EngineWorldView::new(&world, &registry);
         backend
             .invoke(
                 after,
+                order,
                 Callback::FixedUpdate,
                 &snapshot(entity, persistent),
                 &view,
@@ -624,7 +628,6 @@ fn declared_state_survives_an_in_process_module_swap() {
             )
             .unwrap();
     }
-    commands.end();
     let _ = apply_commands(&mut world, &registry, commands.drain_sorted());
 
     assert_eq!(
@@ -667,7 +670,7 @@ fn a_module_with_no_save_state_exports_nothing_rather_than_failing() {
 }
 
 #[test]
-fn invoking_a_callback_a_module_does_not_define_is_a_typed_error() {
+fn invoking_a_callback_a_module_does_not_define_is_a_no_op() {
     let mut backend = backend();
     let module = backend
         .compile(&source("return Script.define({})"))
@@ -681,20 +684,24 @@ fn invoking_a_callback_a_module_does_not_define_is_a_typed_error() {
     let entity = world.spawn((Transform::default(),));
     let persistent = world.ensure_persistent_id(entity).unwrap();
     let registry = component_registry();
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
     let mut commands = CommandBuffer::new();
-    commands.begin(OrderKey::new(0, persistent, InstanceUuid::mint()));
 
     let view = EngineWorldView::new(&world, &registry);
-    let err = backend
+    backend
         .invoke(
             instance,
+            order,
             Callback::FixedUpdate,
             &snapshot(entity, persistent),
             &view,
             &mut commands,
         )
-        .unwrap_err();
-    assert!(matches!(err, ScriptError::NoSuchCallback(Callback::FixedUpdate)));
+        .expect("a module with no such callback is skipped, not an error");
+    assert!(
+        commands.is_empty(),
+        "and it cannot have queued anything either"
+    );
 }
 
 #[test]
@@ -704,14 +711,15 @@ fn an_unknown_instance_is_a_typed_error_not_a_panic() {
     let entity = world.spawn((Transform::default(),));
     let persistent = world.ensure_persistent_id(entity).unwrap();
     let registry = component_registry();
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
     let mut commands = CommandBuffer::new();
-    commands.begin(OrderKey::new(0, persistent, InstanceUuid::mint()));
 
     let view = EngineWorldView::new(&world, &registry);
     let ghost = ScriptInstanceId::next();
     let err = backend
         .invoke(
             ghost,
+            order,
             Callback::FixedUpdate,
             &snapshot(entity, persistent),
             &view,
@@ -719,6 +727,108 @@ fn an_unknown_instance_is_a_typed_error_not_a_panic() {
         )
         .unwrap_err();
     assert!(matches!(err, ScriptError::NoSuchInstance(_)));
+}
+
+#[test]
+fn a_read_modify_write_loop_accumulates_through_the_mirror() {
+    // The defect this fixes: `ctx:get` reads committed world state and
+    // `ctx:set` queues a deferred write, so a loop through that pair
+    // re-read the *pre-phase* value every iteration and only the last
+    // write survived — ten steps silently produced one step of movement.
+    //
+    // Through the mirror a script sees its own writes, which is both what
+    // an author expects and the visibility rule the design documents.
+    let mut slice = Slice::new(
+        r#"
+        return Script.define({
+            uses = { ["somnium.Transform"] = { "translation" } },
+            onFixedUpdate = function(self, ctx, dt)
+                local t = ctx.self.transform
+                for i = 1, 10 do
+                    local p = t.translation
+                    t.translation = vector.create(p.x + 1, p.y, p.z)
+                end
+            end,
+        })
+        "#,
+        PropertyBag::new(),
+    );
+
+    slice.step(Callback::FixedUpdate).unwrap();
+    assert!(
+        (slice.translation().x - 10.0).abs() < 1.0e-5,
+        "ten iterations must accumulate ten steps, got {}",
+        slice.translation().x
+    );
+}
+
+#[test]
+fn a_mirrored_field_only_queues_a_command_when_it_changes() {
+    let mut slice = Slice::new(
+        r#"
+        return Script.define({
+            uses = { "somnium.Transform" },
+            onFixedUpdate = function(self, ctx, dt)
+                local _ = ctx.self.transform.translation   -- read only
+            end,
+        })
+        "#,
+        PropertyBag::new(),
+    );
+    slice.world.get_mut::<Transform>(slice.entity).unwrap().translation =
+        glam::Vec3::new(5.0, 6.0, 7.0);
+    slice.step(Callback::FixedUpdate).unwrap();
+    assert!(
+        (slice.translation() - glam::Vec3::new(5.0, 6.0, 7.0)).length() < 1.0e-6,
+        "a script that only reads must not write anything back"
+    );
+}
+
+#[test]
+fn a_script_cannot_write_an_engine_owned_field_through_the_mirror() {
+    // `MeshComponent`'s fields are all RUNTIME_ONLY. They mirror in as
+    // readable, and writes to them must be dropped rather than queued.
+    let mut backend = backend();
+    let module = backend
+        .compile(&source(
+            r#"
+            return Script.define({
+                uses = { "somnium.Mesh" },
+                onFixedUpdate = function(self, ctx, dt)
+                    ctx.self.mesh.index_count = 999
+                end,
+            })
+            "#,
+        ))
+        .unwrap();
+    let instance = ScriptInstanceId::next();
+    backend.instantiate(instance, module, &PropertyBag::new()).unwrap();
+
+    let mut world = World::new();
+    let entity = world.spawn((somnium_core::MeshComponent::default(), Transform::default()));
+    let persistent = world.ensure_persistent_id(entity).unwrap();
+    let registry = component_registry();
+    let order = OrderKey::new(0, persistent, InstanceUuid::mint());
+    let snap = snapshot(entity, persistent);
+    let calls = [somnium_script::backend::PhaseCall {
+        instance,
+        order,
+        snapshot: &snap,
+    }];
+
+    let mut commands = CommandBuffer::new();
+    {
+        let view = EngineWorldView::new(&world, &registry);
+        let failures = backend.invoke_phase(Callback::FixedUpdate, &calls, &view, &mut commands);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+    let outcome = apply_commands(&mut world, &registry, commands.drain_sorted());
+    assert!(outcome.is_clean(), "{:?}", outcome.rejected);
+    assert_eq!(
+        world.get::<somnium_core::MeshComponent>(entity).unwrap().index_count,
+        0,
+        "an engine-owned field must not be writable through the mirror either"
+    );
 }
 
 #[test]

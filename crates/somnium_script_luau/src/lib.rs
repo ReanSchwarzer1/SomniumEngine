@@ -58,7 +58,7 @@ use somnium_script::backend::{
 };
 use somnium_script::command::CommandBuffer;
 use somnium_script::ids::{LanguageTag, ScriptAssetId, ScriptInstanceId};
-use somnium_script::snapshot::{ScriptSnapshot, WorldView};
+use somnium_script::snapshot::WorldView;
 use somnium_script::value::{FieldType, ScriptValue};
 
 use crate::deadline::Deadline;
@@ -113,6 +113,23 @@ struct ModuleEntry {
     schema: Option<ScriptSchema>,
 }
 
+/// One field of a mirrored component.
+struct MirrorField {
+    id: somnium_ecs::FieldId,
+    /// Pre-interned Lua key. Interning it per access costs 130–190 ns;
+    /// this costs nothing after the first frame.
+    key: mlua::LuaString,
+    writable: bool,
+}
+
+/// One component mirrored onto `ctx.self` for an attachment.
+struct Mirror {
+    component: somnium_ecs::StableId,
+    /// The sub-table a script reads and writes, e.g. `ctx.self.transform`.
+    table: Table,
+    fields: Vec<MirrorField>,
+}
+
 /// A live script object.
 struct Instance {
     module: u64,
@@ -135,11 +152,45 @@ struct Instance {
     /// about 0.5 µs against a 0.5 µs total budget — half the frame's
     /// script time spent re-wrapping a number that had not moved.
     entity_handle: Option<(somnium_ecs::Entity, mlua::AnyUserData)>,
+    /// Components this script declared it uses, unresolved.
+    uses: Vec<somnium_script::backend::ComponentUse>,
+    /// Resolved on the first call, when a `WorldView` is finally available.
+    /// `Some(empty)` means "resolved, uses nothing" and is not retried.
+    mirrors: Option<Vec<Mirror>>,
+    /// The table bound to `ctx.self`, owning the per-component sub-tables.
+    self_table: Table,
+}
+
+/// The `ctx.self` key a component mirrors under.
+///
+/// `"somnium.Transform"` becomes `transform`, `"game.Health"` becomes
+/// `health`. The stable id stays the durable name; this is only how a
+/// script spells it, and keeping it short is the point of having it.
+fn mirror_key(stable_name: &str) -> String {
+    let last = stable_name.rsplit('.').next().unwrap_or(stable_name);
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Interned keys for the per-call hot path.
+struct Keys {
+    entity: mlua::LuaString,
+    zelf: mlua::LuaString,
 }
 
 /// The Luau backend.
 pub struct LuauBackend {
     lua: Lua,
+    /// Pre-interned keys for the fields rewritten on every call.
+    ///
+    /// A `&str` key makes Lua intern the string on every access —
+    /// measured at 264 ns for a `set` against 100 ns with a cached key.
+    /// On a path that runs once per attachment per phase that is most of
+    /// the budget.
+    keys: Keys,
     modules: HashMap<u64, ModuleEntry>,
     instances: HashMap<ScriptInstanceId, Instance>,
     next_handle: u64,
@@ -181,8 +232,14 @@ impl LuauBackend {
 
         lua.sandbox(true).map_err(host::to_script_error)?;
 
+        let keys = Keys {
+            entity: lua.create_string("entity").map_err(host::to_script_error)?,
+            zelf: lua.create_string("self").map_err(host::to_script_error)?,
+        };
+
         Ok(Self {
             lua,
+            keys,
             modules: HashMap::new(),
             instances: HashMap::new(),
             next_handle: 1,
@@ -265,6 +322,65 @@ impl LuauBackend {
         let instance = self.instances.get_mut(&id)?;
         instance.entity_handle = Some((entity, fresh.clone()));
         Some(fresh)
+    }
+
+    /// Resolve an instance's declared `uses` into mirrors.
+    ///
+    /// Deferred to the first call because resolution needs a `WorldView`,
+    /// which only exists during a phase. Done once; a script that declares
+    /// nothing gets an empty list and never pays again.
+    fn resolve_mirrors(&mut self, id: ScriptInstanceId, world: &dyn WorldView) {
+        let Some(instance) = self.instances.get(&id) else {
+            return;
+        };
+        if instance.mirrors.is_some() {
+            return;
+        }
+        let uses = instance.uses.clone();
+        let self_table = instance.self_table.clone();
+
+        let mut mirrors = Vec::with_capacity(uses.len());
+        for declared in &uses {
+            let name = &declared.component;
+            let Some(component) = world.component_by_name(name) else {
+                // An unknown component is a script bug, but not a fatal
+                // one: the mirror is simply absent and `ctx.self.x` reads
+                // nil, which is what an author sees and can act on.
+                continue;
+            };
+            let Ok(table) = self.lua.create_table() else {
+                continue;
+            };
+            let Ok(key) = self.lua.create_string(mirror_key(name)) else {
+                continue;
+            };
+            if self_table.raw_set(&key, &table).is_err() {
+                continue;
+            }
+            let fields = world
+                .script_fields(component)
+                .into_iter()
+                .filter(|(field_name, _, _)| {
+                    declared.fields.is_empty() || declared.fields.contains(field_name)
+                })
+                .filter_map(|(field_name, field_id, writable)| {
+                    Some(MirrorField {
+                        id: field_id,
+                        key: self.lua.create_string(&field_name).ok()?,
+                        writable,
+                    })
+                })
+                .collect();
+            mirrors.push(Mirror {
+                component,
+                table,
+                fields,
+            });
+        }
+
+        if let Some(instance) = self.instances.get_mut(&id) {
+            instance.mirrors = Some(mirrors);
+        }
     }
 
     fn instance(&self, id: ScriptInstanceId) -> Result<&Instance, ScriptError> {
@@ -371,6 +487,12 @@ impl ScriptBackend for LuauBackend {
         }
 
         let callbacks = host::resolve_callbacks(&descriptor).map_err(host::to_script_error)?;
+        let uses = entry
+            .schema
+            .as_ref()
+            .map(|schema| schema.uses.clone())
+            .unwrap_or_default();
+        let self_table = self.lua.create_table().map_err(host::to_script_error)?;
 
         self.instances.insert(
             id,
@@ -380,46 +502,21 @@ impl ScriptBackend for LuauBackend {
                 env,
                 callbacks,
                 entity_handle: None,
+                uses,
+                mirrors: None,
+                self_table,
             },
         );
         Ok(())
     }
 
 
-    fn invoke(
-        &mut self,
-        id: ScriptInstanceId,
-        callback: Callback,
-        snapshot: &ScriptSnapshot,
-        world: &dyn WorldView,
-        commands: &mut CommandBuffer,
-    ) -> Result<(), ScriptError> {
-        let instance = self.instance(id)?;
-        let Some(function) = instance.callbacks[callback as usize].clone() else {
-            return Err(ScriptError::NoSuchCallback(callback));
-        };
-        let descriptor = instance.descriptor.clone();
-
-        let budget = self.budget.per_call;
-        self.deadline.arm(budget);
-        let result = host::call_with_context(
-            &self.lua,
-            &function,
-            &descriptor,
-            callback,
-            snapshot,
-            world,
-            commands,
-        );
-        self.deadline.disarm();
-
-        match result {
-            Ok(()) => Ok(()),
-            Err(_) if self.deadline.tripped() => Err(ScriptError::Deadline { budget }),
-            Err(err) => Err(host::to_script_error(err)),
-        }
-    }
-
+    // Resolve pass, mirror in, dispatch, mirror out, quarantine — one
+    // phase, in the order it happens. Splitting it would mean threading
+    // the scope, the command cell and the staging buffer through four
+    // signatures to save a line count, and would hide the ordering that
+    // is the whole point of the function.
+    #[allow(clippy::too_many_lines)]
     fn invoke_phase(
         &mut self,
         callback: Callback,
@@ -444,24 +541,47 @@ impl ScriptBackend for LuauBackend {
         // Resolve callables and entity handles before entering the scope,
         // so the borrow of `self.instances` ends before `commands` is
         // borrowed mutably — and so neither allocates inside the loop.
-        let resolved: Vec<Option<(Function, Table, mlua::AnyUserData)>> = calls
-            .iter()
-            .map(|call| {
-                let entry = self.instances.get(&call.instance).and_then(|instance| {
-                    instance.callbacks[callback as usize]
-                        .clone()
-                        .map(|function| (function, instance.descriptor.clone()))
-                })?;
-                let handle = self.entity_handle(call.instance, call.snapshot.self_entity)?;
-                Some((entry.0, entry.1, handle))
-            })
-            .collect();
+        let mut resolved: Vec<Option<(Function, Table, mlua::AnyUserData)>> =
+            Vec::with_capacity(calls.len());
+        for call in calls {
+            let Some(instance) = self.instances.get(&call.instance) else {
+                // A stale id is worth seeing; see the trait docs.
+                failures.push((call.instance, ScriptError::NoSuchInstance(call.instance)));
+                resolved.push(None);
+                continue;
+            };
+            let Some(function) = instance.callbacks[callback as usize].clone() else {
+                // The module simply has no such callback. Not an error.
+                resolved.push(None);
+                continue;
+            };
+            let descriptor = instance.descriptor.clone();
+            resolved.push(
+                self.entity_handle(call.instance, call.snapshot.self_entity)
+                    .map(|handle| (function, descriptor, handle)),
+            );
+        }
+
+        // Resolve mirrors before the scope, while `self` is still free.
+        for call in calls {
+            self.resolve_mirrors(call.instance, world);
+        }
 
         let budget = self.budget.per_call;
         let deadline = self.deadline.clone();
-        let lua = &self.lua;
+        // Disjoint field borrows: the scope holds `lua` while the loop
+        // needs `instances` mutably. Destructuring is what makes that
+        // legible to the borrow checker.
+        let Self {
+            lua,
+            instances,
+            keys,
+            ..
+        } = self;
         let command_cell = std::cell::RefCell::new(commands);
         let command_ref = &command_cell;
+        // Reused across the whole phase so mirroring allocates nothing.
+        let mut staged: Vec<ScriptValue> = Vec::new();
 
         // One scope and one `ctx` for the whole phase. See
         // `ScriptBackend::invoke_phase` for the measurement that made this
@@ -471,18 +591,91 @@ impl ScriptBackend for LuauBackend {
 
             for (call, entry) in calls.iter().zip(&resolved) {
                 let Some((function, descriptor, entity)) = entry else {
-                    // No such instance, or the module does not define this
-                    // callback. Neither is an error worth reporting every
-                    // frame — the scheduler filters on the callback mask.
+                    // Already accounted for in the resolve pass above.
                     continue;
                 };
 
-                ctx.set("entity", entity)?;
+                ctx.raw_set(&keys.entity, entity)?;
                 command_ref.borrow_mut().begin(call.order);
+
+                // ── Mirror in ────────────────────────────────────────
+                //
+                // The entity's own components become plain Luau tables
+                // before the call, so a script reading and writing them is
+                // doing table access rather than a host call.
+                //
+                // It also fixes a real defect in the `ctx:get`/`ctx:set`
+                // pair. Because writes are deferred, a read-modify-write
+                // loop through those re-read the *pre-phase* value every
+                // iteration and only the last write survived — the loop
+                // silently computed one step instead of ten. Through the
+                // mirror a script sees its own writes, which is the
+                // documented visibility rule.
+                staged.clear();
+                if let Some(mirrors) = instances.get(&call.instance).and_then(|i| i.mirrors.as_ref())
+                {
+                    if !mirrors.is_empty() {
+                        let self_table = instances[&call.instance].self_table.clone();
+                        ctx.raw_set(&keys.zelf, self_table)?;
+                    }
+                    for mirror in mirrors {
+                        for field in &mirror.fields {
+                            let value = world
+                                .read_field_id(call.snapshot.self_entity, mirror.component, field.id)
+                                .unwrap_or(ScriptValue::Nil);
+                            mirror
+                                .table
+                                .raw_set(&field.key, convert::to_lua(lua, &value)?)?;
+                            staged.push(value);
+                        }
+                    }
+                }
+
                 deadline.arm(budget);
                 let outcome =
                     host::dispatch(lua, function, descriptor, &ctx, callback, call.snapshot);
                 deadline.disarm();
+
+                // ── Mirror out ───────────────────────────────────────
+                //
+                // Only what actually changed becomes a command, and only
+                // fields the schema marks script-writable are considered.
+                // A script that reads its transform and writes nothing
+                // queues nothing.
+                if outcome.is_ok() {
+                    if let Some(mirrors) =
+                        instances.get(&call.instance).and_then(|i| i.mirrors.as_ref())
+                    {
+                        let mut index = 0;
+                        for mirror in mirrors {
+                            let mut changed = somnium_ecs::ReflectObject::new();
+                            for field in &mirror.fields {
+                                let before = &staged[index];
+                                index += 1;
+                                if !field.writable {
+                                    continue;
+                                }
+                                let raw: Value = mirror.table.raw_get(&field.key)?;
+                                let Ok(after) = convert::from_lua(&raw) else {
+                                    continue;
+                                };
+                                if after != *before {
+                                    changed.insert(field.id, after);
+                                }
+                            }
+                            if !changed.is_empty() {
+                                command_ref.borrow_mut().push(
+                                    somnium_script::command::ScriptCommand::SetFields {
+                                        entity: call.snapshot.self_entity,
+                                        component: mirror.component,
+                                        fields: changed,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+
                 command_ref.borrow_mut().end();
 
                 if let Err(err) = outcome {
@@ -610,6 +803,7 @@ pub(crate) fn empty_schema() -> ScriptSchema {
         schema_version: 1,
         fields: Vec::<ScriptFieldSchema>::new(),
         callbacks: CallbackMask::default(),
+        uses: Vec::new(),
     }
 }
 

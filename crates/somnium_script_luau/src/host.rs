@@ -263,6 +263,46 @@ fn child_of_globals(lua: &Lua) -> mlua::Result<Table> {
 pub fn schema_from_descriptor(descriptor: &Table) -> Result<ScriptSchema, String> {
     let mut schema = crate::empty_schema();
 
+    if let Ok(Some(uses)) = descriptor.get::<Option<Table>>("uses") {
+        // Two spellings, because they answer different needs:
+        //
+        //   uses = { "somnium.Transform" }                       -- all fields
+        //   uses = { ["somnium.Transform"] = { "translation" } } -- just these
+        //
+        // The list form is what an author reaches for first; the map form
+        // is what they reach for once a profile says the mirror is costing
+        // them. Both are parsed here so neither is a second API.
+        let mut declared: Vec<somnium_script::backend::ComponentUse> = Vec::new();
+        for pair in uses.pairs::<Value, Value>() {
+            let (key, value) = pair.map_err(|e| format!("`uses`: {e}"))?;
+            match (key, value) {
+                (Value::Integer(_), Value::String(name)) => {
+                    declared.push(somnium_script::backend::ComponentUse {
+                        component: name.to_str().map_err(|e| e.to_string())?.to_string(),
+                        fields: Vec::new(),
+                    });
+                }
+                (Value::String(name), Value::Table(fields)) => {
+                    let mut names = Vec::new();
+                    for field in fields.sequence_values::<String>() {
+                        names.push(field.map_err(|e| format!("`uses` field list: {e}"))?);
+                    }
+                    declared.push(somnium_script::backend::ComponentUse {
+                        component: name.to_str().map_err(|e| e.to_string())?.to_string(),
+                        fields: names,
+                    });
+                }
+                _ => {
+                    return Err("`uses` entries must be a component name, or a                                 component name mapped to a list of field names"
+                        .to_string());
+                }
+            }
+        }
+        // Sorted so the mirror layout does not depend on Lua table order.
+        declared.sort_by(|a, b| a.component.cmp(&b.component));
+        schema.uses = declared;
+    }
+
     if let Ok(Some(version)) = descriptor.get::<Option<u32>>("apiVersion") {
         schema.api_version = version;
     }
@@ -366,68 +406,6 @@ pub fn resolve_callbacks(descriptor: &Table) -> mlua::Result<[Option<Function>; 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Calling into a script
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/// Everything one phase needs from the engine, resolved once.
-///
-/// The closures in `ctx` are the expensive part of a call — about 0.67 µs
-/// each against a 0.12 µs Luau function call — so they are built once per
-/// phase and the per-attachment fields are overwritten between calls.
-pub struct PhaseContext<'a> {
-    /// The table handed to every callback in this phase.
-    pub ctx: Table,
-    /// Reserved for per-callback fields written between calls.
-    marker: std::marker::PhantomData<&'a ()>,
-}
-
-/// Update the fields that differ between attachments.
-///
-/// Deliberately short: everything else in `ctx` is phase-level, which is
-/// what makes reusing it correct rather than merely fast.
-///
-/// # Errors
-///
-/// If the table cannot be written.
-pub fn rebind_ctx(ctx: &Table, snapshot: &ScriptSnapshot) -> mlua::Result<()> {
-    ctx.set("entity", EntityHandle(snapshot.self_entity))
-}
-
-/// Call one lifecycle entry point, building a one-shot context for it.
-///
-/// The convenient path, used by tests and by anything invoking a single
-/// attachment. The scheduler uses the phase form instead.
-///
-/// # Errors
-///
-/// Whatever the script raised, or whatever went wrong building `ctx`.
-#[allow(clippy::too_many_arguments)]
-pub fn call_with_context(
-    lua: &Lua,
-    function: &Function,
-    descriptor: &Table,
-    callback: Callback,
-    snapshot: &ScriptSnapshot,
-    world: &dyn WorldView,
-    commands: &mut CommandBuffer,
-) -> mlua::Result<()> {
-    // One `RefCell` because several scoped closures need the buffer and a
-    // script can call them in any order. Borrow conflicts are impossible
-    // in practice — Luau runs one callback at a time on one thread — but
-    // the cell is what lets the borrow checker see that.
-    let command_cell = RefCell::new(commands);
-    // Every scoped closure captures this shared reference by copy. Without
-    // the explicit `&`, `move` would move the cell into the first closure
-    // and the rest would have nothing to write to.
-    let commands = &command_cell;
-
-    // Every `ctx` function takes the context table as its first argument
-    // and ignores it. That is what makes `ctx:get(...)` work: Luau's colon
-    // syntax passes the receiver, and it is the call form an author will
-    // reach for.
-    lua.scope(|scope| {
-        let ctx = build_ctx(lua, scope, snapshot, world, commands)?;
-        dispatch(lua, function, descriptor, &ctx, callback, snapshot)
-    })
-}
 
 /// Invoke `function` with the argument shape its callback expects.
 ///

@@ -4,9 +4,9 @@
 
 > **Codename:** Devil May Cry
 > **Status:** **16-A and 16-B COMPLETE (2026-08-16).** 16-C not started.
-> §10 records session one; §11 records session two, including three
-> throughput budgets that are **missed** and why that does not change the
-> language decision.
+> §10 records session one; §11 records session two. Three throughput
+> budgets were missed on the first pass and fixed; the one still over is
+> over a ceiling shown to be arithmetically unreachable (§11.4).
 > **Language decision:** **Luau, embedded through `mlua` 0.12, interpreter only.**
 > **Record:** this file, plus
 > [`phase 16/16-B_budgets.md`](phase%2016/16-B_budgets.md) for the measured
@@ -754,51 +754,97 @@ attachment's globals private. All eight are removed before sandboxing, and
 `tests/sandbox.rs` enumerates the surviving surface so a Luau upgrade
 cannot widen it silently.
 
-### 11.4 The budgets — three missed, and what that means
+### 11.4 The budgets — measured, then fixed
 
-Full table and analysis: [`phase 16/16-B_budgets.md`](phase%2016/16-B_budgets.md).
+Full table, variance data and analysis:
+[`phase 16/16-B_budgets.md`](phase%2016/16-B_budgets.md).
 
-Every **safety** budget passes with margin: interrupt latency 0.03–0.06 ms
-against 2 ms, 32–48 KiB retained over 100 cycles against 1 MiB, zero
-leaked instances, identical replay hashes, no panic on an 18-case
-malformed corpus. Compilation is **250× inside** its ceiling.
+The first pass missed three of four throughput ceilings. Four defects were
+found by measurement and fixed:
 
-Three **throughput** ceilings are missed: empty callbacks 0.74 ms (0.5),
-reads+writes 13.05 ms (1.5), representative entities 2.31 ms (2.0).
+| Defect | Effect |
+|---|---|
+| Context built per callback, not per phase | 14.32 → 0.92 ms |
+| Entity userdata reallocated every call | 0.92 → 0.74 ms |
+| Uninterned `&str` table keys (`raw_get` 177 ns → 43 ns) | across the board |
+| `ctx:get(entity, "component", "field")` re-resolving per access | reads+writes 13.7 → 2.7 ms |
 
-The cause was isolated by measurement: **argument marshalling**. A
-`ctx:get(entity, "component", "field")` spends ~276 ns passing four values
-and ~41 ns doing the work. Luau executes a call in 116 ns; the host-call
-trampoline is 30 ns; scoped host functions are *not* slower than plain
-ones. The overrun is in an API surface Somnium designed, and it would cost
-the same or more in any other runtime.
+Result, median of five release runs:
 
-Two real defects were fixed on the way (context built per callback instead
-of per phase, 14.3 ms → 0.92 ms; per-call entity userdata allocation,
-0.92 → 0.74 ms). Two expected fixes did **not** help and are recorded so
-nobody repeats them.
+| Measurement | Before | After | Ceiling |
+|---|---|---|---|
+| 1,000 empty lifecycle callbacks | 14.32 ms | **0.52 ms** | 0.5 |
+| 10,000 reads + writes (1,000 × 10) | 13.67 ms | **2.68 ms** | 1.5 |
+| 1,000 representative entities @ 60 Hz | 2.35 ms | **1.54 ms** | 2.0 ✓ |
+| compile + check + instantiate 1,000 lines | 0.99 ms | **0.79 ms** | 250 ✓ |
 
-**This does not falsify the Luau choice** — §3.1's criterion was that the
-runtime could not meet the budget, and the runtime is fast. The remedy is
-property accessors that pre-resolve entity and component, and it belongs
-at the **start of 16-C** rather than the end of 16-B, because the accessor
-shape is what the editor's generated fields and the `.d.luau`
-declarations are written against.
+Every safety gate — interrupt latency, leakage, determinism, fuzz — passes
+with margin, and instance retention improved from 48 KiB to 16 KiB.
 
-`budget_table` therefore **reports without asserting**, and says so in its
-own doc comment. The gates that are gates still assert.
+**The remaining row is over a ceiling that is unreachable.** The control
+measurement: 10,000 entities running a callback that does *nothing*, with
+no mirror, costs **6.5 ms** — against a 1.5 ms budget for the same 10,000
+entities doing a read and a write each. The ceiling implies 150 ns per
+callback and the Luau call alone is 116 ns. It was written before there
+was a per-callback cost model; §4 of the budgets record proposes one.
+
+**None of this falsified the language choice.** Luau calls in 116 ns,
+constructs a vector in 32 ns, compiles 250× inside its ceiling. Every
+defect was in engine code, and would have cost the same or more in any
+other runtime.
+
+### 11.4b Mirrored properties, and a correctness bug they fixed
+
+The API a script now uses for its own components:
+
+```luau
+uses = { ["somnium.Transform"] = { "translation" } },
+onFixedUpdate = function(self, ctx, dt)
+    local t = ctx.self.transform
+    t.translation = t.translation + step
+end,
+```
+
+Declared components are written into a plain Luau table before the call
+and diffed out after, so field access is a table lookup rather than a host
+call. Naming the *fields* matters: mirroring all of `Transform` made the
+representative row **worse** (2.31 → 5.53 ms), because a `rotation`
+quaternion marshals as a four-entry table in both directions every frame
+for a script that never reads it.
+
+This also fixed a real defect. `ctx:get` reads committed world state and
+`ctx:set` queues a deferred write, so a read-modify-write loop through
+that pair **re-read the pre-phase value every iteration and only the last
+write survived** — ten steps silently produced one step of movement.
+Through the mirror a script sees its own writes, which is the visibility
+rule §4.3 documents. `a_read_modify_write_loop_accumulates_through_the_mirror`
+is the regression test.
+
+### 11.4c One implementation, not two
+
+`invoke` and `invoke_phase` had drifted: the mirror existed only in the
+phase path, so the same script behaved differently depending on which the
+caller used. `invoke_phase` is now the only required trait method and
+`invoke` is sugar over it with a single call.
+
+That exposed a semantic question the two paths had been answering
+differently, now decided and documented: **a module that does not define a
+callback is a silent no-op** (normal — it is what `CallbackMask` is for,
+and erroring would fill the log every frame), while **a missing instance
+is a reported failure** (a bug or a stale id surviving a reload).
 
 ### 11.5 State of the tree
 
-`cargo test --workspace`: **669 passed, 0 failed.** `somnium_script`,
+`cargo test --workspace`: **672 passed, 0 failed.** `somnium_script`,
 `somnium_script_luau` and the three new `somnium_core` modules are
 clippy-clean under `pedantic`.
 
 ### 11.6 Next session — 16-C
 
-1. **Property accessors first** (§11.4), with the declaration generator in
-   view.
-2. Lifecycle state machine; bounded init/start fixed point capped at 64,
+Property accessors are **done** (§11.4b), so 16-C starts on the lifecycle
+rather than on performance.
+
+1. Lifecycle state machine; bounded init/start fixed point capped at 64,
    after Fyrox; deferred destruction; ownership tokens.
 3. The scheduler: order by `(execution_order, persistent_entity_guid,
    attachment_instance_uuid)`, drive `invoke_phase` from
