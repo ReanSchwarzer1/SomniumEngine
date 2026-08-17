@@ -34,6 +34,20 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
+> - **Phase CONTROL — Northlight (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_CONTROL.md`. The editor-reach phase. Premise: the engine
+>   is far ahead of the editor — **96** `SOMNIUM_*` variables with ~18 controls,
+>   **106** hand-wired `InspectorField` variants, **12** registered component
+>   schemas driving **0** generated inspector rows, and `FieldFlags::EDIT` is
+>   defined, documented as "shown in the inspector", and read by no code in the
+>   repository. CONTROL-B makes that flag true and 26-J finally lands; C–J add
+>   an asset database with thumbnails, material authoring, drag and drop,
+>   multi-select, viewport snapping and a view-mode menu, preferences over the
+>   env vars, clickable diagnostics, and the **scene-load fix** (the `NEXT:`
+>   line above). Tracks 2–3 then add curve editing, time of day, volumetric
+>   clouds and weather — each gated on its authoring surface shipping with it.
+>   **Start at CONTROL-A** (the reachability audit); do not write a widget
+>   first, and do not restart at 26-A.
 > - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
 >   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
 >   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
