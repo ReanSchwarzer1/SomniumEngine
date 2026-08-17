@@ -89,6 +89,81 @@ fn synchronize_path_trace_pause(
 }
 
 #[cfg(test)]
+mod content_target_tests {
+    use super::resolve_content_target;
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        Path::new("/project/assets")
+    }
+
+    #[test]
+    fn a_name_lands_in_the_folder_that_was_right_clicked() {
+        let path = resolve_content_target(root(), "scripts", "Enemy", Some("luau")).unwrap();
+        assert!(path.ends_with("Enemy.luau"), "{path:?}");
+        assert!(path.to_string_lossy().contains("scripts"), "{path:?}");
+
+        let at_root = resolve_content_target(root(), "", "Shared", None).unwrap();
+        assert!(at_root.ends_with("Shared"), "{at_root:?}");
+    }
+
+    #[test]
+    fn the_script_extension_is_added_but_never_doubled() {
+        for typed in ["Enemy", "Enemy.luau", "Enemy.LUAU"] {
+            let path = resolve_content_target(root(), "", typed, Some("luau")).unwrap();
+            assert!(
+                path.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("luau")),
+                "{typed} produced {path:?}"
+            );
+            assert!(
+                !path.to_string_lossy().to_ascii_lowercase().contains(".luau.luau"),
+                "{typed} produced {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_cannot_escape_the_content_root() {
+        // The whole reason this function exists: a modal takes a free
+        // string, and the drawer has no undo.
+        for attempt in ["../secrets", "..\\secrets", "..", ".", "a/b", "a\\b"] {
+            assert!(
+                resolve_content_target(root(), "", attempt, None).is_err(),
+                "`{attempt}` should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_blank_name_is_refused() {
+        assert!(resolve_content_target(root(), "", "", None).is_err());
+        assert!(resolve_content_target(root(), "", "   ", None).is_err());
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_rather_than_kept() {
+        let path = resolve_content_target(root(), "", "  Enemy  ", Some("luau")).unwrap();
+        assert!(path.ends_with("Enemy.luau"), "{path:?}");
+    }
+
+    #[test]
+    fn a_windows_reserved_name_is_refused_whatever_the_extension() {
+        // These are created happily and then cannot be opened again.
+        for reserved in ["con", "NUL", "Aux.luau", "com1"] {
+            assert!(
+                resolve_content_target(root(), "", reserved, Some("luau")).is_err(),
+                "`{reserved}` should have been refused"
+            );
+        }
+        assert!(
+            resolve_content_target(root(), "", "console", Some("luau")).is_ok(),
+            "a name that merely starts with a reserved word is fine"
+        );
+    }
+}
+
+#[cfg(test)]
 mod post_process_singleton_tests {
     use super::*;
 
@@ -647,6 +722,53 @@ impl<G: GameApp> Engine<G> {
         self.drain_script_output();
     }
 
+    // ── Content Drawer authoring ─────────────────────────────────────────
+
+    /// Resolve a name typed in the drawer to a path that is safe to write.
+    ///
+    /// Returns `None` — having already told the author why — when the name
+    /// would escape the content root, is empty, or names something that
+    /// already exists. **Nothing here overwrites.** Losing someone's file
+    /// to a mistyped name in a modal is not a recoverable mistake, and the
+    /// drawer has no undo.
+    fn content_target(
+        &mut self,
+        parent: &str,
+        name: &str,
+        force_extension: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
+        let root = std::env::current_dir().unwrap_or_default().join("assets");
+        match resolve_content_target(&root, parent, name, force_extension) {
+            Ok(path) if path.exists() => {
+                self.report_content_error(&path, "something with that name is already here");
+                None
+            }
+            Ok(path) => Some(path),
+            Err(reason) => {
+                self.report_content_error(std::path::Path::new(name), reason);
+                None
+            }
+        }
+    }
+
+    /// Refresh the drawer and say what happened.
+    fn after_content_change(&mut self, message: &str) {
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.refresh_content();
+            ui.push_toast(message);
+        }
+    }
+
+    /// Report a content operation that could not be done.
+    fn report_content_error(&mut self, path: &std::path::Path, reason: &str) {
+        let text = format!("{}: {reason}", path.display());
+        error!("{text}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.append_log(&format!("[content] {text}"));
+            ui.push_toast(reason);
+        }
+    }
+
     /// Write a new `.luau` file from the template and attach it.
     ///
     /// Never overwrites: a name that exists gets a numeric suffix. Losing
@@ -827,6 +949,105 @@ fn script_field_kind(
         V::Nil => somnium_ui::ScriptFieldKind::Text("unset".into()),
         other => somnium_ui::ScriptFieldKind::Text(other.kind().to_string()),
     }
+}
+
+/// Turn a name typed in the Content Drawer into a path inside the content
+/// root, or say why it cannot be one.
+///
+/// Separated from the engine so the rules are testable without a window.
+/// They are worth testing: this is the only place in the editor where a
+/// string an author typed becomes a filesystem path, and the drawer has
+/// no undo.
+///
+/// # Errors
+///
+/// A message fit to show in a toast.
+fn resolve_content_target(
+    root: &std::path::Path,
+    parent: &str,
+    name: &str,
+    force_extension: Option<&str>,
+) -> Result<std::path::PathBuf, &'static str> {
+    let leaf = name.trim();
+    if leaf.is_empty() {
+        return Err("a name cannot be empty");
+    }
+    // A separator would let `../..` walk out of the content root, and
+    // creating into a nested folder is not what the menu offers anyway.
+    if leaf.contains(['/', '\\']) || leaf == "." || leaf == ".." {
+        return Err("a name cannot contain a path separator");
+    }
+    // Windows reserves these whatever the extension, and a file named
+    // after one is created and then unopenable.
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "lpt1", "lpt2", "lpt3",
+    ];
+    let stem = leaf.split('.').next().unwrap_or(leaf).to_ascii_lowercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Err("that name is reserved by the operating system");
+    }
+
+    let mut path = if parent.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(parent)
+    }
+    .join(leaf);
+
+    if let Some(extension) = force_extension {
+        if path
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case(extension))
+        {
+            // `set_extension` replaces rather than appends, which is what
+            // turns `Player.controller` into `Player.luau` rather than
+            // `Player.controller.luau`.
+            path.set_extension(extension);
+        }
+    }
+
+    // Belt and braces on the separator check: whatever the name was, the
+    // result has to still be under the content root.
+    if !path.starts_with(root) {
+        return Err("that would land outside the content folder");
+    }
+    Ok(path)
+}
+
+/// Open the OS file browser at `path`, selecting it where the platform
+/// supports that.
+///
+/// Deliberately *reveal*, not *open*. Opening a `.luau` means launching
+/// whatever the OS has associated with the extension, which on a fresh
+/// machine is nothing, and on a developer's machine is a coin toss.
+/// Choosing an editor is its own sub-phase; showing someone where the
+/// file is costs nothing and is never wrong.
+///
+/// # Errors
+///
+/// A message naming what the platform said.
+fn reveal_in_file_browser(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("that file is no longer there".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer")
+        .arg("/select,")
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        // No "select the file" on the freedesktop side, so open the
+        // folder it is in rather than the file itself — which would hand
+        // it to whatever `.luau` is associated with, if anything.
+        .arg(path.parent().unwrap_or(path))
+        .spawn();
+
+    // `explorer` returns a non-zero exit code even when it succeeds, so
+    // the spawn is what is checked and the status deliberately is not.
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 /// The seed every play session's script random streams derive from.
@@ -4650,6 +4871,94 @@ impl<G: GameApp> Engine<G> {
                     somnium_script::value::ScriptValue::Bool(value),
                     false,
                 );
+            }
+
+            EditorEvent::CreateContentFolder { parent, name } => {
+                let Some(path) = self.content_target(&parent, &name, None) else {
+                    return;
+                };
+                match std::fs::create_dir(&path) {
+                    Ok(()) => {
+                        info!("Created {}", path.display());
+                        self.after_content_change(&format!(
+                            "Created folder {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error.to_string()),
+                }
+            }
+
+            EditorEvent::CreateContentScript { parent, name } => {
+                let Some(path) = self.content_target(&parent, &name, Some("luau")) else {
+                    return;
+                };
+                match std::fs::write(&path, crate::script_host::NEW_SCRIPT_TEMPLATE) {
+                    Ok(()) => {
+                        info!("Created {}", path.display());
+                        // Import it straight away and attach it if
+                        // something is selected. Creating a script and
+                        // then having to find it in the drawer to attach
+                        // it is two steps where one will do.
+                        self.attach_script(&path);
+                        self.after_content_change(&format!(
+                            "Created {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error.to_string()),
+                }
+            }
+
+            EditorEvent::RenameContentItem { path, name } => {
+                let from = std::path::PathBuf::from(path);
+                let leaf = name.trim();
+                if leaf.is_empty() || leaf.contains(['/', '\\']) {
+                    self.report_content_error(&from, "a name cannot contain a path separator");
+                    return;
+                }
+                // Keep the extension if the author did not retype it, so
+                // renaming `Player.luau` to `Character` does not quietly
+                // produce a file the importer no longer recognises.
+                let mut target = from.with_file_name(leaf);
+                if let (Some(old), None) = (from.extension(), target.extension()) {
+                    target.set_extension(old);
+                }
+                if target == from {
+                    return;
+                }
+                if target.exists() {
+                    self.report_content_error(&target, "something with that name is already here");
+                    return;
+                }
+                match std::fs::rename(&from, &target) {
+                    Ok(()) => {
+                        info!("Renamed {} to {}", from.display(), target.display());
+                        // A script's asset id is derived from its path, so
+                        // a rename makes a *different* asset. Attachments
+                        // that named the old one now reference something
+                        // that is not there, and say so in the panel —
+                        // which is honest, and better than silently
+                        // re-pointing them at a file the author may have
+                        // meant to fork.
+                        if from.extension().is_some_and(|e| e.eq_ignore_ascii_case("luau")) {
+                            let _ = self.scripts.import_script_file(&target);
+                            self.drain_script_output();
+                        }
+                        self.after_content_change(&format!(
+                            "Renamed to {}",
+                            target.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&from, &error.to_string()),
+                }
+            }
+
+            EditorEvent::ShowContentItemInFolder(path) => {
+                let path = std::path::PathBuf::from(path);
+                if let Err(error) = reveal_in_file_browser(&path) {
+                    self.report_content_error(&path, &error);
+                }
             }
 
             EditorEvent::ReloadScripts => {

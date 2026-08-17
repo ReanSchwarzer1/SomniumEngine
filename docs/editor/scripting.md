@@ -4,12 +4,33 @@ Somnium scripts are **Luau** files with a `.luau` extension. They live in
 `assets/`, appear in the Content Drawer with a script icon, and attach to
 entities in the Details panel.
 
+## Making a script
+
+**Right-click in the Content Drawer** — on empty space or on an item — for
+**New Folder…**, **New Script…**, **Rename…**, **Show in Folder** and
+**Refresh**. New Folder and New Script create inside whichever folder the
+drawer is currently showing, and both ask for a name; Enter confirms.
+
+A new script starts from a strict-mode template with one declared
+property and an empty `onFixedUpdate`, and is attached to the selection
+straight away if there is one.
+
+Nothing overwrites: a name that already exists is refused rather than
+replacing the file, and so is one that would escape `assets/`. There is
+deliberately **no Delete** — a right-click with no undo and no
+confirmation is not a mistake anyone recovers from, and Show in Folder
+puts you one step from a file browser that has a recycle bin.
+
+**Show in Folder reveals the file; it does not open it.** Opening a
+`.luau` in an editor means launching whatever the OS has associated with
+the extension, which is a coin toss. Choosing an editor is a later
+sub-phase.
+
 ## Attaching a script
 
 Select an entity, then click a `.luau` file in the Content Drawer. The
 Scripts section of the Details panel gains a row for it. **New Script** in
-that section writes a fresh file into `assets/scripts/` from a strict-mode
-template and attaches it in one step.
+that section does the same as the drawer's, without the folder choice.
 
 Each row has a checkbox that switches the attachment on and off, arrows
 that move it earlier or later in execution order, and an ✕ that removes it.
@@ -18,6 +39,11 @@ Attach, remove, reorder and every property edit are undo steps.
 Moving a row with the arrows **renumbers** every attachment's execution
 order to match the list. That is the one gesture that overwrites an
 execution order you may have typed elsewhere.
+
+Renaming a `.luau` file gives it a **new asset id** — the id comes from
+the path — so attachments that named the old one report "asset not
+imported" until you re-attach them. That is deliberate: silently
+re-pointing them would be wrong if you meant to fork the script.
 
 ## Declared properties
 

@@ -514,4 +514,36 @@ pub enum EditorEvent {
     /// across. A file that no longer compiles leaves its instances
     /// running and publishes diagnostics.
     ReloadScripts,
+
+    // ── Content Drawer authoring ────────────────────────────────────────
+    /// Create a folder named `name` inside `parent` (a content-relative
+    /// directory; empty means the content root).
+    CreateContentFolder {
+        /// Directory the new folder goes in.
+        parent: String,
+        /// Leaf name, as typed.
+        name: String,
+    },
+    /// Create a `.luau` file from the strict-mode template inside
+    /// `parent`, and attach it to the selection if there is one.
+    CreateContentScript {
+        /// Directory the new script goes in.
+        parent: String,
+        /// Leaf name, as typed. A missing `.luau` extension is added.
+        name: String,
+    },
+    /// Rename a file or folder. `path` is absolute.
+    RenameContentItem {
+        /// What to rename.
+        path: String,
+        /// New leaf name, as typed.
+        name: String,
+    },
+    /// Reveal a content item in the OS file browser.
+    ///
+    /// Deliberately the only "open" this phase ships: opening a `.luau`
+    /// in an IDE is a later sub-phase, and pretending to do it by
+    /// launching whatever is associated with the extension would be a
+    /// worse experience than saying where the file is.
+    ShowContentItemInFolder(String),
 }

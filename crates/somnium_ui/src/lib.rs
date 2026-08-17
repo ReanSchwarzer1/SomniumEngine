@@ -48,6 +48,7 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
+        context_menu::{ContextMenuMessage, MenuItem},
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
         grid::GridMessage,
@@ -60,6 +61,7 @@ use crate::{
         slider::SliderMessage,
         splitter::SplitterMessage,
         stack_panel::{Orientation, StackPanelBuilder},
+        text_box::TextBoxMessage,
         text::TextBuilder,
         toast::ToastMessage,
         tree_view::{TreeItem, TreeViewMessage},
@@ -72,6 +74,34 @@ use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window};
+
+/// Items the Content Drawer's right-click menu can offer.
+///
+/// Numbered rather than positional, because which items appear depends on
+/// what was clicked — a file gets Rename, empty space does not — and a
+/// menu that reported "the third one" would mean something different in
+/// each case.
+mod content_menu_id {
+    pub const NEW_FOLDER: u32 = 1;
+    pub const NEW_SCRIPT: u32 = 2;
+    pub const RENAME: u32 = 3;
+    pub const SHOW_IN_FOLDER: u32 = 4;
+    pub const REFRESH: u32 = 5;
+}
+
+/// What confirming the name prompt will do.
+///
+/// The prompt is one widget serving three flows, so it carries the flow
+/// with it rather than the editor keeping a mode flag beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NamePrompt {
+    /// Create a folder in this content-relative directory.
+    NewFolder { parent: String },
+    /// Create a script in this content-relative directory.
+    NewScript { parent: String },
+    /// Rename this absolute path.
+    Rename { path: String },
+}
 
 /// What one generated widget in the Scripts section does.
 ///
@@ -579,6 +609,13 @@ struct EditorLayout {
     unsaved_save: NodeHandle,
     unsaved_discard: NodeHandle,
     unsaved_cancel: NodeHandle,
+    content_menu_popup: NodeHandle,
+    content_menu: NodeHandle,
+    name_popup: NodeHandle,
+    name_title: NodeHandle,
+    name_input: NodeHandle,
+    name_ok: NodeHandle,
+    name_cancel: NodeHandle,
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     title_drag: NodeHandle,
@@ -740,6 +777,13 @@ pub struct UiManager {
     unsaved_save: NodeHandle,
     unsaved_discard: NodeHandle,
     unsaved_cancel: NodeHandle,
+    content_menu_popup: NodeHandle,
+    content_menu: NodeHandle,
+    name_popup: NodeHandle,
+    name_title: NodeHandle,
+    name_input: NodeHandle,
+    name_ok: NodeHandle,
+    name_cancel: NodeHandle,
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     help_open: bool,
@@ -769,6 +813,23 @@ pub struct UiManager {
     color_target: Option<crate::ColorField>,
     color_original: [f32; 4],
     color_live: [f32; 4],
+    /// What the Content Drawer's right-click menu is currently about.
+    ///
+    /// Set when the menu opens and read when an item is chosen, because
+    /// the menu itself only reports an id — the *subject* is the editor's
+    /// to remember.
+    content_menu_target: Option<crate::metaphor::ContentEntry>,
+    /// Which folder a right-click happened in, so a "New Folder" from
+    /// inside `scripts/` lands in `scripts/` and not at the root.
+    content_menu_folder: String,
+    /// What confirming the name prompt will do.
+    name_prompt: Option<NamePrompt>,
+    /// What is currently typed in the name prompt.
+    ///
+    /// Mirrored here rather than read back from the widget on confirm:
+    /// the box reports every keystroke, and asking a widget for its state
+    /// is the pattern this UI does not have.
+    name_text: String,
     /// Phase 16-D: the Scripts section as it was last built.
     ///
     /// Rebuilding a widget tree per frame would be wasteful and would eat
@@ -1029,6 +1090,13 @@ impl UiManager {
             unsaved_save: layout.unsaved_save,
             unsaved_discard: layout.unsaved_discard,
             unsaved_cancel: layout.unsaved_cancel,
+            content_menu_popup: layout.content_menu_popup,
+            content_menu: layout.content_menu,
+            name_popup: layout.name_popup,
+            name_title: layout.name_title,
+            name_input: layout.name_input,
+            name_ok: layout.name_ok,
+            name_cancel: layout.name_cancel,
             color_popup: layout.color_popup,
             color_picker: layout.color_picker,
             help_open: false,
@@ -1056,6 +1124,10 @@ impl UiManager {
             color_target: None,
             color_original: [1.0, 1.0, 1.0, 1.0],
             color_live: [1.0, 1.0, 1.0, 1.0],
+            content_menu_target: None,
+            content_menu_folder: String::new(),
+            name_prompt: None,
+            name_text: String::new(),
             script_state: ScriptInspectorState::default(),
             script_widgets: Vec::new(),
             scene_dirty: false,
@@ -1274,6 +1346,22 @@ impl UiManager {
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.native_ui.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
         }
+        // Phase 16-D: the Content Drawer's right-click menu.
+        //
+        // Intercepted here rather than as a widget message because the
+        // menu is about the *drawer*, not about whichever button happens
+        // to be under the cursor — right-clicking the gap between two
+        // items has to work, and no widget owns the gap.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: winit::event::MouseButton::Right,
+            ..
+        } = event
+        {
+            if self.open_content_menu(self.native_ui.cursor_pos) {
+                return true;
+            }
+        }
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
@@ -1431,6 +1519,206 @@ impl UiManager {
     /// next unrelated refresh looks like the create failed.
     pub fn refresh_content(&mut self) {
         self.refresh_content_list();
+    }
+
+    // ── Content Drawer right-click ───────────────────────────────────────
+
+    /// Open the drawer's context menu at `pos`, if `pos` is over it.
+    ///
+    /// Returns whether the click was ours. The item list depends on what
+    /// was under the cursor: a file or folder gets Rename and Show in
+    /// Folder, empty space does not.
+    ///
+    /// **Delete is deliberately absent.** Removing a file from a
+    /// right-click, with no undo and no confirmation, is not a mistake
+    /// anyone recovers from; the OS file browser is one menu item away
+    /// and has a recycle bin.
+    fn open_content_menu(&mut self, pos: Vec2) -> bool {
+        if !self.drawer_open {
+            return false;
+        }
+        let hit = self.native_ui.hit_test(pos);
+        if !self.native_ui.is_under(hit, self.content_drawer) {
+            return false;
+        }
+
+        // Which entry, if any, is under the cursor.
+        self.content_menu_target = self
+            .content_entries
+            .iter()
+            .find(|(handle, _)| self.native_ui.is_under(hit, *handle))
+            .map(|(_, entry)| entry.clone())
+            .filter(|entry| !entry.is_engine);
+
+        // A right-click inside a folder creates in that folder. The
+        // drawer's current path is the folder being *shown*, which is
+        // what an author means by "here".
+        self.content_menu_folder = self.content_path.clone();
+
+        let mut items = vec![
+            MenuItem {
+                id: content_menu_id::NEW_FOLDER,
+                label: "New Folder…".into(),
+                enabled: true,
+            },
+            MenuItem {
+                id: content_menu_id::NEW_SCRIPT,
+                label: "New Script…".into(),
+                enabled: true,
+            },
+        ];
+        if self.content_menu_target.is_some() {
+            items.push(MenuItem {
+                id: content_menu_id::RENAME,
+                label: "Rename…".into(),
+                enabled: true,
+            });
+            items.push(MenuItem {
+                id: content_menu_id::SHOW_IN_FOLDER,
+                label: "Show in Folder".into(),
+                enabled: true,
+            });
+        }
+        items.push(MenuItem {
+            id: content_menu_id::REFRESH,
+            label: "Refresh".into(),
+            enabled: true,
+        });
+
+        // Keep it on screen. The drawer sits at the bottom of the window,
+        // which is precisely where a menu that opened downwards would
+        // fall off — so a menu near the bottom flips to open upwards, the
+        // way every OS menu does.
+        let height = items.len() as f32 * theme::ROW_HEIGHT + 4.0;
+        let (window_w, window_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let mut placement = pos;
+        if placement.y + height > window_h {
+            placement.y = (pos.y - height).max(0.0);
+        }
+        // A conservative width: the menu measures itself from its longest
+        // label, and over-reserving here only moves it left a little
+        // sooner than it strictly had to.
+        const ASSUMED_WIDTH: f32 = 180.0;
+        if placement.x + ASSUMED_WIDTH > window_w {
+            placement.x = (window_w - ASSUMED_WIDTH).max(0.0);
+        }
+
+        self.native_ui.send(UiMessage::new(
+            self.content_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        // `AnchorBelow` with no anchor honours the child's desired
+        // position, which is how the menu lands under the cursor.
+        self.native_ui
+            .set_desired_position(self.content_menu, placement);
+        self.native_ui.send(UiMessage::new(
+            self.content_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(self.content_menu_popup);
+        true
+    }
+
+    fn close_content_menu(&mut self) {
+        self.native_ui.send(UiMessage::new(
+            self.content_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
+    /// Show the name prompt for one of the three flows.
+    fn open_name_prompt(&mut self, prompt: NamePrompt, title: &str, initial: &str) {
+        self.name_prompt = Some(prompt);
+        self.name_text = initial.to_string();
+        self.native_ui
+            .send(TextMessage::set_text(self.name_title, title.to_string()));
+        self.native_ui
+            .send(TextMessage::set_text(self.name_input, initial.to_string()));
+        self.native_ui.send(UiMessage::new(
+            self.name_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(self.name_popup);
+        // So the author can start typing without clicking the box first.
+        self.native_ui.set_focus(self.name_input);
+    }
+
+    fn close_name_prompt(&mut self) {
+        self.name_prompt = None;
+        self.native_ui.send(UiMessage::new(
+            self.name_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
+    /// Turn a confirmed name prompt into an editor event.
+    ///
+    /// A blank name is treated as a cancel rather than an error: it is
+    /// what someone who changed their mind does, and a modal that refuses
+    /// to close is worse than one that quietly gives up.
+    fn confirm_name_prompt(&mut self) {
+        let Some(prompt) = self.name_prompt.take() else {
+            return;
+        };
+        let name = self.name_text.trim().to_string();
+        self.close_name_prompt();
+        if name.is_empty() {
+            return;
+        }
+        let event = match prompt {
+            NamePrompt::NewFolder { parent } => EditorEvent::CreateContentFolder { parent, name },
+            NamePrompt::NewScript { parent } => EditorEvent::CreateContentScript { parent, name },
+            NamePrompt::Rename { path } => EditorEvent::RenameContentItem { path, name },
+        };
+        self.editor_events.push_back(event);
+    }
+
+    /// Act on a chosen menu item.
+    fn activate_content_menu(&mut self, id: u32) {
+        self.close_content_menu();
+        let folder = self.content_menu_folder.clone();
+        let target = self.content_menu_target.clone();
+        match id {
+            content_menu_id::NEW_FOLDER => {
+                self.open_name_prompt(
+                    NamePrompt::NewFolder { parent: folder },
+                    "New folder name",
+                    "NewFolder",
+                );
+            }
+            content_menu_id::NEW_SCRIPT => {
+                self.open_name_prompt(
+                    NamePrompt::NewScript { parent: folder },
+                    "New script name",
+                    "NewScript.luau",
+                );
+            }
+            content_menu_id::RENAME => {
+                if let Some(entry) = target {
+                    let path = entry.path.to_string_lossy().into_owned();
+                    self.open_name_prompt(
+                        NamePrompt::Rename { path },
+                        "Rename to",
+                        &entry.name,
+                    );
+                }
+            }
+            content_menu_id::SHOW_IN_FOLDER => {
+                if let Some(entry) = target {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                }
+            }
+            content_menu_id::REFRESH => self.refresh_content_list(),
+            _ => {}
+        }
     }
 
     /// Phase 16-D: how many blocking script diagnostics are outstanding.
@@ -3443,6 +3731,41 @@ impl UiManager {
                     self.close_unsaved();
                     continue;
                 }
+                if msg.destination == self.name_ok {
+                    self.confirm_name_prompt();
+                    continue;
+                }
+                if msg.destination == self.name_cancel {
+                    self.close_name_prompt();
+                    continue;
+                }
+            }
+            // Phase 16-D: the drawer's right-click menu, and the name
+            // prompt the three creating flows share.
+            if let Some(ContextMenuMessage::Activate(id)) = msg.data::<ContextMenuMessage>() {
+                if msg.destination == self.content_menu {
+                    let id = *id;
+                    self.activate_content_menu(id);
+                    continue;
+                }
+            }
+            if let Some(text) = msg.data::<TextBoxMessage>() {
+                if msg.destination == self.name_input {
+                    match text {
+                        TextBoxMessage::TextChanged(value) => self.name_text = value.clone(),
+                        // Enter in the box is the same as pressing Create:
+                        // typing a name and hitting return is what anyone
+                        // does, and making them reach for the mouse after
+                        // would be a small daily annoyance.
+                        TextBoxMessage::TextCommit(value) => {
+                            self.name_text = value.clone();
+                            if self.name_prompt.is_some() {
+                                self.confirm_name_prompt();
+                            }
+                        }
+                    }
+                    continue;
+                }
             }
             if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
                 if msg.destination == self.inspector_handles.water_underwater {
@@ -3462,6 +3785,11 @@ impl UiManager {
                 }
                 if msg.destination == self.unsaved_popup {
                     self.unsaved_open = false;
+                }
+                if msg.destination == self.name_popup {
+                    // Clicking away from the prompt abandons it, the same
+                    // as Cancel.
+                    self.name_prompt = None;
                 }
             }
 

@@ -1,5 +1,20 @@
 # Content Drawer
 
+## Right-click
+
+Right-clicking anywhere in the drawer opens a menu. On empty space you get
+**New Folder…**, **New Script…** and **Refresh**; on a file or folder you
+also get **Rename…** and **Show in Folder**.
+
+New Folder and New Script create inside the folder the drawer is currently
+showing, and ask for a name — Enter confirms, Escape or clicking away
+abandons it. Nothing overwrites: a name that already exists is refused,
+and so is one containing a path separator.
+
+There is no Delete. Removing a file from a right-click, with no undo and
+no confirmation, is not a mistake anyone recovers from — Show in Folder
+puts you one step from a file browser that has a recycle bin.
+
 The drawer is the project file browser. It stays docked above the status bar, like a Content Browser.
 
 ## Opening it

@@ -91,6 +91,14 @@ export type SomniumParent = {
 	entity: Entity?,
 }
 
+--- `somnium.RigidBody` (schema version 1).
+export type SomniumRigidBody = {
+	body: number, -- engine-owned; reading only
+	velocity: Vec3,
+	grounded: boolean, -- engine-owned; reading only
+	script_driven: boolean,
+}
+
 --- `somnium.Terrain` (schema version 1).
 export type SomniumTerrain = {
 	terrain_id: number,
@@ -163,6 +171,7 @@ export type SelfComponents = {
 	meshKind: SomniumMeshKind?,
 	name: SomniumName?,
 	parent: SomniumParent?,
+	rigidBody: SomniumRigidBody?,
 	terrain: SomniumTerrain?,
 	transform: SomniumTransform?,
 	voxelTerrain: SomniumVoxelTerrain?,

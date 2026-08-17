@@ -1,6 +1,8 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-16  
+> **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
+>
+> **Last updated:** 2026-08-17  
 > **Current phase:** Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
 > D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
 > 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
@@ -1412,7 +1414,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17G | ✅ Complete | **Foliage performance, distance culling, and a usable type picker.** The slowdown was self-inflicted by Phase 15F: a 6 422-triangle grass tuft expands to **51 indirect arguments**, so 2 000 painted instances meant 102 000 draws and 6.3 MB of arguments and cull bounds uploaded *every frame* — to cull sub-parts of things a few pixels across. Clustering pays for a large mesh drawn once, and is backwards for a small mesh drawn thousands of times. The renderer now counts how often each mesh appears in the frame and drops back to a single whole-mesh argument past 8 copies, cutting a painted field's draw count by ~51x. **Distance culling** rejects instances beyond `cull_distance` (120 m) while the submission list is built, so they never reach the instance buffer or the indirect arguments at all — the GPU cull cannot do this, because a draw has to exist before it can be rejected. The test is horizontal distance, so flying up does not make ground cover vanish from under the camera. The per-frame submission vector is also reused rather than reallocated. **UI:** the Foliage section moved to the top of the inspector, since at the bottom it fell behind the output log and the type button was literally unclickable. The type control became an in-place cycler (`Type: Fir Sapling >`) rather than a popup — this UI has no anchoring, so a floating popup has to be hand-positioned and kept landing somewhere unhelpful; for a handful of entries, cycling cannot be occluded or mispositioned. Picking a tree still switches Single on automatically. |
 | 17H | ✅ Complete | **Cutout foliage: alpha masks, alpha-weighted mips, and the island tree.** Three reported faults, three unrelated causes. (1) *Everything looked blue-grey.* Poly Haven ships vegetation as **alpha-cutout cards** — the diffuse atlas carries blade colour only where the mask is opaque (78% of `grass_medium_01` is near-black) and the cutout lives in a **separate `_alpha_` map their glTF never references**. Trusting the glTF meant rendering the black background as if it were the plant, leaving ambient sky as the brightest thing on screen. The loader now folds a sibling `X_alpha_2k.png` into `X_diff_2k.jpg`'s alpha channel by filename convention and promotes the material to `MASK` + double-sided; a missing sidecar is not an error. (2) *Saplings had no trunk.* `ensure_palette_mesh` kept the largest **primitive**, but a glTF node is usually several — the sapling is `branches` + `twigs`, the island tree is trunk + branches + leaves. Primitives are now grouped by node transform, the heaviest **node** wins, and all of its primitives are kept as `FoliagePart`s with a local transform. (3) *The island tree painted nothing.* Not the triangle cap, as assumed: the file lists `KHR_texture_transform` in `extensionsRequired` and the `gltf` crate rejected the import outright. Enabling the feature fixed it; failed imports are now cached so a broken model no longer retries — and stalls — on every brush dab. **Mip generation** was also wrong for cutouts: a plain box filter averages blade colour with the transparent background, so foliage darkened with distance, and averaging a binary mask drops texels under the 0.5 cutoff so coverage erodes until distant grass vanishes. Colour is now averaged **weighted by alpha**, and each level's alpha is rescaled to preserve coverage (Castaño). Both reduce exactly to the old behaviour for opaque textures. |
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
-| 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
+| 16 | ✅ Complete | **Scripting — Luau.** Superseded the "Rhai or Lua, deferred" row this line used to be. Sub-phases 16-A … 16-F below; architecture, budgets and decisions in §17.18. |
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25M-2 | 🟡 Automated complete | **Sunset & Night Sky Visual Fixes, audited 2026-08-11.** **(A)** The authoritative `PostProcessComponent` default is now `ibl_intensity = 1.0`. **(B)** CSMs include a 1 km caster-depth extension patterned after Flax's extended CSM culling range; receiver bias uses the true triangle plane, and contact-shadow thickness is compared in linear view-space metres instead of nonlinear NDC depth. **(C)** Stars use 3×3×3 neighbour evaluation, smooth angular falloff, a magnitude distribution and Milky Way concentration. **(D)** The lunar orbit has a 29.53-day synodic period and 5.14° inclination; the disc uses the real 0.2666° angular radius, tangent-plane sphere normal, phase lighting and limb darkening, with default illuminance tuned to 0.010 lux. **(E)** Palette vegetation retains its foliage/double-sided/transmission semantics, faces its geometric normal toward the viewer, uses wrapped backside transmission without an ambient albedo glow, and has a roughness floor. Moon BRDF evaluation no longer applies N·L twice, and ReSTIR GI invalidates materially changed light history, rejects unsupported emissive hits, and falls back to night IBL when sunlight is zero. Automated tests pass; night appearance is user-confirmed, while the daytime shadow correction awaits the same on-screen confirmation. |
@@ -3805,6 +3807,52 @@ serial because CR-A occupancy is GPU-bound (~50 ms shading vs ~1.5% CPU).
 `SOMNIUM_CPU_FRUSTUM=0` / `SOMNIUM_CASCADE_CULL=0`. Record:
 `dev records/phase_CR.md`. Occupancy:
 `dev records/phase CR/CR-A_occupancy.md`.
+
+## 17.20 Content Drawer authoring (2026-08-17)
+
+Right-clicking the drawer opens a context menu: **New Folder…**, **New
+Script…**, **Refresh** on empty space, plus **Rename…** and **Show in
+Folder** on an item. One modal serves all three naming flows — Enter
+confirms, Escape or clicking away abandons.
+
+The `ContextMenu` widget had existed since 26-B but was built and
+discarded in `shell.rs` with its handle dropped; it is now wrapped in a
+`Popup` for click-away and positioned at the cursor through
+`AnchorBelow`-with-no-anchor, which is that placement's "obey the child's
+desired position" path. A menu near the bottom of the window flips to
+open upwards, because the drawer sits at the bottom and that is exactly
+where you right-click.
+
+The right-click is intercepted in `UiManager::process_os_event` rather
+than handled as a widget message: the menu is about the *drawer*, and
+right-clicking the gap between two items has to work, but no widget owns
+the gap.
+
+### 17.20.1 The rules on names
+
+`resolve_content_target` is the only place in the editor where a string
+someone typed becomes a filesystem path, and the drawer has no undo, so
+it is a free function with its own tests: no path separators, no `.`
+or `..`, nothing that lands outside `assets/`, no Windows reserved names
+(`con`, `nul`, `aux`, `com1`… — created happily and then unopenable),
+whitespace trimmed, and `.luau` added but never doubled.
+
+**Nothing overwrites**, and there is deliberately **no Delete**. A
+right-click that destroys a file with no undo and no confirmation is not
+a mistake anyone recovers from; Show in Folder is one step from a file
+browser with a recycle bin.
+
+**Show in Folder reveals, it does not open.** Opening a `.luau` means
+launching whatever the OS associates with the extension — nothing on a
+fresh machine, a coin toss on a developer's. Choosing an editor is its
+own sub-phase.
+
+Renaming a `.luau` gives it a new asset id, because the id comes from the
+path (§17.18.5). Attachments naming the old one report "asset not
+imported" rather than being silently re-pointed, which would be wrong if
+the author meant to fork the script.
+
+---
 
 ## 17.19 The scripted first-person character (2026-08-17)
 
