@@ -59,6 +59,8 @@ pub mod reflect_registry;
 pub mod scene_serial;
 pub mod scene_schema;
 pub mod script_bridge;
+pub mod script_cook;
+pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
 pub mod sun;

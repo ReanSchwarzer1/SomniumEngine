@@ -328,11 +328,22 @@ pub fn schema_from_descriptor(descriptor: &Table) -> Result<ScriptSchema, String
 
     let mut callbacks = CallbackMask::default();
     for callback in Callback::all() {
-        if matches!(
-            descriptor.get::<Value>(callback.script_name()),
-            Ok(Value::Function(_))
-        ) {
-            callbacks = callbacks.with(callback);
+        match descriptor.get::<Value>(callback.script_name()) {
+            Ok(Value::Function(_)) => callbacks = callbacks.with(callback),
+            Ok(Value::Nil) | Err(_) => {}
+            Ok(other) => {
+                // A callback name bound to something uncallable would
+                // otherwise be *silently absent* — the mask simply would
+                // not have it, and the author would find out at frame four
+                // hundred that their update never ran. Luau's dynamic
+                // typing means a genuinely changed argument list cannot be
+                // caught here; this is the part that can be.
+                return Err(format!(
+                    "`{}` must be a function; this declares a {}",
+                    callback.script_name(),
+                    other.type_name()
+                ));
+            }
         }
     }
     schema.callbacks = callbacks;
@@ -388,13 +399,19 @@ fn field_schema(name: &str, spec: &Table) -> Result<ScriptFieldSchema, String> {
     })
 }
 
+/// One slot per [`Callback`]. Derived rather than written down, so adding
+/// a callback cannot leave an array one short — which it did, and the
+/// symptom was an index-out-of-bounds panic rather than anything that
+/// pointed at the enum.
+pub const CALLBACK_SLOTS: usize = Callback::all().len();
+
 /// Resolve every lifecycle entry point once.
 ///
 /// # Errors
 ///
 /// If the descriptor cannot be read.
-pub fn resolve_callbacks(descriptor: &Table) -> mlua::Result<[Option<Function>; 10]> {
-    let mut resolved: [Option<Function>; 10] = Default::default();
+pub fn resolve_callbacks(descriptor: &Table) -> mlua::Result<[Option<Function>; CALLBACK_SLOTS]> {
+    let mut resolved: [Option<Function>; CALLBACK_SLOTS] = Default::default();
     for callback in Callback::all() {
         if let Ok(Value::Function(function)) = descriptor.get::<Value>(callback.script_name()) {
             resolved[callback as usize] = Some(function);

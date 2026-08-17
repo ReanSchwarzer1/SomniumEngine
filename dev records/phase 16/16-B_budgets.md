@@ -214,3 +214,73 @@ not have moved any of these numbers.
 **Luau is fast. The first draft of the `ctx` API was not.** It is better
 now, and the remaining gap is a documented property of the budget rather
 than of the runtime.
+
+---
+
+## 6. Re-measured after 16-C–16-F (2026-08-17)
+
+> **Run:** same machine, same harness, medians of five settled release
+> runs each.
+
+Re-running the table after three sessions of work showed every row 30–60%
+worse than §1. That looked like a regression, and §2's warning about
+single runs is exactly why it was checked rather than believed.
+
+### 6.1 What the A/B actually showed
+
+Three builds, measured back to back on the same afternoon, using
+`git worktree` so the comparison was of code rather than of memory:
+
+| Row | `1387962` (16-B) | `993a5dc` (16-C) | working tree (16-F) | §1 record |
+|---|---|---|---|---|
+| 1,000 empty callbacks | 0.671 | 0.787 | **0.485** | 0.515 |
+| 10,000 reads + writes | 21.883 | 3.833 | **3.431** | 2.684 |
+| 1,000 representative | 3.289 | 2.205 | **1.946** | 1.541 |
+
+Two conclusions, in the order they matter:
+
+1. **The working tree is faster than either committed build on every
+   row.** Whatever the absolute numbers say, nothing in 16-C to 16-F made
+   scripting slower.
+2. **The machine is about 30% slower today than when §1 was written.**
+   The `1387962` empty-callback row is 0.671 ms against §1's 0.515 ms for
+   *the same code*. That is the scale factor, measured rather than
+   assumed, and it accounts for the whole apparent regression: scaled by
+   it, the working tree lands at ≈0.37 / ≈2.64 / ≈1.50 against §1's
+   0.515 / 2.684 / 1.541.
+
+The lesson §2 taught about single runs generalises: **a number is only
+comparable to another number taken on the same machine on the same day.**
+The table in §1 keeps its numbers; this section keeps its own, and neither
+is rewritten to match the other.
+
+`1387962` is *not* a pre-optimisation baseline, incidentally — its
+reads+writes row at 21.9 ms shows it predates §3.4's mirrored properties
+but not the other three fixes. It is here as a same-day control, not as a
+history.
+
+### 6.2 The two things that made it faster
+
+Both were already written down as owed work.
+
+**The three hash lookups per call, hoisted.** §4's "known, quantified, not
+done" — `invoke_phase` reached the instance through `HashMap::get` three
+times per call (mirror-in, `self_table`, mirror-out). The resolve pass now
+does everything needing `&mut self`, the backend is reborrowed immutably,
+and the loop holds `&Instance` directly. Estimated there at 75–100 ns per
+call; measured here as most of the empty row's 0.787 → 0.485.
+
+**`ctx.spawns` was rebound on every call.** 16-C added spawn-result
+delivery and cleared the key per attachment per phase, including for the
+overwhelmingly common case of nobody having spawned anything — a hash and
+a write barrier per call to set nil over nil. It is now tracked and only
+written when it changes. This is the same shape of mistake as §3.1 and
+§3.2: per-call work that looks too small to be worth thinking about, on a
+path that runs a thousand times a frame.
+
+### 6.3 Still over, still for the reason §4 gives
+
+`10,000 reads + writes` and the `10,000 entities × 1` reading remain over.
+§4's arithmetic is unchanged and unchallenged: the ceiling implies 150 ns
+per callback and the Luau call alone is 116 ns. Nothing in this session
+was aimed at that row, and nothing in it moved.

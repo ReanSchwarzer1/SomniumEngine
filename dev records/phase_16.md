@@ -3,12 +3,13 @@
 > *Devil May Cry: the engine keeps the world; the script only ever asks for it.*
 
 > **Codename:** Devil May Cry
-> **Status:** **16-A, 16-B, 16-C and 16-D COMPLETE (2026-08-17).**
-> 16-E and 16-F remain.
-> §10 records session one; §11 session two; §12 session three. Three
-> throughput budgets were missed on the first pass and fixed; the one
-> still over is over a ceiling shown to be arithmetically unreachable
-> (§11.4).
+> **Status:** **16-A through 16-F COMPLETE (2026-08-17). Phase 16 is
+> closed** except for the two items §13.7 names, neither of which is
+> scripting work.
+> §10 records session one; §11 session two; §12 session three; §13
+> session four. Three throughput budgets were missed on the first pass and
+> fixed; the one still over is over a ceiling shown to be arithmetically
+> unreachable (§11.4).
 > **Language decision:** **Luau, embedded through `mlua` 0.12, interpreter only.**
 > **Record:** this file, plus
 > [`phase 16/16-B_budgets.md`](phase%2016/16-B_budgets.md) for the measured
@@ -993,3 +994,184 @@ Two judgement calls worth writing down:
    rows, and the generated `.d.luau` declarations.
 3. Worth doing early in either: the ~75–100 ns/call the budgets record
    flags as "known, quantified, not done" (§4 of the budgets file).
+
+---
+
+## 13. Status — end of session four (2026-08-17)
+
+**16-E and 16-F are complete.** `cargo test --workspace`: **804 passed,
+0 failed** (43 more than session three). `somnium_script`,
+`somnium_script_luau` and every `somnium_core` scripting module are
+clippy-clean under `pedantic`.
+
+### 13.1 16-B's missing piece, built because 16-E needs it
+
+`require` never shipped. §11.2 does not mention it and `REMOVED_GLOBALS`
+deletes Luau's own, so every script was an island and 16-E's "compute the
+affected dependents from the static dependency graph" had an empty graph
+to compute from. So B-3 was built first.
+
+**`require` takes a string literal and nothing else.** Not a variable, not
+a concatenation, and not even a bare mention — `local r = require` is an
+alias, and an alias is a computed call one line later. All of it is a
+compile error with a line number.
+
+That strictness is the feature. The graph is read out of the *source
+text*, by a scanner that skips comments and both string forms
+([`modules.rs`](../crates/somnium_script_luau/src/modules.rs)), so it is a
+fact about the file rather than something discovered by running it. Three
+things depend on that: a reload knows the blast radius before it touches
+anything, the cook knows what to bundle, and a cycle is caught once on a
+graph rather than by a runtime guard that only fires on the unlucky path.
+
+Two decisions worth recording:
+
+* **Resolution is the runtime's job, not the backend's.** The backend
+  reports the names it found and is handed the answer through a new
+  `ScriptBackend::link`. A backend carrying its own copy of the asset list
+  would be the second source of truth §2 goal 4 forbids.
+* **A required module is evaluated once per trust domain and frozen.**
+  Once per *attachment* would mean a shared helper is not shared; unfrozen
+  would mean one attachment can rewrite a helper for every other one. This
+  is the same argument `Lua::sandbox(true)` makes about the globals.
+
+### 13.2 The reload transaction
+
+§6's nine steps, with the middle already done in 16-C. What is new:
+
+| Step | Where |
+|---|---|
+| 1. Debounce, blast radius | `ScriptHost::poll_file_changes`, `ScriptRuntime::blast_radius` |
+| 2. Shadow compile + link + describe | `ScriptRuntime::build`, called before anything live is touched |
+| 3. On failure, keep the old instances | falls out of 2 — the swap is after the `?` |
+| 9. Commit at a frame boundary, one rollback generation | instances are left in `Loaded`; `AssetRecord::previous` |
+
+The debounce is not decoration. An editor writing a file in several
+chunks is the normal case, and a watcher without one recompiles half a
+file and reports a syntax error the author never made.
+
+**The rollback generation is for the edit that compiled and was wrong
+anyway** — not for syntax errors, which never commit in the first place.
+One generation, because that is the edit anyone returns to. It routes
+through the ordinary reload path rather than a second one.
+
+### 13.3 Migration, and the bug that made it a no-op
+
+`migrateProperties(self, props, fromVersion)` on the module, called
+between the old instance being torn down and the new one being built.
+A rename is the case it exists for: dropping `speed` and adding
+`velocity` otherwise loses every value an author set, and only the person
+who made that change knows they are the same field.
+
+The first version worked and then undid itself on the next frame.
+Migration rewrote the *instance*, but authored data lives in the world,
+and `reconcile` compares the two and rebuilds from the world on a
+difference — so the migration was reverted one frame later and would
+never have been saved. The runtime now reports rewritten bags and
+`ScriptHost::sync` writes them into the `ScriptSet` before reconciling.
+
+### 13.4 16-F
+
+* **Cook.** [`script_cook.rs`](../crates/somnium_core/src/script_cook.rs).
+  The fingerprint is **not** a version string: it is a hash of a fixed
+  probe chunk's compiled bytecode. A version string is a constant a human
+  keeps in sync, so the one time it is stale is the one time the cache is
+  invalid and nothing notices — and stale bytecode handed to Luau is
+  undefined behaviour, not a load error, because the VM does not validate
+  its input. A probe cannot go stale.
+* **Capabilities.**
+  [`capability.rs`](../crates/somnium_script/src/capability.rs), enforced
+  **at the command boundary**, once, in the host. Not per binding: every
+  new host function would be another place to remember, and a forgotten
+  one is a hole. `ScriptCommand::required_capability` is an exhaustive
+  match, so a new command does not compile until it says what it needs.
+* **Adversarial suite.**
+  [`script_threat_model.rs`](../crates/somnium_core/tests/script_threat_model.rs) —
+  22 tests, one per §4.6 row, plus a 28-case malformed corpus and *every
+  prefix of every case*, since half-written files are exactly what a
+  watcher sees.
+* **Profiler rows.** Script CPU, calls, commands, errors, live instances
+  and VM memory, under a `— Scripts (CPU) —` heading. Labelled CPU
+  because there is no GPU side to a script and a row implying otherwise
+  would cost someone a morning.
+* **Generated declarations.**
+  [`script_decls.rs`](../crates/somnium_core/src/script_decls.rs), the
+  registry's fourth consumer, rewritten on startup only when it differs.
+  What is **not** claimed: that a type-checker accepts it. `luau-analyze`
+  is a separate binary this repo does not vendor, so a test asserting "the
+  declarations type-check" would assert something nobody ran. The tests
+  assert shape and coverage, which is what can be checked.
+
+### 13.5 The budgets looked regressed, and were not
+
+Re-running the table showed every row 30–60% worse than
+[`16-B_budgets.md`](phase%2016/16-B_budgets.md) §1. Three `git worktree`
+builds measured back to back settled it:
+
+| Row | 16-B commit | 16-C commit | working tree | §1 record |
+|---|---|---|---|---|
+| 1,000 empty callbacks | 0.671 | 0.787 | **0.485** | 0.515 |
+| 10,000 reads + writes | 21.883 | 3.833 | **3.431** | 2.684 |
+| 1,000 representative | 3.289 | 2.205 | **1.946** | 1.541 |
+
+The working tree beats both committed builds on every row, and the 16-B
+commit measures 0.671 ms on a row the record puts at 0.515 ms *for the
+same code* — the machine is about 30% slower today. Scaled by that, every
+row lands on its recorded number.
+
+Two real wins came out of it, both previously owed: the three per-call
+hash lookups §4 flagged as "known, quantified, not done" are hoisted, and
+`ctx.spawns` — added in 16-C — was being rebound on every call including
+the overwhelmingly common case of nobody having spawned anything. Full
+analysis in §6 of the budgets record.
+
+**The lesson generalises past this phase: a number is only comparable to
+another number taken on the same machine on the same day.** Neither table
+was rewritten to match the other.
+
+### 13.6 Two defects the tests found
+
+* **`Callback::all()` grew to eleven and two arrays stayed at ten.** The
+  symptom was an index-out-of-bounds panic that pointed at `host.rs`
+  rather than at the enum. Both are now `host::CALLBACK_SLOTS`, derived
+  from `Callback::all().len()`, so the next addition cannot repeat it.
+* **A callback bound to a non-function was silently absent.**
+  `onFixedUpdate = 5` produced an empty `CallbackMask` entry and the
+  author found out at frame four hundred that their update never ran. It
+  is a describe-time error now. Luau's dynamic typing means a genuinely
+  changed *argument list* still cannot be caught before the call, and the
+  test says so rather than implying otherwise.
+
+### 13.7 What Phase 16 does not close
+
+Both are named here rather than left implicit, and neither is scripting
+work:
+
+* **A saved `scene.somnium` still cannot be opened from the editor.**
+  `EditorEvent::LoadScene` routes to `map::load_map`, which only accepts
+  version-2 map recipes. §11.0 guessed this belonged with 16-D; it does
+  not. It is renderer reconstruction — meshes from `MeshKind`, terrain
+  sidecars, GPU uploads — with nothing scripting-specific in it, and §6's
+  16-D list never contained it. Attachments round-trip correctly through
+  `scene_schema` and are covered by tests; it is the *editor's load
+  route* that is missing.
+* **Diagnostics are positioned, not clickable.** Every message carries
+  `file:line:column`; the Output Log is a text list and does not turn that
+  into a jump. Making it one needs a click affordance per row and a way to
+  open an external editor, which is UI work rather than scripting work.
+
+### 13.8 Phase 16, assessed against its own goals
+
+1. *A `.luau` file attached in the editor runs deterministically at fixed
+   step and its properties survive save/load.* **Met**, and asserted in
+   `script_gate.rs` against the same file `hello_engine` runs.
+2. *A script cannot crash, hang or corrupt the engine.* **Met** — §4.6 is
+   22 tests, and the corpus covers every prefix of every malformed case.
+3. *Hot reload is transactional.* **Met**, including the blast radius, the
+   rollback generation and the failure paths.
+4. *One registry, four consumers.* **Met**: script bindings, the scene
+   format, the Details panel's generated field UI, and the `.d.luau`. No
+   per-component script UI is hand-written anywhere.
+5. *The language is replaceable.* **Met.** `mlua` appears in exactly one
+   `Cargo.toml`, and `somnium_core` names `somnium_script_luau` in exactly
+   one module — `ScriptHost::new`, to install it.

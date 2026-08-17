@@ -1,4 +1,4 @@
-﻿//! Phase 16-C: the thing that drives scripts from the frame loop.
+//! Phase 16-C: the thing that drives scripts from the frame loop.
 //!
 //! [`ScriptRuntime`] owns the lifecycle and the order; it deliberately
 //! knows nothing about `World`, `PhysicsWorld` or `AudioEngine`.
@@ -11,14 +11,14 @@
 //!
 //! A script spawned during `onInit` does not exist in the world until its
 //! spawn command has been applied. Only something holding `&mut World`
-//! can answer "what is attached now", so the init loop is here â€” while
+//! can answer "what is attached now", so the init loop is here — while
 //! the cap it obeys, [`MAX_INIT_CYCLES`], and the diagnostic it raises
 //! belong to the runtime, so the number is stated once.
 //!
 //! # Physics and audio are routed, not called
 //!
 //! `ApplyForce` names an entity; Jolt wants a body id, and the map from
-//! one to the other is game-layer knowledge â€” `somnium_core` has no
+//! one to the other is game-layer knowledge — `somnium_core` has no
 //! rigid-body component. So the host takes a [`ForceRouter`] the game
 //! installs once, rather than guessing. An uninstalled router turns a
 //! force into a rejection with a message that says so, which is a much
@@ -108,6 +108,47 @@ pub struct SyncReport {
     pub failures: Vec<InstanceFailure>,
 }
 
+/// What scripting cost this frame, for the Phase 29 overlay.
+///
+/// CPU only, and named as such: there is no GPU side to a script, and a
+/// row that implied otherwise would be worse than no row. `break-on-error`
+/// is deliberately not here — it is not claimed at MVP.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScriptStats {
+    /// Wall time in the fixed phases, including the command apply.
+    pub fixed_ms: f32,
+    /// Wall time in the variable phase.
+    pub update_ms: f32,
+    /// Wall time reconciling, initialising and tearing down.
+    pub sync_ms: f32,
+    /// Callbacks the VM was actually entered for.
+    pub calls: u32,
+    /// Commands applied.
+    pub commands: u32,
+    /// Callbacks that raised.
+    pub errors: u32,
+    /// Live instances.
+    pub instances: usize,
+    /// Bytes attributed to the VM.
+    pub vm_bytes: usize,
+}
+
+impl ScriptStats {
+    /// Total script CPU time this frame.
+    #[must_use]
+    pub fn total_ms(&self) -> f32 {
+        self.fixed_ms + self.update_ms + self.sync_ms
+    }
+}
+
+/// Which phase group a measurement belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Meter {
+    Sync,
+    Fixed,
+    Update,
+}
+
 /// Scripts, wired to the engine.
 pub struct ScriptHost {
     runtime: ScriptRuntime,
@@ -115,6 +156,9 @@ pub struct ScriptHost {
     force_router: Option<ForceRouter>,
     /// Where each imported script came from, so a reload can re-read it.
     script_paths: BTreeMap<ScriptAssetId, PathBuf>,
+    /// What each of those files looked like when it was last loaded, and
+    /// whether a change is still in flight. See [`ScriptHost::poll_file_changes`].
+    watched: BTreeMap<ScriptAssetId, WatchState>,
     /// Sound assets a script may name, and where they live on disk.
     audio_paths: BTreeMap<ScriptAssetId, String>,
     voices: BTreeMap<u64, SoundHandle>,
@@ -123,6 +167,12 @@ pub struct ScriptHost {
     /// Rejections from the last apply, kept so the editor can show why a
     /// script's write did not land.
     rejections: Vec<String>,
+    /// Whether imports consult and write the bytecode cache.
+    cook_enabled: bool,
+    /// This frame's cost, accumulated as phases run.
+    stats: ScriptStats,
+    /// Which group `run_phase` is currently attributing time to.
+    meter: Meter,
 }
 
 impl Default for ScriptHost {
@@ -154,11 +204,15 @@ impl ScriptHost {
             registry: component_registry(),
             force_router: None,
             script_paths: BTreeMap::new(),
+            watched: BTreeMap::new(),
             audio_paths: BTreeMap::new(),
             voices: BTreeMap::new(),
             next_voice: 1,
             logs,
             rejections: Vec::new(),
+            cook_enabled: true,
+            stats: ScriptStats::default(),
+            meter: Meter::Sync,
         }
     }
 
@@ -171,11 +225,15 @@ impl ScriptHost {
             registry: component_registry(),
             force_router: None,
             script_paths: BTreeMap::new(),
+            watched: BTreeMap::new(),
             audio_paths: BTreeMap::new(),
             voices: BTreeMap::new(),
             next_voice: 1,
             logs: Vec::new(),
             rejections: Vec::new(),
+            cook_enabled: true,
+            stats: ScriptStats::default(),
+            meter: Meter::Sync,
         }
     }
 
@@ -191,7 +249,7 @@ impl ScriptHost {
         &self.runtime
     }
 
-    /// The scheduler underneath, mutably â€” asset loading, quarantine
+    /// The scheduler underneath, mutably — asset loading, quarantine
     /// clearing and state export all go through it.
     pub fn runtime_mut(&mut self) -> &mut ScriptRuntime {
         &mut self.runtime
@@ -228,16 +286,28 @@ impl ScriptHost {
 
     /// Import a `.luau` file from disk.
     ///
-    /// The id comes from the path, not the bytes â€” see
+    /// The id comes from the path, not the bytes — see
     /// [`ScriptAssetId::from_path`] for why. Importing the same file twice
     /// is a reload, not a second asset.
     ///
     /// # Errors
     ///
     /// A read failure or the compiler's diagnostics.
-    pub fn import_script_file(
+    pub fn import_script_file(&mut self, path: &Path) -> Result<ScriptAssetId, Diagnostics> {
+        self.import_with_dependencies(path, 0)
+    }
+
+    /// How deep a `require` chain may be followed while importing.
+    ///
+    /// Cycles are rejected by the runtime on the static graph. This bounds
+    /// the *import* recursion, which walks a directory tree it did not
+    /// create and therefore has to answer for one.
+    const MAX_IMPORT_DEPTH: u32 = 16;
+
+    fn import_with_dependencies(
         &mut self,
-        path: &std::path::Path,
+        path: &Path,
+        depth: u32,
     ) -> Result<ScriptAssetId, Diagnostics> {
         let display = display_path(path);
         let asset = ScriptAssetId::from_path(&display);
@@ -247,18 +317,201 @@ impl ScriptHost {
                 asset,
                 &format!("cannot read {display}: {error}"),
             ));
-            self.runtime_mut()
-                .take_diagnostics()
-                .into_iter()
-                .for_each(drop);
             diagnostics
         })?;
         self.script_paths.insert(asset, path.to_path_buf());
+        self.remember_signature(asset, path);
+
+        // Phase 16-F: offer the cook, if there is a valid one. A miss
+        // costs nothing — the backend compiles from source and the cache
+        // is rewritten below.
+        self.offer_cached_bytecode(asset, &text);
+
+        let first = self.load_or_reload(asset, &display, &text);
+        if first.is_ok() {
+            self.store_cooked(asset, &text);
+            return first;
+        }
+
+        // A `require` naming a script nobody has imported yet is not the
+        // author's problem to solve by hand. The link pass reports which
+        // names it could not find; import those and try once more. A
+        // second failure is a real one.
+        let missing = self.runtime.take_unresolved();
+        if missing.is_empty() || depth >= Self::MAX_IMPORT_DEPTH {
+            return first;
+        }
+        let folder = path.parent().map(Path::to_path_buf);
+        let root = std::env::current_dir().unwrap_or_default();
+        for (_, name) in missing {
+            let candidates = [
+                folder.as_ref().map(|dir| dir.join(format!("{name}.luau"))),
+                Some(root.join(format!("{name}.luau"))),
+                Some(root.join("assets").join(format!("{name}.luau"))),
+            ];
+            if let Some(found) = candidates.into_iter().flatten().find(|p| p.is_file()) {
+                let _ = self.import_with_dependencies(&found, depth + 1);
+            }
+        }
+        let second = self.load_or_reload(asset, &display, &text);
+        if second.is_ok() {
+            self.store_cooked(asset, &text);
+        }
+        second
+    }
+
+    // ── The cook (16-F) ────────────────────────────────────────────
+
+    /// Whether the bytecode cache is in use. Off leaves the source path,
+    /// which is what development wants and what a debugger needs.
+    pub fn set_bytecode_cache(&mut self, enabled: bool) {
+        self.cook_enabled = enabled;
+    }
+
+    /// Hand the runtime a cached artifact, if there is one that matches
+    /// both this runtime and this exact source.
+    fn offer_cached_bytecode(&mut self, asset: ScriptAssetId, text: &str) {
+        if !self.cook_enabled {
+            return;
+        }
+        let Some(fingerprint) = self.runtime.runtime_fingerprint(LanguageTag::LUAU) else {
+            return;
+        };
+        let path = crate::script_cook::cache_path(&crate::script_cook::cache_dir(), asset);
+        let Some(cooked) = crate::script_cook::read_cooked(&path) else {
+            return;
+        };
+        if cooked.is_valid_for(text, &fingerprint) {
+            self.runtime
+                .offer_bytecode(asset, cooked.fingerprint, cooked.bytecode);
+        }
+    }
+
+    /// Record what this load compiled, so the next one can skip it.
+    fn store_cooked(&mut self, asset: ScriptAssetId, text: &str) {
+        if !self.cook_enabled {
+            return;
+        }
+        let (Some(fingerprint), Some(bytecode)) = (
+            self.runtime.runtime_fingerprint(LanguageTag::LUAU),
+            self.runtime.bytecode_of(asset),
+        ) else {
+            return;
+        };
+        let cooked = crate::script_cook::CookedScript {
+            fingerprint,
+            source_hash: crate::script_cook::hash_source(text),
+            bytecode,
+        };
+        let path = crate::script_cook::cache_path(&crate::script_cook::cache_dir(), asset);
+        // A cache that cannot be written is not a failure worth telling
+        // anyone about: the next load compiles from source, which is what
+        // it would have done anyway.
+        let _ = crate::script_cook::write_cooked(&path, &cooked);
+    }
+
+    fn load_or_reload(
+        &mut self,
+        asset: ScriptAssetId,
+        display: &str,
+        text: &str,
+    ) -> Result<ScriptAssetId, Diagnostics> {
         if self.runtime.is_asset_loaded(asset) {
             self.reload_script(asset, display, text).map(|()| asset)
         } else {
             self.load_script(asset, display, text)
         }
+    }
+
+    // ── The watcher (16-E) ─────────────────────────────────────────
+
+    /// Note a file's current shape, so a later change is detectable.
+    fn remember_signature(&mut self, asset: ScriptAssetId, path: &Path) {
+        let signature = file_signature(path);
+        self.watched.insert(
+            asset,
+            WatchState {
+                loaded: signature,
+                pending: None,
+                changed_at: None,
+            },
+        );
+    }
+
+    /// Which imported scripts have changed on disk **and settled**.
+    ///
+    /// The debounce is not decoration. An editor saving a file often
+    /// writes it in more than one go, and a watcher without one
+    /// recompiles a half-written file and reports a syntax error the
+    /// author never made. A change is reported only once its size and
+    /// mtime have stopped moving for `settle`.
+    pub fn poll_file_changes(&mut self, settle: std::time::Duration) -> Vec<ScriptAssetId> {
+        let now = std::time::Instant::now();
+        let paths: Vec<(ScriptAssetId, PathBuf)> = self
+            .script_paths
+            .iter()
+            .map(|(id, path)| (*id, path.clone()))
+            .collect();
+
+        let mut settled = Vec::new();
+        for (asset, path) in paths {
+            let current = file_signature(&path);
+            let Some(state) = self.watched.get_mut(&asset) else {
+                continue;
+            };
+            if current == state.loaded {
+                state.pending = None;
+                state.changed_at = None;
+            } else if state.pending == Some(current) {
+                if state.changed_at.is_some_and(|at| now.duration_since(at) >= settle) {
+                    state.loaded = current;
+                    state.pending = None;
+                    state.changed_at = None;
+                    settled.push(asset);
+                }
+            } else {
+                // Still being written. Restart the clock.
+                state.pending = Some(current);
+                state.changed_at = Some(now);
+            }
+        }
+        settled
+    }
+
+    /// Poll, then reload whatever settled — the editor's per-frame call.
+    ///
+    /// Returns `(reloaded, failed)`. A file that no longer compiles keeps
+    /// its live instances running and only publishes diagnostics, which is
+    /// what makes this safe to run every frame.
+    pub fn reload_changed(&mut self, settle: std::time::Duration) -> (usize, usize) {
+        let changed = self.poll_file_changes(settle);
+        if changed.is_empty() {
+            return (0, 0);
+        }
+        let (mut ok, mut failed) = (0, 0);
+        for asset in changed {
+            let Some(path) = self.script_paths.get(&asset).cloned() else {
+                continue;
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    if self.reload_script(asset, display_path(&path), text).is_ok() {
+                        ok += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    self.logs.push(ScriptLogLine {
+                        level: LogLevel::Error,
+                        instance: InstanceUuid::NONE,
+                        message: format!("cannot read {}: {error}", path.display()),
+                    });
+                }
+            }
+        }
+        (ok, failed)
     }
 
     /// Recompile every imported script from its file on disk.
@@ -322,7 +575,7 @@ impl ScriptHost {
         })
     }
 
-    // â”€â”€ The frame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── The frame ──────────────────────────────────────────────────
 
     /// Reconcile the live set with the authored one and run the lifecycle
     /// up to `Enabled`.
@@ -336,6 +589,14 @@ impl ScriptHost {
         services: &mut HostServices<'_>,
     ) -> SyncReport {
         let mut report = SyncReport::default();
+        self.meter = Meter::Sync;
+
+        // Phase 16-E: a reload's property migration rewrote authored data,
+        // and authored data lives in the world. Written back before the
+        // reconcile below, which would otherwise see the instance and the
+        // scene disagree, rebuild from the scene, and undo the migration
+        // on the very frame it happened.
+        self.apply_migrated_properties(world);
 
         // Anything on a despawned entity is on its way out whether or not
         // the authored data changed.
@@ -382,7 +643,7 @@ impl ScriptHost {
         }
 
         // The author's `enabled` flag, and quarantine, are both applied
-        // here â€” one diff, one place.
+        // here — one diff, one place.
         report
             .failures
             .extend(self.run_phase(Callback::Enable, world, phase, services).failures);
@@ -410,6 +671,7 @@ impl ScriptHost {
             time,
             input: input.clone(),
         };
+        self.meter = Meter::Fixed;
         let mut failures = self
             .run_phase(Callback::FixedUpdate, world, &phase, services)
             .failures;
@@ -436,11 +698,43 @@ impl ScriptHost {
             time,
             input: input.clone(),
         };
+        self.meter = Meter::Update;
         let failures = self
             .run_phase(Callback::Update, world, &phase, services)
             .failures;
         self.teardown(world, &phase, services);
         failures
+    }
+
+    /// Write a migration's rewritten property bags into the `ScriptSet`s
+    /// they came from.
+    ///
+    /// This is what makes a rename survive a save as well as a reload: the
+    /// scene is the authority on authored data, so a migration that only
+    /// reached the live instance would be lost the moment anything
+    /// re-read the world.
+    fn apply_migrated_properties(&mut self, world: &mut World) {
+        let migrated = self.runtime.take_migrated_properties();
+        if migrated.is_empty() {
+            return;
+        }
+        let scripted: Vec<Entity> = world
+            .entities()
+            .filter(|entity| world.get::<ScriptSet>(*entity).is_some())
+            .collect();
+        for (instance, properties) in migrated {
+            for entity in &scripted {
+                let Some(mut set) = world.get::<ScriptSet>(*entity).cloned() else {
+                    continue;
+                };
+                let Some(attachment) = set.get_mut(instance) else {
+                    continue;
+                };
+                attachment.properties = properties.clone();
+                let _ = world.insert_component(*entity, set);
+                break;
+            }
+        }
     }
 
     /// Tear every live instance down, as Stop does.
@@ -472,7 +766,7 @@ impl ScriptHost {
         if !self.runtime.has_pending_destroy() {
             return 0;
         }
-        // `onDisable` first, then `onDestroy` â€” the same order a hot reload
+        // `onDisable` first, then `onDestroy` — the same order a hot reload
         // uses, so a script that gives things back in `onDisable` does not
         // need a second copy of that code in its destructor. Both run while
         // the instance is still whole; the VM object goes after, at the
@@ -516,6 +810,7 @@ impl ScriptHost {
         phase: &PhaseInput,
         services: &mut HostServices<'_>,
     ) -> somnium_script::runtime::PhaseReport {
+        let started = std::time::Instant::now();
         let mut commands = CommandBuffer::new();
         let report = {
             // The view borrows the world immutably for exactly the
@@ -532,9 +827,62 @@ impl ScriptHost {
             });
         }
 
-        let outcome = apply_commands(world, &self.registry, commands.drain_sorted());
+        // Phase 16-F: the capability manifest, enforced once, here.
+        //
+        // At the command boundary rather than in the bindings: every
+        // effect a script can have on the world is a command, so this is
+        // exhaustive, and a new command variant cannot be added without
+        // declaring what it needs.
+        let mut queued = commands.drain_sorted();
+        queued.retain(|command| {
+            let granted = self.runtime.capabilities_for(command.order);
+            let needed = command.command.required_capability();
+            if granted.allows(needed) {
+                return true;
+            }
+            self.rejections.push(format!(
+                "`{}` needs the `{}` capability, which this script package \
+                 does not have",
+                command.command.name(),
+                needed.name()
+            ));
+            false
+        });
+
+        let outcome = apply_commands(world, &self.registry, queued);
+        self.stats.commands += u32::try_from(outcome.applied).unwrap_or(u32::MAX);
         self.absorb(outcome, world, services);
+
+        // Measured around the whole phase — the VM call *and* the apply —
+        // because "how much did scripting cost this frame" is the
+        // question, and the marshalling either side of the call is most of
+        // the answer (see the 16-B budget record).
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed = started.elapsed().as_secs_f32() * 1000.0;
+        match self.meter {
+            Meter::Sync => self.stats.sync_ms += elapsed,
+            Meter::Fixed => self.stats.fixed_ms += elapsed,
+            Meter::Update => self.stats.update_ms += elapsed,
+        }
+        self.stats.calls += u32::try_from(report.invoked).unwrap_or(u32::MAX);
+        self.stats.errors += u32::try_from(report.failures.len()).unwrap_or(u32::MAX);
         report
+    }
+
+    /// This frame's cost so far.
+    #[must_use]
+    pub fn stats(&self) -> ScriptStats {
+        ScriptStats {
+            instances: self.runtime.live_instances(),
+            vm_bytes: self.runtime.memory_used(),
+            ..self.stats
+        }
+    }
+
+    /// Zero the per-frame counters. Called once per frame by the engine,
+    /// after the overlay has read them.
+    pub fn begin_frame(&mut self) {
+        self.stats = ScriptStats::default();
     }
 
     /// Route one apply pass's side effects into the engine.
@@ -614,7 +962,7 @@ impl ScriptHost {
         }
     }
 
-    // â”€â”€ Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Output ─────────────────────────────────────────────────────
 
     /// Take everything scripts wrote to the log this frame.
     pub fn take_logs(&mut self) -> Vec<ScriptLogLine> {
@@ -638,7 +986,7 @@ impl ScriptHost {
     }
 
     /// Export every live attachment's declared state, keyed by its durable
-    /// id â€” the save-game half of the reload contract.
+    /// id — the save-game half of the reload contract.
     pub fn export_states(&mut self) -> BTreeMap<InstanceUuid, ScriptValue> {
         let ids: Vec<InstanceUuid> = self.live_instance_ids();
         let mut out = BTreeMap::new();
@@ -692,7 +1040,7 @@ pub fn run_to_fixed_point(mut cycle: impl FnMut() -> bool) -> (u32, bool) {
 
 /// Read every authored attachment out of the world, in world order.
 ///
-/// Ordering does not matter here â€” [`OrderKey`] decides run order â€” but
+/// Ordering does not matter here — [`OrderKey`] decides run order — but
 /// durable ids do: an attachment with no [`PersistentId`] on its entity
 /// has no stable tiebreak, so one is minted the first time it is seen.
 #[must_use]
@@ -725,6 +1073,41 @@ pub fn collect_attachments(world: &mut World) -> Vec<AttachmentView> {
         }
     }
     views
+}
+
+/// What a file looks like, without reading it.
+///
+/// Modification time and size — enough to notice an edit, cheap enough to
+/// check every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileSignature {
+    /// Last modified, and how big.
+    Present(std::time::SystemTime, u64),
+    /// Not there. A signature like any other: deleting a script is a
+    /// change, and the reload that follows reports the read failure.
+    Missing,
+}
+
+/// What a watched file looked like, and whether a change is still in
+/// flight.
+#[derive(Debug, Clone)]
+struct WatchState {
+    /// Signature of the text currently compiled.
+    loaded: FileSignature,
+    /// A different signature seen but not yet settled.
+    pending: Option<FileSignature>,
+    /// When `pending` was first seen.
+    changed_at: Option<std::time::Instant>,
+}
+
+fn file_signature(path: &Path) -> FileSignature {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return FileSignature::Missing;
+    };
+    meta.modified()
+        .map_or(FileSignature::Missing, |at| {
+            FileSignature::Present(at, meta.len())
+        })
 }
 
 /// A path as the editor and the diagnostics show it: project-relative

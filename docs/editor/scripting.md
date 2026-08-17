@@ -163,23 +163,112 @@ ordinary.
 The status area counts blocking script diagnostics. The Output Log carries
 the messages, positioned as `file:line:column`.
 
+## Sharing code between scripts
+
+```luau
+local util = require("scripts/util")
+```
+
+`require` takes a **string literal** and nothing else. Not a variable, not
+a concatenation, and you cannot store `require` in a local — all three are
+compile errors with a line number.
+
+That is not a limitation that happened; it is the point. The engine reads
+your dependency graph out of the source *without running it*, and three
+things need that: a reload has to know which scripts an edit affects
+before it touches anything, the cook has to know what to bundle, and a
+`require` cycle is caught once, up front, naming both files.
+
+A required module is evaluated **once per session and frozen**. That makes
+a shared helper genuinely shared, and stops one script rewriting a helper
+for every other script in the game. Return a table of functions and
+constants; do not expect to keep mutable state in one.
+
+Module names resolve relative to the requiring file first, then from the
+project root, then under `assets/`. So a file next to yours is
+`require("helpers")` and `assets/scripts/util.luau` is
+`require("scripts/util")`. Importing a script imports what it requires —
+you never have to hunt down dependencies by hand.
+
 ## Reload
 
-**F5** recompiles every imported script.
+**F5** recompiles every imported script, and the editor also watches the
+files you have imported: saving in an external editor reloads it within a
+quarter of a second. The delay is deliberate — editors often write a file
+in more than one go, and reloading a half-written file reports a syntax
+error you never made.
 
 A file that no longer compiles **leaves its live instances running** and
-publishes diagnostics — nothing about the running world changes. A file
-that does compile has its instances rebuilt: `saveState` is asked for the
-old state, the new module is instantiated, `loadState` gives it back, and
-the lifecycle replays `onInit`, `onStart`, `onEnable`.
+publishes diagnostics — nothing about the running world changes. Editing
+a shared module reloads every script that requires it, transitively.
+
+A file that does compile has its instances rebuilt: `saveState` is asked
+for the old state, the new module is instantiated, `loadState` gives it
+back, and the lifecycle replays `onInit`, `onStart`, `onEnable` at the
+next frame boundary.
 
 Only versioned pure data survives. A closure, a coroutine, userdata and any
 engine resource the script was holding do not. Anything your script needs
 across a reload has to come back out of `saveState` as plain values.
 
+### Renaming a property
+
+Bump `schemaVersion` and say how the old values map to the new ones:
+
+```luau
+schemaVersion = 2,
+fields = { velocity = Field.number(1.0) },
+migrateProperties = function(self, props, fromVersion)
+    if fromVersion < 2 and props.speed ~= nil then
+        props.velocity = props.speed
+        props.speed = nil
+    end
+    return props
+end,
+```
+
+Without this, renaming a field loses every value anyone set in the editor:
+the old key no longer matches anything the script declares, so it is
+dropped with a warning in the Output Log. Only the person who made the
+rename knows the two are the same field.
+
+The migrated values are written back into the scene, so they survive a
+save as well as the reload.
+
+## Capabilities
+
+Every effect a script can have on the world goes through one command
+boundary, and each command needs a capability: writing fields, adding or
+removing components, spawning, despawning, forces, audio, events, logging.
+
+A project's own scripts get all of them. The point of the manifest is a
+future mod tier, where the default is nearly empty — change fields, log,
+emit events, and nothing else. A refused command is reported in the Output
+Log and does not fault the script; it simply does not happen.
+
+## Bytecode cache
+
+Compiled scripts are cached under `target/script-cache/`. The cache is
+keyed on both a fingerprint of the runtime that produced it and a hash of
+the source, and a mismatch in either is a cache miss that recompiles — so
+it can never hand a stale artifact to the VM. Bytecode is a cache, never
+storage; deleting the directory costs nothing but a recompile.
+
+## Editor autocomplete
+
+`assets/scripts/somnium.d.luau` is generated from the same component
+registry the engine, the scene format and the Details panel read, so it
+cannot drift from them. It is rewritten on startup whenever it differs.
+
+Whether your editor understands it is a separate question: the Luau
+language server most people use is community-maintained and is not an
+official Luau tool. Nothing here claims first-class IDE support.
+
 ## What is not here yet
 
-No breakpoints or stepping. No `.d.luau` declarations for editor
-autocomplete. No file watcher — reload is the F5 key, not a save hook. No
-mod sandbox. Those are later sub-phases, and the help page will say so
-until they land.
+No breakpoints or stepping. Diagnostics carry `file:line:column` but the
+Output Log does not turn them into a jump — you read the position and go
+there yourself. No mod sandbox: the capability manifest that a mod tier
+would need exists and is enforced, but nothing yet loads untrusted
+packages into their own VM. Those are later sub-phases, and this page will
+say so until they land.

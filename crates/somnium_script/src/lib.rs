@@ -52,6 +52,7 @@
 
 pub mod attachment;
 pub mod backend;
+pub mod capability;
 pub mod command;
 pub mod ids;
 pub mod lifecycle;
@@ -69,6 +70,7 @@ pub use backend::{
     PhaseCall,
     ScriptBackend, ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
 };
+pub use capability::Capabilities;
 pub use command::{
     CommandBuffer, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken,
 };

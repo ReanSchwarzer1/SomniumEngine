@@ -137,6 +137,14 @@ pub struct ScriptSchema {
     /// `translation` should not be paying to marshal a rotation
     /// quaternion it never reads.
     pub uses: Vec<ComponentUse>,
+    /// Modules this one `require`s, in source order.
+    ///
+    /// Read out of the source **without running it**, which is what makes
+    /// the dependency graph static — and therefore what lets a reload
+    /// compute the blast radius of an edit before it touches anything,
+    /// lets the cook know what to bundle, and lets cycle detection happen
+    /// once on a graph rather than as a runtime guard.
+    pub requires: Vec<String>,
 }
 
 impl ScriptSchema {
@@ -204,6 +212,14 @@ pub enum Callback {
     SaveState = 8,
     /// Import declared state after a reload.
     LoadState = 9,
+    /// Rewrite authored properties saved under an older schema version.
+    ///
+    /// Not a lifecycle phase — it is called on the *module*, with the
+    /// attachment's property bag, during a reload. A rename is the case it
+    /// exists for: dropping `speed` and adding `velocity` otherwise loses
+    /// every value an author set, and only whoever made that change knows
+    /// the two are the same field.
+    MigrateState = 10,
 }
 
 impl Callback {
@@ -221,12 +237,13 @@ impl Callback {
             Self::Destroy => "onDestroy",
             Self::SaveState => "saveState",
             Self::LoadState => "loadState",
+            Self::MigrateState => "migrateProperties",
         }
     }
 
     /// Every callback, in declaration order.
     #[must_use]
-    pub const fn all() -> [Self; 10] {
+    pub const fn all() -> [Self; 11] {
         [
             Self::Init,
             Self::Start,
@@ -238,6 +255,7 @@ impl Callback {
             Self::Destroy,
             Self::SaveState,
             Self::LoadState,
+            Self::MigrateState,
         ]
     }
 
@@ -491,6 +509,83 @@ pub trait ScriptBackend: Send {
     /// Diagnostics explaining why the descriptor could not be read.
     fn describe(&mut self, module: CompiledModule) -> Result<ScriptSchema, Diagnostics>;
 
+    /// A string that changes whenever this runtime would produce
+    /// different bytecode.
+    ///
+    /// Cooked bytecode is a **cache, never durable storage** — Luau's own
+    /// `Bytecode.h` says indefinite backward compatibility is not
+    /// provided — so anything that stores it has to be able to tell
+    /// whether it is still valid, and recook from source when it is not.
+    /// This is what that check compares.
+    fn runtime_fingerprint(&self) -> String {
+        String::new()
+    }
+
+    /// The bytecode of a compiled module, for a cook to store.
+    ///
+    /// `None` from a backend that has no such thing.
+    fn bytecode(&self, module: CompiledModule) -> Option<Vec<u8>> {
+        let _ = module;
+        None
+    }
+
+    /// Adopt bytecode this backend produced earlier, skipping compilation.
+    ///
+    /// The `source` is still required, because everything except the
+    /// parse still needs it: diagnostics, the dependency scan, and the
+    /// ability to recook if the fingerprint no longer matches. Bytecode
+    /// from anywhere other than this engine's own compiler is never
+    /// loaded — the Luau VM assumes its input came from its own compiler
+    /// and does not validate it.
+    ///
+    /// # Errors
+    ///
+    /// A fingerprint mismatch, or a backend that cannot take bytecode.
+    fn load_bytecode(
+        &mut self,
+        source: &ScriptSource,
+        bytecode: &[u8],
+        fingerprint: &str,
+    ) -> Result<CompiledModule, Diagnostics> {
+        let _ = (bytecode, fingerprint);
+        self.compile(source)
+    }
+
+    /// The module names a compiled module `require`s.
+    ///
+    /// Available straight after [`Self::compile`], before
+    /// [`Self::describe`] — which is the order it has to be, because
+    /// describing a module runs its top-level code and that code may
+    /// `require`. Read from the source text, never from anything the
+    /// script builds at run time, so a module cannot lie about what it
+    /// depends on.
+    fn module_requires(&self, module: CompiledModule) -> Vec<String> {
+        let _ = module;
+        Vec::new()
+    }
+
+    /// Bind a module's `require`s to the modules that satisfy them.
+    ///
+    /// Called after every asset in a graph has compiled, and again for a
+    /// module's dependents when it is reloaded. Resolution is the
+    /// **runtime's** job, not the backend's: names come out of
+    /// [`ScriptSchema::requires`], the runtime maps them to assets and
+    /// rejects cycles, and this hands the backend the answer.
+    ///
+    /// A backend with no module system can leave this alone.
+    ///
+    /// # Errors
+    ///
+    /// Whatever went wrong evaluating a dependency.
+    fn link(
+        &mut self,
+        module: CompiledModule,
+        imports: &[(String, CompiledModule)],
+    ) -> Result<(), ScriptError> {
+        let _ = (module, imports);
+        Ok(())
+    }
+
     /// Create a live instance of a module with its resolved properties.
     ///
     /// # Errors
@@ -593,6 +688,30 @@ pub trait ScriptBackend: Send {
     /// Whatever the script raised.
     fn export_state(&mut self, id: ScriptInstanceId) -> Result<ScriptValue, ScriptError>;
 
+    /// Rewrite an attachment's authored properties for a new schema
+    /// version, using the module's own `migrateProperties`.
+    ///
+    /// Called on the module rather than on an instance, because the
+    /// instance it is for does not exist yet — this runs between the old
+    /// one being torn down and the new one being built.
+    ///
+    /// A backend with no migration support can leave this alone; the
+    /// runtime only calls it when [`ScriptSchema::callbacks`] says the
+    /// module declared one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the script raised.
+    fn migrate_properties(
+        &mut self,
+        module: CompiledModule,
+        properties: &PropertyBag,
+        from_version: u32,
+    ) -> Result<PropertyBag, ScriptError> {
+        let _ = (module, from_version);
+        Ok(properties.clone())
+    }
+
     /// Give an instance previously exported state.
     ///
     /// # Errors
@@ -651,6 +770,7 @@ mod tests {
                 .with(Callback::FixedUpdate)
                 .with(Callback::Init),
             uses: Vec::new(),
+            requires: Vec::new(),
         }
     }
 

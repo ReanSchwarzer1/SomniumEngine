@@ -140,6 +140,46 @@ pub enum ScriptCommand {
     },
 }
 
+impl ScriptCommand {
+    /// The capability a script must hold for this command to be applied.
+    ///
+    /// Exhaustive by construction: a new variant does not compile until it
+    /// says what it needs, which is the property that makes the capability
+    /// check impossible to forget. See
+    /// [`Capabilities`](crate::capability::Capabilities).
+    #[must_use]
+    pub const fn required_capability(&self) -> crate::capability::Capabilities {
+        use crate::capability::Capabilities as C;
+        match self {
+            Self::SetFields { .. } => C::WRITE_FIELDS,
+            Self::AddComponent { .. } => C::ADD_COMPONENT,
+            Self::RemoveComponent { .. } => C::REMOVE_COMPONENT,
+            Self::Spawn { .. } => C::SPAWN,
+            Self::Despawn { .. } => C::DESPAWN,
+            Self::ApplyForce { .. } => C::PHYSICS,
+            Self::PlayAudio { .. } => C::AUDIO,
+            Self::EmitEvent { .. } => C::EVENTS,
+            Self::Log { .. } => C::LOG,
+        }
+    }
+
+    /// A short name for a diagnostic.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::SetFields { .. } => "set",
+            Self::AddComponent { .. } => "addComponent",
+            Self::RemoveComponent { .. } => "removeComponent",
+            Self::Spawn { .. } => "spawn",
+            Self::Despawn { .. } => "despawn",
+            Self::ApplyForce { .. } => "applyForce",
+            Self::PlayAudio { .. } => "playAudio",
+            Self::EmitEvent { .. } => "emit",
+            Self::Log { .. } => "log",
+        }
+    }
+}
+
 /// A command together with everything needed to order it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedCommand {

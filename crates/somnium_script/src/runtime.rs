@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use somnium_ecs::{Entity, PersistentId, ReflectObject};
 
 use crate::attachment::PropertyBag;
+use crate::capability::Capabilities;
 use crate::backend::{
     Budget, Callback, CallbackMask, CompiledModule, Diagnostic, Diagnostics, PhaseCall,
     ScriptBackend, ScriptError, ScriptSchema, ScriptSource, Severity,
@@ -211,6 +212,15 @@ struct AssetRecord {
     backend: usize,
     module: CompiledModule,
     schema: ScriptSchema,
+    /// The module this one replaced, kept for exactly one generation.
+    ///
+    /// One, not a history: the case it exists for is "the reload compiled
+    /// but the new code is broken, put it back". Keeping more would mean
+    /// holding VM objects for edits nobody is going to return to.
+    previous: Option<CompiledModule>,
+    /// The source of that previous module, so a rollback can re-describe
+    /// it rather than trusting a cached schema.
+    previous_source: Option<ScriptSource>,
 }
 
 struct InstanceRecord {
@@ -231,6 +241,10 @@ struct InstanceRecord {
     /// the instance is rebuilt, which is how an editor property edit takes
     /// effect without a reload.
     properties: PropertyBag,
+    /// The script's own schema version at the moment those properties were
+    /// resolved. A reload compares against the new one to decide whether
+    /// migration is needed.
+    schema_version: u32,
     consecutive_failures: u32,
     pending_destroy: bool,
     inbox: Vec<ScriptEvent>,
@@ -265,6 +279,41 @@ pub struct ScriptRuntime {
     /// promise, and a hash map's is not.
     instances: BTreeMap<InstanceUuid, InstanceRecord>,
     ledger: ResourceLedger,
+    /// Module name → asset, for resolving `require`.
+    module_keys: BTreeMap<String, ScriptAssetId>,
+    /// Asset → the path it was loaded from, recorded when a load is
+    /// *attempted*.
+    ///
+    /// Separate from `assets` on purpose: the diagnostic that most needs a
+    /// readable name is the `require` cycle, and in a cycle neither file
+    /// has finished loading, so neither is in `assets` to be named from.
+    module_paths: BTreeMap<ScriptAssetId, String>,
+    /// The static dependency graph: asset → what it requires.
+    ///
+    /// Built from source at compile time, never observed at run time. It
+    /// is what tells a reload the blast radius of an edit before anything
+    /// is touched, and what makes cycle detection one pass over a graph
+    /// rather than a guard that fires on the unlucky path.
+    dependencies: BTreeMap<ScriptAssetId, Vec<ScriptAssetId>>,
+    /// `require`s that named a module nothing is loaded under, so the
+    /// caller can go and import it.
+    unresolved: Vec<(ScriptAssetId, String)>,
+    /// Attachments whose authored properties a migration rewrote.
+    ///
+    /// These have to reach the **world**, not just the live instance: the
+    /// next reconcile compares the instance's properties against the
+    /// authored ones and rebuilds on a difference, so a migration that
+    /// only updated the instance would be undone on the very next frame —
+    /// and would never be saved. The runtime cannot touch the world, so it
+    /// reports and the host writes.
+    migrated: Vec<(InstanceUuid, PropertyBag)>,
+    /// What a script may ask the engine for when its package says nothing.
+    default_capabilities: Capabilities,
+    /// Per-package overrides, keyed by asset.
+    capabilities: BTreeMap<ScriptAssetId, Capabilities>,
+    /// Cooked bytecode offered for the next load of an asset. Consumed on
+    /// use, and ignored entirely if its fingerprint does not match.
+    offered: BTreeMap<ScriptAssetId, (String, Vec<u8>)>,
     budget: Budget,
     failure_threshold: u32,
     diagnostics: Vec<Diagnostic>,
@@ -281,6 +330,18 @@ impl ScriptRuntime {
             assets: BTreeMap::new(),
             instances: BTreeMap::new(),
             ledger: ResourceLedger::new(),
+            module_keys: BTreeMap::new(),
+            module_paths: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            unresolved: Vec::new(),
+            migrated: Vec::new(),
+            // A project's own scripts, until something says otherwise.
+            // The mod tier is the case that narrows this, and it does not
+            // exist yet; defaulting to the narrow set would mean every
+            // ordinary script started out unable to spawn anything.
+            default_capabilities: Capabilities::PROJECT,
+            capabilities: BTreeMap::new(),
+            offered: BTreeMap::new(),
             budget,
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
             diagnostics: Vec::new(),
@@ -326,6 +387,41 @@ impl ScriptRuntime {
             .position(|backend| backend.language() == language)
     }
 
+    // ── Capabilities ───────────────────────────────────────────────
+
+    /// What a script may ask for when its package declares nothing.
+    pub fn set_default_capabilities(&mut self, capabilities: Capabilities) {
+        self.default_capabilities = capabilities;
+    }
+
+    /// Grant one script package exactly this set.
+    pub fn set_capabilities(&mut self, asset: ScriptAssetId, capabilities: Capabilities) {
+        self.capabilities.insert(asset, capabilities);
+    }
+
+    /// What one asset is allowed to do.
+    #[must_use]
+    pub fn capabilities_of(&self, asset: ScriptAssetId) -> Capabilities {
+        self.capabilities
+            .get(&asset)
+            .copied()
+            .unwrap_or(self.default_capabilities)
+    }
+
+    /// What the attachment behind an [`OrderKey`] is allowed to do.
+    ///
+    /// Keyed by the order key because that is what a queued command
+    /// carries: the command applier knows who emitted it and nothing else,
+    /// which is exactly enough.
+    #[must_use]
+    pub fn capabilities_for(&self, order: OrderKey) -> Capabilities {
+        self.instances
+            .get(&order.instance)
+            .map_or(self.default_capabilities, |record| {
+                self.capabilities_of(record.asset)
+            })
+    }
+
     /// Apply new limits to every backend.
     pub fn set_budget(&mut self, budget: Budget) {
         self.budget = budget;
@@ -356,21 +452,6 @@ impl ScriptRuntime {
             return Err(diagnostics);
         };
 
-        let module = self.backends[backend].compile(&source).inspect_err(|d| {
-            self.diagnostics.extend(d.messages.iter().cloned());
-        })?;
-        let schema = match self.backends[backend].describe(module) {
-            Ok(schema) => schema,
-            Err(diagnostics) => {
-                // The module compiled but does not declare itself. Release
-                // it rather than leaving a module nothing can instantiate.
-                self.backends[backend].release_module(module);
-                self.diagnostics
-                    .extend(diagnostics.messages.iter().cloned());
-                return Err(diagnostics);
-            }
-        };
-
         let id = source.id;
         // Replacing an asset in place would strand live instances against
         // a module that is about to be released; `reload_asset` is the path
@@ -378,6 +459,13 @@ impl ScriptRuntime {
         if self.assets.contains_key(&id) {
             return self.reload_asset(source).map(|()| id);
         }
+
+        // The name has to be registered before the link pass, so that a
+        // module can be required by something loaded after it *and* by
+        // something loaded before it once that is relinked.
+        self.module_keys.insert(module_key(&source.display_path), id);
+        self.module_paths.insert(id, source.display_path.clone());
+        let (module, schema) = self.build(backend, &source)?;
         self.assets.insert(
             id,
             AssetRecord {
@@ -385,9 +473,279 @@ impl ScriptRuntime {
                 backend,
                 module,
                 schema,
+                previous: None,
+                previous_source: None,
             },
         );
+        // Anything that failed to resolve this module by name earlier can
+        // now succeed.
+        self.relink_all();
         Ok(id)
+    }
+
+    /// Offer a cooked artifact for the next [`Self::load_asset`] of this
+    /// source.
+    ///
+    /// Not a separate load path: the artifact is a *hint*, and if its
+    /// fingerprint does not match this runtime the backend compiles from
+    /// source and nobody notices. That is what makes bytecode a cache
+    /// rather than storage.
+    pub fn offer_bytecode(&mut self, asset: ScriptAssetId, fingerprint: String, bytecode: Vec<u8>) {
+        self.offered.insert(asset, (fingerprint, bytecode));
+    }
+
+    /// The fingerprint a cook must record beside its bytes.
+    #[must_use]
+    pub fn runtime_fingerprint(&self, language: LanguageTag) -> Option<String> {
+        self.backend_index(language)
+            .map(|index| self.backends[index].runtime_fingerprint())
+    }
+
+    /// The bytecode of a loaded asset, for a cook to store.
+    #[must_use]
+    pub fn bytecode_of(&self, asset: ScriptAssetId) -> Option<Vec<u8>> {
+        let record = self.assets.get(&asset)?;
+        self.backends[record.backend].bytecode(record.module)
+    }
+
+    /// Compile, link and describe one source, in that order.
+    ///
+    /// The order is forced: describing a module runs its top-level code,
+    /// and that code may `require`, so the imports have to be bound first.
+    /// The requires themselves come out of the source text at compile
+    /// time, which is what breaks the circularity.
+    fn build(
+        &mut self,
+        backend: usize,
+        source: &ScriptSource,
+    ) -> Result<(CompiledModule, ScriptSchema), Diagnostics> {
+        let module = match self.offered.remove(&source.id) {
+            Some((fingerprint, bytecode)) => self.backends[backend]
+                .load_bytecode(source, &bytecode, &fingerprint)
+                .inspect_err(|d| self.diagnostics.extend(d.messages.iter().cloned()))?,
+            None => self.backends[backend].compile(source).inspect_err(|d| {
+                self.diagnostics.extend(d.messages.iter().cloned());
+            })?,
+        };
+
+        if let Err(diagnostics) = self.link_module(source.id, &source.display_path, module) {
+            self.backends[backend].release_module(module);
+            self.diagnostics
+                .extend(diagnostics.messages.iter().cloned());
+            return Err(diagnostics);
+        }
+
+        match self.backends[backend].describe(module) {
+            Ok(schema) => Ok((module, schema)),
+            Err(diagnostics) => {
+                // The module compiled but does not declare itself. Release
+                // it rather than leaving a module nothing can instantiate.
+                self.backends[backend].release_module(module);
+                self.dependencies.remove(&source.id);
+                self.diagnostics
+                    .extend(diagnostics.messages.iter().cloned());
+                Err(diagnostics)
+            }
+        }
+    }
+
+    /// Resolve one module's `require`s, reject cycles, and hand the
+    /// backend the answer.
+    /// `display_path` is passed rather than looked up, because the most
+    /// common caller is an asset **being loaded for the first time** — it
+    /// is not in `assets` yet, and without its path a sibling `require`
+    /// has nothing to be relative to.
+    fn link_module(
+        &mut self,
+        asset: ScriptAssetId,
+        display_path: &str,
+        module: CompiledModule,
+    ) -> Result<(), Diagnostics> {
+        let backend = module_backend(&self.backends, module.language).ok_or_else(|| {
+            single(asset, "<link>", "no backend is registered for this module")
+        })?;
+        let names = self.backends[backend].module_requires(module);
+
+        // ── 1. Names to assets ───────────────────────────────────────
+        //
+        // Through `module_keys`, which is populated the moment a load is
+        // *attempted*, not when it succeeds. That matters for a cycle: two
+        // files that require each other both fail their first link, and if
+        // resolution needed a loaded target neither edge would ever be
+        // recorded and the cycle would report as "not loaded" forever.
+        let mut edges = Vec::with_capacity(names.len());
+        for name in &names {
+            let Some(target) = self.resolve_module(display_path, name) else {
+                self.unresolved.push((asset, name.clone()));
+                return Err(single(
+                    asset,
+                    display_path,
+                    &format!("`require(\"{name}\")` names no loaded script"),
+                ));
+            };
+            edges.push(target);
+        }
+
+        // ── 2. The cycle check, on the graph that is about to exist ──
+        //
+        // Recorded before the availability check below, and deliberately
+        // *left* recorded if that check fails: the half-built graph is how
+        // the second file in a cycle discovers the first one's edge.
+        let previous = self.dependencies.insert(asset, edges.clone());
+        if let Some(cycle) = self.find_cycle(asset) {
+            match previous {
+                Some(old) => self.dependencies.insert(asset, old),
+                None => self.dependencies.remove(&asset),
+            };
+            return Err(single(
+                asset,
+                display_path,
+                &format!("`require` cycle: {}", cycle.join(" → ")),
+            ));
+        }
+
+        // ── 3. Are they actually loaded? ─────────────────────────────
+        let mut imports = Vec::with_capacity(names.len());
+        for (name, target) in names.iter().zip(&edges) {
+            let Some(record) = self.assets.get(target) else {
+                self.unresolved.push((asset, name.clone()));
+                return Err(single(
+                    asset,
+                    display_path,
+                    &format!("`require(\"{name}\")` names a script that is not loaded"),
+                ));
+            };
+            imports.push((name.clone(), record.module));
+        }
+
+        self.backends[backend]
+            .link(module, &imports)
+            .map_err(|error| single(asset, display_path, &error.to_string()))
+    }
+
+    /// Re-link every asset, so a newly loaded module satisfies whoever was
+    /// waiting for it. Cheap: linking is a name lookup and a handle copy.
+    fn relink_all(&mut self) {
+        let all: Vec<(ScriptAssetId, String, CompiledModule)> = self
+            .assets
+            .iter()
+            .map(|(id, record)| (*id, record.source.display_path.clone(), record.module))
+            .collect();
+        self.unresolved.clear();
+        for (id, path, module) in all {
+            // A failure here is already recorded in `unresolved`, and the
+            // asset stays loaded but unlinked — which is exactly the state
+            // "its dependency has not been imported yet" should produce.
+            let _ = self.link_module(id, &path, module);
+        }
+    }
+
+    /// Map a module name written by a script onto a loaded asset.
+    ///
+    /// Three spellings, in order of specificity: relative to the requiring
+    /// file's folder, then the project-relative path, then the same with
+    /// the content root's name prepended — so `require("scripts/util")`
+    /// finds `assets/scripts/util.luau` without the author writing
+    /// `assets/` in every file.
+    fn resolve_module(&self, requester: &str, name: &str) -> Option<ScriptAssetId> {
+        let folder = module_key(requester)
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string());
+
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(folder) = folder {
+            candidates.push(format!("{folder}/{name}"));
+        }
+        candidates.push(name.to_string());
+        candidates.push(format!("assets/{name}"));
+
+        candidates
+            .into_iter()
+            .find_map(|candidate| self.module_keys.get(&module_key(&candidate)).copied())
+    }
+
+    /// The first `require` cycle reachable from `start`, as a path.
+    fn find_cycle(&self, start: ScriptAssetId) -> Option<Vec<String>> {
+        let mut stack = vec![start];
+        let mut visiting = vec![start];
+        let mut done: Vec<ScriptAssetId> = Vec::new();
+        // Iterative DFS: a deep graph must not blow the Rust stack, and a
+        // cycle is exactly the case where a naive recursion would not
+        // terminate.
+        let mut frames: Vec<usize> = vec![0];
+        while let Some(&node) = stack.last() {
+            let index = *frames.last().unwrap_or(&0);
+            let children = self.dependencies.get(&node).cloned().unwrap_or_default();
+            if index >= children.len() {
+                stack.pop();
+                frames.pop();
+                visiting.retain(|id| *id != node);
+                done.push(node);
+                continue;
+            }
+            *frames.last_mut().unwrap() += 1;
+            let child = children[index];
+            if visiting.contains(&child) {
+                let mut path: Vec<String> = visiting.iter().map(|id| self.name_of(*id)).collect();
+                path.push(self.name_of(child));
+                return Some(path);
+            }
+            if done.contains(&child) {
+                continue;
+            }
+            stack.push(child);
+            visiting.push(child);
+            frames.push(0);
+        }
+        None
+    }
+
+    fn name_of(&self, asset: ScriptAssetId) -> String {
+        self.assets
+            .get(&asset)
+            .map(|record| record.source.display_path.clone())
+            .or_else(|| self.module_paths.get(&asset).cloned())
+            .unwrap_or_else(|| asset.to_string())
+    }
+
+    /// Every asset that would have to be rebuilt if `asset` changed —
+    /// itself, plus everything that requires it, transitively.
+    ///
+    /// This is the blast radius, and computing it from the static graph is
+    /// why the graph has to be static.
+    #[must_use]
+    pub fn blast_radius(&self, asset: ScriptAssetId) -> Vec<ScriptAssetId> {
+        let mut affected = vec![asset];
+        let mut index = 0;
+        while index < affected.len() {
+            let current = affected[index];
+            index += 1;
+            for (dependent, deps) in &self.dependencies {
+                if deps.contains(&current) && !affected.contains(dependent) {
+                    affected.push(*dependent);
+                }
+            }
+        }
+        affected
+    }
+
+    /// What one module requires, resolved.
+    #[must_use]
+    pub fn dependencies_of(&self, asset: ScriptAssetId) -> Vec<ScriptAssetId> {
+        self.dependencies.get(&asset).cloned().unwrap_or_default()
+    }
+
+    /// `require`s that named nothing loaded, so the caller can import them
+    /// and try again.
+    pub fn take_unresolved(&mut self) -> Vec<(ScriptAssetId, String)> {
+        std::mem::take(&mut self.unresolved)
+    }
+
+    /// Authored property bags a migration rewrote, for the caller to write
+    /// back into the world. See the field's documentation for why this is
+    /// not optional.
+    pub fn take_migrated_properties(&mut self) -> Vec<(InstanceUuid, PropertyBag)> {
+        std::mem::take(&mut self.migrated)
     }
 
     /// The declaration of a loaded asset.
@@ -436,79 +794,116 @@ impl ScriptRuntime {
             return self.load_asset(source).map(|_| ());
         };
         let backend = existing.backend;
-        let previous = existing.module;
+        let previous_module = existing.module;
+        let previous_source = existing.source.clone();
+        let superseded = existing.previous;
 
-        // Compile and describe in the shadow, before anything live is
-        // touched. A failure here returns with the world untouched.
-        let module = self.backends[backend].compile(&source).inspect_err(|d| {
-            self.diagnostics.extend(d.messages.iter().cloned());
-        })?;
-        let schema = match self.backends[backend].describe(module) {
-            Ok(schema) => schema,
-            Err(diagnostics) => {
-                self.backends[backend].release_module(module);
-                self.diagnostics
-                    .extend(diagnostics.messages.iter().cloned());
-                return Err(diagnostics);
-            }
-        };
+        // ── 1–3. The shadow build ────────────────────────────────────
+        //
+        // Compile, link and describe before anything live is touched. A
+        // failure here returns with **every live instance still running**
+        // and nothing about the world changed — that is the property this
+        // ordering exists for, and it is what makes the reload key safe to
+        // lean on.
+        let (module, schema) = self.build(backend, &source)?;
 
         // From here the swap is committed.
-        let affected: Vec<InstanceUuid> = self
-            .instances
-            .iter()
-            .filter(|(_, record)| record.asset == asset && record.state.is_live())
-            .map(|(id, _)| *id)
-            .collect();
-
-        let mut carried: Vec<(InstanceUuid, ScriptValue)> = Vec::with_capacity(affected.len());
-        for id in &affected {
-            let record = &self.instances[id];
-            let state = self.backends[backend]
-                .export_state(record.live)
-                .unwrap_or(ScriptValue::Nil);
-            carried.push((*id, state));
-            // Owned resources do not survive a reload: a coroutine, a task
-            // and an audio voice are all VM-lifetime things.
-            self.ledger.release_all(*id);
-            self.backends[backend].unload(record.live);
-        }
-
         self.assets.insert(
             asset,
             AssetRecord {
                 source,
                 backend,
                 module,
-                schema: schema.clone(),
+                schema,
+                previous: Some(previous_module),
+                previous_source: Some(previous_source),
             },
         );
+        // The generation before last is now unreachable and can go.
+        if let Some(stale) = superseded {
+            self.backends[backend].release_module(stale);
+        }
 
-        for (id, state) in carried {
-            let Some(record) = self.instances.get_mut(&id) else {
+        // ── The blast radius ─────────────────────────────────────────
+        //
+        // Everything that requires this module, transitively, holds a
+        // reference to what the old one evaluated to. Relinking clears
+        // that, and their instances are rebuilt alongside this module's.
+        let affected_assets = self.blast_radius(asset);
+        for dependent in &affected_assets {
+            if *dependent == asset {
+                continue;
+            }
+            if let Some(record) = self.assets.get(dependent) {
+                let (id, path, module) =
+                    (*dependent, record.source.display_path.clone(), record.module);
+                let _ = self.link_module(id, &path, module);
+            }
+        }
+
+        self.rebuild_instances(&affected_assets);
+        Ok(())
+    }
+
+    /// Steps 4–8 of the reload: carry state across, tear the old VM
+    /// objects down, build the new ones, migrate, and put the state back.
+    ///
+    /// The lifecycle is *not* replayed here — the instances are left in
+    /// `Loaded` and the scheduler runs `onInit`, `onStart` and `onEnable`
+    /// at the next sync, which is the frame boundary the plan asks the
+    /// swap to commit at.
+    fn rebuild_instances(&mut self, assets: &[ScriptAssetId]) {
+        let affected: Vec<InstanceUuid> = self
+            .instances
+            .iter()
+            .filter(|(_, record)| assets.contains(&record.asset) && record.state.is_live())
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut carried: Vec<(InstanceUuid, ScriptValue, u32)> = Vec::with_capacity(affected.len());
+        for id in &affected {
+            let record = &self.instances[id];
+            let (backend, live) = (record.backend, record.live);
+            let from_version = record.schema_version;
+            let state = self.backends[backend]
+                .export_state(live)
+                .unwrap_or(ScriptValue::Nil);
+            carried.push((*id, state, from_version));
+            // Owned resources do not survive a reload: a coroutine, a task
+            // and an audio voice are all VM-lifetime things. Released
+            // before the VM object, so nothing is delivered to a
+            // half-torn-down instance.
+            self.ledger.release_all(*id);
+            self.backends[backend].unload(live);
+        }
+
+        for (id, state, from_version) in carried {
+            let Some(record) = self.instances.get(&id) else {
                 continue;
             };
-            let (resolved, dropped) = schema.resolve_properties(&record.properties);
-            let live = ScriptInstanceId::next();
-            match self.backends[backend].instantiate(live, module, &resolved) {
-                Ok(()) => {
-                    record.live = live;
-                    record.callbacks = schema.callbacks;
-                    // `loadState` before `onInit`, then the scheduler
-                    // replays init/start/enable — the documented order.
-                    let _ = self.backends[backend].import_state(live, state);
-                    record.state = LifecycleState::Loaded;
-                    record.consecutive_failures = 0;
-                }
-                Err(error) => {
-                    record.state = LifecycleState::Destroyed;
-                    self.diagnostics.push(diagnostic(
-                        asset,
-                        "<reload>",
-                        &format!("{id} did not survive the reload: {error}"),
-                    ));
-                }
+            let asset = record.asset;
+            let Some(entry) = self.assets.get(&asset) else {
+                continue;
+            };
+            let (backend, module, schema) = (entry.backend, entry.module, entry.schema.clone());
+            let properties = record.properties.clone();
+
+            // ── 7. Property migration ────────────────────────────────
+            let (migrated, notes) = self.migrate_properties(
+                backend,
+                module,
+                &schema,
+                &properties,
+                from_version,
+                asset,
+            );
+            for note in notes {
+                self.diagnostics.push(note);
             }
+            if migrated != properties {
+                self.migrated.push((id, migrated.clone()));
+            }
+            let (resolved, dropped) = schema.resolve_properties(&migrated);
             for name in dropped {
                 self.diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
@@ -516,15 +911,133 @@ impl ScriptRuntime {
                     display_path: String::new(),
                     line: 0,
                     column: 0,
-                    message: format!("property `{name}` no longer exists and was dropped"),
+                    message: format!(
+                        "property `{name}` no longer exists in the script and was dropped"
+                    ),
                 });
+            }
+
+            let live = ScriptInstanceId::next();
+            match self.backends[backend].instantiate(live, module, &resolved) {
+                Ok(()) => {
+                    // ── 8. `loadState`, then let the scheduler replay
+                    // `onInit`, `onStart`, `onEnable`.
+                    let _ = self.backends[backend].import_state(live, state);
+                    if let Some(record) = self.instances.get_mut(&id) {
+                        record.live = live;
+                        record.callbacks = schema.callbacks;
+                        record.properties = migrated;
+                        record.schema_version = schema.schema_version;
+                        record.state = LifecycleState::Loaded;
+                        record.consecutive_failures = 0;
+                    }
+                }
+                Err(error) => {
+                    if let Some(record) = self.instances.get_mut(&id) {
+                        record.state = LifecycleState::Destroyed;
+                    }
+                    self.diagnostics.push(diagnostic(
+                        asset,
+                        "<reload>",
+                        &format!("{id} did not survive the reload: {error}"),
+                    ));
+                }
             }
         }
 
         self.instances
             .retain(|_, record| record.state != LifecycleState::Destroyed);
-        self.backends[backend].release_module(previous);
-        Ok(())
+    }
+
+    /// Run the script's own property migration, if its schema version
+    /// moved and it declared one.
+    ///
+    /// A rename is the case this exists for: dropping `speed` and adding
+    /// `velocity` loses every value an author set, and only the person who
+    /// made that change knows they are the same field.
+    fn migrate_properties(
+        &mut self,
+        backend: usize,
+        module: CompiledModule,
+        schema: &ScriptSchema,
+        properties: &PropertyBag,
+        from_version: u32,
+        asset: ScriptAssetId,
+    ) -> (PropertyBag, Vec<Diagnostic>) {
+        if from_version == schema.schema_version || !schema.callbacks.has(Callback::MigrateState) {
+            return (properties.clone(), Vec::new());
+        }
+        match self.backends[backend].migrate_properties(module, properties, from_version) {
+            Ok(mut migrated) => (
+                {
+                    // The bag came back through a runtime with one number
+                    // type, so a float that went in as `9.0` can come back
+                    // as `9`. The declared type is the authority, and this
+                    // is what stops the scene *recording* the wrong one.
+                    for (name, value) in &mut migrated {
+                        if let Some(field) = schema.field(name) {
+                            *value = field.ty.coerce(value.clone());
+                        }
+                    }
+                    migrated
+                },
+                vec![Diagnostic {
+                    severity: Severity::Hint,
+                    asset,
+                    display_path: String::new(),
+                    line: 0,
+                    column: 0,
+                    message: format!(
+                        "migrated authored properties from schema version {from_version} to {}",
+                        schema.schema_version
+                    ),
+                }],
+            ),
+            Err(error) => (
+                properties.clone(),
+                vec![diagnostic(
+                    asset,
+                    "<migrate>",
+                    &format!("migrateProperties failed, keeping the authored values: {error}"),
+                )],
+            ),
+        }
+    }
+
+    /// Put the previous generation of a module back.
+    ///
+    /// The case this exists for is "it compiled, and it is wrong". One
+    /// generation deep, because that is the edit anyone is going to
+    /// return to.
+    ///
+    /// # Errors
+    ///
+    /// That there is nothing to roll back to, or the old source's
+    /// diagnostics — which would mean the old module no longer compiles,
+    /// and is worth hearing about.
+    pub fn rollback_asset(&mut self, asset: ScriptAssetId) -> Result<(), Diagnostics> {
+        let Some(record) = self.assets.get(&asset) else {
+            return Err(single(asset, "<rollback>", "no such script"));
+        };
+        let Some(source) = record.previous_source.clone() else {
+            return Err(single(
+                asset,
+                "<rollback>",
+                "there is no previous generation of this script to return to",
+            ));
+        };
+        // Deliberately the ordinary reload path: rolling back is loading
+        // the old text, and a second code path here would be a second set
+        // of bugs.
+        self.reload_asset(source)
+    }
+
+    /// Whether a script has a generation to roll back to.
+    #[must_use]
+    pub fn can_rollback(&self, asset: ScriptAssetId) -> bool {
+        self.assets
+            .get(&asset)
+            .is_some_and(|record| record.previous_source.is_some())
     }
 
     // ── Diagnostics ────────────────────────────────────────────────
@@ -584,6 +1097,7 @@ impl ScriptRuntime {
             let backend = asset.backend;
             let module = asset.module;
             let callbacks = asset.schema.callbacks;
+            let schema_version = asset.schema.schema_version;
             let (resolved, dropped) = asset.schema.resolve_properties(&view.properties);
             for name in dropped {
                 self.diagnostics.push(Diagnostic {
@@ -623,6 +1137,7 @@ impl ScriptRuntime {
                     quarantined: false,
                     callbacks,
                     properties: view.properties.clone(),
+                    schema_version,
                     consecutive_failures: 0,
                     pending_destroy: false,
                     inbox: Vec::new(),
@@ -1131,8 +1646,12 @@ fn participates(record: &InstanceRecord, callback: Callback) -> bool {
         Callback::FixedUpdate | Callback::Update => record.state.receives_updates(),
         Callback::Event => record.state.receives_updates() && !record.inbox.is_empty(),
         // Teardown of a live instance is requested by `pending_destroy`,
-        // handled above.
-        Callback::Destroy | Callback::SaveState | Callback::LoadState => false,
+        // handled above. State export/import and property migration are
+        // driven explicitly by the reload, not by a phase.
+        Callback::Destroy
+        | Callback::SaveState
+        | Callback::LoadState
+        | Callback::MigrateState => false,
     }
 }
 
@@ -1152,7 +1671,8 @@ const fn advanced_state(callback: Callback) -> Option<LifecycleState> {
         | Callback::Update
         | Callback::Event
         | Callback::SaveState
-        | Callback::LoadState => None,
+        | Callback::LoadState
+        | Callback::MigrateState => None,
     }
 }
 
@@ -1169,6 +1689,29 @@ fn seed_for(world_seed: u64, instance: InstanceUuid) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// The key a module is looked up by: lower-cased, forward slashes, and no
+/// script extension.
+///
+/// The same file has to resolve to the same module on Windows and Linux,
+/// and `require("scripts/util")` has to find `scripts/util.luau`.
+fn module_key(display_path: &str) -> String {
+    let normalised = display_path.replace('\\', "/").to_ascii_lowercase();
+    normalised
+        .strip_suffix(".luau")
+        .or_else(|| normalised.strip_suffix(".lua"))
+        .unwrap_or(&normalised)
+        .trim_start_matches("./")
+        .to_string()
+}
+
+/// Which backend runs a language. A free function so it can be called
+/// while another field of the runtime is borrowed.
+fn module_backend(backends: &[Box<dyn ScriptBackend>], language: LanguageTag) -> Option<usize> {
+    backends
+        .iter()
+        .position(|backend| backend.language() == language)
 }
 
 fn diagnostic(asset: ScriptAssetId, display_path: &str, message: &str) -> Diagnostic {

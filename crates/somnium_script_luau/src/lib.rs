@@ -45,6 +45,7 @@
 pub mod convert;
 pub mod deadline;
 pub mod host;
+pub mod modules;
 
 use std::collections::HashMap;
 
@@ -103,6 +104,19 @@ struct ModuleEntry {
     display_path: String,
     /// Bytecode from our own compiler. Never from anywhere else.
     bytecode: Vec<u8>,
+    /// Module names this one `require`s, read out of the source at compile
+    /// time.
+    requires: Vec<String>,
+    /// What those names resolved to, filled in by `link`.
+    imports: Vec<(String, u64)>,
+    /// The value this module returned, evaluated once per trust domain and
+    /// frozen.
+    ///
+    /// Once per *domain*, not once per attachment: that is what makes a
+    /// shared library shared. Frozen for the same reason the global table
+    /// is — one attachment must not be able to rewrite a helper for every
+    /// other attachment in the game.
+    evaluated: Option<Value>,
     /// Filled by the first `describe`, and reused by every instantiate.
     ///
     /// Instantiation needs it: an attachment that overrides none of a
@@ -150,7 +164,7 @@ struct Instance {
     /// anti-pattern this array exists to avoid; at a thousand scripted
     /// entities it is a string hash and a table lookup per entity per
     /// phase, for an answer that cannot change until the next reload.
-    callbacks: [Option<Function>; 10],
+    callbacks: [Option<Function>; host::CALLBACK_SLOTS],
     /// The entity handle this instance hands to `ctx.entity`, cached.
     ///
     /// An attachment's entity does not change, but the handle is userdata
@@ -305,6 +319,89 @@ impl LuauBackend {
         }
     }
 
+    /// Evaluate everything a module `require`s, and hand back the values
+    /// its `require` will return.
+    fn resolve_imports(&mut self, handle: u64, depth: u32) -> mlua::Result<Vec<(String, Value)>> {
+        let imports = self
+            .modules
+            .get(&handle)
+            .map(|entry| entry.imports.clone())
+            .unwrap_or_default();
+        let mut resolved = Vec::with_capacity(imports.len());
+        for (name, dependency) in imports {
+            resolved.push((name, self.evaluate_module(dependency, depth + 1)?));
+        }
+        Ok(resolved)
+    }
+
+    /// Run a required module once and freeze what it returned.
+    ///
+    /// Once per **trust domain**, not once per attachment: a shared helper
+    /// that were re-evaluated per attachment would not be shared, and two
+    /// attachments would disagree about anything it kept. Frozen for the
+    /// same reason the globals are — one attachment must not be able to
+    /// rewrite a helper for everyone else.
+    fn evaluate_module(&mut self, handle: u64, depth: u32) -> mlua::Result<Value> {
+        if let Some(cached) = self.modules.get(&handle).and_then(|e| e.evaluated.clone()) {
+            return Ok(cached);
+        }
+        if depth > MAX_MODULE_DEPTH {
+            // The runtime rejects cycles on the static graph before we get
+            // here. This is the belt to that braces: a graph that somehow
+            // arrived cyclic must not blow the Rust stack.
+            return Err(mlua::Error::RuntimeError(format!(
+                "module graph nests deeper than {MAX_MODULE_DEPTH} levels; \
+                 the dependency graph should have rejected this as a cycle"
+            )));
+        }
+
+        let resolved = self.resolve_imports(handle, depth)?;
+        let env = self.module_environment(&resolved)?;
+        let value = {
+            let entry = self.modules.get(&handle).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("module {handle} is not loaded"))
+            })?;
+            self.load_with_env(entry, env)?.call::<Value>(())?
+        };
+        if let Value::Table(table) = &value {
+            table.set_readonly(true);
+        }
+        if let Some(entry) = self.modules.get_mut(&handle) {
+            entry.evaluated = Some(value.clone());
+        }
+        Ok(value)
+    }
+
+    /// A private environment chained to the frozen globals, with `require`
+    /// bound to exactly this module's resolved imports.
+    ///
+    /// `require` is a table lookup, not a searcher: resolution already
+    /// happened, in Rust, against the asset graph. A script therefore
+    /// cannot reach a module it did not declare, cannot reach the
+    /// filesystem, and cannot reach a native library.
+    fn module_environment(&self, imports: &[(String, Value)]) -> mlua::Result<Table> {
+        let env = host::instance_environment(&self.lua)?;
+        let table = self.lua.create_table()?;
+        for (name, value) in imports {
+            table.set(name.as_str(), value.clone())?;
+        }
+        table.set_readonly(true);
+        env.set(
+            "require",
+            self.lua.create_function(move |_, name: String| {
+                let value: Value = table.get(name.as_str())?;
+                if value.is_nil() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "`{name}` is not one of this script's declared requires; \
+                         module names are resolved before the script runs"
+                    )));
+                }
+                Ok(value)
+            })?,
+        )?;
+        Ok(env)
+    }
+
     fn module(&self, module: CompiledModule) -> Result<&ModuleEntry, ScriptError> {
         self.modules
             .get(&module.handle)
@@ -416,6 +513,25 @@ impl ScriptBackend for LuauBackend {
             diagnostics
         })?;
 
+        // The dependency graph is read out of the text, not out of a run.
+        // A `require` the engine cannot resolve statically is a compile
+        // error here rather than a surprise at frame four hundred.
+        let requires = match modules::parse_requires(&source.text) {
+            Ok(sites) => sites.into_iter().map(|site| site.module).collect(),
+            Err((line, message)) => {
+                let mut diagnostics = Diagnostics::default();
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    asset: source.id,
+                    display_path: source.display_path.clone(),
+                    line,
+                    column: 0,
+                    message,
+                });
+                return Err(diagnostics);
+            }
+        };
+
         let handle = self.next_handle;
         self.next_handle += 1;
         self.modules.insert(
@@ -424,6 +540,9 @@ impl ScriptBackend for LuauBackend {
                 asset: source.id,
                 display_path: source.display_path.clone(),
                 bytecode,
+                requires,
+                imports: Vec::new(),
+                evaluated: None,
                 schema: None,
             },
         );
@@ -435,31 +554,127 @@ impl ScriptBackend for LuauBackend {
     }
 
     fn describe(&mut self, module: CompiledModule) -> Result<ScriptSchema, Diagnostics> {
-        let entry = self.module(module).map_err(|err| {
-            host::single_diagnostic(module.asset, "<unknown>", &err.to_string())
-        })?;
+        let path = self
+            .modules
+            .get(&module.handle)
+            .map_or_else(|| "<unknown>".to_string(), |e| e.display_path.clone());
+        let fail = |message: String| host::single_diagnostic(module.asset, &path, &message);
 
         // The descriptor runs in an environment with **no world access**.
         // Opening a script in the editor, or merely importing one to read
         // its property list, must not be able to change the scene — so the
-        // API surface it can see does not include the means.
-        let env = host::describe_environment(&self.lua).map_err(|err| {
-            host::single_diagnostic(module.asset, &entry.display_path, &err.to_string())
-        })?;
+        // API surface it can see does not include the means. It does get
+        // `require`, because a module's declaration may legitimately be
+        // built from a shared table, and evaluating a dependency is
+        // subject to the same restriction.
+        let imports = self
+            .resolve_imports(module.handle, 0)
+            .map_err(|err| fail(err.to_string()))?;
+        let env = self
+            .module_environment(&imports)
+            .map_err(|err| fail(err.to_string()))?;
 
-        let descriptor = self
-            .with_deadline(self.budget.per_call, || self.evaluate(entry, env))
-            .map_err(|err| {
-                host::single_diagnostic(module.asset, &entry.display_path, &err.to_string())
-            })?;
+        let descriptor = {
+            let entry = self
+                .modules
+                .get(&module.handle)
+                .ok_or_else(|| fail(format!("module {} is not loaded", module.handle)))?;
+            self.with_deadline(self.budget.per_call, || self.evaluate(entry, env))
+                .map_err(|err| fail(err.to_string()))?
+        };
 
-        let schema = host::schema_from_descriptor(&descriptor).map_err(|message| {
-            host::single_diagnostic(module.asset, &entry.display_path, &message)
-        })?;
+        let mut schema = host::schema_from_descriptor(&descriptor).map_err(fail)?;
+        // The graph comes out of the source scan, not the descriptor: a
+        // script's `require`s are a property of its text, and reading them
+        // from a table the script itself built would let it lie about them.
+        schema.requires = self
+            .modules
+            .get(&module.handle)
+            .map(|entry| entry.requires.clone())
+            .unwrap_or_default();
         if let Some(entry) = self.modules.get_mut(&module.handle) {
             entry.schema = Some(schema.clone());
         }
         Ok(schema)
+    }
+
+    fn runtime_fingerprint(&self) -> String {
+        runtime_fingerprint()
+    }
+
+    fn bytecode(&self, module: CompiledModule) -> Option<Vec<u8>> {
+        self.modules
+            .get(&module.handle)
+            .map(|entry| entry.bytecode.clone())
+    }
+
+    fn load_bytecode(
+        &mut self,
+        source: &ScriptSource,
+        bytecode: &[u8],
+        fingerprint: &str,
+    ) -> Result<CompiledModule, Diagnostics> {
+        if fingerprint != runtime_fingerprint() {
+            // Not an error the caller has to handle specially — recooking
+            // from source is always available, and is what the cache is a
+            // cache *of*.
+            return self.compile(source);
+        }
+        // The dependency scan still runs: the graph is a property of the
+        // source, not of the bytecode, and the cook does not store it.
+        let requires = match modules::parse_requires(&source.text) {
+            Ok(sites) => sites.into_iter().map(|site| site.module).collect(),
+            Err(_) => return self.compile(source),
+        };
+
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        self.modules.insert(
+            handle,
+            ModuleEntry {
+                asset: source.id,
+                display_path: source.display_path.clone(),
+                bytecode: bytecode.to_vec(),
+                requires,
+                imports: Vec::new(),
+                evaluated: None,
+                schema: None,
+            },
+        );
+        Ok(CompiledModule {
+            asset: source.id,
+            language: LanguageTag::LUAU,
+            handle,
+        })
+    }
+
+    fn module_requires(&self, module: CompiledModule) -> Vec<String> {
+        self.modules
+            .get(&module.handle)
+            .map(|entry| entry.requires.clone())
+            .unwrap_or_default()
+    }
+
+    fn link(
+        &mut self,
+        module: CompiledModule,
+        imports: &[(String, CompiledModule)],
+    ) -> Result<(), ScriptError> {
+        let Some(entry) = self.modules.get_mut(&module.handle) else {
+            return Err(ScriptError::HostRejected {
+                message: format!("module {} is not loaded", module.handle),
+            });
+        };
+        entry.imports = imports
+            .iter()
+            .map(|(name, dependency)| (name.clone(), dependency.handle))
+            .collect();
+        // Relinking invalidates whatever this module last evaluated to.
+        // That is how a reload of a shared helper reaches everything that
+        // required it: the runtime relinks the dependents, and their next
+        // instantiate re-evaluates against the new module.
+        entry.evaluated = None;
+        Ok(())
     }
 
     fn instantiate(
@@ -482,7 +697,13 @@ impl ScriptBackend for LuauBackend {
             None => properties.clone(),
         };
 
-        let env = host::instance_environment(&self.lua).map_err(host::to_script_error)?;
+        let imports = self
+            .resolve_imports(module.handle, 0)
+            .map_err(host::to_script_error)?;
+        let env = self
+            .module_environment(&imports)
+            .map_err(host::to_script_error)?;
+        let entry = self.module(module)?;
         let descriptor =
             self.with_deadline(self.budget.per_call, || self.evaluate(entry, env.clone()))?;
 
@@ -547,46 +768,47 @@ impl ScriptBackend for LuauBackend {
              context is built once from the first"
         );
 
-        // Resolve callables and entity handles before entering the scope,
-        // so the borrow of `self.instances` ends before `commands` is
-        // borrowed mutably — and so neither allocates inside the loop.
-        let mut resolved: Vec<Option<(Function, Table, mlua::AnyUserData)>> =
-            Vec::with_capacity(calls.len());
+        // ── The resolve pass ─────────────────────────────────────────
+        //
+        // Everything that needs `&mut self` happens here, once, before the
+        // scope: caching the entity userdata and building the mirrors.
+        // After it, the phase touches nothing mutably — which is what lets
+        // the loop below hold a *reference* to each instance instead of
+        // looking it up in a hash map three times per call.
+        //
+        // Those three lookups were measured at ~75–100 ns per call, about
+        // 12% of the mirror overhead; `dev records/phase 16/16-B_budgets.md`
+        // §4 flagged hoisting them as the first thing to do here.
         for call in calls {
-            let Some(instance) = self.instances.get(&call.instance) else {
+            if self.instances.contains_key(&call.instance) {
+                self.entity_handle(call.instance, call.snapshot.self_entity);
+                self.resolve_mirrors(call.instance, world);
+            }
+        }
+
+        let budget = self.budget.per_call;
+        let deadline = self.deadline.clone();
+        // Reborrowed immutably. Nothing inside the scope mutates the
+        // backend, so this costs nothing and buys the borrow checker's
+        // permission to keep `&Instance` across the whole loop.
+        let this: &Self = self;
+        let (lua, keys) = (&this.lua, &this.keys);
+
+        let mut resolved: Vec<Option<&Instance>> = Vec::with_capacity(calls.len());
+        for call in calls {
+            let Some(instance) = this.instances.get(&call.instance) else {
                 // A stale id is worth seeing; see the trait docs.
                 failures.push((call.instance, ScriptError::NoSuchInstance(call.instance)));
                 resolved.push(None);
                 continue;
             };
-            let Some(function) = instance.callbacks[callback as usize].clone() else {
-                // The module simply has no such callback. Not an error.
-                resolved.push(None);
-                continue;
-            };
-            let descriptor = instance.descriptor.clone();
-            resolved.push(
-                self.entity_handle(call.instance, call.snapshot.self_entity)
-                    .map(|handle| (function, descriptor, handle)),
-            );
+            // The module simply has no such callback, or the entity handle
+            // could not be built. Neither is an error.
+            let runnable = instance.callbacks[callback as usize].is_some()
+                && instance.entity_handle.is_some();
+            resolved.push(runnable.then_some(instance));
         }
 
-        // Resolve mirrors before the scope, while `self` is still free.
-        for call in calls {
-            self.resolve_mirrors(call.instance, world);
-        }
-
-        let budget = self.budget.per_call;
-        let deadline = self.deadline.clone();
-        // Disjoint field borrows: the scope holds `lua` while the loop
-        // needs `instances` mutably. Destructuring is what makes that
-        // legible to the borrow checker.
-        let Self {
-            lua,
-            instances,
-            keys,
-            ..
-        } = self;
         let command_cell = std::cell::RefCell::new(commands);
         let command_ref = &command_cell;
         // Reused across the whole phase so mirroring allocates nothing.
@@ -597,33 +819,55 @@ impl ScriptBackend for LuauBackend {
         // the shape it is.
         let scope_result = lua.scope(|scope| {
             let ctx = host::build_ctx(lua, scope, calls[0].snapshot, world, command_ref)?;
+            // Whether `ctx.spawns` currently holds a table, so the common
+            // case of nobody having spawned anything costs nothing.
+            let mut spawns_bound = false;
 
             for (call, entry) in calls.iter().zip(&resolved) {
-                let Some((function, descriptor, entity)) = entry else {
+                let Some(instance) = entry else {
                     // Already accounted for in the resolve pass above.
                     continue;
                 };
+                // Both were checked when `resolved` was built; a phase
+                // that reached here without them would be a bug in the
+                // resolve pass rather than in a script.
+                let Some(function) = instance.callbacks[callback as usize].as_ref() else {
+                    continue;
+                };
+                let Some((_, entity)) = instance.entity_handle.as_ref() else {
+                    continue;
+                };
+                let descriptor = &instance.descriptor;
 
-                ctx.raw_set(&keys.entity, entity)?;
+                ctx.raw_set(&keys.entity, entity.clone())?;
 
                 // ── Spawn results ────────────────────────────────────
                 //
                 // A spawn cannot return an entity: the entity does not
                 // exist until the commit point. The script gets a token
                 // straight away and finds `ctx.spawns[token]` filled in on
-                // the next phase. Per attachment, so it is rebound here
-                // rather than built with the rest of `ctx` — and only when
-                // there is something to report, since the common case is
-                // an empty list and a table per attachment per phase is
-                // exactly the kind of cost §11.4 was spent removing.
+                // the next phase.
+                //
+                // Per attachment, so it is rebound here rather than built
+                // with the rest of `ctx` — but *only when it changes*. The
+                // overwhelmingly common case is that no attachment in the
+                // phase spawned anything, and clearing a key that is
+                // already nil still costs a hash and a write barrier per
+                // call. Tracking whether the key is currently set makes
+                // that case free, which is the same lesson §11.4 records
+                // about per-call work that looks too small to matter.
                 if call.snapshot.spawn_results.is_empty() {
-                    ctx.raw_set(&keys.spawns, Value::Nil)?;
+                    if spawns_bound {
+                        ctx.raw_set(&keys.spawns, Value::Nil)?;
+                        spawns_bound = false;
+                    }
                 } else {
                     let spawns = lua.create_table()?;
                     for (token, spawned) in &call.snapshot.spawn_results {
                         spawns.raw_set(token.0, convert::EntityHandle(*spawned))?;
                     }
                     ctx.raw_set(&keys.spawns, spawns)?;
+                    spawns_bound = true;
                 }
 
                 command_ref.borrow_mut().begin(call.order);
@@ -642,11 +886,9 @@ impl ScriptBackend for LuauBackend {
                 // mirror a script sees its own writes, which is the
                 // documented visibility rule.
                 staged.clear();
-                if let Some(mirrors) = instances.get(&call.instance).and_then(|i| i.mirrors.as_ref())
-                {
+                if let Some(mirrors) = instance.mirrors.as_ref() {
                     if !mirrors.is_empty() {
-                        let self_table = instances[&call.instance].self_table.clone();
-                        ctx.raw_set(&keys.zelf, self_table)?;
+                        ctx.raw_set(&keys.zelf, instance.self_table.clone())?;
                     }
                     for mirror in mirrors {
                         for field in &mirror.fields {
@@ -673,9 +915,7 @@ impl ScriptBackend for LuauBackend {
                 // A script that reads its transform and writes nothing
                 // queues nothing.
                 if outcome.is_ok() {
-                    if let Some(mirrors) =
-                        instances.get(&call.instance).and_then(|i| i.mirrors.as_ref())
-                    {
+                    if let Some(mirrors) = instance.mirrors.as_ref() {
                         let mut index = 0;
                         for mirror in mirrors {
                             let mut changed = somnium_ecs::ReflectObject::new();
@@ -759,6 +999,57 @@ impl ScriptBackend for LuauBackend {
         })
     }
 
+    fn migrate_properties(
+        &mut self,
+        module: CompiledModule,
+        properties: &PropertyBag,
+        from_version: u32,
+    ) -> Result<PropertyBag, ScriptError> {
+        // Evaluated fresh rather than borrowed from an instance: the
+        // instance this is for has already been torn down and its
+        // replacement does not exist yet. A reload is not a hot path.
+        let imports = self
+            .resolve_imports(module.handle, 0)
+            .map_err(host::to_script_error)?;
+        let env = self
+            .module_environment(&imports)
+            .map_err(host::to_script_error)?;
+        let entry = self.module(module)?;
+        let descriptor =
+            self.with_deadline(self.budget.per_call, || self.evaluate(entry, env))?;
+
+        let Ok(Value::Function(migrate)) =
+            descriptor.get::<Value>(Callback::MigrateState.script_name())
+        else {
+            return Ok(properties.clone());
+        };
+
+        let bag = self.lua.create_table().map_err(host::to_script_error)?;
+        for (name, value) in properties {
+            let lua_value = convert::to_lua(&self.lua, value).map_err(host::to_script_error)?;
+            bag.set(name.as_str(), lua_value)
+                .map_err(host::to_script_error)?;
+        }
+
+        let returned: Value = self.with_deadline(self.budget.per_call, || {
+            migrate.call((descriptor.clone(), bag, from_version))
+        })?;
+
+        // A migration that returns nothing usable keeps the old bag rather
+        // than silently emptying an author's work.
+        match convert::from_lua(&returned) {
+            Ok(ScriptValue::Map(entries)) => Ok(entries.into_iter().collect()),
+            Ok(ScriptValue::Nil) => Ok(properties.clone()),
+            Ok(other) => Err(ScriptError::HostRejected {
+                message: format!(
+                    "migrateProperties must return a table of property values, got {}",
+                    other.kind()
+                ),
+            }),
+            Err(message) => Err(ScriptError::HostRejected { message }),
+        }
+    }
+
     fn import_state(
         &mut self,
         id: ScriptInstanceId,
@@ -840,8 +1131,52 @@ pub(crate) fn empty_schema() -> ScriptSchema {
         fields: Vec::<ScriptFieldSchema>::new(),
         callbacks: CallbackMask::default(),
         uses: Vec::new(),
+        requires: Vec::new(),
     }
 }
+
+/// A fingerprint that changes whenever this build would produce different
+/// bytecode.
+///
+/// # Why a probe and not a version string
+///
+/// The obvious implementation is `format!("mlua {MLUA_VERSION} luau
+/// {LUAU_VERSION}")`, and it is wrong in the way that matters: those are
+/// constants a human keeps in sync, so the one time they are stale is the
+/// one time the cache is invalid and nothing notices. Stale bytecode
+/// handed to the Luau VM is undefined behaviour — the VM assumes its input
+/// came from its own compiler and does not validate it.
+///
+/// So this compiles a fixed probe and hashes the result. If the compiler,
+/// its options, or the bytecode format change *at all*, the bytes change
+/// and the fingerprint changes with them. Nothing has to be remembered.
+#[must_use]
+pub fn runtime_fingerprint() -> String {
+    /// Exercises constants, upvalues, a table, a call and a loop, so a
+    /// change to almost any part of the emitter moves the hash.
+    const PROBE: &str = "local t = {1,2,3} local s = 0 \
+                         for i, v in ipairs(t) do s += v * i end \
+                         return function() return s end";
+
+    let bytes = Compiler::new().compile(PROBE).unwrap_or_default();
+    // FNV-1a. Not cryptographic and does not need to be: this compares a
+    // build against itself.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in &bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // The prefix is the *cache layout* version, which is ours to bump when
+    // what we store beside the bytecode changes.
+    format!("somnium-luau-1/{hash:016x}")
+}
+
+/// How deep a module graph may nest before the evaluator gives up.
+///
+/// The runtime rejects cycles on the static graph, so reaching this is a
+/// bug rather than a script's mistake — but a Rust stack overflow is not
+/// an acceptable way to find that out.
+const MAX_MODULE_DEPTH: u32 = 32;
 
 /// Build a one-message diagnostic batch at error severity.
 pub(crate) fn error_diagnostic(

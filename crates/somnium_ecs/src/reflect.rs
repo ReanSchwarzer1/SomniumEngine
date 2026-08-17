@@ -265,13 +265,22 @@ impl FieldType {
     /// only thing that knows, so the boundary asks the field rather than
     /// guessing, and [`Self::accepts`] stays strict.
     ///
-    /// Deliberately narrow: this is the one ambiguity the value model has,
-    /// and widening it into a general coercion table would turn every
-    /// mistyped write into a silent reinterpretation.
+    /// The second case is the same problem one step down: a script-family
+    /// runtime with a single number type hands back `3` for a value that
+    /// went in as `3.0`, so a float field would quietly start storing
+    /// integers. [`Self::accepts`] already tolerates that; this stops it
+    /// being *written down* that way, which is what a scene diff and a
+    /// value comparison both care about.
+    ///
+    /// Deliberately narrow: these are the two ambiguities the value model
+    /// has, and widening this into a general coercion table would turn
+    /// every mistyped write into a silent reinterpretation.
     #[must_use]
     pub fn coerce(&self, value: ReflectValue) -> ReflectValue {
         match (self, value) {
             (Self::Quat, ReflectValue::Vec4(v)) => ReflectValue::Quat(v),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::F64, ReflectValue::I64(v)) => ReflectValue::F64(v as f64),
             (_, value) => value,
         }
     }
