@@ -692,6 +692,10 @@ pub struct UiManager {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
     outliner_rows: Vec<(NodeHandle, u32)>,
+    /// Entities the palette can jump to, mirrored from the Outliner.
+    palette_entities: Vec<(u32, String)>,
+    /// What each *dynamic* palette row does, in append order.
+    palette_targets: Vec<PaletteTarget>,
     // Inspector field handles
     inspector_handles: InspectorHandles,
     // Editor event queue drained by app.rs each frame
@@ -965,6 +969,21 @@ fn load_fonts(ui: &mut UserInterface) -> u8 {
     registry.id(FontRole::UiRegular)
 }
 
+/// What a *dynamic* palette row resolves to.
+///
+/// Phase 27-G. Static commands stay positional (see
+/// `UiManager::STATIC_PALETTE_COMMANDS`); everything appended after them
+/// carries its target here instead, so adding a category cannot rebind a
+/// command.
+#[derive(Clone, Debug, PartialEq)]
+enum PaletteTarget {
+    Entity(u32),
+    Asset(std::path::PathBuf),
+    Help(u8),
+    Drawer,
+    Log,
+}
+
 impl UiManager {
     pub fn new(
         device: &wgpu::Device,
@@ -1042,6 +1061,8 @@ impl UiManager {
             foliage_toolbar_button: layout.foliage_toolbar_button,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
+            palette_entities: Vec::new(),
+            palette_targets: Vec::new(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
             viewport_handle: layout.viewport_handle,
@@ -2217,6 +2238,9 @@ impl UiManager {
         }
         self.close_all_menus();
         self.palette_open = true;
+        // Entities and assets change while the palette is closed, so the set is
+        // rebuilt on open rather than kept in sync from a dozen call sites.
+        self.refresh_palette_items();
         self.native_ui.send(UiMessage::new(
             self.palette_widget,
             MessageDirection::ToWidget,
@@ -2242,7 +2266,89 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
+    /// Number of statically declared palette commands, which occupy indices
+    /// `0..STATIC_PALETTE_COMMANDS` in the order `editor::shell` declares them.
+    ///
+    /// [`Self::run_palette_command`] dispatches on that position, so anything
+    /// dynamic must be **appended** after this point. Inserting or reordering a
+    /// static command silently rebinds every command after it;
+    /// `static_palette_command_count_is_pinned` fails if the count moves.
+    pub(crate) const STATIC_PALETTE_COMMANDS: usize = 15;
+
+    /// Rebuild the searchable set: the static commands, then everything that
+    /// exists right now. Called each time the palette opens, because entities
+    /// and assets change while it is closed.
+    fn refresh_palette_items(&mut self) {
+        use crate::widgets::command_palette::PaletteCategory as Cat;
+
+        let mut items: Vec<PaletteItem> = crate::editor::shell::palette_commands();
+        debug_assert_eq!(items.len(), Self::STATIC_PALETTE_COMMANDS);
+        let mut targets: Vec<PaletteTarget> = Vec::new();
+
+        // Entities, from whatever the Outliner is currently showing.
+        for (id, name) in &self.palette_entities {
+            items.push(PaletteItem::new(name.clone(), "Select", Cat::Entity));
+            targets.push(PaletteTarget::Entity(*id));
+        }
+
+        // Assets in the current Content Drawer folder.
+        for (_, entry) in &self.content_entries {
+            if entry.is_dir {
+                continue;
+            }
+            items.push(PaletteItem::new(entry.name.clone(), "Open", Cat::Asset));
+            targets.push(PaletteTarget::Asset(entry.path.clone()));
+        }
+
+        // Help pages, so a question is answerable from the same surface.
+        for (i, title) in crate::metaphor::help_titles().iter().enumerate() {
+            items.push(PaletteItem::new((*title).to_string(), "F1", Cat::Help));
+            targets.push(PaletteTarget::Help(i as u8));
+        }
+
+        // Panels, so the palette can also be used to reach a surface.
+        for (label, target) in [
+            ("Content Drawer", PaletteTarget::Drawer),
+            ("Output Log", PaletteTarget::Log),
+        ] {
+            items.push(PaletteItem::new(label.to_string(), "", Cat::Panel));
+            targets.push(target);
+        }
+
+        self.palette_targets = targets;
+        self.native_ui.send(UiMessage::new(
+            self.palette_widget,
+            MessageDirection::ToWidget,
+            CommandPaletteMessage::SetItems(items),
+        ));
+    }
+
     fn run_palette_command(&mut self, idx: usize) {
+        // Anything past the static block is a dynamic row; the parallel target
+        // list is built in the same order `refresh_palette_items` appended them.
+        if idx >= Self::STATIC_PALETTE_COMMANDS {
+            let target = self
+                .palette_targets
+                .get(idx - Self::STATIC_PALETTE_COMMANDS)
+                .cloned();
+            match target {
+                Some(PaletteTarget::Entity(id)) => {
+                    self.editor_events
+                        .push_back(EditorEvent::SelectEntity(Some(id)));
+                }
+                Some(PaletteTarget::Asset(path)) => {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            path.to_string_lossy().into_owned(),
+                        ));
+                }
+                Some(PaletteTarget::Help(page)) => self.toggle_help(Some(page)),
+                Some(PaletteTarget::Drawer) => self.toggle_drawer(),
+                Some(PaletteTarget::Log) => self.toggle_log_panel(),
+                None => {}
+            }
+            return;
+        }
         match idx {
             0 => self.prompt_unsaved_new(),
             1 => self.editor_events.push_back(EditorEvent::SaveScene),
@@ -2432,6 +2538,21 @@ impl UiManager {
         self.content_entries.clear();
         let font_id = self.font_id;
         let parent = self.content_list;
+
+        // Phase 27-G. A drawer with nothing in it used to be a blank grey
+        // rectangle, which reads as broken rather than as empty. A filtered
+        // miss and a genuinely empty folder are different situations and get
+        // different copy — offering "import a model" to someone who mistyped a
+        // search would be the wrong advice.
+        if entries.is_empty() {
+            let state = if self.content_filter.is_empty() {
+                crate::metaphor::empty::CONTENT
+            } else {
+                crate::metaphor::empty::CONTENT_FILTERED
+            };
+            crate::editor::parts::build_empty_state(&mut self.native_ui, parent, font_id, state);
+        }
+
         for entry in entries {
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
@@ -2479,6 +2600,46 @@ impl UiManager {
             .with_wrap(true)
             .build();
             self.native_ui.add_node(lbl, col_h);
+
+            // Phase 27-G. A type badge, so a tile says what it *is* without the
+            // user having to parse the extension out of a wrapped filename or
+            // recognise the icon. Folders are self-evident and get none; the
+            // engine's virtual primitives are labelled as such because they do
+            // not exist on disk and cannot be revealed in a file browser.
+            let badge_text = if entry.is_dir {
+                String::new()
+            } else if entry.is_engine {
+                "ENGINE".to_string()
+            } else {
+                entry
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_uppercase())
+                    .unwrap_or_default()
+            };
+            if !badge_text.is_empty() {
+                let t = theme::active();
+                // Ember is the warm content half of the palette (§4.2); it marks
+                // asset identity and never competes with indigo for a state cue.
+                let badge = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 4.0,
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                }))
+                .with_text(&badge_text)
+                .with_font_size(t.typography.caption)
+                .with_font_id(font_id)
+                .with_color(if entry.is_engine {
+                    t.semantic.text.muted.bytes()
+                } else {
+                    t.ember.bytes()
+                })
+                .build();
+                self.native_ui.add_node(badge, col_h);
+            }
+
             self.content_entries.push((bh, entry));
         }
         let mut parts = vec!["Game".to_string()];
@@ -2689,6 +2850,12 @@ impl UiManager {
             });
         }
         self.outliner_rows = items.iter().map(|i| (self.outliner_tree, i.id)).collect();
+        // Mirror the rows so the palette can offer them without reaching into
+        // the widget tree.
+        self.palette_entities = entities
+            .iter()
+            .map(|(id, name, _, _)| (*id, name.clone()))
+            .collect();
         self.native_ui
             .send(TreeViewMessage::set_items(self.outliner_tree, items));
         if selected.is_some() {
@@ -4677,6 +4844,131 @@ impl CollapseRules {
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod elysium_tests {
+    use super::*;
+
+    #[test]
+    fn static_palette_command_count_is_pinned() {
+        // `run_palette_command` dispatches on position. If this count moves,
+        // every dynamic row is off by the difference and commands silently run
+        // the wrong action.
+        assert_eq!(
+            crate::editor::shell::palette_commands().len(),
+            UiManager::STATIC_PALETTE_COMMANDS
+        );
+    }
+
+    #[test]
+    fn static_palette_commands_keep_their_exact_positions() {
+        // The real guard: `run_palette_command` maps 0 to New Scene, 1 to Save
+        // Scene and so on. Inserting a command anywhere but the end rebinds
+        // everything after it, and nothing else in the codebase would notice.
+        let labels: Vec<String> = crate::editor::shell::palette_commands()
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "New Scene",
+                "Save Scene",
+                "Import Model…",
+                "Undo",
+                "Redo",
+                "Delete",
+                "Duplicate",
+                "Play",
+                "Pause",
+                "Stop",
+                "Toggle Profiler",
+                "Content Drawer",
+                "Help",
+                "Create Cube",
+                "Create Directional Light",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_static_palette_row_is_a_command() {
+        use crate::widgets::command_palette::PaletteCategory;
+        for item in crate::editor::shell::palette_commands() {
+            assert_eq!(item.category, PaletteCategory::Command, "{}", item.label);
+        }
+    }
+
+    #[test]
+    fn empty_state_copy_follows_plain_speech() {
+        // phase_27 §13: sentence case bodies ending in a period, no exclamation
+        // marks, no "Please", no "Oops", and an action phrased as an action.
+        use crate::metaphor::empty;
+        for state in [
+            empty::OUTLINER,
+            empty::DETAILS,
+            empty::CONTENT,
+            empty::CONTENT_FILTERED,
+            empty::LOG,
+        ] {
+            let head = state.headline;
+            let body = state.body;
+            let action = state.action;
+            assert!(!head.is_empty() && !body.is_empty() && !action.is_empty());
+            assert!(body.ends_with('.'), "body must be a sentence: {body}");
+            assert!(!head.ends_with('.'), "headline is a label: {head}");
+            assert!(!action.ends_with('.'), "action is a label: {action}");
+            for text in [head, body, action] {
+                assert!(!text.contains('!'), "no exclamation marks: {text}");
+                assert!(!text.contains("Please"), "no Please: {text}");
+                assert!(!text.contains("Oops"), "no Oops: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_folder_and_a_filtered_miss_give_different_advice() {
+        // Offering "import a model" to someone who mistyped a search would be
+        // the wrong instruction.
+        use crate::metaphor::empty;
+        assert_ne!(empty::CONTENT.headline, empty::CONTENT_FILTERED.headline);
+        assert_ne!(empty::CONTENT.action, empty::CONTENT_FILTERED.action);
+    }
+
+    #[test]
+    fn the_content_drawer_shows_an_empty_state_when_it_has_nothing() {
+        // Built against a directory that cannot contain assets, so the drawer
+        // is genuinely empty rather than incidentally so.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let font_id = load_fonts(&mut ui);
+        let parent = ui.root();
+        assert!(
+            ui.first_child(parent).is_none(),
+            "the fixture root should start empty"
+        );
+
+        let column = crate::editor::parts::build_empty_state(
+            &mut ui,
+            parent,
+            font_id,
+            crate::metaphor::empty::CONTENT,
+        );
+        assert!(column.is_some(), "the empty state must build a container");
+        assert_eq!(
+            ui.first_child(parent),
+            column,
+            "and attach it to the panel it was asked to fill"
+        );
+
+        // Mark, headline, body and action: four children, none optional.
+        ui.perform_layout();
+        ui.draw();
+        assert!(
+            ui.draw_ctx.instance_count() > 0,
+            "an empty state that draws nothing is the bug it exists to prevent"
+        );
     }
 }
 

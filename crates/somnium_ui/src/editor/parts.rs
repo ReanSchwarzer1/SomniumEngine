@@ -330,3 +330,98 @@ pub(crate) fn labeled_icon_button(
     let lbl_h = ui.add_node(lbl, row_h);
     (h, lbl_h)
 }
+
+/// Build a centred empty state into `parent`.
+///
+/// Phase 27-G. Returns the container so the caller can hide it when the panel
+/// gains content, rather than rebuilding the subtree on every refresh.
+pub(crate) fn build_empty_state(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    font_id: u8,
+    state: crate::metaphor::EmptyState,
+) -> NodeHandle {
+    let t = theme::active();
+    let column = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_background(theme::TRANSPARENT)
+            .with_margin(Thickness {
+                left: 16.0,
+                top: 28.0,
+                right: 16.0,
+                bottom: 16.0,
+            }),
+    )
+    .with_orientation(Orientation::Vertical)
+    .build();
+    let column_h = ui.add_node(column, parent);
+
+    // The mark is muted, not accented: an empty panel is a neutral condition,
+    // and an accent here would read as a warning.
+    let icon = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_width(32.0)
+            .with_height(32.0)
+            .with_horizontal_alignment(HorizontalAlignment::Center),
+    )
+    .with_icon(state.icon)
+    .with_size(32.0)
+    .with_tint(t.semantic.text.disabled.bytes())
+    .build();
+    ui.add_node(icon, column_h);
+
+    let headline = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 10.0,
+                right: 0.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_text(state.headline)
+    .with_font_size(t.typography.body)
+    .with_font_id(font_id)
+    .with_color(t.semantic.text.secondary.bytes())
+    .build();
+    ui.add_node(headline, column_h);
+
+    let body = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_margin(Thickness {
+                left: 8.0,
+                top: 6.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_text(state.body)
+    .with_font_size(t.typography.caption)
+    .with_font_id(font_id)
+    .with_color(t.semantic.text.muted.bytes())
+    .with_wrap(true)
+    .build();
+    ui.add_node(body, column_h);
+
+    let action = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_margin(Thickness {
+                left: 8.0,
+                top: 10.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_text(state.action)
+    .with_font_size(t.typography.caption)
+    .with_font_id(font_id)
+    .with_color(t.semantic.text.link.bytes())
+    .with_wrap(true)
+    .build();
+    ui.add_node(action, column_h);
+
+    column_h
+}

@@ -51,6 +51,32 @@ use glam::Vec2;
 
 // ── Editor layout builder ─────────────────────────────────────────────────────
 
+/// The statically declared palette commands.
+///
+/// Order is load-bearing: `UiManager::run_palette_command` dispatches on
+/// position, so inserting or reordering an entry here silently rebinds every
+/// command after it. Append only, and update
+/// `UiManager::STATIC_PALETTE_COMMANDS` when you do.
+pub(crate) fn palette_commands() -> Vec<PaletteItem> {
+    vec![
+        PaletteItem::command("New Scene", "Ctrl+N"),
+        PaletteItem::command("Save Scene", "Ctrl+S"),
+        PaletteItem::command("Import Model…", ""),
+        PaletteItem::command("Undo", "Ctrl+Z"),
+        PaletteItem::command("Redo", "Ctrl+Y"),
+        PaletteItem::command("Delete", "Del"),
+        PaletteItem::command("Duplicate", "Ctrl+D"),
+        PaletteItem::command("Play", ""),
+        PaletteItem::command("Pause", ""),
+        PaletteItem::command("Stop", ""),
+        PaletteItem::command("Toggle Profiler", ""),
+        PaletteItem::command("Content Drawer", "Ctrl+Space"),
+        PaletteItem::command("Help", "F1"),
+        PaletteItem::command("Create Cube", ""),
+        PaletteItem::command("Create Directional Light", ""),
+    ]
+}
+
 pub(crate) fn build_editor_layout(
     ui: &mut UserInterface,
     font_id: u8,
@@ -1115,68 +1141,7 @@ pub(crate) fn build_editor_layout(
     let content_menu = ui.add_node(content_menu_node, content_menu_popup);
 
 
-    let palette_items = vec![
-        PaletteItem {
-            label: "New Scene".into(),
-            hint: "Ctrl+N".into(),
-        },
-        PaletteItem {
-            label: "Save Scene".into(),
-            hint: "Ctrl+S".into(),
-        },
-        PaletteItem {
-            label: "Import Model…".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Undo".into(),
-            hint: "Ctrl+Z".into(),
-        },
-        PaletteItem {
-            label: "Redo".into(),
-            hint: "Ctrl+Y".into(),
-        },
-        PaletteItem {
-            label: "Delete".into(),
-            hint: "Del".into(),
-        },
-        PaletteItem {
-            label: "Duplicate".into(),
-            hint: "Ctrl+D".into(),
-        },
-        PaletteItem {
-            label: "Play".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Pause".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Stop".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Toggle Profiler".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Content Drawer".into(),
-            hint: "Ctrl+Space".into(),
-        },
-        PaletteItem {
-            label: "Help".into(),
-            hint: "F1".into(),
-        },
-        PaletteItem {
-            label: "Create Cube".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Create Directional Light".into(),
-            hint: String::new(),
-        },
-    ];
+    let palette_items = palette_commands();
     let palette_popup_node = PopupBuilder::new(
         WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
     )

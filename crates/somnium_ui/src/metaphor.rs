@@ -320,3 +320,64 @@ mod tests {
         assert_eq!(tonemap_index("ACES"), 1);
     }
 }
+
+/// Phase 27-G. The empty state a panel shows instead of a blank rectangle.
+///
+/// Every field is required on purpose. `phase_27.md` §9.7-4 asks for a mark, one
+/// sentence and one action, and §13 (Plain Speech) rules out "Oops" and the
+/// exclamation mark. A panel that has nothing to show still has to say what
+/// *would* be here and what to do about it, or the user cannot tell an empty
+/// list from a broken one.
+#[derive(Clone, Copy, Debug)]
+pub struct EmptyState {
+    pub icon: IconId,
+    /// What would be here. Title Case, no trailing period.
+    pub headline: &'static str,
+    /// One sentence, sentence case, ending in a period.
+    pub body: &'static str,
+    /// The single action that fixes it. Sentence case, no period.
+    pub action: &'static str,
+}
+
+/// The shipped empty states, one per panel that can be empty.
+pub mod empty {
+    use super::{EmptyState, IconId};
+
+    pub const OUTLINER: EmptyState = EmptyState {
+        icon: IconId::Scene,
+        headline: "No Entities",
+        body: "This scene is empty. Add something to start building.",
+        action: "Use Create in the toolbar",
+    };
+
+    pub const DETAILS: EmptyState = EmptyState {
+        icon: IconId::Select,
+        headline: "No Selection",
+        body: "Select an entity in the viewport or the Outliner to edit it.",
+        action: "Click an entity",
+    };
+
+    pub const CONTENT: EmptyState = EmptyState {
+        icon: IconId::Folder,
+        headline: "Nothing Here",
+        body: "This folder has no assets yet.",
+        action: "Import a model from the File menu",
+    };
+
+    /// Distinct from `CONTENT`: a filter that matches nothing is a different
+    /// situation from a folder that is genuinely empty, and offering "import a
+    /// model" to someone who mistyped a search would be wrong.
+    pub const CONTENT_FILTERED: EmptyState = EmptyState {
+        icon: IconId::Search,
+        headline: "No Matches",
+        body: "No asset in this folder matches the filter.",
+        action: "Clear the search box",
+    };
+
+    pub const LOG: EmptyState = EmptyState {
+        icon: IconId::OutputLog,
+        headline: "Nothing Logged",
+        body: "Script output and import messages appear here.",
+        action: "Press Play to run the scene",
+    };
+}
