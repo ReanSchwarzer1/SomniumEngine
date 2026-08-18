@@ -1,63 +1,41 @@
-// Port of: example_repo/fyrox/Fyrox-master/fyrox-ui/src/draw.rs
-// Stripped of Fyrox font/material/brush systems. Somnium uses:
-// - solid color rects (background/border)
-// - textured quads for glyphs (font atlas at texture_id 0, Phase 12A-4)
-// DrawingContext produces CPU-side vertex/index lists consumed by UiPass.
+// Originally a port of: example_repo/fyrox/Fyrox-master/fyrox-ui/src/draw.rs.
+//
+// Phase 27-A (Styx) replaced the vertex/index draw list with an instance list.
+// Every shape the UI can draw is now one `Primitive` (see `primitive.rs`), and
+// `UiPass` issues one instanced draw per `DrawCommand`. The six historical
+// `push_*` entry points survive unchanged as thin constructors over that
+// instance, which is what lets the ~86 widget call sites migrate to radius,
+// gradients and real shadows one recipe at a time instead of all at once
+// (`dev records/phase_27.md` §6.4).
 
 use crate::{
     font::{FONT_ATLAS_TEXTURE_ID, FontAtlas},
     icons::IconAtlas,
+    primitive::Primitive,
     types::Rect,
 };
 use glam::Vec2;
 
-/// Per-vertex data uploaded to UiPass vertex buffer.
-/// Layout must match the `UiVertex` WGSL struct in ui.wgsl.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex {
-    pub pos: [f32; 2],
-    pub uv: [f32; 2],
-    /// Authored sRGB tint with straight (unassociated) alpha.
-    pub color: [u8; 4],
-}
-
-impl Vertex {
-    pub fn colored(pos: Vec2, color: [u8; 4]) -> Self {
-        Self {
-            pos: pos.into(),
-            uv: [0.0, 0.0],
-            color,
-        }
-    }
-    pub fn textured(pos: Vec2, uv: Vec2, color: [u8; 4]) -> Self {
-        Self {
-            pos: pos.into(),
-            uv: uv.into(),
-            color,
-        }
-    }
-}
-
-/// References one draw call in UiPass.
-/// All draws are alpha-blended. Texture = None means use solid color from vertex.
-#[derive(Clone, Debug)]
+/// One instanced draw: a contiguous run of primitives sharing a clip rect.
+///
+/// The bound texture is no longer part of the key. Every atlas is bound at once
+/// and selected per instance through [`Primitive::texture_layer`], so a run of
+/// panel fills, labels and icons inside one clip region is a single draw.
+#[derive(Clone, Debug, PartialEq)]
 pub struct DrawCommand {
     pub clip_rect: Rect,
-    /// wgpu texture-view index into UiPass's texture array (None = white 1×1 pixel).
-    pub texture_id: Option<u32>,
-    pub index_offset: u32,
-    pub index_count: u32,
+    pub instance_offset: u32,
+    pub instance_count: u32,
 }
 
 /// Accumulated draw list for one UI frame.
 ///
-/// Widgets call the helper methods during their `draw()` call. The renderer
-/// then uploads `vertices` and `indices` to GPU and issues one draw per command.
-/// `font_atlas` persists across frames (not cleared by `clear()`).
+/// Widgets call the helper methods during their `draw()` call. `UiPass` then
+/// uploads `instances` and issues one instanced draw per command. `font_atlas`
+/// and `icon_atlas` persist across frames (not cleared by `clear()`).
 pub struct DrawingContext {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
+    /// The frame's primitive instances, in paint order.
+    pub instances: Vec<Primitive>,
     pub commands: Vec<DrawCommand>,
     clip_stack: Vec<Rect>,
     current_clip: Rect,
@@ -69,8 +47,7 @@ impl DrawingContext {
     pub fn new(screen_w: f32, screen_h: f32) -> Self {
         let root_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
         Self {
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            instances: Vec::new(),
             commands: Vec::new(),
             clip_stack: Vec::new(),
             current_clip: root_clip,
@@ -79,10 +56,10 @@ impl DrawingContext {
         }
     }
 
-    /// Clear per-frame geometry. Does NOT clear font_atlas — glyphs persist across frames.
+    /// Clear per-frame geometry. Does NOT clear the atlases — glyphs and icons
+    /// persist across frames.
     pub fn clear(&mut self, screen_w: f32, screen_h: f32) {
-        self.vertices.clear();
-        self.indices.clear();
+        self.instances.clear();
         self.commands.clear();
         self.clip_stack.clear();
         self.current_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
@@ -97,63 +74,88 @@ impl DrawingContext {
         self.current_clip = self.clip_stack.pop().unwrap_or(self.current_clip);
     }
 
-    fn begin_command(&mut self, texture_id: Option<u32>) {
-        let idx_offset = self.indices.len() as u32;
-        // Merge with previous command if same clip + texture.
+    /// Number of instances emitted this frame. Used by the Phase 27-I
+    /// performance harness and by the idle-frame stability test.
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+
+    fn begin_command(&mut self) {
+        // Merge with the previous command whenever the clip region matches.
         if let Some(last) = self.commands.last() {
-            if last.clip_rect == self.current_clip && last.texture_id == texture_id {
-                return; // keep extending last command
+            if last.clip_rect == self.current_clip {
+                return;
             }
         }
         self.commands.push(DrawCommand {
             clip_rect: self.current_clip,
-            texture_id,
-            index_offset: idx_offset,
-            index_count: 0,
+            instance_offset: self.instances.len() as u32,
+            instance_count: 0,
         });
     }
 
-    fn push_indices(&mut self, a: u32, b: u32, c: u32) {
-        self.indices.push(a);
-        self.indices.push(b);
-        self.indices.push(c);
+    /// The native Styx entry point. Every other `push_*` builds on this.
+    ///
+    /// `texture_id` selects the atlas sampled when the primitive carries
+    /// `FLAG_TEXTURED`; it no longer breaks the batch.
+    pub fn push_primitive(&mut self, primitive: Primitive, texture_id: Option<u32>) {
+        self.begin_command();
+        let primitive = match texture_id {
+            Some(id) => primitive.with_texture_layer(id),
+            None => primitive,
+        };
+        self.instances.push(primitive);
         if let Some(cmd) = self.commands.last_mut() {
-            cmd.index_count += 3;
+            cmd.instance_count += 1;
         }
     }
 
-    /// Solid-color filled rectangle.
+    /// Solid-colour filled rectangle.
+    ///
+    /// Square corners and no border, so the fragment shader resolves to full
+    /// coverage inside and zero outside for any integer-aligned rect — the
+    /// pre-Styx result, byte for byte.
     pub fn push_rect_filled(&mut self, rect: Rect, color: [u8; 4]) {
-        self.begin_command(None);
-        let base = self.vertices.len() as u32;
-        let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
-        self.vertices.extend_from_slice(&[
-            Vertex::colored(Vec2::new(x, y), color),
-            Vertex::colored(Vec2::new(x + w, y), color),
-            Vertex::colored(Vec2::new(x + w, y + h), color),
-            Vertex::colored(Vec2::new(x, y + h), color),
-        ]);
-        self.push_indices(base, base + 1, base + 2);
-        self.push_indices(base + 2, base + 3, base);
+        self.push_primitive(Primitive::fill(rect, color), None);
     }
 
-    /// Solid-color border (outline only).
+    /// Rounded, optionally gradient-filled, optionally bordered rectangle.
+    pub fn push_round_rect(&mut self, rect: Rect, radius: f32, color: [u8; 4]) {
+        self.push_primitive(Primitive::fill(rect, color).with_radius(radius), None);
+    }
+
+    /// Solid-colour border (outline only).
+    ///
+    /// Pre-Styx this was four separate filled rects. It is now one instance
+    /// with an inset stroke band, which both removes three quads and lets the
+    /// stroke follow a corner radius.
     pub fn push_rect_border(&mut self, rect: Rect, thickness: f32, color: [u8; 4]) {
-        let t = thickness;
-        self.push_rect_filled(Rect::new(rect.x, rect.y, rect.w, t), color); // top
-        self.push_rect_filled(Rect::new(rect.x, rect.y + rect.h - t, rect.w, t), color); // bottom
-        self.push_rect_filled(Rect::new(rect.x, rect.y + t, t, rect.h - 2.0 * t), color); // left
-        self.push_rect_filled(
-            Rect::new(rect.x + rect.w - t, rect.y + t, t, rect.h - 2.0 * t),
-            color,
-        ); // right
+        self.push_primitive(
+            Primitive::fill(rect, [0, 0, 0, 0]).with_border(thickness, color),
+            None,
+        );
+    }
+
+    /// Rounded border following `radius`.
+    pub fn push_round_rect_border(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
+        self.push_primitive(
+            Primitive::fill(rect, [0, 0, 0, 0])
+                .with_radius(radius)
+                .with_border(thickness, color),
+            None,
+        );
     }
 
     /// Render a run of text using the font atlas.
     ///
     /// `origin` is the top-left corner of the text block (above the ascenders).
     /// Glyphs are rasterized on first use and cached in the atlas permanently.
-    /// Emits `DrawCommand` entries with `texture_id = Some(FONT_ATLAS_TEXTURE_ID)`.
     pub fn push_text(&mut self, text: &str, origin: Vec2, font_id: u8, px: f32, color: [u8; 4]) {
         self.push_text_tracked(text, origin, font_id, px, color, 0.0);
     }
@@ -166,6 +168,12 @@ impl DrawingContext {
     /// matches how CSS `letter-spacing` measures, so
     /// [`crate::font::FontAtlas::measure_text_tracked`] can stay a pure
     /// `advance + tracking * count` calculation.
+    ///
+    /// Phase 27-B: the glyph *quad* is snapped to whole device pixels while the
+    /// *cursor* keeps full fractional precision. The atlas is a bitmap, so a
+    /// quad landing on a half pixel is resampled by the linear sampler and the
+    /// stems smear; snapping puts the texel grid back in register. Advances are
+    /// untouched, so measured text width is unchanged.
     pub fn push_text_tracked(
         &mut self,
         text: &str,
@@ -190,7 +198,7 @@ impl DrawingContext {
                 cursor_x += px * 0.5 + tracking;
                 continue;
             };
-            // Zero-size glyphs (space, etc.) — advance cursor only
+            // Zero-size glyphs (space, etc.) — advance cursor only.
             if info.px_w == 0.0 {
                 cursor_x += info.advance + tracking;
                 continue;
@@ -198,51 +206,57 @@ impl DrawingContext {
             // Glyph top-left in screen space:
             //   x = cursor_x + xmin  (horizontal bearing)
             //   y = baseline_y - (ymin + px_h)  (freetype y-up → screen y-down)
-            let gx = cursor_x + info.xmin;
-            let gy = baseline_y - (info.ymin + info.px_h);
+            let gx = (cursor_x + info.xmin).round();
+            let gy = (baseline_y - (info.ymin + info.px_h)).round();
             let rect = Rect::new(gx, gy, info.px_w, info.px_h);
-            let uv = [
-                Vec2::new(info.uv_min[0], info.uv_min[1]), // TL
-                Vec2::new(info.uv_max[0], info.uv_min[1]), // TR
-                Vec2::new(info.uv_max[0], info.uv_max[1]), // BR
-                Vec2::new(info.uv_min[0], info.uv_max[1]), // BL
-            ];
-            self.push_textured_rect(rect, uv, color, FONT_ATLAS_TEXTURE_ID);
+            let uv = [info.uv_min[0], info.uv_min[1], info.uv_max[0], info.uv_max[1]];
+            self.push_primitive(
+                Primitive::glyph(rect, uv, color),
+                Some(FONT_ATLAS_TEXTURE_ID),
+            );
             cursor_x += info.advance + tracking;
         }
     }
 
-    /// Layered drop shadow beneath `rect`, used to mark z-order for popups,
-    /// drawers and modals.
+    /// Drop shadow beneath `rect`, marking z-order for popups, drawers and
+    /// modals.
     ///
-    /// The renderer has no blur pass, so the falloff is approximated with
-    /// concentric translucent rings — cheap, no extra bind group, and visually
-    /// sufficient at the 12–32 px spreads the elevation tokens ask for.
+    /// Pre-Styx this was six concentric hard-edged rectangles standing in for a
+    /// blur, which banded visibly at the 12–32 px spreads the elevation tokens
+    /// ask for. It is now a single instance with an analytic falloff.
     /// Panels never call this: elevation marks layering, not decoration.
     pub fn push_drop_shadow(&mut self, rect: Rect, elevation: crate::theme::Elevation) {
-        const RINGS: usize = 6;
-        for i in 0..RINGS {
-            // Outermost ring first so the darker inner rings composite on top.
-            let t = (RINGS - i) as f32 / RINGS as f32;
-            let grow = elevation.spread * t;
-            let alpha = elevation.alpha * (1.0 - t) * (1.0 / RINGS as f32) * 4.0;
-            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-            if a == 0 {
-                continue;
-            }
-            self.push_rect_filled(
-                Rect::new(
-                    rect.x - grow,
-                    rect.y - grow + elevation.offset_y * t,
-                    rect.w + grow * 2.0,
-                    rect.h + grow * 2.0,
-                ),
-                [0, 0, 0, a],
-            );
-        }
+        self.push_drop_shadow_rounded(rect, [0.0; 4], elevation);
     }
 
-    /// Textured quad (used for image widgets and glyph quads).
+    /// [`push_drop_shadow`](Self::push_drop_shadow) following a corner radius.
+    pub fn push_drop_shadow_rounded(
+        &mut self,
+        rect: Rect,
+        radii: [f32; 4],
+        elevation: crate::theme::Elevation,
+    ) {
+        let alpha = (elevation.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if alpha == 0 {
+            return;
+        }
+        self.push_primitive(
+            Primitive::shadow(
+                rect,
+                radii,
+                [0.0, elevation.offset_y],
+                elevation.spread,
+                0.0,
+                [0, 0, 0, alpha],
+            ),
+            None,
+        );
+    }
+
+    /// Textured quad (used for image widgets and icon quads).
+    ///
+    /// `uv` is kept as four corners for source compatibility with the pre-Styx
+    /// signature; the primitive stores the axis-aligned min/max it implies.
     pub fn push_textured_rect(
         &mut self,
         rect: Rect,
@@ -250,17 +264,11 @@ impl DrawingContext {
         color: [u8; 4],
         texture_id: u32,
     ) {
-        self.begin_command(Some(texture_id));
-        let base = self.vertices.len() as u32;
-        let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
-        self.vertices.extend_from_slice(&[
-            Vertex::textured(Vec2::new(x, y), uv[0], color),
-            Vertex::textured(Vec2::new(x + w, y), uv[1], color),
-            Vertex::textured(Vec2::new(x + w, y + h), uv[2], color),
-            Vertex::textured(Vec2::new(x, y + h), uv[3], color),
-        ]);
-        self.push_indices(base, base + 1, base + 2);
-        self.push_indices(base + 2, base + 3, base);
+        let uv_rect = [uv[0].x, uv[0].y, uv[2].x, uv[2].y];
+        self.push_primitive(
+            Primitive::textured(rect, uv_rect, color),
+            Some(texture_id),
+        );
     }
 
     /// 9-slice: corners stay unscaled, edges stretch on one axis, center tiles.
@@ -286,14 +294,179 @@ impl DrawingContext {
                 if r.w <= 0.0 || r.h <= 0.0 {
                     continue;
                 }
-                let uv = [
-                    Vec2::new(us[col], vs[row]),
-                    Vec2::new(us[col + 1], vs[row]),
-                    Vec2::new(us[col + 1], vs[row + 1]),
-                    Vec2::new(us[col], vs[row + 1]),
-                ];
-                self.push_textured_rect(r, uv, color, texture_id);
+                let uv = [us[col], vs[row], us[col + 1], vs[row + 1]];
+                self.push_primitive(Primitive::textured(r, uv, color), Some(texture_id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitive::{AA_PAD, FLAG_TEXT, FLAG_TEXTURED};
+
+    fn ctx() -> DrawingContext {
+        DrawingContext::new(800.0, 600.0)
+    }
+
+    #[test]
+    fn filled_rect_is_a_single_plain_instance() {
+        // The 27-A merge gate: the compatibility shim must not gain behaviour.
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(10.0, 20.0, 30.0, 40.0), [1, 2, 3, 255]);
+        assert_eq!(c.instances.len(), 1);
+        let p = c.instances[0];
+        assert!(p.is_plain_fill());
+        assert_eq!(p.rect, [10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(p.fill_a, [1, 2, 3, 255]);
+        assert_eq!(p.expand, AA_PAD);
+    }
+
+    #[test]
+    fn border_is_one_instance_not_four_rects() {
+        // Pre-Styx this emitted four filled quads.
+        let mut c = ctx();
+        c.push_rect_border(Rect::new(0.0, 0.0, 20.0, 10.0), 1.0, [9, 9, 9, 255]);
+        assert_eq!(c.instances.len(), 1);
+        assert_eq!(c.instances[0].border_width, 1.0);
+        assert_eq!(c.instances[0].fill_a, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn drop_shadow_is_one_instance_not_six_rings() {
+        let mut c = ctx();
+        c.push_drop_shadow(
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            crate::theme::Elevation {
+                offset_y: 4.0,
+                spread: 16.0,
+                alpha: 0.5,
+            },
+        );
+        assert_eq!(c.instances.len(), 1);
+        let p = c.instances[0];
+        assert_eq!(p.shadow[2], 16.0, "spread token drives the blur radius");
+        assert_eq!(p.shadow_color[3], 128);
+    }
+
+    #[test]
+    fn fully_transparent_shadow_emits_nothing() {
+        let mut c = ctx();
+        c.push_drop_shadow(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            crate::theme::Elevation {
+                offset_y: 0.0,
+                spread: 8.0,
+                alpha: 0.0,
+            },
+        );
+        assert!(c.instances.is_empty());
+        assert!(c.commands.is_empty());
+    }
+
+    #[test]
+    fn commands_merge_while_clip_and_texture_match() {
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(0.0, 0.0, 1.0, 1.0), [255; 4]);
+        c.push_rect_filled(Rect::new(1.0, 0.0, 1.0, 1.0), [255; 4]);
+        assert_eq!(c.commands.len(), 1);
+        assert_eq!(c.commands[0].instance_count, 2);
+        assert_eq!(c.commands[0].instance_offset, 0);
+    }
+
+    #[test]
+    fn a_texture_change_no_longer_breaks_the_batch() {
+        // The 164-draw-call measurement that motivated moving the selector onto
+        // the instance. A fill followed by a glyph inside one clip region is one
+        // draw, and the glyph still records which atlas it samples.
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(0.0, 0.0, 1.0, 1.0), [255; 4]);
+        c.push_textured_rect(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
+            [255; 4],
+            crate::icons::ICON_ATLAS_TEXTURE_ID,
+        );
+        assert_eq!(c.commands.len(), 1);
+        assert_eq!(c.commands[0].instance_count, 2);
+        assert_eq!(c.instances[0].texture_layer(), 0);
+        assert_eq!(
+            c.instances[1].texture_layer(),
+            crate::icons::ICON_ATLAS_TEXTURE_ID
+        );
+
+        let total: u32 = c.commands.iter().map(|cmd| cmd.instance_count).sum();
+        assert_eq!(total as usize, c.instances.len());
+    }
+
+    #[test]
+    fn command_breaks_on_clip_change() {
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(0.0, 0.0, 1.0, 1.0), [255; 4]);
+        c.push_clip_rect(Rect::new(0.0, 0.0, 10.0, 10.0));
+        c.push_rect_filled(Rect::new(0.0, 0.0, 1.0, 1.0), [255; 4]);
+        c.pop_clip_rect();
+        assert_eq!(c.commands.len(), 2);
+    }
+
+    #[test]
+    fn textured_rect_converts_corner_uvs_to_min_max() {
+        let mut c = ctx();
+        let uv = [
+            Vec2::new(0.25, 0.5),
+            Vec2::new(0.75, 0.5),
+            Vec2::new(0.75, 0.9),
+            Vec2::new(0.25, 0.9),
+        ];
+        c.push_textured_rect(Rect::new(0.0, 0.0, 8.0, 8.0), uv, [255; 4], 1);
+        assert_eq!(c.instances[0].uv, [0.25, 0.5, 0.75, 0.9]);
+        assert_eq!(c.instances[0].texture_layer(), 1);
+        assert_ne!(c.instances[0].flags & FLAG_TEXTURED, 0);
+        assert_eq!(c.instances[0].flags & FLAG_TEXT, 0, "icons are not glyphs");
+    }
+
+    #[test]
+    fn nine_slice_still_emits_nine_cells() {
+        let mut c = ctx();
+        c.push_nine_slice(Rect::new(0.0, 0.0, 60.0, 60.0), 3, 0.25, [255; 4]);
+        assert_eq!(c.instances.len(), 9);
+    }
+
+    #[test]
+    fn clear_drops_geometry_but_keeps_atlases() {
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(0.0, 0.0, 1.0, 1.0), [255; 4]);
+        c.font_atlas.dirty = true;
+        c.clear(800.0, 600.0);
+        assert!(c.instances.is_empty());
+        assert!(c.commands.is_empty());
+        assert!(c.font_atlas.dirty, "atlas survives the frame boundary");
+    }
+
+    #[test]
+    fn identical_frames_produce_identical_instance_bytes() {
+        // phase_27 §10.3: an idle shell must not churn the draw list.
+        let build = || {
+            let mut c = ctx();
+            c.push_rect_filled(Rect::new(4.0, 4.0, 100.0, 24.0), [28, 30, 38, 255]);
+            c.push_rect_border(Rect::new(4.0, 4.0, 100.0, 24.0), 1.0, [49, 53, 67, 255]);
+            c.push_drop_shadow(
+                Rect::new(0.0, 0.0, 50.0, 50.0),
+                crate::theme::Elevation {
+                    offset_y: 2.0,
+                    spread: 12.0,
+                    alpha: 0.4,
+                },
+            );
+            c
+        };
+        let a = build();
+        let b = build();
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&a.instances),
+            bytemuck::cast_slice::<_, u8>(&b.instances)
+        );
+        assert_eq!(a.commands, b.commands);
     }
 }

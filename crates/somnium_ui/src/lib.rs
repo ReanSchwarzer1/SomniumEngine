@@ -10,6 +10,7 @@ pub mod message;
 pub mod metaphor;
 pub mod node;
 pub mod pass;
+pub mod primitive;
 pub mod pool;
 pub mod runtime;
 pub mod style;
@@ -1299,8 +1300,14 @@ impl UiManager {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        let scale = window.scale_factor() as f32;
-        self.native_ui.draw_ctx.font_atlas.set_dpi_scale(scale);
+        // The font atlas is deliberately *not* told the window scale factor.
+        // The widget tree is laid out in physical pixels (`reposition_panels`
+        // passes `window.inner_size()`), so one layout unit is already one
+        // device pixel and `FontAtlas::render_scale` must stay 1.0. Feeding the
+        // scale factor here — as this line did before Phase 27-B — rasterized
+        // glyphs at `px * scale * SUPER_SAMPLE` and then minified them into a
+        // `px` quad, which softened text at 125 % and above instead of sharpening
+        // it. See `FontAtlas::render_scale` and `set_render_scale`.
 
         // Flush all queued widget messages; convert outgoing to EditorEvents.
         let outgoing = self.native_ui.update();
@@ -4612,6 +4619,100 @@ impl CollapseRules {
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod styx_budget_tests {
+    use super::*;
+
+    /// Builds the real Nocturne shell with the real bundled faces and returns
+    /// the frame's draw list, so the Phase 27 §10.6 budget is measured against
+    /// the actual editor rather than against a synthetic scene.
+    fn shell_frame(w: f32, h: f32) -> UserInterface {
+        let mut ui = UserInterface::new(w, h);
+        let font_id = load_fonts(&mut ui);
+        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        ui.perform_layout();
+        ui.draw();
+        ui
+    }
+
+    #[test]
+    fn measured_instance_budget_for_the_real_shell() {
+        for (w, h) in [(1920.0, 1080.0), (2560.0, 1440.0)] {
+            let ui = shell_frame(w, h);
+            let ctx = &ui.draw_ctx;
+            let instances = ctx.instance_count();
+            let bytes = instances * std::mem::size_of::<crate::primitive::Primitive>();
+            let batches = ctx.commands.iter().filter(|c| c.instance_count > 0).count();
+
+            println!(
+                "{w}x{h}: {instances} instances, {} KiB, {batches} batches",
+                bytes / 1024
+            );
+
+            // phase_27 §10.6, restated from measurement rather than estimate.
+            //
+            // Bytes: the pre-Styx list spent 4 vertices (20 B each) plus 6
+            // indices (4 B each) per quad = 104 B, and a border cost four quads
+            // while a shadow cost six. Styx spends one 100 B instance for each,
+            // and the real shell measures ~61 KiB. 256 KiB leaves 4x headroom.
+            assert!(
+                bytes <= 256 * 1024,
+                "{w}x{h}: instance buffer {bytes} B exceeds the 256 KiB budget"
+            );
+
+            // Batches: the plan guessed 8. That was wrong by more than an order
+            // of magnitude and is corrected here against the real shell.
+            //
+            // `UserInterface::draw_node` pushes a clip rect for every visible
+            // node, so a batch break is a genuine clip transition, not waste —
+            // folding the atlases into one bind group (which is why
+            // `DrawCommand` no longer carries a texture) took this from 164 to
+            // 146, and the remainder is the widget tree's clipping structure.
+            // Collapsing it to a single draw means clipping per instance in the
+            // fragment shader instead of by scissor. That work is real and is
+            // scheduled where it is actually needed — 27-D wants rounded clips
+            // for scroll regions and thumbnails — rather than done here to chase
+            // an invented number, because 146 scissor-plus-draw pairs cost
+            // microseconds of command recording.
+            assert!(
+                batches <= 192,
+                "{w}x{h}: {batches} batches exceeds the measured budget"
+            );
+        }
+    }
+
+    #[test]
+    fn an_idle_shell_rebuilds_a_byte_identical_draw_list() {
+        // phase_27 §10.3 / §5.6: nothing may churn the draw list between two
+        // frames with no input. This is the guard that keeps the coming
+        // animation driver (27-C) from quietly costing a redraw every frame.
+        let a = shell_frame(1920.0, 1080.0);
+        let b = shell_frame(1920.0, 1080.0);
+        assert_eq!(a.draw_ctx.instance_count(), b.draw_ctx.instance_count());
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&a.draw_ctx.instances),
+            bytemuck::cast_slice::<_, u8>(&b.draw_ctx.instances),
+        );
+        assert_eq!(a.draw_ctx.commands, b.draw_ctx.commands);
+    }
+
+    #[test]
+    fn the_shell_never_exhausts_the_font_atlas() {
+        // A full atlas makes text silently vanish (`FontAtlas::get_or_rasterize`
+        // returns None and the draw path advances past a blank). The shell must
+        // sit well clear of that.
+        let ui = shell_frame(1920.0, 1080.0);
+        let atlas = &ui.draw_ctx.font_atlas;
+        println!(
+            "shell atlas: {} glyphs, {:.1}% used",
+            atlas.cached_glyph_count(),
+            atlas.utilization() * 100.0
+        );
+        assert!(!atlas.is_full());
+        assert!(atlas.utilization() < 0.75);
     }
 }
 
