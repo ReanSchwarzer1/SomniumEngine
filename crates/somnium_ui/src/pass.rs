@@ -77,6 +77,35 @@ struct Globals {
 
 const _: () = assert!(std::mem::size_of::<Globals>() == 80);
 
+/// The two sizes a UI frame is drawn against.
+///
+/// They differ whenever the window scale factor is not 1.0: the widget tree
+/// lays out in `logical` units and the framebuffer is `physical` device pixels.
+/// Bundling them keeps the pair impossible to swap at a call site.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiSurface {
+    /// Layout extent the ortho projection is built from.
+    pub logical: (f32, f32),
+    /// Framebuffer size, for the scissor rect.
+    pub physical: (u32, u32),
+}
+
+impl UiSurface {
+    pub fn new(logical: (f32, f32), physical: (u32, u32)) -> Self {
+        Self { logical, physical }
+    }
+
+    /// Device pixels per layout unit, derived from the two sizes rather than
+    /// from the raw scale factor so rounding cannot drift a clip region off the
+    /// framebuffer edge.
+    pub fn scale(&self) -> (f32, f32) {
+        (
+            self.physical.0 as f32 / self.logical.0.max(1.0),
+            self.physical.1 as f32 / self.logical.1.max(1.0),
+        )
+    }
+}
+
 /// Per-frame counters for the Phase 27-I performance harness.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UiFrameStats {
@@ -106,8 +135,12 @@ pub struct UiPass {
     commands: Vec<DrawCommand>,
     text_gamma: f32,
     stats: UiFrameStats,
+    /// Framebuffer size in device pixels, for clamping the scissor rect.
     surface_w: u32,
     surface_h: u32,
+    /// Layout-space size the ortho projection was built from.
+    logical_w: f32,
+    logical_h: f32,
 }
 
 impl UiPass {
@@ -307,6 +340,8 @@ impl UiPass {
             stats: UiFrameStats::default(),
             surface_w: 0,
             surface_h: 0,
+            logical_w: 0.0,
+            logical_h: 0.0,
         }
     }
 
@@ -350,19 +385,30 @@ impl UiPass {
     }
 
     /// Upload draw data to the GPU. Call once per frame before `render()`.
+    /// `logical_w` / `logical_h` are the widget tree's layout extent; `surface_w`
+    /// / `surface_h` are the framebuffer size in device pixels. They differ
+    /// whenever the window scale factor is not 1.0.
+    ///
+    /// The projection is built from the logical extent, so the GPU stretches
+    /// layout space across the whole framebuffer and every density token keeps
+    /// its apparent size at any DPI. Only the scissor rect is converted back to
+    /// device pixels, and it is converted by the *measured* ratio rather than by
+    /// the raw scale factor, so a rounded logical size cannot drift a clip
+    /// region off the framebuffer edge.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         draw_ctx: &mut DrawingContext,
-        surface_w: u32,
-        surface_h: u32,
+        surface: UiSurface,
     ) {
-        self.surface_w = surface_w;
-        self.surface_h = surface_h;
+        self.surface_w = surface.physical.0;
+        self.surface_h = surface.physical.1;
+        self.logical_w = surface.logical.0.max(1.0);
+        self.logical_h = surface.logical.1.max(1.0);
 
-        // Ortho: (0,0) = top-left, (W,H) = bottom-right, y-down.
-        let proj = Mat4::orthographic_rh(0.0, surface_w as f32, surface_h as f32, 0.0, 0.0, 1.0);
+        // Ortho: (0,0) = top-left, (logical_w, logical_h) = bottom-right, y-down.
+        let proj = Mat4::orthographic_rh(0.0, self.logical_w, self.logical_h, 0.0, 0.0, 1.0);
         let globals = Globals {
             proj: proj.to_cols_array(),
             text_gamma: self.text_gamma,
@@ -492,17 +538,25 @@ impl UiPass {
 
         let sw = self.surface_w;
         let sh = self.surface_h;
+        // Layout units -> device pixels. Derived from the two sizes rather than
+        // from the scale factor so rounding cannot put the scissor off the edge.
+        let scale_x = sw as f32 / self.logical_w;
+        let scale_y = sh as f32 / self.logical_h;
 
         for cmd in &self.commands {
             if cmd.instance_count == 0 {
                 continue;
             }
 
-            // Scissor rect clamped to [0, surface_w) × [0, surface_h).
-            let x0 = (cmd.clip_rect.x.max(0.0) as u32).min(sw);
-            let y0 = (cmd.clip_rect.y.max(0.0) as u32).min(sh);
-            let x1 = ((cmd.clip_rect.x + cmd.clip_rect.w).max(0.0) as u32).min(sw);
-            let y1 = ((cmd.clip_rect.y + cmd.clip_rect.h).max(0.0) as u32).min(sh);
+            // Scissor rect in device pixels, clamped to the framebuffer.
+            let px = cmd.clip_rect.x * scale_x;
+            let py = cmd.clip_rect.y * scale_y;
+            let pw = cmd.clip_rect.w * scale_x;
+            let ph = cmd.clip_rect.h * scale_y;
+            let x0 = (px.max(0.0) as u32).min(sw);
+            let y0 = (py.max(0.0) as u32).min(sh);
+            let x1 = ((px + pw).max(0.0).ceil() as u32).min(sw);
+            let y1 = ((py + ph).max(0.0).ceil() as u32).min(sh);
             let cw = x1.saturating_sub(x0);
             let ch = y1.saturating_sub(y0);
             if cw == 0 || ch == 0 {

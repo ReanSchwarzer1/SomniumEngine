@@ -46,6 +46,18 @@ pub struct UserInterface {
     message_queue: VecDeque<UiMessage>,
     pub draw_ctx: DrawingContext,
     pub cursor_pos: Vec2,
+    /// Device pixels per unit of layout space.
+    ///
+    /// The widget tree lays out in **logical units**, so every density token
+    /// (`theme::TITLEBAR_HEIGHT`, row heights, the 68 px pre-scene budget) means
+    /// the same apparent size at every DPI. This factor exists only at the two
+    /// boundaries where the OS speaks device pixels: pointer positions coming
+    /// in, and the scissor rect going out.
+    ///
+    /// Before Phase 27 the tree was fed `window.inner_size()` directly, which
+    /// winit reports in physical pixels, so at 200 % the whole chrome rendered
+    /// at half its intended apparent size.
+    ui_scale: f32,
     focused_ih: IH,
     #[allow(dead_code)]
     captured_ih: IH,
@@ -75,6 +87,7 @@ impl UserInterface {
             message_queue: VecDeque::new(),
             draw_ctx: DrawingContext::new(screen_w, screen_h),
             cursor_pos: Vec2::ZERO,
+            ui_scale: 1.0,
             focused_ih: IH::NONE,
             captured_ih: IH::NONE,
             hovered_ih: IH::NONE,
@@ -670,6 +683,24 @@ impl UserInterface {
     // Resize
     // -----------------------------------------------------------------------
 
+    /// Device pixels per layout unit. Feed `Window::scale_factor()`.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.ui_scale = scale.clamp(0.5, 8.0);
+    }
+
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Convert an OS pointer position (device pixels) into layout units.
+    pub fn to_logical(&self, physical_x: f64, physical_y: f64) -> Vec2 {
+        Vec2::new(
+            physical_x as f32 / self.ui_scale,
+            physical_y as f32 / self.ui_scale,
+        )
+    }
+
+    /// Resize the tree. `w` and `h` are **logical units**, not device pixels.
     pub fn resize(&mut self, w: f32, h: f32) {
         self.screen_size = Vec2::new(w, h);
         // Update root widget dimensions.
@@ -755,7 +786,7 @@ impl UserInterface {
 
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+                self.cursor_pos = self.to_logical(position.x, position.y);
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;

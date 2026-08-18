@@ -41,6 +41,11 @@ pub struct DrawingContext {
     current_clip: Rect,
     pub font_atlas: FontAtlas,
     pub icon_atlas: IconAtlas,
+    /// Phase 27-C. Lives here rather than on `UserInterface` because a widget
+    /// receives `&mut DrawingContext` in `draw()` and nothing else — which is
+    /// also the moment it knows its own interaction state, so it can both read
+    /// a wash value and retarget the track in one place.
+    pub motion: crate::motion::Animator,
 }
 
 impl DrawingContext {
@@ -53,11 +58,12 @@ impl DrawingContext {
             current_clip: root_clip,
             font_atlas: FontAtlas::new(),
             icon_atlas: IconAtlas::new(),
+            motion: crate::motion::Animator::new(),
         }
     }
 
-    /// Clear per-frame geometry. Does NOT clear the atlases — glyphs and icons
-    /// persist across frames.
+    /// Clear per-frame geometry. Does NOT clear the atlases or the animator —
+    /// glyphs, icons and in-flight tracks all persist across frames.
     pub fn clear(&mut self, screen_w: f32, screen_h: f32) {
         self.instances.clear();
         self.commands.clear();
@@ -150,6 +156,67 @@ impl DrawingContext {
                 .with_border(thickness, color),
             None,
         );
+    }
+
+    /// Render a resolved [`crate::style::Paint`] into `rect`.
+    ///
+    /// One call, so a widget cannot get the layering wrong. The order is fixed
+    /// and is the whole reason this helper exists: shadow and glow sit *behind*
+    /// the surface, the inset sits inside it, and the selection rail sits on
+    /// top of everything so it is never washed out by a gradient.
+    pub fn push_paint(&mut self, rect: Rect, paint: &crate::style::Paint) {
+        let radii = [paint.radius; 4];
+
+        if let Some(elevation) = paint.elevation {
+            self.push_drop_shadow_rounded(rect, radii, elevation);
+        }
+        if let Some(glow) = paint.glow {
+            self.push_primitive(
+                Primitive::glow(rect, radii, glow.radius, glow.color.bytes()),
+                None,
+            );
+        }
+
+        let mut fill = Primitive::fill(rect, paint.background)
+            .with_radii(radii)
+            .with_border(paint.border_thickness, paint.border);
+        if let Some(gradient) = paint.gradient {
+            fill = fill.with_gradient(gradient.to.bytes(), gradient.axis);
+            fill.fill_a = gradient.from.bytes();
+        }
+        self.push_primitive(fill, None);
+
+        if let Some(inset) = paint.inset {
+            self.push_primitive(
+                Primitive::inset_shadow(rect, radii, inset.blur, inset.color.bytes()),
+                None,
+            );
+        }
+
+        if let Some(rail) = paint.rail {
+            let width = crate::theme::active().geometry.stroke_rail;
+            self.push_primitive(
+                Primitive::fill(Rect::new(rect.x, rect.y, width, rect.h), rail),
+                None,
+            );
+        }
+    }
+
+    /// Vertical fade at the edge of a scrolling region.
+    ///
+    /// Phase 27-D, from the §2.4 audit: the Details panel cut off mid-row with
+    /// nothing to say content continued. Drawn as a gradient from the panel
+    /// colour to fully transparent, so it works over any content.
+    pub fn push_scroll_fade(&mut self, rect: Rect, surface: [u8; 4], from_top: bool) {
+        let transparent = [surface[0], surface[1], surface[2], 0];
+        let (from, to, axis) = if from_top {
+            (surface, transparent, [0.0, 1.0])
+        } else {
+            (transparent, surface, [0.0, 1.0])
+        };
+        let mut p = Primitive::fill(rect, from);
+        p = p.with_gradient(to, axis);
+        self.push_primitive(p, None);
     }
 
     /// Render a run of text using the font atlas.
@@ -442,6 +509,149 @@ mod tests {
         assert!(c.instances.is_empty());
         assert!(c.commands.is_empty());
         assert!(c.font_atlas.dirty, "atlas survives the frame boundary");
+    }
+
+    // ── Phase 27-D / 27-E: depth ────────────────────────────────────────────
+
+    #[test]
+    fn push_paint_layers_shadow_then_fill_then_inset_then_rail() {
+        // The order is the whole reason `push_paint` exists: a widget that
+        // emitted these by hand could put the rail under a gradient or the
+        // shadow over the fill, and both look like a rendering bug.
+        use crate::primitive::{FLAG_GRADIENT, FLAG_INSET, FLAG_SHADOW};
+        let mut c = ctx();
+        let t = crate::theme::active();
+        let paint = crate::style::Paint {
+            rail: Some([1, 2, 3, 255]),
+            ..crate::style::input(crate::style::VisualState::rest())
+        }
+        .at_elevation(t.elevation.popup);
+
+        c.push_paint(Rect::new(0.0, 0.0, 100.0, 24.0), &paint);
+
+        let flags: Vec<u32> = c.instances.iter().map(|p| p.flags).collect();
+        assert_eq!(flags.len(), 4, "shadow, fill, inset, rail");
+        assert_ne!(flags[0] & FLAG_SHADOW, 0, "shadow first, behind everything");
+        assert_eq!(flags[1] & FLAG_SHADOW, 0, "then the fill");
+        assert_ne!(flags[2] & FLAG_INSET, 0, "then the recession, inside it");
+        assert_eq!(flags[3], 0, "and the rail on top, unwashed");
+        assert_eq!(flags[1] & FLAG_GRADIENT, 0, "an input is never washed");
+    }
+
+    #[test]
+    fn a_flat_paint_emits_exactly_one_instance() {
+        // Depth is opt-in. A recipe that asked for none must cost nothing.
+        let mut c = ctx();
+        let paint = crate::style::tree_row(crate::style::VisualState::rest());
+        c.push_paint(Rect::new(0.0, 0.0, 100.0, 24.0), &paint);
+        assert_eq!(c.instances.len(), 1);
+    }
+
+    #[test]
+    fn a_gradient_paint_carries_both_stops_in_the_right_order() {
+        use crate::primitive::FLAG_GRADIENT;
+        let mut c = ctx();
+        let t = crate::theme::active();
+        let paint = crate::style::button(crate::style::VisualState::rest());
+        c.push_paint(Rect::new(0.0, 0.0, 100.0, 32.0), &paint);
+
+        let fill = c
+            .instances
+            .iter()
+            .find(|p| p.flags & FLAG_GRADIENT != 0)
+            .expect("a resting button is washed with chrome_wash");
+        assert_eq!(fill.fill_a, t.gradient.chrome_wash.from.bytes());
+        assert_eq!(fill.fill_b, t.gradient.chrome_wash.to.bytes());
+        assert_eq!(fill.grad_axis, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn the_focus_ring_is_the_only_state_that_glows() {
+        use crate::primitive::{FLAG_GLOW, FLAG_SHADOW};
+        let glowing = |paint: &crate::style::Paint| {
+            let mut c = ctx();
+            c.push_paint(Rect::new(0.0, 0.0, 80.0, 24.0), paint);
+            c.instances
+                .iter()
+                .any(|p| p.flags & FLAG_GLOW != 0 && p.flags & FLAG_SHADOW != 0)
+        };
+        let rest = crate::style::button(crate::style::VisualState::rest());
+        let focused = crate::style::button(crate::style::VisualState::rest().focused(true));
+        assert!(!glowing(&rest), "a resting control must not glow");
+        assert!(glowing(&focused), "a focused control must");
+    }
+
+    #[test]
+    fn a_disabled_control_is_neither_lit_nor_lifted() {
+        use crate::style::{Interaction, VisualState, button};
+        let disabled = button(VisualState::with(Interaction::Disabled).focused(true));
+        assert!(disabled.glow.is_none(), "disabled must not glow");
+        assert!(disabled.elevation.is_none(), "disabled must not lift");
+    }
+
+    #[test]
+    fn pressing_a_button_removes_its_lift() {
+        use crate::style::{Interaction, VisualState, button};
+        let rest = button(VisualState::rest());
+        let pressed = button(VisualState::with(Interaction::Pressed));
+        assert!(rest.elevation.is_some(), "a resting button sits above its panel");
+        assert!(
+            pressed.elevation.is_none(),
+            "a pressed button is pushed into it"
+        );
+    }
+
+    #[test]
+    fn an_input_is_recessed_and_a_button_is_raised() {
+        use crate::style::{VisualState, button, input};
+        assert!(input(VisualState::rest()).inset.is_some());
+        assert!(input(VisualState::rest()).elevation.is_none());
+        assert!(button(VisualState::rest()).elevation.is_some());
+        assert!(button(VisualState::rest()).inset.is_none());
+    }
+
+    #[test]
+    fn recipes_follow_the_active_theme() {
+        // The Dawn acceptance gate: swapping the snapshot must repaint every
+        // recipe without a single widget knowing it happened.
+        use crate::theme::{ThemeId, active_id, set_active};
+        let original = active_id();
+
+        set_active(ThemeId::Nocturne);
+        let dark = crate::style::button(crate::style::VisualState::rest());
+        set_active(ThemeId::Dawn);
+        let light = crate::style::button(crate::style::VisualState::rest());
+        set_active(original);
+
+        assert_ne!(dark.background, light.background);
+        assert_ne!(dark.foreground, light.foreground);
+        // Geometry is shared, so a swap never invalidates layout.
+        assert_eq!(dark.radius, light.radius);
+    }
+
+    #[test]
+    fn scroll_fade_runs_from_the_surface_to_fully_transparent() {
+        use crate::primitive::FLAG_GRADIENT;
+        let surface = [0x1C, 0x1E, 0x26, 0xFF];
+        let mut c = ctx();
+        c.push_scroll_fade(Rect::new(0.0, 0.0, 200.0, 12.0), surface, true);
+        assert_eq!(c.instances.len(), 1);
+        let p = c.instances[0];
+        assert_ne!(p.flags & FLAG_GRADIENT, 0);
+        assert_eq!(p.fill_a, surface, "opaque at the clipped edge");
+        assert_eq!(p.fill_b[3], 0, "and fully transparent at the other");
+        // The RGB must match so the fade does not tint the content it covers.
+        assert_eq!(p.fill_b[0..3], surface[0..3]);
+    }
+
+    #[test]
+    fn a_bottom_scroll_fade_runs_the_other_way() {
+        let surface = [0x1C, 0x1E, 0x26, 0xFF];
+        let mut c = ctx();
+        c.push_scroll_fade(Rect::new(0.0, 0.0, 200.0, 12.0), surface, false);
+        let p = c.instances[0];
+        assert_eq!(p.fill_a[3], 0);
+        assert_eq!(p.fill_b, surface);
     }
 
     #[test]

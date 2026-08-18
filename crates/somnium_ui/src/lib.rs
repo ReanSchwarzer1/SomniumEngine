@@ -8,6 +8,7 @@ pub mod icons;
 pub mod layout_persist;
 pub mod message;
 pub mod metaphor;
+pub mod motion;
 pub mod node;
 pub mod pass;
 pub mod primitive;
@@ -633,7 +634,16 @@ struct EditorLayout {
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
 pub struct UiManager {
     window: Arc<Window>,
+    /// Window size in **logical units** — what the widget tree, the collapse
+    /// rules and the workspace presets all measure against.
     window_size: (u32, u32),
+    /// Window size in device pixels, for the scissor rect.
+    physical_size: (u32, u32),
+    /// Device pixels per logical unit.
+    ui_scale: f32,
+    /// Wall clock of the previous `end_frame`, for the motion delta. `None`
+    /// until the first frame, which therefore advances nothing.
+    last_frame_at: Option<std::time::Instant>,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -966,8 +976,20 @@ impl UiManager {
         info!("Initializing native UI…");
 
         let size = window.inner_size();
-        let (sw, sh) = (size.width as f32, size.height as f32);
+        // The tree lays out in logical units so every density token keeps its
+        // apparent size at any DPI. `inner_size()` is device pixels.
+        let ui_scale = window.scale_factor() as f32;
+        let (sw, sh) = (
+            size.width as f32 / ui_scale,
+            size.height as f32 / ui_scale,
+        );
         let mut native_ui = UserInterface::new(sw, sh);
+        native_ui.set_ui_scale(ui_scale);
+        // Now that one layout unit is one *logical* pixel, the atlas can finally
+        // be told the real device ratio: glyphs rasterize at
+        // `px * ui_scale * SUPER_SAMPLE` and land in a quad that is exactly
+        // `px * ui_scale` device pixels wide.
+        native_ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
 
         let font_id = load_fonts(&mut native_ui);
 
@@ -980,7 +1002,10 @@ impl UiManager {
 
         let mut this = Self {
             window: Arc::clone(&window),
-            window_size: (size.width, size.height),
+            window_size: (sw.round() as u32, sh.round() as u32),
+            physical_size: (size.width, size.height),
+            ui_scale,
+            last_frame_at: None,
             native_ui,
             ui_pass,
             font_id,
@@ -1150,7 +1175,7 @@ impl UiManager {
         this.refresh_content_list();
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
-        this.apply_collapse_rules(size.width);
+        this.apply_collapse_rules(this.window_size.0);
         this
     }
 
@@ -1158,9 +1183,24 @@ impl UiManager {
 
     pub fn reposition_panels(&mut self, window: &Window) {
         let size = window.inner_size();
-        self.window_size = (size.width, size.height);
-        self.native_ui.resize(size.width as f32, size.height as f32);
-        self.apply_collapse_rules(size.width);
+        let ui_scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / ui_scale;
+        let logical_h = size.height as f32 / ui_scale;
+
+        self.ui_scale = ui_scale;
+        self.physical_size = (size.width, size.height);
+        self.window_size = (logical_w.round() as u32, logical_h.round() as u32);
+
+        self.native_ui.set_ui_scale(ui_scale);
+        // Dragging a window between monitors changes the scale factor, which
+        // invalidates every cached glyph. `set_render_scale` is a no-op when the
+        // ratio is unchanged, so this costs nothing on an ordinary resize.
+        self.native_ui
+            .draw_ctx
+            .font_atlas
+            .set_render_scale(ui_scale);
+        self.native_ui.resize(logical_w, logical_h);
+        self.apply_collapse_rules(self.window_size.0);
     }
 
     /// Switch to a named workspace and lay the shell out accordingly.
@@ -1300,14 +1340,22 @@ impl UiManager {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        // The font atlas is deliberately *not* told the window scale factor.
-        // The widget tree is laid out in physical pixels (`reposition_panels`
-        // passes `window.inner_size()`), so one layout unit is already one
-        // device pixel and `FontAtlas::render_scale` must stay 1.0. Feeding the
-        // scale factor here — as this line did before Phase 27-B — rasterized
-        // glyphs at `px * scale * SUPER_SAMPLE` and then minified them into a
-        // `px` quad, which softened text at 125 % and above instead of sharpening
-        // it. See `FontAtlas::render_scale` and `set_render_scale`.
+        // Scale and logical size are owned by `reposition_panels`, which winit
+        // calls for both Resized and ScaleFactorChanged. Nothing to do here.
+
+        // Phase 27-C. Advance motion before layout so a track that finished
+        // this frame settles into the layout it produced. The first frame has
+        // no previous timestamp and therefore advances nothing, and a tick with
+        // no live tracks returns false without touching the tree — which is what
+        // keeps an idle shell's draw list byte-identical.
+        let now = std::time::Instant::now();
+        if let Some(previous) = self.last_frame_at {
+            let dt_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
+            // A stalled frame (breakpoint, minimised window) must not teleport
+            // every track to its end state.
+            self.native_ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+        }
+        self.last_frame_at = Some(now);
 
         // Flush all queued widget messages; convert outgoing to EditorEvents.
         let outgoing = self.native_ui.update();
@@ -1317,15 +1365,20 @@ impl UiManager {
         let extra = self.native_ui.update();
         self.process_outgoing(extra);
 
-        let (w, h) = self.window_size;
+        let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
         self.reanchor_open_popups();
         self.update_tooltip();
         self.native_ui.perform_layout();
         self.native_ui.draw();
         window.set_cursor(self.native_ui.cursor_kind().to_winit());
-        self.ui_pass
-            .prepare(device, queue, &mut self.native_ui.draw_ctx, w, h);
+        self.ui_pass.prepare(
+            device,
+            queue,
+            &mut self.native_ui.draw_ctx,
+            crate::pass::UiSurface::new((logical_w, logical_h), (phys_w, phys_h)),
+        );
         self.ui_pass.render(encoder, view);
     }
 
@@ -1351,7 +1404,7 @@ impl UiManager {
             self.shift_held = m.state().shift_key();
         }
         if let WindowEvent::CursorMoved { position, .. } = event {
-            self.native_ui.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+            self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
         }
         // Phase 16-D: the Content Drawer's right-click menu.
         //
@@ -4619,6 +4672,122 @@ impl CollapseRules {
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod dpi_tests {
+    use super::*;
+
+    fn shell(logical_w: f32, logical_h: f32, scale: f32) -> UserInterface {
+        let mut ui = UserInterface::new(logical_w, logical_h);
+        ui.set_ui_scale(scale);
+        let font_id = load_fonts(&mut ui);
+        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        ui.perform_layout();
+        ui
+    }
+
+    fn bounds(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
+        ui.nodes
+            .try_borrow(handle.transmute())
+            .expect("layout handle should remain valid")
+            .widget
+            .screen_bounds()
+    }
+
+    #[test]
+    fn pointer_positions_convert_from_device_pixels_to_layout_units() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        ui.set_ui_scale(2.0);
+        assert_eq!(ui.to_logical(200.0, 100.0), glam::Vec2::new(100.0, 50.0));
+        ui.set_ui_scale(1.0);
+        assert_eq!(ui.to_logical(200.0, 100.0), glam::Vec2::new(200.0, 100.0));
+    }
+
+    #[test]
+    fn layout_is_identical_at_every_scale_for_the_same_logical_size() {
+        // The whole point of the fix: a density token means the same apparent
+        // size at 100 %, 150 % and 200 %. Before Phase 27 the tree was fed
+        // device pixels, so a 36 unit title bar shrank to a third of its
+        // intended height at 300 %.
+        let a = shell(1280.0, 720.0, 1.0);
+        let b = shell(1280.0, 720.0, 2.0);
+        let c = shell(1280.0, 720.0, 1.5);
+
+        for (h_a, h_b, h_c) in [
+            (a.root(), b.root(), c.root()),
+        ] {
+            assert_eq!(bounds(&a, h_a), bounds(&b, h_b));
+            assert_eq!(bounds(&a, h_a), bounds(&c, h_c));
+        }
+        assert_eq!(a.screen_size, b.screen_size);
+        assert_eq!(a.screen_size, c.screen_size);
+    }
+
+    #[test]
+    fn the_pre_scene_budget_is_measured_in_logical_units() {
+        // phase_26_Zeta redline: application 36 + mode 32 = 68 before the
+        // viewport, and that number must now hold at any DPI.
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let mut ui = UserInterface::new(1920.0, 1080.0);
+            ui.set_ui_scale(scale);
+            let font_id = load_fonts(&mut ui);
+            let layout = build_editor_layout(
+                &mut ui,
+                font_id,
+                crate::layout_persist::ChromeLayout::default(),
+            );
+            ui.perform_layout();
+            let viewport = bounds(&ui, layout.viewport_handle);
+            assert!(
+                (viewport.y - 68.0).abs() < 0.1,
+                "scale {scale}: viewport starts at {} not 68",
+                viewport.y
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_at_a_device_pixel_hits_the_widget_drawn_there() {
+        // The round trip that actually matters: the OS reports a pointer in
+        // device pixels, the tree hit-tests in logical units, and the two must
+        // agree or every control is offset at HiDPI.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        ui.set_ui_scale(2.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.perform_layout();
+
+        let save = bounds(&ui, layout.save_button);
+        assert!(save.w > 0.0 && save.h > 0.0, "save button must be laid out");
+
+        // Centre of the Save button, expressed the way winit would report it.
+        let device_x = (save.x + save.w * 0.5) as f64 * 2.0;
+        let device_y = (save.y + save.h * 0.5) as f64 * 2.0;
+        let logical = ui.to_logical(device_x, device_y);
+
+        assert!(
+            logical.x >= save.x && logical.x <= save.x + save.w,
+            "converted x {} outside {:?}",
+            logical.x,
+            save
+        );
+        assert!(ui.hit_test(logical).is_some(), "hit test must land on a widget");
+    }
+
+    #[test]
+    fn font_render_scale_follows_the_device_ratio() {
+        // With layout in logical units the atlas ratio is finally meaningful:
+        // a `px` tall glyph occupies `px * scale` device pixels, so it must
+        // rasterize at `px * scale * SUPER_SAMPLE`.
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        ui.draw_ctx.font_atlas.set_render_scale(2.0);
+        assert_eq!(ui.draw_ctx.font_atlas.render_scale, 2.0);
     }
 }
 

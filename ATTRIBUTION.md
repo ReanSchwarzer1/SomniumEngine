@@ -1717,3 +1717,71 @@ blend equation, the scissor clamp, the doubling buffer-grow strategy) are
 unchanged and still apply. §13.16's fontdue attribution is likewise unchanged —
 27-B altered how glyph quads are *placed* and *blended*, not how they are
 rasterized.
+
+
+---
+
+## 13F. Phase 27-C / 27-D / 27-E — motion, depth, and the second theme (2026-08-18)
+
+Continues §13E. Everything below is a **technique citation**; no source,
+shader, asset, or data was copied, and no dependency was added.
+
+### 13F.1 Easing curves
+
+**Pattern:** Hermite smoothstep (`t*t*(3-2t)`) for the symmetric ease-in-out, and
+a critically damped second-order step response for press feedback. Both are
+standard, long predating any particular UI toolkit. Somnium normalises the spring
+so `f(1) == 1` exactly, because an un-normalised critically damped curve
+asymptotes and would leave a permanent sub-pixel offset when the track retires.
+
+**Somnium implementation:** `crates/somnium_ui/src/motion.rs` — `Easing::apply`.
+The reduced-motion contract (identical end state, timing only) is asserted by
+`reduced_motion_reaches_the_same_end_state_instantly`.
+
+### 13F.2 Elevation ladder
+
+**Reference:** Microsoft's [Fluent 2 elevation](https://fluent2.microsoft.design/)
+and Material's elevation model both establish that a desktop surface hierarchy is
+better expressed as a small ordered ladder of shadow definitions than as ad-hoc
+per-component shadows. Concept only.
+
+**Somnium divergence:** Somnium's ladder deliberately leaves `canvas` and `panel`
+flat — elevation marks z-order, never decoration — which is the opposite of
+Material's practice of lifting cards. Dawn also drops every alpha rather than
+reusing the dark theme's, because the same alpha reads far heavier over a bright
+ground; `shadows_are_lighter_on_the_light_theme` checks all five rungs.
+
+**Somnium implementation:** `theme::ElevationTokens` (raised / popup / drawer /
+modal / toast), `style::Paint::at_elevation`, `draw::DrawingContext::push_paint`.
+
+### 13F.3 COSMIC theming concepts, applied
+
+**Reference:** System76's `libcosmic` (MPL-2.0), rejected as a dependency in
+`phase_27.md` §3.4.
+
+**Concept adopted in 27-E:** a theme is a *snapshot of roles* selected at runtime,
+not a set of constants compiled into the widgets. Somnium's `theme::active()`
+resolves through one relaxed atomic load over two compile-time constants, which is
+the smallest thing that ships two themes; a user-authored theme would need a
+different mechanism and that is recorded rather than pretended.
+
+**Somnium implementation:** `theme::{active, set_active, ThemeId, DAWN}`, and the
+conversion of every `style.rs` recipe from `NOCTURNE` constants to `active()`.
+
+### 13F.4 WCAG 2.x contrast mathematics
+
+**Reference:** [W3C WCAG 2.2 relative luminance and contrast ratio definitions](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html).
+Normative formulas, implemented directly.
+
+**Somnium implementation:** `theme::{relative_luminance, contrast_ratio}` and
+`certified_pairs_meet_wcag_aa_in_both_themes`, which certifies every text pair at
+4.5:1 and every state cue at 3:1 across both snapshots. It found six failing pairs
+in the previously shipped Nocturne palette on first run.
+
+### 13F.5 Note on §13.16 and §13.17
+
+`FontAtlas::render_scale` (27) is unrelated to the fontdue attribution in
+§13.16 — it changes the size glyphs are rasterized at, not how. The `UiPass`
+description in §13.17 was already superseded by §13E.7; 27 additionally
+replaced its `prepare` signature with `UiSurface`, which carries the logical and
+physical extents as one value.
