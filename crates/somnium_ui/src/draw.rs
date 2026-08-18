@@ -236,11 +236,11 @@ impl DrawingContext {
     /// [`crate::font::FontAtlas::measure_text_tracked`] can stay a pure
     /// `advance + tracking * count` calculation.
     ///
-    /// Phase 27-B: the glyph *quad* is snapped to whole device pixels while the
-    /// *cursor* keeps full fractional precision. The atlas is a bitmap, so a
-    /// quad landing on a half pixel is resampled by the linear sampler and the
-    /// stems smear; snapping puts the texel grid back in register. Advances are
-    /// untouched, so measured text width is unchanged.
+    /// Phase 27-B snaps the **text block origin** to whole pixels; glyphs are
+    /// then placed exactly relative to it. Snapping each glyph quad instead —
+    /// the first version of this — rounded every letter to its own subpixel
+    /// offset and made the baseline visibly ragged. Advances are untouched, so
+    /// measured text width is unchanged either way.
     pub fn push_text_tracked(
         &mut self,
         text: &str,
@@ -251,14 +251,27 @@ impl DrawingContext {
         tracking: f32,
     ) {
         // Ascent: distance from top-of-line to baseline (positive).
+        // Phase 27-B snapped each glyph quad to whole pixels *independently*,
+        // which was wrong and visibly so: `ymin + px_h` differs per glyph, so
+        // rounding each quad's top rounded every letter to its own subpixel
+        // offset and the baseline visibly jittered. The block origin is snapped
+        // once instead, and glyphs are placed exactly relative to it.
         let ascent = self.font_atlas.ascent(px, font_id);
-        let mut baseline_y = origin.y + ascent;
-        let mut cursor_x = origin.x;
+        let origin_x = origin.x.round();
+        let mut baseline_y = (origin.y + ascent).round();
+        let mut cursor_x = origin_x;
 
         for ch in text.chars() {
             if ch == '\n' {
-                cursor_x = origin.x;
-                baseline_y += self.font_atlas.measure_text("Ag", px, font_id).y.max(px);
+                cursor_x = origin_x;
+                // Rounded too, so every line shares one pixel phase rather than
+                // drifting down the paragraph.
+                baseline_y += self
+                    .font_atlas
+                    .measure_text("Ag", px, font_id)
+                    .y
+                    .max(px)
+                    .round();
                 continue;
             }
             let Some(info) = self.font_atlas.get_or_rasterize(ch, px, font_id) else {
@@ -273,8 +286,8 @@ impl DrawingContext {
             // Glyph top-left in screen space:
             //   x = cursor_x + xmin  (horizontal bearing)
             //   y = baseline_y - (ymin + px_h)  (freetype y-up → screen y-down)
-            let gx = (cursor_x + info.xmin).round();
-            let gy = (baseline_y - (info.ymin + info.px_h)).round();
+            let gx = cursor_x + info.xmin;
+            let gy = baseline_y - (info.ymin + info.px_h);
             let rect = Rect::new(gx, gy, info.px_w, info.px_h);
             let uv = [info.uv_min[0], info.uv_min[1], info.uv_max[0], info.uv_max[1]];
             self.push_primitive(
@@ -652,6 +665,91 @@ mod tests {
         let p = c.instances[0];
         assert_eq!(p.fill_a[3], 0);
         assert_eq!(p.fill_b, surface);
+    }
+
+    #[test]
+    fn every_glyph_in_a_run_sits_on_one_baseline() {
+        // Reproduces the reported defect directly: "some letters are a bit
+        // above others". Phase 27-B rounded each glyph quad's top, and because
+        // `ymin + px_h` differs per glyph that rounded every letter to its own
+        // subpixel offset. The baseline a glyph implies is `quad_top + px_h +
+        // ymin`; if the placement is sound, every glyph in a run implies the
+        // *same* baseline.
+        let mut c = ctx();
+        for cut in [
+            include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice(),
+            include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
+        ] {
+            c.font_atlas.add_font(cut).expect("bundled cut parses");
+        }
+
+        // Deliberately mixed: ascenders, descenders, x-height and digits, which
+        // is exactly where per-glyph rounding shows up.
+        for (font_id, px) in [(0u8, 13.0f32), (0, 11.0), (1, 12.0)] {
+            c.clear(800.0, 600.0);
+            c.push_text(
+                "Agxy 0369 Hlip",
+                Vec2::new(10.3, 20.7),
+                font_id,
+                px,
+                [255, 255, 255, 255],
+            );
+
+            let mut baselines: Vec<f32> = Vec::new();
+            for (i, ch) in "Agxy 0369 Hlip".chars().enumerate() {
+                let _ = i;
+                if ch == ' ' {
+                    continue;
+                }
+                if let Some(info) = c.font_atlas.get_or_rasterize(ch, px, font_id) {
+                    if info.px_h == 0.0 {
+                        continue;
+                    }
+                    baselines.push(info.px_h + info.ymin);
+                }
+            }
+            assert!(!baselines.is_empty(), "the run must rasterize");
+
+            // Recover each drawn glyph's implied baseline from the draw list.
+            let implied: Vec<f32> = c
+                .instances
+                .iter()
+                .zip(baselines.iter())
+                .map(|(p, offset)| p.rect[1] + offset)
+                .collect();
+            let first = implied[0];
+            for (n, b) in implied.iter().enumerate() {
+                assert!(
+                    (b - first).abs() < 0.001,
+                    "font {font_id} at {px}px: glyph {n} sits on baseline {b},                      not {first} — the run is not on one baseline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_text_block_starts_on_a_whole_pixel() {
+        // The bitmap atlas is sampled linearly, so a block landing on a half
+        // pixel smears every stem. Snapping the *origin* keeps the grid in
+        // register without disturbing the glyphs' relative placement.
+        let mut c = ctx();
+        c.font_atlas
+            .add_font(include_bytes!("../assets/fonts/Inter-Regular.ttf"))
+            .expect("bundled cut parses");
+        c.push_text("Hi", Vec2::new(10.4, 20.6), 0, 13.0, [255; 4]);
+        let first = c.instances.first().expect("a glyph was drawn");
+        // `xmin` is the glyph's own bearing and may be fractional; the pen
+        // origin it is measured from must not be.
+        let bearing = c
+            .font_atlas
+            .get_or_rasterize('H', 13.0, 0)
+            .map(|i| i.xmin)
+            .unwrap_or(0.0);
+        let pen_x = first.rect[0] - bearing;
+        assert!(
+            (pen_x - pen_x.round()).abs() < 0.001,
+            "the pen origin must be whole-pixel, got {pen_x}"
+        );
     }
 
     #[test]
