@@ -89,6 +89,81 @@ fn synchronize_path_trace_pause(
 }
 
 #[cfg(test)]
+mod content_target_tests {
+    use super::resolve_content_target;
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        Path::new("/project/assets")
+    }
+
+    #[test]
+    fn a_name_lands_in_the_folder_that_was_right_clicked() {
+        let path = resolve_content_target(root(), "scripts", "Enemy", Some("luau")).unwrap();
+        assert!(path.ends_with("Enemy.luau"), "{path:?}");
+        assert!(path.to_string_lossy().contains("scripts"), "{path:?}");
+
+        let at_root = resolve_content_target(root(), "", "Shared", None).unwrap();
+        assert!(at_root.ends_with("Shared"), "{at_root:?}");
+    }
+
+    #[test]
+    fn the_script_extension_is_added_but_never_doubled() {
+        for typed in ["Enemy", "Enemy.luau", "Enemy.LUAU"] {
+            let path = resolve_content_target(root(), "", typed, Some("luau")).unwrap();
+            assert!(
+                path.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("luau")),
+                "{typed} produced {path:?}"
+            );
+            assert!(
+                !path.to_string_lossy().to_ascii_lowercase().contains(".luau.luau"),
+                "{typed} produced {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_cannot_escape_the_content_root() {
+        // The whole reason this function exists: a modal takes a free
+        // string, and the drawer has no undo.
+        for attempt in ["../secrets", "..\\secrets", "..", ".", "a/b", "a\\b"] {
+            assert!(
+                resolve_content_target(root(), "", attempt, None).is_err(),
+                "`{attempt}` should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_blank_name_is_refused() {
+        assert!(resolve_content_target(root(), "", "", None).is_err());
+        assert!(resolve_content_target(root(), "", "   ", None).is_err());
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_rather_than_kept() {
+        let path = resolve_content_target(root(), "", "  Enemy  ", Some("luau")).unwrap();
+        assert!(path.ends_with("Enemy.luau"), "{path:?}");
+    }
+
+    #[test]
+    fn a_windows_reserved_name_is_refused_whatever_the_extension() {
+        // These are created happily and then cannot be opened again.
+        for reserved in ["con", "NUL", "Aux.luau", "com1"] {
+            assert!(
+                resolve_content_target(root(), "", reserved, Some("luau")).is_err(),
+                "`{reserved}` should have been refused"
+            );
+        }
+        assert!(
+            resolve_content_target(root(), "", "console", Some("luau")).is_ok(),
+            "a name that merely starts with a reserved word is fine"
+        );
+    }
+}
+
+#[cfg(test)]
 mod post_process_singleton_tests {
     use super::*;
 
@@ -270,6 +345,12 @@ pub struct Engine<G: GameApp> {
     config: EngineConfig,
     time: TimeState,
     world: World,
+    /// Phase 16-A: the engine's one reflected description of its
+    /// components. Built once at startup and shared by scene
+    /// serialization, the script boundary, and (when it exists) the
+    /// reflection inspector — the whole point being that there is exactly
+    /// one of these.
+    type_registry: somnium_ecs::reflect::TypeRegistry,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
     window: Option<Arc<Window>>,
@@ -353,6 +434,22 @@ pub struct Engine<G: GameApp> {
     ui_wants_exit: bool,
     /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
     pending_map_load: Option<crate::MapLoadResult>,
+    // ── Phase 16-C: scripting ────────────────────────────────────────────
+    /// Live scripts: the lifecycle, the scheduler and the command applier.
+    ///
+    /// Public so game code can load assets and install the entity-to-body
+    /// mapping `applyForce` needs; the engine drives the phases.
+    pub scripts: crate::script_host::ScriptHost,
+    /// Held keys and buttons as scripts see them. Separate from the
+    /// editor's own input handling because a script's view is a *sampled*
+    /// snapshot per fixed step, not an event stream.
+    script_input: crate::script_input::ScriptInputTracker,
+    /// The authored world as it was when Play was pressed. Stop restores
+    /// it, which is what stops a script dirtying the edit-time scene.
+    play_checkpoint: Option<crate::script_input::WorldCheckpoint>,
+    /// Fixed steps elapsed in this play session. Part of the deterministic
+    /// clock a script sees, and reset by Stop.
+    script_step: u64,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -389,6 +486,7 @@ impl<G: GameApp + 'static> Engine<G> {
             time: TimeState::new(config.target_fps),
             config,
             world: World::new(),
+            type_registry: crate::reflect_registry::component_registry(),
             physics: None,
             audio: None,
             window: None,
@@ -433,6 +531,10 @@ impl<G: GameApp + 'static> Engine<G> {
             scene_dirty: false,
             ui_wants_exit: false,
             pending_map_load: None,
+            scripts: crate::script_host::ScriptHost::default(),
+            script_input: crate::script_input::ScriptInputTracker::new(),
+            play_checkpoint: None,
+            script_step: 0,
         };
 
         event_loop
@@ -444,8 +546,539 @@ impl<G: GameApp + 'static> Engine<G> {
     }
 }
 
+impl<G: GameApp> Engine<G> {
+    // ── Phase 16-C: driving scripts from the frame loop ──────────────────
+
+    /// The clock a script sees. Fixed-step callbacks are handed
+    /// `fixed_delta` and simulation time and nothing else, because those
+    /// are the only two values that are the same on a replay.
+    fn script_time(
+        &self,
+        fixed_dt: f32,
+        dt: f32,
+    ) -> somnium_script::snapshot::TimeSnapshot {
+        somnium_script::snapshot::TimeSnapshot {
+            fixed_delta: fixed_dt,
+            delta: dt,
+            simulation_time: f64::from(self.simulation_clock.elapsed_seconds),
+            step: self.script_step,
+        }
+    }
+
+    fn sync_scripts(&mut self, dt: f32) {
+        let phase = somnium_script::runtime::PhaseInput {
+            time: self.script_time(self.simulation_clock.fixed_delta_seconds, dt),
+            input: self.script_input.snapshot(),
+        };
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        let report = self.scripts.sync(&mut self.world, &phase, &mut services);
+        if report.hit_cap {
+            warn!("script initialisation hit its cycle cap; see the Output Log");
+        }
+    }
+
+    fn script_fixed_update(&mut self, fixed_dt: f32, dt: f32) {
+        let time = self.script_time(fixed_dt, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts
+            .fixed_update(&mut self.world, time, &input, &mut services);
+    }
+
+    fn script_update(&mut self, dt: f32) {
+        let time = self.script_time(self.simulation_clock.fixed_delta_seconds, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts
+            .update(&mut self.world, time, &input, &mut services);
+    }
+
+    /// Phase 16-E: recompile scripts whose file changed and settled.
+    ///
+    /// A quarter of a second is long enough to cover an editor that
+    /// writes a file in several chunks and short enough that the reload
+    /// feels immediate. Nothing here can break a running session: a file
+    /// that no longer compiles keeps its live instances and publishes
+    /// diagnostics.
+    fn poll_script_reloads(&mut self) {
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+        let (reloaded, failed) = self.scripts.reload_changed(SETTLE);
+        if reloaded == 0 && failed == 0 {
+            return;
+        }
+        if let Some(ui) = self.ui_manager.as_mut() {
+            if failed == 0 {
+                ui.clear_script_errors();
+                ui.push_toast(&format!("Reloaded {reloaded} script(s)"));
+            } else {
+                ui.push_toast(&format!(
+                    "{failed} script(s) still failing — see the Output Log"
+                ));
+            }
+        }
+    }
+
+    /// Move everything scripts produced into the editor's Output Log.
+    ///
+    /// Always drained, even while stopped, so a compile error raised by an
+    /// import is not stuck in a buffer until the next Play.
+    fn drain_script_output(&mut self) {
+        let logs = self.scripts.take_logs();
+        let diagnostics = self.scripts.take_diagnostics();
+        let rejections = self.scripts.take_rejections();
+        if logs.is_empty() && diagnostics.is_empty() && rejections.is_empty() {
+            return;
+        }
+        let errors = diagnostics
+            .iter()
+            .filter(|d| d.severity == somnium_script::backend::Severity::Error)
+            .count();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            for line in logs {
+                ui.append_log(&line.to_string());
+            }
+            for diagnostic in &diagnostics {
+                ui.append_log(&format!("[script] {diagnostic}"));
+            }
+            for rejection in rejections {
+                ui.append_log(&format!("[script rejected] {rejection}"));
+            }
+            if errors > 0 {
+                ui.set_script_error_count(errors);
+            }
+        }
+    }
+
+    // ── Phase 16-D: the editor's scripting actions ───────────────────────
+
+    /// How many attachments the selection carries, if it carries a
+    /// `ScriptSet` at all.
+    fn selected_script_count(&self) -> Option<usize> {
+        let entity = self.selected_entity?;
+        self.world
+            .get::<somnium_script::attachment::ScriptSet>(entity)
+            .map(somnium_script::attachment::ScriptSet::len)
+    }
+
+    /// Run one script `EditorCommand` against the selection.
+    ///
+    /// Every scripting edit goes through the undo stack, so Ctrl+Z covers
+    /// attaching a behaviour the same way it covers moving an object.
+    fn push_script_command(
+        &mut self,
+        build: impl FnOnce(u32) -> Box<dyn crate::editor_commands::EditorCommand>,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        let command = build(entity.index());
+        self.undo_stack
+            .push(command, &mut self.world, &mut self.selected_entity);
+        self.scene_dirty = true;
+    }
+
+    /// Import a `.luau` file and attach it to the selection.
+    fn attach_script(&mut self, path: &std::path::Path) {
+        match self.scripts.import_script_file(path) {
+            Ok(asset) => {
+                if self.selected_entity.is_none() {
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.push_toast("Select an entity first, then click the script");
+                    }
+                    return;
+                }
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::AttachScriptCmd::new(entity, asset))
+                });
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast(&format!(
+                        "Attached {}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+            Err(diagnostics) => {
+                let errors = diagnostics.messages.len();
+                if let Some(ui) = &mut self.ui_manager {
+                    for message in &diagnostics.messages {
+                        ui.append_log(&format!("[script] {message}"));
+                    }
+                    ui.set_script_error_count(errors);
+                    ui.push_toast("Script failed to compile — see the Output Log");
+                }
+            }
+        }
+        self.drain_script_output();
+    }
+
+    // ── Content Drawer authoring ─────────────────────────────────────────
+
+    /// Resolve a name typed in the drawer to a path that is safe to write.
+    ///
+    /// Returns `None` — having already told the author why — when the name
+    /// would escape the content root, is empty, or names something that
+    /// already exists. **Nothing here overwrites.** Losing someone's file
+    /// to a mistyped name in a modal is not a recoverable mistake, and the
+    /// drawer has no undo.
+    fn content_target(
+        &mut self,
+        parent: &str,
+        name: &str,
+        force_extension: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
+        let root = std::env::current_dir().unwrap_or_default().join("assets");
+        match resolve_content_target(&root, parent, name, force_extension) {
+            Ok(path) if path.exists() => {
+                self.report_content_error(&path, "something with that name is already here");
+                None
+            }
+            Ok(path) => Some(path),
+            Err(reason) => {
+                self.report_content_error(std::path::Path::new(name), reason);
+                None
+            }
+        }
+    }
+
+    /// Refresh the drawer and say what happened.
+    fn after_content_change(&mut self, message: &str) {
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.refresh_content();
+            ui.push_toast(message);
+        }
+    }
+
+    /// Report a content operation that could not be done.
+    fn report_content_error(&mut self, path: &std::path::Path, reason: &str) {
+        let text = format!("{}: {reason}", path.display());
+        error!("{text}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.append_log(&format!("[content] {text}"));
+            ui.push_toast(reason);
+        }
+    }
+
+    /// Write a new `.luau` file from the template and attach it.
+    ///
+    /// Never overwrites: a name that exists gets a numeric suffix. Losing
+    /// someone's script to a menu click is not a recoverable mistake.
+    fn create_script(&mut self) {
+        let folder = std::env::current_dir()
+            .unwrap_or_default()
+            .join("assets")
+            .join("scripts");
+        if let Err(error) = std::fs::create_dir_all(&folder) {
+            error!("cannot create {}: {error}", folder.display());
+            return;
+        }
+        let mut path = folder.join("NewScript.luau");
+        let mut suffix = 1;
+        while path.exists() {
+            path = folder.join(format!("NewScript{suffix}.luau"));
+            suffix += 1;
+        }
+        if let Err(error) = std::fs::write(&path, crate::script_host::NEW_SCRIPT_TEMPLATE) {
+            error!("cannot write {}: {error}", path.display());
+            return;
+        }
+        info!("Created {}", path.display());
+        self.attach_script(&path);
+        if let Some(ui) = &mut self.ui_manager {
+            ui.refresh_content();
+        }
+    }
+
+    /// Apply one property edit, recording it only when the gesture ends.
+    fn set_script_property(
+        &mut self,
+        index: usize,
+        field: String,
+        value: somnium_script::value::ScriptValue,
+        live: bool,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        if live {
+            // Mid-drag: apply it, do not record it. The gesture's final
+            // value arrives once with `live == false` and becomes the one
+            // undo step — the same convention `SetInspectorValue` uses.
+            if let Some(set) = self
+                .world
+                .get_mut::<somnium_script::attachment::ScriptSet>(entity)
+            {
+                if let Some(attachment) = set.attachments.get_mut(index) {
+                    attachment.properties.insert(field, value);
+                }
+            }
+            self.scene_dirty = true;
+            return;
+        }
+        self.push_script_command(|entity_index| {
+            Box::new(crate::editor_commands::SetScriptPropertyCmd::new(
+                entity_index,
+                index,
+                field,
+                value,
+            ))
+        });
+    }
+
+    /// Describe the selection's attachments for the Details panel.
+    ///
+    /// Every row here comes from the script's own declaration. Nothing in
+    /// this function names a property, and adding one to a `.luau` file
+    /// changes nothing in Rust.
+    fn script_inspector_state(&self) -> Option<somnium_ui::ScriptInspectorState> {
+        let entity = self.selected_entity?;
+        let set = self
+            .world
+            .get::<somnium_script::attachment::ScriptSet>(entity)?;
+
+        let mut attachments = Vec::with_capacity(set.attachments.len());
+        for attachment in &set.attachments {
+            let schema = self.scripts.runtime().asset_schema(attachment.asset);
+            let asset_name = self
+                .scripts
+                .script_path(attachment.asset)
+                .and_then(|path| path.file_name())
+                .map_or_else(
+                    || attachment.asset.to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+
+            let quarantined = self.scripts.runtime().is_quarantined(attachment.instance);
+            let status = match self.scripts.state_of(attachment.instance) {
+                Some(state) if quarantined => {
+                    format!("{} — quarantined after repeated errors", state.name())
+                }
+                Some(state) => state.name().to_string(),
+                None if schema.is_none() => "asset not imported".to_string(),
+                None => "not running (press Play)".to_string(),
+            };
+
+            let fields = schema.map_or_else(Vec::new, |schema| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let authored = attachment.properties.get(&field.name);
+                        let value = authored.unwrap_or(&field.default);
+                        somnium_ui::ScriptFieldRow {
+                            name: field.name.clone(),
+                            kind: script_field_kind(value, field),
+                            description: field.description.clone(),
+                        }
+                    })
+                    .collect()
+            });
+
+            attachments.push(somnium_ui::ScriptAttachmentRow {
+                asset_name,
+                status,
+                enabled: attachment.enabled,
+                quarantined,
+                fields,
+            });
+        }
+        Some(somnium_ui::ScriptInspectorState { attachments })
+    }
+
+    /// Capture the authored world so Stop can put it back, and start the
+    /// script clock from zero.
+    fn begin_play_session(&mut self) {
+        self.play_checkpoint = Some(crate::script_input::WorldCheckpoint::capture(
+            &mut self.world,
+            &self.type_registry,
+        ));
+        self.script_step = 0;
+        self.scripts.runtime_mut().set_world_seed(SCRIPT_WORLD_SEED);
+    }
+
+    /// Tear every script down and restore the world exactly as it was.
+    fn end_play_session(&mut self) {
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+        };
+        self.scripts.shutdown(&mut self.world, &mut services);
+        if let Some(checkpoint) = self.play_checkpoint.take() {
+            checkpoint.restore(&mut self.world, &self.type_registry);
+        }
+        self.script_step = 0;
+        self.drain_script_output();
+    }
+}
+
+/// How one declared property is drawn.
+///
+/// Numbers and booleans are editable; everything else is shown read-only
+/// rather than hidden, because an absent row looks like the script forgot
+/// to declare the property and a visible one says "not authorable yet".
+fn script_field_kind(
+    value: &somnium_script::value::ScriptValue,
+    field: &somnium_script::backend::ScriptFieldSchema,
+) -> somnium_ui::ScriptFieldKind {
+    use somnium_script::value::ScriptValue as V;
+    match value {
+        #[allow(clippy::cast_possible_truncation)]
+        V::F64(v) => somnium_ui::ScriptFieldKind::Number {
+            value: *v as f32,
+            min: field.min.map(|m| m as f32),
+            max: field.max.map(|m| m as f32),
+        },
+        #[allow(clippy::cast_precision_loss)]
+        V::I64(v) => somnium_ui::ScriptFieldKind::Number {
+            value: *v as f32,
+            min: field.min.map(|m| m as f32),
+            max: field.max.map(|m| m as f32),
+        },
+        V::Bool(v) => somnium_ui::ScriptFieldKind::Bool(*v),
+        V::Str(v) => somnium_ui::ScriptFieldKind::Text(v.clone()),
+        V::Nil => somnium_ui::ScriptFieldKind::Text("unset".into()),
+        other => somnium_ui::ScriptFieldKind::Text(other.kind().to_string()),
+    }
+}
+
+/// Turn a name typed in the Content Drawer into a path inside the content
+/// root, or say why it cannot be one.
+///
+/// Separated from the engine so the rules are testable without a window.
+/// They are worth testing: this is the only place in the editor where a
+/// string an author typed becomes a filesystem path, and the drawer has
+/// no undo.
+///
+/// # Errors
+///
+/// A message fit to show in a toast.
+fn resolve_content_target(
+    root: &std::path::Path,
+    parent: &str,
+    name: &str,
+    force_extension: Option<&str>,
+) -> Result<std::path::PathBuf, &'static str> {
+    let leaf = name.trim();
+    if leaf.is_empty() {
+        return Err("a name cannot be empty");
+    }
+    // A separator would let `../..` walk out of the content root, and
+    // creating into a nested folder is not what the menu offers anyway.
+    if leaf.contains(['/', '\\']) || leaf == "." || leaf == ".." {
+        return Err("a name cannot contain a path separator");
+    }
+    // Windows reserves these whatever the extension, and a file named
+    // after one is created and then unopenable.
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "lpt1", "lpt2", "lpt3",
+    ];
+    let stem = leaf.split('.').next().unwrap_or(leaf).to_ascii_lowercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Err("that name is reserved by the operating system");
+    }
+
+    let mut path = if parent.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(parent)
+    }
+    .join(leaf);
+
+    if let Some(extension) = force_extension {
+        if path
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case(extension))
+        {
+            // `set_extension` replaces rather than appends, which is what
+            // turns `Player.controller` into `Player.luau` rather than
+            // `Player.controller.luau`.
+            path.set_extension(extension);
+        }
+    }
+
+    // Belt and braces on the separator check: whatever the name was, the
+    // result has to still be under the content root.
+    if !path.starts_with(root) {
+        return Err("that would land outside the content folder");
+    }
+    Ok(path)
+}
+
+/// Open the OS file browser at `path`, selecting it where the platform
+/// supports that.
+///
+/// Deliberately *reveal*, not *open*. Opening a `.luau` means launching
+/// whatever the OS has associated with the extension, which on a fresh
+/// machine is nothing, and on a developer's machine is a coin toss.
+/// Choosing an editor is its own sub-phase; showing someone where the
+/// file is costs nothing and is never wrong.
+///
+/// # Errors
+///
+/// A message naming what the platform said.
+fn reveal_in_file_browser(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("that file is no longer there".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer")
+        .arg("/select,")
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        // No "select the file" on the freedesktop side, so open the
+        // folder it is in rather than the file itself — which would hand
+        // it to whatever `.luau` is associated with, if anything.
+        .arg(path.parent().unwrap_or(path))
+        .spawn();
+
+    // `explorer` returns a non-zero exit code even when it succeeds, so
+    // the spawn is what is checked and the status deliberately is not.
+    result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// The seed every play session's script random streams derive from.
+///
+/// Fixed rather than clock-derived: Phase 16 promises that the same build
+/// on the same platform replays identically, and a wall-clock seed would
+/// break that on the first frame.
+const SCRIPT_WORLD_SEED: u64 = 0x536F_6D6E_6975_6D01;
+
 impl<G: GameApp> ApplicationHandler for Engine<G> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Phase 16-F: keep the generated `.d.luau` current.
+        //
+        // Rewritten only when it differs from what is on disk, so an
+        // ordinary run does not dirty the working tree — and so a
+        // component added to the registry updates it without anyone
+        // having to remember to regenerate.
+        {
+            let path = crate::script_decls::default_declarations_path();
+            let generated = crate::script_decls::generate_declarations(&self.type_registry);
+            let current = std::fs::read_to_string(&path).is_ok_and(|on_disk| on_disk == generated);
+            if !current {
+                match std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                    .and_then(|()| std::fs::write(&path, &generated))
+                {
+                    Ok(()) => info!("Wrote script declarations to {}", path.display()),
+                    Err(error) => warn!("could not write {}: {error}", path.display()),
+                }
+            }
+        }
+
         if self.physics.is_none() {
             self.physics = Some(PhysicsWorld::new(PhysicsConfig::default()));
         }
@@ -471,6 +1104,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Resumed);
             return;
@@ -528,6 +1162,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
+                    &mut self.scripts,
                 );
                 self.game.on_init(&mut ctx);
 
@@ -559,6 +1194,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &EngineEvent::Suspended);
         }
@@ -859,6 +1495,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── 5. Forward remaining events to game ──────────────────────────────
         if let Some(engine_event) = translate_window_event(&event) {
+            // Phase 16-C: scripts see a sampled snapshot per fixed step
+            // rather than the event stream, so the tracker folds every
+            // event in here and the phase reads it later.
+            self.script_input.observe(&engine_event);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -871,6 +1511,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &engine_event);
             let speed_request = ctx.camera_speed_request;
@@ -915,6 +1556,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         };
 
         if let Some(ev) = engine_event {
+            self.script_input.observe(&ev);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -927,6 +1569,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_event(&mut ctx, &ev);
         }
@@ -939,6 +1582,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
+        // Phase 16-F: the script profiler counters are per frame, and the
+        // frame starts here.
+        self.scripts.begin_frame();
 
         let path_tracer_active = self
             .world
@@ -955,6 +1601,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Editor-world simulations (water, buoyancy, particles, previews) run
         // in ordinary Edit mode. Pause is the only state that freezes time;
         // Play remains a game-state distinction, not an animation power switch.
+        // Phase 16-C: reconcile the live script set with the authored one
+        // before any phase runs, so an attachment added this frame is
+        // initialised this frame. Only while Play is running — scripts are
+        // not allowed to dirty the edit-time scene.
+        if self.simulation_clock.state == SimulationState::Playing {
+            self.sync_scripts(dt);
+        }
+
         if self.simulation_clock.state != SimulationState::Paused {
             self.simulation_accumulator += dt.min(0.1);
             let fixed_dt = self.simulation_clock.fixed_delta_seconds;
@@ -972,8 +1626,30 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.ui_manager.as_mut().unwrap(),
                         crate::camera_speed_from_normalized(self.camera_speed_norm),
                         self.simulation_clock,
+                        &mut self.scripts,
                     );
                     self.game.on_fixed_update(&mut ctx);
+                }
+                // `onFixedUpdate` runs here, inside the accumulator and
+                // **before** `physics.step`, so a force a script applies is
+                // integrated by the same step that applied it. This is the
+                // deterministic hook; nothing about the loop needed
+                // restructuring to get it.
+                if self.simulation_clock.state == SimulationState::Playing {
+                    // Jolt → components, so a script sees the velocity it
+                    // actually has after last step's collisions rather
+                    // than the one it asked for.
+                    if let Some(physics) = self.physics.as_ref() {
+                        crate::character::read_physics_into_world(&mut self.world, physics);
+                    }
+                    self.script_fixed_update(fixed_dt, dt);
+                    // Components → Jolt, after the command apply, so a
+                    // script's write is the last word before integration.
+                    if let Some(physics) = self.physics.as_mut() {
+                        crate::character::write_world_into_physics(&self.world, physics);
+                    }
+                    self.script_input.end_step();
+                    self.script_step += 1;
                 }
                 if let Some(physics) = self.physics.as_mut() {
                     physics.step(fixed_dt);
@@ -1017,9 +1693,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_update(&mut ctx);
         }
+
+        // Phase 16-C: the variable-rate script phase, and the one place
+        // script output reaches the editor's Output Log.
+        if self.simulation_clock.state == SimulationState::Playing {
+            self.script_update(dt);
+        }
+        // Phase 16-E: pick up edits made outside the editor. Runs while
+        // stopped as well as while playing — an author fixing a compile
+        // error wants to see it clear without pressing anything, and a
+        // file that still does not compile costs nothing but a diagnostic.
+        self.poll_script_reloads();
+        self.drain_script_output();
 
         // Phase IV-C: ECS membership is authoritative for renderer-owned water
         // data. Delete drops textures; undo/redo recreates them from the small
@@ -1322,6 +2011,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     show_width: matches!(lc.light_type, LightType::Rect | LightType::Tube),
                     show_height: lc.light_type == LightType::Rect,
                 });
+            // Phase 16-D: the Scripts section, built from what each
+            // attached script declared. Computed before the `ui` borrow
+            // because it reads the world and the script host.
+            let sel_scripts = self.script_inspector_state();
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
                 ui.set_fps(self.time.fps());
@@ -1382,6 +2075,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .map(|m| m.base_color)
                 });
                 ui.update_material_inspector(material);
+                ui.update_script_inspector(sel_scripts);
                 ui.set_scene_dirty(self.scene_dirty);
                 // Phase 26-Zeta-G. Must run after the update_* writes above:
                 // the first value a field is seen holding becomes its revert
@@ -1425,6 +2119,32 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         value: format!("{:.3} ms", p.unattributed_ms()),
                         depth: 1,
                     });
+                    // Phase 16-F. CPU only, and labelled as such: there
+                    // is no GPU side to a script, and a row under "GPU"
+                    // that was really wall time would be a lie that took
+                    // someone a morning to find.
+                    let script = self.scripts.stats();
+                    rows.push(somnium_ui::ProfilerRow {
+                        label: "— Scripts (CPU) —".to_string(),
+                        value: format!("{:.3} ms", script.total_ms()),
+                        depth: 0,
+                    });
+                    for (label, value) in [
+                        ("fixed", format!("{:.3} ms", script.fixed_ms)),
+                        ("update", format!("{:.3} ms", script.update_ms)),
+                        ("sync + teardown", format!("{:.3} ms", script.sync_ms)),
+                        ("calls", script.calls.to_string()),
+                        ("commands applied", script.commands.to_string()),
+                        ("errors", script.errors.to_string()),
+                        ("live instances", script.instances.to_string()),
+                        ("VM memory", format!("{} KiB", script.vm_bytes / 1024)),
+                    ] {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: label.to_string(),
+                            value,
+                            depth: 1,
+                        });
+                    }
                     rows.push(somnium_ui::ProfilerRow {
                         label: "— Graph —".to_string(),
                         value: String::new(),
@@ -1530,6 +2250,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
+                &mut self.scripts,
             );
             self.game.on_render(&mut ctx);
 
@@ -1615,6 +2336,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
+                    &mut self.scripts,
                 );
                 self.game.on_map_loaded(&mut ctx, &result);
             }
@@ -3710,7 +4432,16 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SaveScene => {
                 let path = "scene.somnium";
-                match crate::scene_serial::save_scene(&self.world, path) {
+                // Phase 16-A: the schema-driven format (`version: 3`).
+                // It writes whatever the registry describes, which is how
+                // script attachments and their authored properties reach
+                // the file at all — the hand-written version-1 walk has no
+                // way to express them.
+                match crate::scene_schema::save_scene_schema(
+                    &mut self.world,
+                    &self.type_registry,
+                    path,
+                ) {
                     Ok(()) => {
                         info!("Scene saved to {}", path);
                         self.scene_dirty = false;
@@ -4077,7 +4808,182 @@ impl<G: GameApp> Engine<G> {
                 info!("Viewport 3D {label} ({sw}×{sh})");
             }
 
+            // ── Phase 16-D: scripting ────────────────────────────────────
+            EditorEvent::AttachScript(path) => self.attach_script(&std::path::PathBuf::from(path)),
+
+            EditorEvent::CreateScript => self.create_script(),
+
+            EditorEvent::DetachScript(index) => {
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::DetachScriptCmd::new(entity, index))
+                });
+            }
+
+            EditorEvent::ReorderScript { index, delta } => {
+                let Some(count) = self.selected_script_count() else {
+                    return;
+                };
+                let target = i64::try_from(index).unwrap_or(0) + i64::from(delta);
+                if target < 0 || target >= i64::try_from(count).unwrap_or(0) {
+                    // Already at the end of the list. Silently doing
+                    // nothing is right here — the arrow is visible on every
+                    // row and clamping is what a list is expected to do.
+                    return;
+                }
+                let to = usize::try_from(target).unwrap_or(0);
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::ReorderScriptCmd::new(
+                        entity, index, to,
+                    ))
+                });
+            }
+
+            EditorEvent::SetScriptEnabled { index, enabled } => {
+                self.push_script_command(|entity| {
+                    Box::new(crate::editor_commands::SetScriptEnabledCmd::new(
+                        entity, index, enabled,
+                    ))
+                });
+            }
+
+            EditorEvent::SetScriptNumber {
+                index,
+                field,
+                value,
+                live,
+            } => {
+                self.set_script_property(
+                    index,
+                    field,
+                    somnium_script::value::ScriptValue::F64(f64::from(value)),
+                    live,
+                );
+            }
+
+            EditorEvent::SetScriptBool {
+                index,
+                field,
+                value,
+            } => {
+                self.set_script_property(
+                    index,
+                    field,
+                    somnium_script::value::ScriptValue::Bool(value),
+                    false,
+                );
+            }
+
+            EditorEvent::CreateContentFolder { parent, name } => {
+                let Some(path) = self.content_target(&parent, &name, None) else {
+                    return;
+                };
+                match std::fs::create_dir(&path) {
+                    Ok(()) => {
+                        info!("Created {}", path.display());
+                        self.after_content_change(&format!(
+                            "Created folder {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error.to_string()),
+                }
+            }
+
+            EditorEvent::CreateContentScript { parent, name } => {
+                let Some(path) = self.content_target(&parent, &name, Some("luau")) else {
+                    return;
+                };
+                match std::fs::write(&path, crate::script_host::NEW_SCRIPT_TEMPLATE) {
+                    Ok(()) => {
+                        info!("Created {}", path.display());
+                        // Import it straight away and attach it if
+                        // something is selected. Creating a script and
+                        // then having to find it in the drawer to attach
+                        // it is two steps where one will do.
+                        self.attach_script(&path);
+                        self.after_content_change(&format!(
+                            "Created {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error.to_string()),
+                }
+            }
+
+            EditorEvent::RenameContentItem { path, name } => {
+                let from = std::path::PathBuf::from(path);
+                let leaf = name.trim();
+                if leaf.is_empty() || leaf.contains(['/', '\\']) {
+                    self.report_content_error(&from, "a name cannot contain a path separator");
+                    return;
+                }
+                // Keep the extension if the author did not retype it, so
+                // renaming `Player.luau` to `Character` does not quietly
+                // produce a file the importer no longer recognises.
+                let mut target = from.with_file_name(leaf);
+                if let (Some(old), None) = (from.extension(), target.extension()) {
+                    target.set_extension(old);
+                }
+                if target == from {
+                    return;
+                }
+                if target.exists() {
+                    self.report_content_error(&target, "something with that name is already here");
+                    return;
+                }
+                match std::fs::rename(&from, &target) {
+                    Ok(()) => {
+                        info!("Renamed {} to {}", from.display(), target.display());
+                        // A script's asset id is derived from its path, so
+                        // a rename makes a *different* asset. Attachments
+                        // that named the old one now reference something
+                        // that is not there, and say so in the panel —
+                        // which is honest, and better than silently
+                        // re-pointing them at a file the author may have
+                        // meant to fork.
+                        if from.extension().is_some_and(|e| e.eq_ignore_ascii_case("luau")) {
+                            let _ = self.scripts.import_script_file(&target);
+                            self.drain_script_output();
+                        }
+                        self.after_content_change(&format!(
+                            "Renamed to {}",
+                            target.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&from, &error.to_string()),
+                }
+            }
+
+            EditorEvent::ShowContentItemInFolder(path) => {
+                let path = std::path::PathBuf::from(path);
+                if let Err(error) = reveal_in_file_browser(&path) {
+                    self.report_content_error(&path, &error);
+                }
+            }
+
+            EditorEvent::ReloadScripts => {
+                let (ok, failed) = self.scripts.reload_all_from_disk();
+                self.drain_script_output();
+                if let Some(ui) = &mut self.ui_manager {
+                    if failed == 0 {
+                        ui.clear_script_errors();
+                        ui.push_toast(&format!("Reloaded {ok} script(s)"));
+                    } else {
+                        ui.push_toast(&format!(
+                            "Reloaded {ok} script(s); {failed} still failing — see the Output Log"
+                        ));
+                    }
+                }
+            }
+
             EditorEvent::PlaySimulation => {
+                // Phase 16-D: the authored world is captured on the way in,
+                // once per session. Resuming from Pause must not recapture
+                // it — that would silently make everything a script has
+                // done so far the new "authored" state.
+                if !self.play_session_active {
+                    self.begin_play_session();
+                }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
                 self.gizmo_drag = None;
@@ -4109,6 +5015,12 @@ impl<G: GameApp> Engine<G> {
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
                 self.simulation_accumulator = 0.0;
+                // Phase 16-D: tear the scripts down and put the authored
+                // world back before anything else observes it, so Stop is
+                // exact rather than approximately exact.
+                if self.play_session_active {
+                    self.end_play_session();
+                }
                 self.play_session_active = false;
                 if let Some(r) = &mut self.renderer {
                     r.set_editor_overlays_enabled(true);

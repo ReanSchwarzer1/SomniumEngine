@@ -27,7 +27,10 @@ use crate::editor::{
     inspector::build_inspector,
     shell::build_editor_layout,
 };
-pub use editor_event::{ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle};
+pub use editor_event::{
+    ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle, ScriptAttachmentRow,
+    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState,
+};
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
 
@@ -45,6 +48,7 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
+        context_menu::{ContextMenuMessage, MenuItem},
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
         grid::GridMessage,
@@ -57,6 +61,7 @@ use crate::{
         slider::SliderMessage,
         splitter::SplitterMessage,
         stack_panel::{Orientation, StackPanelBuilder},
+        text_box::TextBoxMessage,
         text::TextBuilder,
         toast::ToastMessage,
         tree_view::{TreeItem, TreeViewMessage},
@@ -69,6 +74,53 @@ use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window};
+
+/// Items the Content Drawer's right-click menu can offer.
+///
+/// Numbered rather than positional, because which items appear depends on
+/// what was clicked — a file gets Rename, empty space does not — and a
+/// menu that reported "the third one" would mean something different in
+/// each case.
+mod content_menu_id {
+    pub const NEW_FOLDER: u32 = 1;
+    pub const NEW_SCRIPT: u32 = 2;
+    pub const RENAME: u32 = 3;
+    pub const SHOW_IN_FOLDER: u32 = 4;
+    pub const REFRESH: u32 = 5;
+}
+
+/// What confirming the name prompt will do.
+///
+/// The prompt is one widget serving three flows, so it carries the flow
+/// with it rather than the editor keeping a mode flag beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NamePrompt {
+    /// Create a folder in this content-relative directory.
+    NewFolder { parent: String },
+    /// Create a script in this content-relative directory.
+    NewScript { parent: String },
+    /// Rename this absolute path.
+    Rename { path: String },
+}
+
+/// What one generated widget in the Scripts section does.
+///
+/// Carried beside the handle rather than encoded in a field enum, because
+/// the rows are built from a script's declaration and there is no fixed
+/// set of them to enumerate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScriptWidgetAction {
+    /// The attachment's enable checkbox.
+    Enable(usize),
+    /// Move it earlier or later in execution order.
+    Reorder(usize, i32),
+    /// Remove it.
+    Detach(usize),
+    /// A declared numeric property.
+    Number(usize, String),
+    /// A declared boolean property.
+    Bool(usize, String),
+}
 
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
@@ -203,6 +255,12 @@ struct InspectorHandles {
     particle_end: NodeHandle,
     material_section: NodeHandle,
     material_base: NodeHandle,
+    /// Phase 16-D. The Scripts section holds a header, a "New Script"
+    /// button and `script_list`; every row inside the list is built from a
+    /// script's declared schema at refresh time, not here.
+    script_section: NodeHandle,
+    script_add: NodeHandle,
+    script_list: NodeHandle,
     vessel_section: NodeHandle,
     vessel_buoyancy: NodeHandle,
     vessel_drag: NodeHandle,
@@ -551,6 +609,13 @@ struct EditorLayout {
     unsaved_save: NodeHandle,
     unsaved_discard: NodeHandle,
     unsaved_cancel: NodeHandle,
+    content_menu_popup: NodeHandle,
+    content_menu: NodeHandle,
+    name_popup: NodeHandle,
+    name_title: NodeHandle,
+    name_input: NodeHandle,
+    name_ok: NodeHandle,
+    name_cancel: NodeHandle,
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     title_drag: NodeHandle,
@@ -712,6 +777,13 @@ pub struct UiManager {
     unsaved_save: NodeHandle,
     unsaved_discard: NodeHandle,
     unsaved_cancel: NodeHandle,
+    content_menu_popup: NodeHandle,
+    content_menu: NodeHandle,
+    name_popup: NodeHandle,
+    name_title: NodeHandle,
+    name_input: NodeHandle,
+    name_ok: NodeHandle,
+    name_cancel: NodeHandle,
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     help_open: bool,
@@ -741,7 +813,38 @@ pub struct UiManager {
     color_target: Option<crate::ColorField>,
     color_original: [f32; 4],
     color_live: [f32; 4],
+    /// What the Content Drawer's right-click menu is currently about.
+    ///
+    /// Set when the menu opens and read when an item is chosen, because
+    /// the menu itself only reports an id — the *subject* is the editor's
+    /// to remember.
+    content_menu_target: Option<crate::metaphor::ContentEntry>,
+    /// Which folder a right-click happened in, so a "New Folder" from
+    /// inside `scripts/` lands in `scripts/` and not at the root.
+    content_menu_folder: String,
+    /// What confirming the name prompt will do.
+    name_prompt: Option<NamePrompt>,
+    /// What is currently typed in the name prompt.
+    ///
+    /// Mirrored here rather than read back from the widget on confirm:
+    /// the box reports every keystroke, and asking a widget for its state
+    /// is the pattern this UI does not have.
+    name_text: String,
+    /// Phase 16-D: the Scripts section as it was last built.
+    ///
+    /// Rebuilding a widget tree per frame would be wasteful and would eat
+    /// the focus of any field being typed into, so the section is rebuilt
+    /// only when this differs from what the engine offers.
+    script_state: ScriptInspectorState,
+    /// What each generated widget in the Scripts section does. Rebuilt
+    /// alongside the widgets, so a handle can never outlive its meaning.
+    script_widgets: Vec<(NodeHandle, ScriptWidgetAction)>,
     scene_dirty: bool,
+    /// Phase 16-D: blocking script diagnostics since the last clear, shown
+    /// in the status cluster. A count rather than a light, because "three
+    /// scripts are broken" and "one script is broken" are different
+    /// situations and the log is one click away either way.
+    script_errors: usize,
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
     title_drag: NodeHandle,
@@ -987,6 +1090,13 @@ impl UiManager {
             unsaved_save: layout.unsaved_save,
             unsaved_discard: layout.unsaved_discard,
             unsaved_cancel: layout.unsaved_cancel,
+            content_menu_popup: layout.content_menu_popup,
+            content_menu: layout.content_menu,
+            name_popup: layout.name_popup,
+            name_title: layout.name_title,
+            name_input: layout.name_input,
+            name_ok: layout.name_ok,
+            name_cancel: layout.name_cancel,
             color_popup: layout.color_popup,
             color_picker: layout.color_picker,
             help_open: false,
@@ -1014,7 +1124,14 @@ impl UiManager {
             color_target: None,
             color_original: [1.0, 1.0, 1.0, 1.0],
             color_live: [1.0, 1.0, 1.0, 1.0],
+            content_menu_target: None,
+            content_menu_folder: String::new(),
+            name_prompt: None,
+            name_text: String::new(),
+            script_state: ScriptInspectorState::default(),
+            script_widgets: Vec::new(),
             scene_dirty: false,
+            script_errors: 0,
             chrome_layout: layout_sizes,
             log_open: false,
             title_drag: layout.title_drag,
@@ -1229,6 +1346,22 @@ impl UiManager {
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.native_ui.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
         }
+        // Phase 16-D: the Content Drawer's right-click menu.
+        //
+        // Intercepted here rather than as a widget message because the
+        // menu is about the *drawer*, not about whichever button happens
+        // to be under the cursor — right-clicking the gap between two
+        // items has to work, and no widget owns the gap.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: winit::event::MouseButton::Right,
+            ..
+        } = event
+        {
+            if self.open_content_menu(self.native_ui.cursor_pos) {
+                return true;
+            }
+        }
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
@@ -1238,6 +1371,14 @@ impl UiManager {
                     }
                     KeyCode::F1 if pressed => {
                         self.toggle_help(None);
+                        return true;
+                    }
+                    // Phase 16-D. Safe to lean on: a script that no longer
+                    // compiles leaves its live instances running and only
+                    // publishes diagnostics, so a reload can never be the
+                    // thing that breaks a play session.
+                    KeyCode::F5 if pressed => {
+                        self.editor_events.push_back(EditorEvent::ReloadScripts);
                         return true;
                     }
                     KeyCode::Space if pressed && self.ctrl_held => {
@@ -1357,13 +1498,242 @@ impl UiManager {
         // Redline §06: items drop right to left as width runs out, and FPS
         // never drops.
         let rules = CollapseRules::for_width(self.window_size.0 as f32);
-        let text = if rules.status_objects {
+        let mut text = if rules.status_objects {
             format!("{objects} objects · {fps:.0} fps")
         } else {
             format!("{fps:.0} fps")
         };
+        // Phase 16-D. Prepended, not appended: it is the item that must
+        // survive the narrowest window, because a broken script is the one
+        // thing in this cluster that needs acting on.
+        if self.script_errors > 0 {
+            let plural = if self.script_errors == 1 { "" } else { "s" };
+            text = format!("{} script error{plural} · {text}", self.script_errors);
+        }
         self.native_ui
             .send(TextMessage::set_text(self.status_stats, text));
+    }
+
+    /// Re-read the content folder. Called after the editor writes a file
+    /// into it — a new script that does not appear in the drawer until the
+    /// next unrelated refresh looks like the create failed.
+    pub fn refresh_content(&mut self) {
+        self.refresh_content_list();
+    }
+
+    // ── Content Drawer right-click ───────────────────────────────────────
+
+    /// Open the drawer's context menu at `pos`, if `pos` is over it.
+    ///
+    /// Returns whether the click was ours. The item list depends on what
+    /// was under the cursor: a file or folder gets Rename and Show in
+    /// Folder, empty space does not.
+    ///
+    /// **Delete is deliberately absent.** Removing a file from a
+    /// right-click, with no undo and no confirmation, is not a mistake
+    /// anyone recovers from; the OS file browser is one menu item away
+    /// and has a recycle bin.
+    fn open_content_menu(&mut self, pos: Vec2) -> bool {
+        if !self.drawer_open {
+            return false;
+        }
+        let hit = self.native_ui.hit_test(pos);
+        if !self.native_ui.is_under(hit, self.content_drawer) {
+            return false;
+        }
+
+        // Which entry, if any, is under the cursor.
+        self.content_menu_target = self
+            .content_entries
+            .iter()
+            .find(|(handle, _)| self.native_ui.is_under(hit, *handle))
+            .map(|(_, entry)| entry.clone())
+            .filter(|entry| !entry.is_engine);
+
+        // A right-click inside a folder creates in that folder. The
+        // drawer's current path is the folder being *shown*, which is
+        // what an author means by "here".
+        self.content_menu_folder = self.content_path.clone();
+
+        let mut items = vec![
+            MenuItem {
+                id: content_menu_id::NEW_FOLDER,
+                label: "New Folder…".into(),
+                enabled: true,
+            },
+            MenuItem {
+                id: content_menu_id::NEW_SCRIPT,
+                label: "New Script…".into(),
+                enabled: true,
+            },
+        ];
+        if self.content_menu_target.is_some() {
+            items.push(MenuItem {
+                id: content_menu_id::RENAME,
+                label: "Rename…".into(),
+                enabled: true,
+            });
+            items.push(MenuItem {
+                id: content_menu_id::SHOW_IN_FOLDER,
+                label: "Show in Folder".into(),
+                enabled: true,
+            });
+        }
+        items.push(MenuItem {
+            id: content_menu_id::REFRESH,
+            label: "Refresh".into(),
+            enabled: true,
+        });
+
+        // Keep it on screen. The drawer sits at the bottom of the window,
+        // which is precisely where a menu that opened downwards would
+        // fall off — so a menu near the bottom flips to open upwards, the
+        // way every OS menu does.
+        let height = items.len() as f32 * theme::ROW_HEIGHT + 4.0;
+        let (window_w, window_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let mut placement = pos;
+        if placement.y + height > window_h {
+            placement.y = (pos.y - height).max(0.0);
+        }
+        // A conservative width: the menu measures itself from its longest
+        // label, and over-reserving here only moves it left a little
+        // sooner than it strictly had to.
+        const ASSUMED_WIDTH: f32 = 180.0;
+        if placement.x + ASSUMED_WIDTH > window_w {
+            placement.x = (window_w - ASSUMED_WIDTH).max(0.0);
+        }
+
+        self.native_ui.send(UiMessage::new(
+            self.content_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        // `AnchorBelow` with no anchor honours the child's desired
+        // position, which is how the menu lands under the cursor.
+        self.native_ui
+            .set_desired_position(self.content_menu, placement);
+        self.native_ui.send(UiMessage::new(
+            self.content_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(self.content_menu_popup);
+        true
+    }
+
+    fn close_content_menu(&mut self) {
+        self.native_ui.send(UiMessage::new(
+            self.content_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
+    /// Show the name prompt for one of the three flows.
+    fn open_name_prompt(&mut self, prompt: NamePrompt, title: &str, initial: &str) {
+        self.name_prompt = Some(prompt);
+        self.name_text = initial.to_string();
+        self.native_ui
+            .send(TextMessage::set_text(self.name_title, title.to_string()));
+        self.native_ui
+            .send(TextMessage::set_text(self.name_input, initial.to_string()));
+        self.native_ui.send(UiMessage::new(
+            self.name_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui.invalidate_ancestors(self.name_popup);
+        // So the author can start typing without clicking the box first.
+        self.native_ui.set_focus(self.name_input);
+    }
+
+    fn close_name_prompt(&mut self) {
+        self.name_prompt = None;
+        self.native_ui.send(UiMessage::new(
+            self.name_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
+    /// Turn a confirmed name prompt into an editor event.
+    ///
+    /// A blank name is treated as a cancel rather than an error: it is
+    /// what someone who changed their mind does, and a modal that refuses
+    /// to close is worse than one that quietly gives up.
+    fn confirm_name_prompt(&mut self) {
+        let Some(prompt) = self.name_prompt.take() else {
+            return;
+        };
+        let name = self.name_text.trim().to_string();
+        self.close_name_prompt();
+        if name.is_empty() {
+            return;
+        }
+        let event = match prompt {
+            NamePrompt::NewFolder { parent } => EditorEvent::CreateContentFolder { parent, name },
+            NamePrompt::NewScript { parent } => EditorEvent::CreateContentScript { parent, name },
+            NamePrompt::Rename { path } => EditorEvent::RenameContentItem { path, name },
+        };
+        self.editor_events.push_back(event);
+    }
+
+    /// Act on a chosen menu item.
+    fn activate_content_menu(&mut self, id: u32) {
+        self.close_content_menu();
+        let folder = self.content_menu_folder.clone();
+        let target = self.content_menu_target.clone();
+        match id {
+            content_menu_id::NEW_FOLDER => {
+                self.open_name_prompt(
+                    NamePrompt::NewFolder { parent: folder },
+                    "New folder name",
+                    "NewFolder",
+                );
+            }
+            content_menu_id::NEW_SCRIPT => {
+                self.open_name_prompt(
+                    NamePrompt::NewScript { parent: folder },
+                    "New script name",
+                    "NewScript.luau",
+                );
+            }
+            content_menu_id::RENAME => {
+                if let Some(entry) = target {
+                    let path = entry.path.to_string_lossy().into_owned();
+                    self.open_name_prompt(
+                        NamePrompt::Rename { path },
+                        "Rename to",
+                        &entry.name,
+                    );
+                }
+            }
+            content_menu_id::SHOW_IN_FOLDER => {
+                if let Some(entry) = target {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                }
+            }
+            content_menu_id::REFRESH => self.refresh_content_list(),
+            _ => {}
+        }
+    }
+
+    /// Phase 16-D: how many blocking script diagnostics are outstanding.
+    ///
+    /// Accumulates rather than replaces, because diagnostics arrive a
+    /// batch at a time and the status area is reporting the session, not
+    /// the last batch. [`Self::clear_script_errors`] is the reset.
+    pub fn set_script_error_count(&mut self, errors: usize) {
+        self.script_errors += errors;
+    }
+
+    /// Reset the script error count — on a successful reload, or when the
+    /// author clears the Output Log.
+    pub fn clear_script_errors(&mut self) {
+        self.script_errors = 0;
     }
 
     pub fn prompt_unsaved_new(&mut self) {
@@ -2263,6 +2633,201 @@ impl UiManager {
                 TreeViewMessage::SetSelected(selected),
             ));
         }
+    }
+
+    /// Phase 16-D: rebuild the Details panel's Scripts section.
+    ///
+    /// `None` hides it — the selection carries no `ScriptSet`. An empty
+    /// state shows the section with just its "New Script" button, which is
+    /// how an entity that *could* have scripts differs from one that
+    /// cannot.
+    ///
+    /// The rows are built from what each script declared. Nothing in this
+    /// function names a property; adding a field to a script is a one-line
+    /// edit in the `.luau` file and nothing here changes.
+    pub fn update_script_inspector(&mut self, state: Option<ScriptInspectorState>) {
+        let section = self.inspector_handles.script_section;
+        let Some(state) = state else {
+            self.native_ui.set_visibility(section, false);
+            if !self.script_state.attachments.is_empty() {
+                self.script_state = ScriptInspectorState::default();
+                self.script_widgets.clear();
+                let list = self.inspector_handles.script_list;
+                self.native_ui.clear_children(list);
+            }
+            return;
+        };
+        self.native_ui.set_visibility(section, true);
+        if state == self.script_state && !self.script_widgets.is_empty() {
+            return;
+        }
+        if state == self.script_state && state.attachments.is_empty() {
+            return;
+        }
+        self.script_state = state;
+        self.rebuild_script_rows();
+    }
+
+    /// Build one widget per declared property, plus the per-attachment
+    /// controls.
+    fn rebuild_script_rows(&mut self) {
+        let list = self.inspector_handles.script_list;
+        self.native_ui.clear_children(list);
+        self.script_widgets.clear();
+        let font_id = self.font_id;
+
+        // Cloned because the builders below borrow `self.native_ui`
+        // mutably, and the state is small — a handful of rows per entity.
+        let attachments = self.script_state.attachments.clone();
+        for (index, attachment) in attachments.iter().enumerate() {
+            let card = crate::widgets::border::BorderBuilder::new(
+                WidgetBuilder::new()
+                    .with_margin(Thickness::axes(4.0, 3.0))
+                    .with_background(theme::BG_PANEL)
+                    .with_foreground(theme::BORDER_DARK),
+            )
+            .with_stroke_thickness(Thickness::uniform(1.0))
+            .build();
+            let card = self.native_ui.add_node(card, list);
+            let column = StackPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Vertical)
+            .build();
+            let column = self.native_ui.add_node(column, card);
+
+            // Header: name, state, and the three structural controls.
+            let header = StackPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Horizontal)
+            .build();
+            let header = self.native_ui.add_node(header, column);
+
+            let enable = crate::widgets::check_box::CheckBoxBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::ROW_HEIGHT)
+                    .with_margin(Thickness::axes(4.0, 0.0)),
+            )
+            .with_label(&attachment.asset_name)
+            .with_checked(attachment.enabled)
+            .with_font_id(font_id)
+            .with_font_size(12.0)
+            .build();
+            let enable = self.native_ui.add_node(enable, header);
+            self.script_widgets
+                .push((enable, ScriptWidgetAction::Enable(index)));
+
+            for (glyph, action) in [
+                ("↑", ScriptWidgetAction::Reorder(index, -1)),
+                ("↓", ScriptWidgetAction::Reorder(index, 1)),
+                ("✕", ScriptWidgetAction::Detach(index)),
+            ] {
+                let button = ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(22.0)
+                        .with_height(theme::ROW_HEIGHT)
+                        .with_background(theme::TRANSPARENT),
+                )
+                .build();
+                let button = self.native_ui.add_node(button, header);
+                let label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 6.0,
+                    top: 3.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                }))
+                .with_text(glyph)
+                .with_font_size(12.0)
+                .with_font_id(font_id)
+                .with_color(theme::TEXT_SECONDARY)
+                .build();
+                self.native_ui.add_node(label, button);
+                self.script_widgets.push((button, action));
+            }
+
+            // Status. Quarantine reads differently from an authored
+            // disable, so it says which one it is.
+            let status = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                left: 10.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 2.0,
+            }))
+            .with_role(TextRole::Caption)
+            .with_text(&attachment.status)
+            .with_color(if attachment.quarantined {
+                theme::STATUS_WARN
+            } else {
+                theme::TEXT_SECONDARY
+            })
+            .build();
+            self.native_ui.add_node(status, column);
+
+            // Declared properties.
+            for field in &attachment.fields {
+                match &field.kind {
+                    ScriptFieldKind::Number { value, .. } => {
+                        let row = crate::widgets::property_row::PropertyRowBuilder::new(
+                            WidgetBuilder::new()
+                                .with_clip_to_bounds(false)
+                                .with_background(theme::TRANSPARENT),
+                        )
+                        .with_label(&field.name)
+                        .build();
+                        let row = self.native_ui.add_node(row, column);
+                        let numeric = crate::widgets::numeric_field::NumericFieldBuilder::new(
+                            WidgetBuilder::new().with_margin(Thickness::axes(0.0, 1.0)),
+                        )
+                        .with_drag_step(0.05)
+                        .build();
+                        let numeric = self.native_ui.add_node(numeric, row);
+                        self.native_ui
+                            .send(NumericFieldMessage::set_value(numeric, *value));
+                        self.script_widgets.push((
+                            numeric,
+                            ScriptWidgetAction::Number(index, field.name.clone()),
+                        ));
+                    }
+                    ScriptFieldKind::Bool(on) => {
+                        let check = crate::widgets::check_box::CheckBoxBuilder::new(
+                            WidgetBuilder::new()
+                                .with_height(theme::ROW_HEIGHT)
+                                .with_margin(Thickness::axes(10.0, 0.0)),
+                        )
+                        .with_label(&field.name)
+                        .with_checked(*on)
+                        .with_font_id(font_id)
+                        .with_font_size(12.0)
+                        .build();
+                        let check = self.native_ui.add_node(check, column);
+                        self.script_widgets.push((
+                            check,
+                            ScriptWidgetAction::Bool(index, field.name.clone()),
+                        ));
+                    }
+                    ScriptFieldKind::Text(text) => {
+                        // Shown, not editable. A property kind the editor
+                        // cannot author yet is better visible than absent:
+                        // absent looks like the script failed to declare it.
+                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(
+                            Thickness {
+                                left: 10.0,
+                                top: 2.0,
+                                right: 0.0,
+                                bottom: 2.0,
+                            },
+                        ))
+                        .with_role(TextRole::Caption)
+                        .with_text(format!("{}: {text}", field.name))
+                        .build();
+                        self.native_ui.add_node(label, column);
+                    }
+                }
+            }
+        }
+        self.native_ui
+            .invalidate_ancestors(self.inspector_handles.script_list);
     }
 
     /// Update inspector NumericFields from a Transform.
@@ -3166,6 +3731,41 @@ impl UiManager {
                     self.close_unsaved();
                     continue;
                 }
+                if msg.destination == self.name_ok {
+                    self.confirm_name_prompt();
+                    continue;
+                }
+                if msg.destination == self.name_cancel {
+                    self.close_name_prompt();
+                    continue;
+                }
+            }
+            // Phase 16-D: the drawer's right-click menu, and the name
+            // prompt the three creating flows share.
+            if let Some(ContextMenuMessage::Activate(id)) = msg.data::<ContextMenuMessage>() {
+                if msg.destination == self.content_menu {
+                    let id = *id;
+                    self.activate_content_menu(id);
+                    continue;
+                }
+            }
+            if let Some(text) = msg.data::<TextBoxMessage>() {
+                if msg.destination == self.name_input {
+                    match text {
+                        TextBoxMessage::TextChanged(value) => self.name_text = value.clone(),
+                        // Enter in the box is the same as pressing Create:
+                        // typing a name and hitting return is what anyone
+                        // does, and making them reach for the mouse after
+                        // would be a small daily annoyance.
+                        TextBoxMessage::TextCommit(value) => {
+                            self.name_text = value.clone();
+                            if self.name_prompt.is_some() {
+                                self.confirm_name_prompt();
+                            }
+                        }
+                    }
+                    continue;
+                }
             }
             if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
                 if msg.destination == self.inspector_handles.water_underwater {
@@ -3185,6 +3785,11 @@ impl UiManager {
                 }
                 if msg.destination == self.unsaved_popup {
                     self.unsaved_open = false;
+                }
+                if msg.destination == self.name_popup {
+                    // Clicking away from the prompt abandons it, the same
+                    // as Cancel.
+                    self.name_prompt = None;
                 }
             }
 
@@ -3453,7 +4058,47 @@ impl UiManager {
                             self.editor_events
                                 .push_back(EditorEvent::CreateEntity(kind));
                         }
+                    } else if entry
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
+                    {
+                        // Phase 16-D: clicking a script attaches it to the
+                        // selection. `app.rs` refuses with a toast if there
+                        // is nothing selected, rather than silently doing
+                        // nothing.
+                        self.editor_events.push_back(EditorEvent::AttachScript(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
                     }
+                    continue;
+                }
+                // Phase 16-D: the Scripts section's generated controls.
+                if let Some((_, action)) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    match action {
+                        ScriptWidgetAction::Reorder(index, delta) => {
+                            self.editor_events
+                                .push_back(EditorEvent::ReorderScript { index, delta });
+                        }
+                        ScriptWidgetAction::Detach(index) => {
+                            self.editor_events.push_back(EditorEvent::DetachScript(index));
+                        }
+                        // Enable and the property widgets are not buttons;
+                        // they arrive as CheckBox and NumericField messages.
+                        ScriptWidgetAction::Enable(_)
+                        | ScriptWidgetAction::Number(_, _)
+                        | ScriptWidgetAction::Bool(_, _) => {}
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.script_add {
+                    self.editor_events.push_back(EditorEvent::CreateScript);
                     continue;
                 }
                 // Create popup item
@@ -3561,6 +4206,32 @@ impl UiManager {
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
                     self.refresh_content_list();
+                    continue;
+                }
+                // Phase 16-D: an attachment's enable box, or one of its
+                // declared boolean properties.
+                if let Some((_, action)) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    match action {
+                        ScriptWidgetAction::Enable(index) => {
+                            self.editor_events.push_back(EditorEvent::SetScriptEnabled {
+                                index,
+                                enabled: *on,
+                            });
+                        }
+                        ScriptWidgetAction::Bool(index, field) => {
+                            self.editor_events.push_back(EditorEvent::SetScriptBool {
+                                index,
+                                field,
+                                value: *on,
+                            });
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 // Inspector checkboxes share the same destinations as the old buttons.
@@ -3890,6 +4561,24 @@ impl UiManager {
                             value: v,
                             live,
                         });
+                    continue;
+                }
+                // Phase 16-D: a script's declared numeric property. Same
+                // live/commit convention as every other inspector field —
+                // a drag is applied and not recorded, and the gesture's
+                // final value is one undo step.
+                if let Some((_, ScriptWidgetAction::Number(index, field))) = self
+                    .script_widgets
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .cloned()
+                {
+                    self.editor_events.push_back(EditorEvent::SetScriptNumber {
+                        index,
+                        field,
+                        value: v,
+                        live,
+                    });
                 }
             }
         }

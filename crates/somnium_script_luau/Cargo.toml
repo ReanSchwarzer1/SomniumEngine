@@ -1,0 +1,22 @@
+[package]
+name        = "somnium_script_luau"
+description = "Luau backend for the Somnium Engine scripting contract."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+
+# NOTE (Phase 16): this is the ONLY crate in the workspace permitted to
+# depend on `mlua`. See `dev records/phase_16.md` — the boundary rule.
+[dependencies]
+somnium_ecs    = { workspace = true }
+somnium_script = { workspace = true }
+mlua           = { workspace = true }
+tracing        = { workspace = true }
+
+# The vertical-slice tests drive the backend through a real world and the
+# real registry, which is where the component schemas live.
+[dev-dependencies]
+somnium_core = { workspace = true }
+glam         = { workspace = true }

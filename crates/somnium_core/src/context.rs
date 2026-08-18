@@ -119,6 +119,16 @@ pub struct EngineContext<'a> {
     /// The UI manager for sending messages to the HTML frontend.
     pub ui: &'a mut UiManager,
 
+    /// Phase 16-C: live scripts.
+    ///
+    /// Game code uses this to import `.luau` assets and to install the
+    /// entity-to-rigid-body mapping `applyForce` needs — the engine has no
+    /// rigid-body component of its own, so it cannot route a force without
+    /// being told how. The *phases* are driven by the engine, not from
+    /// here; calling them again from a callback would run every script
+    /// twice.
+    pub scripts: &'a mut crate::script_host::ScriptHost,
+
     /// Set to `true` to request a graceful engine shutdown at the end
     /// of the current frame.
     ///
@@ -151,6 +161,7 @@ impl<'a> EngineContext<'a> {
         ui: &'a mut UiManager,
         camera_speed: f32,
         simulation: SimulationClock,
+        scripts: &'a mut crate::script_host::ScriptHost,
     ) -> Self {
         Self {
             time,
@@ -165,6 +176,7 @@ impl<'a> EngineContext<'a> {
             simulation,
             camera_speed_request: None,
             ui,
+            scripts,
             should_exit: false,
         }
     }

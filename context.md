@@ -1,7 +1,13 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-14  
-> **Current phase:** Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
+> **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
+>
+> **Last updated:** 2026-08-17  
+> **Current phase:** Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
+> D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
+> 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
+> default **off**. Terrain hex/parallax now default **off** on both maps.
+> Previously: Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
 > **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
 >
@@ -18,7 +24,8 @@
 > **Phase XV live contract** (do not silently retune): 32 global layers /
 > strongest-four local; sidecar v4; `GpuTerrainMaterial` 1664 bytes; unique
 > colour from splat (512²); biome v3 / landscape v4; snow cap `relief * 0.48`;
-> aerial hex/POM off when the camera is > 80 m above the heightfield
+> hex/POM now default **off** (Phase DOOM, 2026-08-16); still forced off when
+> the camera is > 80 m above the heightfield
 > (`gpu_material_for_camera`). Do not reintroduce a per-pixel terrain
 > sample-count LOD. Water: `WaterComponent::great_lakes` stays frozen.
 > BC7: `encode_terrain_bc7` writes gitignored `assets/terrain/bc7/`; runtime
@@ -27,14 +34,38 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
-> - **Phase DOOM — id Tech (plan, 2026-08-16):** `dev records/phase_DOOM.md`.
->   Optimization with no change to the look. Premise is CR-A's verdict —
->   GPU-bound, shading ~40–50 ms at maximized Native. Spine is tile-classified
->   **compute** shading (`ShadingSpec` per tile, not per frame), plus shadow
->   cascade caching, opt-in dynamic resolution, a real job system and parallel
->   command encoding. **DOOM-A (the clock) and DOOM-B (the pixel census) are
->   gates — do them before anything else.** Non-goals include turning Clipmap
->   default on (DF-E owns that) and any retune of water / XV / foliage.
+> - **Phase CONTROL — Northlight (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_CONTROL.md`. The editor-reach phase. Premise: the engine
+>   is far ahead of the editor — **96** `SOMNIUM_*` variables with ~18 controls,
+>   **106** hand-wired `InspectorField` variants, **12** registered component
+>   schemas driving **0** generated inspector rows, and `FieldFlags::EDIT` is
+>   defined, documented as "shown in the inspector", and read by no code in the
+>   repository. CONTROL-B makes that flag true and 26-J finally lands; C–J add
+>   an asset database with thumbnails, material authoring, drag and drop,
+>   multi-select, viewport snapping and a view-mode menu, preferences over the
+>   env vars, clickable diagnostics, and the **scene-load fix** (the `NEXT:`
+>   line above). Tracks 2–3 then add curve editing, time of day, volumetric
+>   clouds and weather — each gated on its authoring surface shipping with it.
+>   **Start at CONTROL-A** (the reachability audit); do not write a widget
+>   first, and do not restart at 26-A.
+> - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
+>   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
+>   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
+>   (`unattributed` 13% → 0.4%), the pixel census + shading ablation, and opt-in
+>   **dynamic resolution** (Camera details) — **Frame 38.4 → 19.9 ms**.
+>   **Built but default off, both measured slower:** tile-binned shading
+>   (`SOMNIUM_SHADE_BINS=1`) and the aerial terrain pipeline (Terrain details).
+>   **Deferred:** DOOM-D (shadow cache — `Shadows` is only 0.958 ms) and G–M.
+>   The plan's §1 thesis is **superseded**: DOOM-B measured terrain at 97.6% of
+>   the shading pass, so per-tile binning was worth ~0.4 ms, not double digits.
+>   The levers that worked were pixel count and deleting terrain material work.
+> - **Terrain hex tiling and parallax now default OFF on both maps**
+>   (2026-08-16, user request). Coastal ground Frame 37.6 → 29.4 ms, Shading
+>   24.9 → 18.2. This is a **visible look change on the ground** and it departs
+>   from the XV walking defaults recorded below and in
+>   `dev records/terrain_shading_occupancy_2026-08-14.md`. Both are still
+>   Terrain-details checkboxes; `SOMNIUM_HEXTILE=1` / `SOMNIUM_TERRAIN_PARALLAX=1`
+>   restore the old defaults.
 > - **Clipmap audit (required, other model):** `dev records/phase_DF.md` §12 —
 >   defect-hunt the in-engine path before more “make clipmap run better” work
 >   or default-on. Do not reintroduce per-pixel sample-count LOD.
@@ -281,6 +312,7 @@ hello_engine
 | `renderer` | `Option<&mut SomniumRenderer>` | yes | High-level draw API |
 | `selected_entity` | `&mut Option<Entity>` | yes | Editor selection state |
 | `ui` | `&mut UiManager` | yes | IPC send/recv |
+| `scripts` | `&mut ScriptHost` | yes | Phase 16-C. Import `.luau` assets and install the entity-to-rigid-body mapping `applyForce` needs. The *phases* are driven by the engine — calling them from a callback would run every script twice |
 | `should_exit` | `bool` | yes | Set to request shutdown |
 
 ### 5.3 Event Translation
@@ -494,10 +526,13 @@ SortKey bit layout:
 | Concept | Rust type | Description |
 |---|---|---|
 | Entity | `Entity { index: u32, generation: u32 }` | Lightweight handle, generational to detect stale refs |
-| Component | `trait Component: Send + Sync + 'static` | Any `Copy` + `'static` struct |
+| Component | `trait Component: Send + Sync + 'static` | Any `Send + Sync + 'static` struct. **Not** `Copy` — `Children` ships a `Vec<Entity>`, and `ComponentColumn` runs a `drop_fn` for types that need one. (This row said `Copy` until Phase 16-A; it was never true of the trait.) |
 | Archetype | `Archetype` | Group of entities with identical component sets; data in parallel dense arrays |
 | ComponentSet | `ComponentSet` | Bitmask of component IDs; used for archetype matching |
 | World | `World` | Owns all archetypes and the entity allocator |
+| StableId | `StableId(&'static str)` | Phase 16-A. Durable component name for files and scripts. `ComponentId` stays process-local and lazy; `StableId` is what gets written down. |
+| PersistentId | `PersistentId(u128)` | Phase 16-A. Durable entity identity across save/load. `Entity` stays the runtime handle. |
+| ScriptSet | `ScriptSet { attachments: Vec<ScriptAttachment> }` | Phase 16-A. **Authored data only** — asset id, enable flag, execution order, typed properties. Never a VM pointer, a closure or a coroutine; that is what makes a scene portable and the language replaceable. Live VM state lives in `ScriptRuntime`, keyed by `InstanceUuid`. |
 
 ### 7.2 Storage Layout
 
@@ -827,8 +862,20 @@ Every frame, `about_to_wait()` runs in this exact sequence:
 1. time.tick()
       Updates delta_time, elapsed, frame_count, EMA FPS
 
-2. physics.step(dt)
-      Advances Jolt simulation by one delta
+1.5. scripts.sync()   (Phase 16-C, only while Playing)
+      Reconcile the live script set with the authored ScriptSets, then run
+      onInit / onStart to a fixed point (capped at 64 cycles), then the
+      onEnable / onDisable diff, then teardown for anything retired.
+
+2. Fixed-step loop, while accumulator >= fixed_dt:
+      ├── game.on_fixed_update(ctx)
+      ├── scripts.fixed_update()  (Phase 16-C, only while Playing)
+      │     onFixedUpdate → commands → validate → apply → route forces
+      │     then onEvent for whatever this step emitted.
+      │     Deliberately BEFORE physics.step, so a force a script applies
+      │     is integrated by the step that applied it.
+      └── physics.step(fixed_dt)
+            Advances Jolt simulation by one fixed delta
 
 2.5. Gizmo drag update  (Phase 11.5B)
       If gizmo_drag is Some, reproject cursor ray onto constrained axis/plane,
@@ -838,6 +885,13 @@ Every frame, `about_to_wait()` runs in this exact sequence:
       ├── Sync physics → ECS transforms  (query PhysicsBody + Transform)
       ├── EditorCamera.update(dt)        (WASD movement if RMB held)
       └── log_timer update
+
+3.5. scripts.update()  (Phase 16-C, only while Playing), then the file
+      watcher (Phase 16-E) recompiles any script whose file changed and
+      settled, then the script log, diagnostics and rejections are drained
+      into the Output Log. The watcher and the drain both run every frame,
+      including while stopped: an author fixing a compile error wants to
+      see it clear without pressing anything.
 
 4. Process queued editor events
       while let Some(ev) = ui.poll_editor_event() → handle_editor_event(ev)
@@ -1374,7 +1428,7 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | 17G | ✅ Complete | **Foliage performance, distance culling, and a usable type picker.** The slowdown was self-inflicted by Phase 15F: a 6 422-triangle grass tuft expands to **51 indirect arguments**, so 2 000 painted instances meant 102 000 draws and 6.3 MB of arguments and cull bounds uploaded *every frame* — to cull sub-parts of things a few pixels across. Clustering pays for a large mesh drawn once, and is backwards for a small mesh drawn thousands of times. The renderer now counts how often each mesh appears in the frame and drops back to a single whole-mesh argument past 8 copies, cutting a painted field's draw count by ~51x. **Distance culling** rejects instances beyond `cull_distance` (120 m) while the submission list is built, so they never reach the instance buffer or the indirect arguments at all — the GPU cull cannot do this, because a draw has to exist before it can be rejected. The test is horizontal distance, so flying up does not make ground cover vanish from under the camera. The per-frame submission vector is also reused rather than reallocated. **UI:** the Foliage section moved to the top of the inspector, since at the bottom it fell behind the output log and the type button was literally unclickable. The type control became an in-place cycler (`Type: Fir Sapling >`) rather than a popup — this UI has no anchoring, so a floating popup has to be hand-positioned and kept landing somewhere unhelpful; for a handful of entries, cycling cannot be occluded or mispositioned. Picking a tree still switches Single on automatically. |
 | 17H | ✅ Complete | **Cutout foliage: alpha masks, alpha-weighted mips, and the island tree.** Three reported faults, three unrelated causes. (1) *Everything looked blue-grey.* Poly Haven ships vegetation as **alpha-cutout cards** — the diffuse atlas carries blade colour only where the mask is opaque (78% of `grass_medium_01` is near-black) and the cutout lives in a **separate `_alpha_` map their glTF never references**. Trusting the glTF meant rendering the black background as if it were the plant, leaving ambient sky as the brightest thing on screen. The loader now folds a sibling `X_alpha_2k.png` into `X_diff_2k.jpg`'s alpha channel by filename convention and promotes the material to `MASK` + double-sided; a missing sidecar is not an error. (2) *Saplings had no trunk.* `ensure_palette_mesh` kept the largest **primitive**, but a glTF node is usually several — the sapling is `branches` + `twigs`, the island tree is trunk + branches + leaves. Primitives are now grouped by node transform, the heaviest **node** wins, and all of its primitives are kept as `FoliagePart`s with a local transform. (3) *The island tree painted nothing.* Not the triangle cap, as assumed: the file lists `KHR_texture_transform` in `extensionsRequired` and the `gltf` crate rejected the import outright. Enabling the feature fixed it; failed imports are now cached so a broken model no longer retries — and stalls — on every brush dab. **Mip generation** was also wrong for cutouts: a plain box filter averages blade colour with the transparent background, so foliage darkened with distance, and averaging a binary mask drops texels under the 0.5 cutoff so coverage erodes until distant grass vanishes. Colour is now averaged **weighted by alpha**, and each level's alpha is rescaled to preserve coverage (Castaño). Both reduce exactly to the old behaviour for opaque textures. |
 | 17I | ✅ Complete | **Ambient occlusion reaches indirect light.** The IBL term had a standing note that nothing attenuated sky light, and it showed on foliage: grass albedo is a dark olive, so an unoccluded sky reflection's 4% Fresnel sheen was a large share of each blade's colour — and the sky is blue. `Surface` now carries an `occlusion` term applied to indirect diffuse, and to indirect specular through Lagarde's specular-occlusion fit, never to the sun (which already has shadow maps). Sourcing it needed two attempts: reading AO from the metallic-roughness map's red channel rendered the damaged helmet **pitch black**, because glTF leaves that channel undefined and models with a separate AO texture leave it at zero. Occlusion now comes from the material's own `occlusionTexture` — plus one narrow inference: exporters that pack ARM (AO/Roughness/Metallic) have no way to declare it and simply leave `occlusionTexture` unset, so an `_arm` filename is taken as stating the packing. That is the same convention-over-metadata rule the `_alpha_` sidecars use, and it is scoped to the filename so a plain metallic-roughness map is never misread. `occlusion_map` took over the material struct's padding word, so the GPU layout is unchanged. |
-| 16 | ⏸ Deferred | Scripting (Rhai or Lua) |
+| 16 | ✅ Complete | **Scripting — Luau.** Superseded the "Rhai or Lua, deferred" row this line used to be. Sub-phases 16-A … 16-F below; architecture, budgets and decisions in §17.18. |
 | 25A | ✅ Complete | **Terrain into the visibility buffer.** Terrain records at `renderer.rs:1516`, *after* the visibility pass (1386/1408), GTAO (1458) and ReSTIR (1443). It therefore misses every one of them, and `terrain.wgsl` carries its own duplicated copies of the shadow and cluster helpers — so each lighting improvement in Phase 24 had to be written twice or silently skipped terrain. This is the same failure as 24C's sky-in-three-places, and the fix is the same: one source. Terrain writes depth and visibility IDs in the pre-pass like everything else, and the duplicated helpers are deleted. **Unblocks GTAO, contact shadows, ReSTIR and correct TAA on terrain in one change, and is what makes 24K verifiable at all.** Reference: O3DE keeps a dedicated `Terrain_DepthPass.azsl` feeding the shared depth buffer rather than a self-contained terrain pass. |
 | 25B | ✅ Complete | **Terrain chunks in the TLAS.** 25A-2 already put chunks in the draw queue the acceleration-structure build reads, so they reached the TLAS loop and were skipped for having no BLAS; 25B registers one per chunk. The architectural half came from `bevy_solari/src/scene/blas.rs`, which builds a bottom-level structure only for geometry that was **added or modified** and rebuilds the top level alone each frame — Somnium had been reissuing *every* BLAS every frame, invisible with a handful of meshes and untenable at 256 chunks. `RaytracePass` gained a `pending_blas` list, stores the size descriptor and offsets each BLAS was built with, and gained `mark_geometry_dirty` for the case Bevy has no equivalent of: a chunk's *contents* changing under a stable allocation when sculpted. BLAS geometry is always the full-detail unstitched `(lod 0, mask 0)` range, never the frame's LOD — a BLAS is sized once at creation, and a traced shadow that changed shape as chunks swapped LOD would be worse than one finer than what is drawn. **Verified** with `SOMNIUM_RT_TERRAIN=0/1`: 6 945 terrain pixels move by 17.998 mean absolute luminance, TLAS instances go 1 → 17, and mesh and sky come back bit-identical — the only new occluder is terrain, so this is terrain shadowing terrain. That is 24K's acceptance test, which is why 24K closes with it. See §25.3d. |
 | 25M-2 | 🟡 Automated complete | **Sunset & Night Sky Visual Fixes, audited 2026-08-11.** **(A)** The authoritative `PostProcessComponent` default is now `ibl_intensity = 1.0`. **(B)** CSMs include a 1 km caster-depth extension patterned after Flax's extended CSM culling range; receiver bias uses the true triangle plane, and contact-shadow thickness is compared in linear view-space metres instead of nonlinear NDC depth. **(C)** Stars use 3×3×3 neighbour evaluation, smooth angular falloff, a magnitude distribution and Milky Way concentration. **(D)** The lunar orbit has a 29.53-day synodic period and 5.14° inclination; the disc uses the real 0.2666° angular radius, tangent-plane sphere normal, phase lighting and limb darkening, with default illuminance tuned to 0.010 lux. **(E)** Palette vegetation retains its foliage/double-sided/transmission semantics, faces its geometric normal toward the viewer, uses wrapped backside transmission without an ambient albedo glow, and has a roughness floor. Moon BRDF evaluation no longer applies N·L twice, and ReSTIR GI invalidates materially changed light history, rejects unsupported emissive hits, and falls back to night IBL when sunlight is zero. Automated tests pass; night appearance is user-confirmed, while the daytime shadow correction awaits the same on-screen confirmation. |
@@ -1393,6 +1447,12 @@ All editor events (button clicks, keyboard shortcuts, gizmo interactions) flow t
 | VV | 🔧 A–H + VV+1 | **Phase VV — Halcyon: ray-traced water reflections.** History: `dev records/halcyon_context_handoff.md`. **Audit start-here:** `dev records/post_halcyon_audit_handoff.md`. Water G-buffer prepass + half-res RT compute + shade blend with SSR on confidence. Shared `rt_hit.wgsl` (GI wraps `rt_trace`). Kill switch `SOMNIUM_RT_REFLECT=0`. Inspector: water **RT Reflect** / **Reflect Debug**; Post FX **RT Reflections**. **VV+1 refraction** in the same compute pass (array layer 1), **default off** (Post FX **RT Refraction**; `SOMNIUM_RT_REFRACT=0`). Live SSR miss-rate capture not yet in `dev records/phase VV/`. Plan: `dev records/phase_VV.md`. |
 | FSR | ✅ Default on | **FSR 3 temporal upscale** (no frame gen) via vendored wgpu-ffx. Karis compress → FSR → untonemap; RCAS not CAS. Bevy jitter on `proj.z_axis`. `SOMNIUM_FSR=0`. ATTRIBUTION §13B.8. |
 | DF | 🔧 In engine; **audit required** | **Phase DF — Daggerfall:** nested material clipmaps. Fragment generate; shade taps the cache; POM **not** on clipmap height. Default **off**. Walk luminance gate not passed. **Next:** audit (`phase_DF.md` §12), then remeasure DF-E at maximized Native. `SOMNIUM_TERRAIN_CLIPMAP=1` to enable. |
+| 16-A | ✅ Complete | **Scripting foundation, no VM.** Runtime component insert/remove with archetype migration (`world.rs`, `archetype.rs`); durable component schemas and the `component_schema!` macro (`somnium_ecs::reflect`); `PersistentId` durable entity identity; the neutral scripting contract (`somnium_script` — values, snapshots, commands, `ScriptBackend`); built-in component registration (`somnium_core::reflect_registry`); `WorldView` + the command applier (`script_bridge.rs`); the schema-driven scene format. `mlua` appeared in no `Cargo.toml`. |
+| 16-B | ✅ Complete | **The Luau adapter.** `somnium_script_luau` — the only crate that names `mlua` (0.12.0 / Luau 0.728, interpreter only, exact-pinned). One VM per trust domain, engine API installed *before* `sandbox(true)`, a private environment per attachment, callbacks resolved once, bytecode from the embedded compiler only, a wall-clock deadline on the Luau interrupt. Eight base-library globals removed (`getfenv`/`setfenv` are the serious ones). Budgets measured in [`dev records/phase 16/16-B_budgets.md`](dev%20records/phase%2016/16-B_budgets.md); four defects found by measurement and fixed, one row over a ceiling shown to be arithmetically unreachable. |
+| 16-C | ✅ Complete | **Lifecycle, scheduler, frame hooks.** `LifecycleState` (`Loaded → Initialized → Started → Enabled ⇄ Disabled → Destroyed`) with a transition table; `ScriptRuntime` — instance registry, deterministic order, error quarantine, ownership ledger, the reload halves; `ScriptHost` in `somnium_core` — world reads, command apply, force/audio routing, the bounded init fixed point (64 cycles, after Fyrox). `onFixedUpdate` runs inside the existing accumulator **before** `physics.step`; `onUpdate` in the variable phase. Gate: `assets/scripts/demo_rotator.luau` rotates, reads input, applies a force, spawns and despawns what it spawned, emits and hears an event, and carries its state through a reload — asserted in `crates/somnium_core/tests/script_gate.rs`. |
+| 16-D | ✅ Complete | **Editor workflow.** `.luau` files are content (script icon, click-to-attach, **New Script** writes a strict-mode template); the Details panel's **Scripts** section is *generated from each script's declared schema* — no per-script UI is hand-written anywhere; attach / remove / reorder / enable / property edits are all `EditorCommand`s on the existing `UndoStack`, with the live-scrub convention `SetInspectorValue` established; diagnostics reach the Output Log positioned as `file:line:column`, with a blocking-error count in the status cluster; **F5** recompiles every script from disk and a file that no longer compiles leaves its instances running; Play captures the authored world and Stop restores it exactly, so a script cannot dirty the edit-time scene. Help: [`docs/editor/scripting.md`](docs/editor/scripting.md). |
+| 16-E | ✅ Complete | **Transactional hot reload.** `require` is asset-only and takes a **string literal**, scanned out of the source so the dependency graph is static — a computed name, a concatenation or even `local r = require` is a compile error with a line number. Required modules evaluate once per trust domain and are frozen. Cycles are rejected at link time naming both files. A debounced file watcher (250 ms, because editors write a file in more than one go) recompiles on save; F5 does the same on demand. A failed compile leaves every live instance running. Editing a shared module rebuilds every script that requires it, transitively. `migrateProperties` carries authored values across a schema-version bump — including back into the scene, so a rename survives a save — and one rollback generation is retained for the edit that compiled and was wrong anyway. |
+| 16-F | ✅ Complete | **Cook, capabilities, hardening.** Bytecode is cached under `target/script-cache/`, keyed on a hash of the source *and* a runtime fingerprint that is itself a hash of a probe chunk's compiled bytecode — a version string is a constant someone forgets to bump, and stale bytecode handed to Luau is undefined behaviour rather than a load error. A per-package capability manifest is enforced once, at the command boundary, with `ScriptCommand::required_capability` an exhaustive match so a new command cannot skip it. The threat model in [`phase_16.md`](dev%20records/phase_16.md) §4.6 is 22 tests plus a malformed corpus and every prefix of it. Profiler rows for script CPU, calls, commands, errors, instances and VM memory. `.d.luau` declarations generated from the registry — its fourth consumer. |
 | CR | ✅ In engine | **Phase CR — Crysis:** CPU AABB frustum early-out for terrain vis (default on, Camera Details **Frustum Cull**, `SOMNIUM_CPU_FRUSTUM=0`). GPU 15B stays F10. Off-screen casters keep shadowing via cascade volumes (`shadow_only_queue`). Rayon job helper above 512 chunks (256-chunk default stays serial — CR-A GPU-bound). Record: `dev records/phase_CR.md`. |
 
 ---
@@ -3761,6 +3821,293 @@ serial because CR-A occupancy is GPU-bound (~50 ms shading vs ~1.5% CPU).
 `SOMNIUM_CPU_FRUSTUM=0` / `SOMNIUM_CASCADE_CULL=0`. Record:
 `dev records/phase_CR.md`. Occupancy:
 `dev records/phase CR/CR-A_occupancy.md`.
+
+## 17.20 Content Drawer authoring (2026-08-17)
+
+Right-clicking the drawer opens a context menu: **New Folder…**, **New
+Script…**, **Refresh** on empty space, plus **Rename…** and **Show in
+Folder** on an item. One modal serves all three naming flows — Enter
+confirms, Escape or clicking away abandons.
+
+The `ContextMenu` widget had existed since 26-B but was built and
+discarded in `shell.rs` with its handle dropped; it is now wrapped in a
+`Popup` for click-away and positioned at the cursor through
+`AnchorBelow`-with-no-anchor, which is that placement's "obey the child's
+desired position" path. A menu near the bottom of the window flips to
+open upwards, because the drawer sits at the bottom and that is exactly
+where you right-click.
+
+The right-click is intercepted in `UiManager::process_os_event` rather
+than handled as a widget message: the menu is about the *drawer*, and
+right-clicking the gap between two items has to work, but no widget owns
+the gap.
+
+### 17.20.1 The rules on names
+
+`resolve_content_target` is the only place in the editor where a string
+someone typed becomes a filesystem path, and the drawer has no undo, so
+it is a free function with its own tests: no path separators, no `.`
+or `..`, nothing that lands outside `assets/`, no Windows reserved names
+(`con`, `nul`, `aux`, `com1`… — created happily and then unopenable),
+whitespace trimmed, and `.luau` added but never doubled.
+
+**Nothing overwrites**, and there is deliberately **no Delete**. A
+right-click that destroys a file with no undo and no confirmation is not
+a mistake anyone recovers from; Show in Folder is one step from a file
+browser with a recycle bin.
+
+**Show in Folder reveals, it does not open.** Opening a `.luau` means
+launching whatever the OS associates with the extension — nothing on a
+fresh machine, a coin toss on a developer's. Choosing an editor is its
+own sub-phase.
+
+Renaming a `.luau` gives it a new asset id, because the id comes from the
+path (§17.18.5). Attachments naming the old one report "asset not
+imported" rather than being silently re-pointed, which would be wrong if
+the author meant to fork the script.
+
+---
+
+## 17.19 The scripted first-person character (2026-08-17)
+
+The first real gameplay written in Luau, and the exercise that showed
+whether the scripting system is usable rather than merely correct.
+Two files, `assets/scripts/`:
+
+| File | Owns |
+|---|---|
+| `first_person_controller.luau` | Yaw, WASD movement, run, jump |
+| `first_person_camera.luau` | Pitch, eye offset |
+
+The camera is a **child entity** of the player. The controller writes yaw
+to the player's transform, the camera writes pitch to its own, and
+`propagate_transforms` multiplies them — so neither script knows the other
+exists and either can be replaced alone. Every declared field
+(`walkSpeed`, `runSpeed`, `jumpSpeed`, `airControl`, `mouseSensitivity`,
+`eyeHeight`, `pitchLimit`, the invert flags) appears in the Details panel
+automatically, because the panel is generated from the schema.
+
+`hello_engine` spawns the pair on the transition into Play, at the editor
+camera's position minus an eye height, so pressing Play leaves you looking
+from exactly where you were standing. Stop destroys the Jolt body; the
+entities go with the play-session checkpoint, because anything created
+after Play was pressed is not part of the authored world.
+
+### 17.19.1 `RigidBodyComponent` — why `applyForce` was not enough
+
+Phase 16 gave scripts one way to touch physics: queue a force. That is
+right for a push and wrong for a character. A walking character sets its
+velocity outright — that is what makes it stop dead when you release the
+key instead of skating, and expressing it through forces means fighting
+the integrator with a PD controller that never feels right.
+
+So `somnium.RigidBody` is a registered component whose `velocity` is
+script-readable and script-writable, and the engine brackets the script
+phase with a sync:
+
+```
+read Jolt → components     (before scripts: see what physics did to you)
+     scripts read and write velocity
+components → write Jolt    (after the command apply: your write is last)
+physics.step
+```
+
+`body`, the Jolt index, is script-readable but **not** writable and not
+saved: a script that could set it could point one entity's controls at
+another's body, and an index from the last run names a different body in
+this one.
+
+The write-back also zeroes angular velocity for script-driven bodies —
+a rotation lock, which is what an upright capsule needs and what Jolt's
+`AllowedDOFs` would give if `somnium_physics` exposed it. Without it a
+character tips over on the first slope and rolls.
+
+### 17.19.2 `grounded` is a heuristic and says so
+
+Jolt's shape cast is not exposed through `somnium_physics`, so there is no
+honest "is there floor under me" query. `grounded` is derived from
+vertical speed: a resting body has gravity cancelled by contact and sits
+near zero. **The known false positive is the apex of a jump**, where
+vertical speed also passes through zero.
+
+Two things in the controller cover that, and both are in the tests:
+jumping is edge-triggered on the key rather than level-triggered, and a
+cooldown sized to the jump's whole flight time (`2·v/g`) closes the window
+until you would have landed. Landing early on a ledge means a short wait —
+that goes away when a real ground test replaces the heuristic, and the
+field's meaning does not change when it does.
+
+### 17.19.3 Proven headlessly
+
+`crates/somnium_core/tests/first_person.rs` runs **the same two `.luau`
+files** on a real Jolt world through the real `ScriptHost`: walking speed,
+stopping dead on key release, run vs walk, diagonal movement not being
+1.41× faster, mouse turning changing which way forward is, pitch clamping,
+the camera riding at eye height, jump height, the anti-staircase cooldown
+under adversarial input, and look direction surviving a reload.
+
+Two defects it caught, both in the scripts:
+
+- **The jump cooldown was a guessed constant (12 steps) and expired before
+  the apex** — holding Space climbed to 6 m. Now derived from the jump's
+  own flight time.
+- **`onInit` assigned `self.yaw = 0`**, which threw away the state
+  `loadState` had just restored, so editing the file spun the player
+  round. The idiom is `self.yaw = self.yaw or 0.0`, and it is now in both
+  scripts and in the help page.
+
+---
+
+## 17.18 Phase 16 — scripting (complete, 2026-08-17)
+
+> **Note on records.** `dev records/` is local-only and is not pushed.
+> Everything from it that outlives its session lives here; study citations
+> live in `ATTRIBUTION.md` §13D. Source comments that name a file under
+> `dev records/` are pointing at a local working note, not a repo file.
+
+### 17.18.1 The shape
+
+```
+somnium_ecs        reflect: schemas, StableId, PersistentId, patches
+      ▼            world: runtime component insert/remove + migration
+somnium_script     NEUTRAL. values / snapshots / commands / capabilities /
+      │            ScriptBackend / lifecycle / scheduler / instance registry
+      ├──────────────┐
+      ▼              ▼
+somnium_script_luau  somnium_core
+  the ONLY crate     ScriptHost drives phases from the frame loop, applies
+  that names mlua    commands, routes physics/audio, owns the cook + decls
+```
+
+**The boundary rule.** No `mlua` type may appear outside
+`somnium_script_luau`. `somnium_core` names that crate in exactly one
+place — `ScriptHost::new`, to install the backend. Replacing the language
+is writing a sibling crate, not editing the ECS, the scene format, the
+undo stack or a line of gameplay API.
+
+**Runtime:** `mlua` 0.12.0 / Luau 0.728, interpreter only, exact-pinned.
+Clean build including the vendored C++ runtime: 38 s.
+
+### 17.18.2 Ownership: snapshot in, commands out
+
+A script never receives `&mut World`. It reads a snapshot plus a
+copy-out `WorldView`, and emits a `CommandBuffer` that is validated and
+applied at a phase boundary. Three things follow, and all three are
+load-bearing: structural change cannot invalidate a live archetype
+iteration; a stale handle is a typed rejection rather than a panic; and
+the design survives parallel script workers because commands are already
+a merge point with a total order.
+
+Ordering is always `(execution_order, persistent_entity_guid,
+attachment_instance_uuid)` — authored data only, never archetype
+traversal, `ComponentId` order or hash-map iteration.
+
+**Visibility rule:** one script's writes are invisible to another until
+the commit point; a script sees its *own* writes because its declared
+components are mirrored into a plain Luau table. Documented for authors in
+`docs/editor/scripting.md`, not just implemented.
+
+### 17.18.3 Measured budgets
+
+RTX 5080 laptop, medians of five settled release runs, via
+`cargo test -p somnium_script_luau --release --test budgets -- --nocapture`.
+
+| Measurement | 16-B record | after 16-F | Ceiling |
+|---|---|---|---|
+| 1,000 empty lifecycle callbacks | 0.515 ms | **0.485** | 0.5 |
+| 10,000 reads + writes (1,000 × 10) | 2.684 ms | **3.431** | 1.5 |
+| 1,000 representative entities @ 60 Hz | 1.541 ms | **1.946** | 2.0 |
+| compile + check + instantiate 1,000 lines | 0.79 ms | **1.50** | 250 |
+| interrupt latency past deadline | 0.05 ms | 0.16 | 2 |
+| 100 instantiate/teardown cycles retained | 16 KiB | 16 KiB | < 1 MiB |
+
+**The two columns are not comparable.** A three-build `git worktree` A/B
+on one afternoon measured the *16-B commit itself* at 0.671 ms on a row
+its record puts at 0.515 — the machine is ~30% slower than the day the
+first column was taken. Scaled by that factor every "after" row lands on
+its recorded number, and the working tree beat both committed builds on
+every row. A number is only comparable to another taken on the same
+machine on the same day.
+
+**The reads+writes ceiling is arithmetically unreachable and is reported
+against rather than relaxed.** 10,000 entities running an *empty*
+callback with no mirror costs 6.5 ms against a 1.5 ms budget for the same
+10,000 doing a read and a write each; the ceiling implies 150 ns per
+callback and the Luau call alone is 116 ns. It was written before there
+was a per-callback cost model. The useful model:
+
+| Component | Measured |
+|---|---|
+| per attachment per phase, no mirror | ~0.55 µs |
+| per mirrored field, in + out | ~0.64 µs |
+| per script-side field read or write | ~0.03 µs |
+| Luau function call | 0.12 µs |
+| cheapest possible host call | 0.03 µs |
+
+**None of this falsified the language choice.** Every defect found by
+measurement was in engine code, and would have cost the same or more in
+any other runtime — more in Wasm, where each argument crosses a sandbox
+boundary. Compilation runs 250× inside its ceiling, which is the number
+that governs editor iteration speed.
+
+### 17.18.4 Sandbox and threat model
+
+`StdLib::ALL_SAFE` is `u32::MAX` under the `luau` feature, so `Lua::new()`
+hands scripts `os` and `debug`. This crate never calls it. Beyond library
+selection, the base library still arrives carrying `getfenv`, `setfenv`,
+`loadstring`, `require`, `collectgarbage`, `gcinfo`, `print` and `_G` —
+all removed *before* `sandbox(true)`, which is what freezes the table.
+`getfenv`/`setfenv` are the serious ones: they rewrite another function's
+environment, which is the entire mechanism keeping one attachment's
+globals private. `tests/sandbox.rs` enumerates the surviving surface so a
+Luau upgrade cannot widen it silently.
+
+The threat model is 22 tests in
+`crates/somnium_core/tests/script_threat_model.rs`, one per row, plus a
+28-case malformed corpus **and every prefix of every case** — half-written
+files are exactly what a file watcher sees.
+
+### 17.18.5 Decisions worth not re-litigating
+
+- **A script asset's id comes from its path, not its content.** A content
+  hash would give every attachment in every scene a new name the first
+  time someone saved the script. Content hashing belongs to the cook,
+  where the question is "is this bytecode still valid".
+- **The cook's runtime fingerprint is a hash of a probe chunk's compiled
+  bytecode**, not a version string. A version string is a constant someone
+  forgets to bump, and stale bytecode handed to Luau is undefined
+  behaviour rather than a load error — the VM does not validate its input.
+- **`require` takes a string literal and nothing else**, enforced by a
+  source scanner. Not a variable, not a concatenation, not even a bare
+  mention. The dependency graph has to be a fact about the file for hot
+  reload to know an edit's blast radius, for the cook to know what to
+  bundle, and for cycles to be caught once.
+- **A required module is evaluated once per trust domain and frozen.**
+  Once per attachment would mean a shared helper is not shared; unfrozen
+  would let one attachment rewrite a helper for everyone.
+- **Capabilities are enforced at the command boundary, once.** Per-binding
+  enforcement means every new host function is another place to remember.
+  `ScriptCommand::required_capability` is an exhaustive match.
+- **Stop restores the authored world from a component checkpoint, not a
+  scene round-trip.** Scripts can only touch what the `TypeRegistry`
+  describes, so capturing exactly that is sufficient and needs no
+  renderer involvement.
+- **The Details panel's Scripts section has no rows in the widget tree.**
+  Every row is generated from the script's declared schema. Hand-written
+  per-script field UI is a review failure, not a shortcut.
+
+### 17.18.6 Not done
+
+- **Diagnostics are positioned, not clickable.** Messages carry
+  `file:line:column`; the Output Log does not turn that into a jump.
+- No debugger (breakpoints, stepping). No mod tier loading untrusted
+  packages into their own VM — the capability manifest a mod tier needs
+  exists and is enforced, but nothing yet uses it that way.
+- Determinism is promised **same build, same platform** only. Jolt and
+  cross-platform float behaviour are unaudited and the stronger claim is
+  not made.
+
+---
 
 ## 18. Known Issues & Active Bugs
 

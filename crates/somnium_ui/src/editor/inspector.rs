@@ -539,6 +539,52 @@ pub(crate) fn build_inspector(
     let material_base = make_color(ui, "Base colour", 34.0, font_id, material_section);
     ui.set_visibility(material_section, false);
 
+    // ── Scripts (Phase 16-D) ─────────────────────────────────────────────────
+    //
+    // The only section in this file with no rows in it.
+    //
+    // Every other section is a fixed widget tree because the component it
+    // edits is a fixed Rust struct. A script's properties are declared by
+    // its author and can change on the next save, so the rows are built
+    // from the schema at refresh time by `UiManager::update_script_inspector`
+    // and this is just the container they go into. Hand-writing a field UI
+    // per script is the failure mode Phase 16 exists to avoid — see the
+    // plan's fourth goal — and 26-J's reflection inspector is meant to
+    // adopt this code path rather than grow a second one.
+    let script_panel =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let script_section = ui.add_node(script_panel, parent);
+    sec_label(ui, "Scripts", font_id, script_section);
+    let script_add = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(theme::ROW_HEIGHT)
+            .with_margin(Thickness::axes(6.0, 2.0)),
+    )
+    .build();
+    let script_add = ui.add_node(script_add, script_section);
+    let add_label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 8.0,
+        top: 4.0,
+        right: 0.0,
+        bottom: 0.0,
+    }))
+    .with_text("New Script")
+    .with_font_size(12.0)
+    .with_font_id(font_id)
+    .with_color(theme::TEXT_PRIMARY)
+    .build();
+    ui.add_node(add_label, script_add);
+    // Attachments are appended here so the "New Script" button stays at the
+    // top of the section rather than sliding down as scripts are added.
+    let script_list =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let script_list = ui.add_node(script_list, script_section);
+    ui.set_visibility(script_section, false);
+
     let vessel_panel =
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
             .with_orientation(Orientation::Vertical)
@@ -654,6 +700,9 @@ pub(crate) fn build_inspector(
         particle_end,
         material_section,
         material_base,
+        script_section,
+        script_add,
+        script_list,
         vessel_section,
         vessel_buoyancy,
         vessel_drag,

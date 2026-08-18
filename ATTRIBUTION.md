@@ -1135,9 +1135,13 @@ engine is only the shape of the solution.
 ## 13C. Phase DOOM — visibility-buffer shade binning (plan reconnaissance, 2026-08-16)
 
 Read while writing [`dev records/phase_DOOM.md`](dev%20records/phase_DOOM.md).
-**Architecture studied, not code copied.** Nothing from this section is in the
-tree yet; the entries exist so the implementing session does not re-derive the
-provenance. Update the "Somnium implementation" column as DOOM-C lands.
+**Architecture studied, not code copied.** DOOM-C shipped as
+`pass/classify.rs` + `shaders/classify.wgsl` and is **default off**: the binning
+is correct (parity to 2 px of 2 615 044) but drawing one instanced quad per tile
+costs more in primitive setup than binning saves, at every tile size tried. That
+is the practical reason the two references below are compute — a dispatch has no
+vertex shader, no primitive setup and no rasterizer. See
+`dev records/phase DOOM/README.md`.
 
 ### 13C.1 Wicked Engine — visibility tile binning
 
@@ -1539,3 +1543,68 @@ internal reflection, directionally gated subsurface scattering, and a fixed
 50 Hz cascade step — the departure and its cause are recorded in
 `dev records/phase_IV.md` section 14.4. The GPU spray emitter in the last row
 was studied but never shipped.
+
+## 13D. Phase 16 — scripting architecture (2026-08-16)
+
+Phase 16 embeds Luau through `mlua`. Both are MIT-licensed dependencies,
+declared in `THIRD_PARTY_NOTICES.md`; **no engine source was copied from
+any reference codebase.** What follows is a record of which architectural
+patterns were studied and where they came from.
+
+### 13D.1 Godot — the language-neutral script contract
+
+`core/object/script_language.h` (MIT) defines `ScriptServer` plus a
+`Script`/`ScriptInstance` pair that engine objects depend on instead of on
+any particular language's types. Somnium's `ScriptBackend`,
+`CompiledModule` and `ScriptInstanceId` in `somnium_script` serve the same
+purpose: the ECS, the scene format and the editor never name a runtime.
+
+Godot's GDScript VM is also the clearest available argument *against* one
+of the options considered — building a bespoke language — because it shows
+the full cost: parser, analyser, compiler, VM, formatter, debugger,
+language server and migration burden.
+
+### 13D.2 O3DE — reflection-driven bindings, and safe-point reconstruction
+
+`AzCore/RTTI/BehaviorContext.h` and `AzCore/Script/ScriptContext.cpp`
+(Apache-2.0 / MIT) expose a single reflected API to Lua rather than a
+hand-written binding per subsystem. Somnium's `TypeRegistry` plays that
+role for scripts, the serializer and the inspector alike.
+
+`AzFramework/Script/ScriptComponent.cpp` reloads by deactivating the old
+instance, discarding it, deferring to the next tick and building a new
+one, rather than patching live VM objects. Somnium's reload contract
+follows that shape.
+
+One thing was studied and deliberately **not** copied: O3DE calls
+`luaL_openlibs` and then removes what it does not want. Somnium opens an
+explicit safe subset instead, because the removal list has to be revisited
+on every runtime upgrade and a missed entry fails open.
+
+### 13D.3 Fyrox — bounded initialisation and deferred destruction
+
+`fyrox-impl/src/script/mod.rs` (MIT) iterates `on_init`/`on_start` to a
+fixed point because scripts can spawn more scripted nodes, caps the loop
+at 64 iterations, queues destruction until the end of the frame, and
+unregisters message subscriptions before deinitialisation. Somnium's
+lifecycle contract adopts all four semantics, independent of language.
+
+### 13D.4 Falco, NeoAxis, Flax — the C# cost estimate
+
+Studied to size the alternative that was **not** chosen. Falco's 66-file
+managed API mirror and per-call `MonoMethodDesc` lookup, NeoAxis's
+non-unloading dynamic assemblies, and Flax's binding generator plus
+collectible-load-context teardown together establish that a C# tier is a
+major subsystem rather than a language plug-in.
+
+**Licence note:** no Falco licence grant was found in any inspected tree,
+so it is **study-only**. NeoAxis's licence forbids building a competing
+engine substantially based on its code. Flax is EULA-governed. None of the
+three is a code donor and none was used as one.
+
+### 13D.5 Wicked Engine — the binding-sprawl anti-pattern
+
+`wiLua.cpp` and 24 separate `*_BindLua.cpp` files (MIT) demonstrate what
+hand-registering a binding surface per subsystem becomes. Cited as the
+motivation for generating Somnium's script surface from the component
+registry rather than writing it.

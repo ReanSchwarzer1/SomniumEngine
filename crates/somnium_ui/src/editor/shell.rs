@@ -24,13 +24,14 @@ use crate::{
         color_picker::ColorPickerBuilder,
         combo_box::ComboBoxBuilder,
         command_palette::CommandPaletteBuilder,
-        context_menu::{ContextMenuBuilder, MenuItem},
+        context_menu::ContextMenuBuilder,
         grid::{Column, GridBuilder, Row},
         image::ImageBuilder,
         menu::MenuBuilder,
         popup::{PopupBuilder, PopupPlacement},
         scroll_viewer::ScrollViewerBuilder,
         search_box::{SearchBoxBuilder, TooltipBuilder},
+        text_box::TextBoxBuilder,
         slider::SliderBuilder,
         splitter::{SplitterBuilder, SplitterOrientation},
         stack_panel::{Orientation, StackPanelBuilder},
@@ -1090,26 +1091,29 @@ pub(crate) fn build_editor_layout(
     .build();
     let tooltip = ui.add_node(tooltip_node, root);
 
-    let _ctx = ContextMenuBuilder::new(
+    // ── Content Drawer context menu (right-click) ────────────────────────────
+    //
+    // Wrapped in a `Popup` so clicking away closes it, and placed with
+    // `AnchorBelow` *without* an anchor — which is the placement's
+    // "obey the child's desired position" path, and is how the menu
+    // lands at the cursor. `UiManager` sets that position when it opens.
+    //
+    // The item list is rebuilt per open: what you may do depends on
+    // whether you right-clicked a file, a folder or empty space.
+    let content_menu_popup_node =
+        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
+    let content_menu_popup = ui.add_node(content_menu_popup_node, root);
+    let content_menu_node = ContextMenuBuilder::new(
         WidgetBuilder::new()
-            .with_visibility(false)
-            .with_desired_position(Vec2::new(0.0, 0.0)),
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_desired_position(Vec2::ZERO),
     )
-    .with_items(vec![
-        MenuItem {
-            id: 1,
-            label: "Duplicate".into(),
-            enabled: true,
-        },
-        MenuItem {
-            id: 2,
-            label: "Delete".into(),
-            enabled: true,
-        },
-    ])
+    .with_items(Vec::new())
     .with_font_id(font_id)
     .build();
-    let _ = ui.add_node(_ctx, root);
+    let content_menu = ui.add_node(content_menu_node, content_menu_popup);
+
 
     let palette_items = vec![
         PaletteItem {
@@ -1250,6 +1254,57 @@ pub(crate) fn build_editor_layout(
     let unsaved_discard = mk_modal_btn(ui, "Don't Save", unsaved_row_h);
     let unsaved_cancel = mk_modal_btn(ui, "Cancel", unsaved_row_h);
 
+    // ── Name prompt (Content Drawer) ─────────────────────────────────────────
+    //
+    // "New Folder", "New Script" and "Rename" all need a name, so one
+    // modal serves all three: the caller sets the title and the initial
+    // text, and confirming reports whatever is in the box. A creation
+    // flow that named things `NewFolder1` and made you find a rename
+    // afterwards would be the wrong shape.
+    let name_popup_node = PopupBuilder::new(
+        WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
+    )
+    .with_placement(PopupPlacement::Center)
+    .build();
+    let name_popup = ui.add_node(name_popup_node, root);
+    let name_border = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_width(360.0)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness::uniform(1.0))
+    .build();
+    let name_border_h = ui.add_node(name_border, name_popup);
+    let name_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let name_stack_h = ui.add_node(name_stack, name_border_h);
+    let name_title_node =
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(12.0)))
+            .with_role(TextRole::Body)
+            .with_text("New Folder")
+            .build();
+    let name_title = ui.add_node(name_title_node, name_stack_h);
+    let name_input_node = TextBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_height(26.0)
+            .with_margin(Thickness::axes(12.0, 4.0))
+            .with_background(theme::BG_INPUT),
+    )
+    .with_font_id(font_id)
+    .build();
+    let name_input = ui.add_node(name_input_node, name_stack_h);
+    let name_row = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_orientation(Orientation::Horizontal)
+        .build();
+    let name_row_h = ui.add_node(name_row, name_stack_h);
+    let name_ok = mk_modal_btn(ui, "Create", name_row_h);
+    let name_cancel = mk_modal_btn(ui, "Cancel", name_row_h);
+
     let color_popup_node =
         PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
             .with_placement(PopupPlacement::AnchorBelow)
@@ -1375,6 +1430,13 @@ pub(crate) fn build_editor_layout(
         unsaved_save,
         unsaved_discard,
         unsaved_cancel,
+        content_menu_popup,
+        content_menu,
+        name_popup,
+        name_title,
+        name_input,
+        name_ok,
+        name_cancel,
         color_popup,
         color_picker,
         title_drag,

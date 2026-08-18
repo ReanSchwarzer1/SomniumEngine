@@ -9,6 +9,13 @@ authors.workspace     = true
 
 [dependencies]
 somnium_ecs = { workspace = true }
+somnium_script = { workspace = true }
+# Phase 16-C. The backend is named here, once, so `ScriptHost` can install
+# it — and nowhere else. Every other crate, and every other module in this
+# one, sees only `somnium_script`'s neutral types. (The reverse edge is a
+# dev-dependency in `somnium_script_luau`, which Cargo permits and which
+# does not make the build graph cyclic.)
+somnium_script_luau = { workspace = true }
 somnium_renderer = { workspace = true }
 somnium_physics = { workspace = true }
 somnium_audio   = { workspace = true }

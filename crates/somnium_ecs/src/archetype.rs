@@ -74,10 +74,20 @@ impl ComponentColumn {
         self.info.id
     }
 
-    /// Size of one item in bytes.
+    /// Type-erased metadata for the component this column stores.
     #[inline]
     #[must_use]
-    fn item_size(&self) -> usize {
+    pub fn info(&self) -> &ComponentInfo {
+        &self.info
+    }
+
+    /// Size of one item in bytes.
+    ///
+    /// Zero-sized types report 1 so that row indexing stays uniform; the
+    /// *payload* size (which is what gets copied) is `info.layout.size()`.
+    #[inline]
+    #[must_use]
+    pub fn item_size(&self) -> usize {
         // Use at least 1 byte for ZSTs to keep indexing simple.
         self.info.layout.size().max(1)
     }
@@ -233,6 +243,29 @@ impl ComponentColumn {
         swapped
     }
 
+    /// Append one already-owned value, copying `info.layout.size()` bytes
+    /// from `src` into a freshly allocated row.
+    ///
+    /// This is the archetype-migration counterpart of
+    /// [`Self::move_out_and_swap_remove`]: ownership transfers into the
+    /// column, so no drop runs on either side of the move.
+    ///
+    /// # Safety
+    ///
+    /// `src` must point to a valid, initialised value of this column's
+    /// component type, and the caller must not use that value afterwards.
+    pub unsafe fn push_moved(&mut self, src: *const u8) {
+        let payload = self.info.layout.size();
+        let start = self.data.len();
+        self.data.resize(start + self.item_size(), 0);
+        if payload > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src, self.data.as_mut_ptr().add(start), payload);
+            }
+        }
+        self.len += 1;
+    }
+
     /// Number of items in this column.
     #[inline]
     #[must_use]
@@ -259,6 +292,61 @@ impl Drop for ComponentColumn {
                 }
             }
         }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MovedComponent — an owned value in transit between archetypes
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// One component value that has been moved out of an archetype and is not
+/// yet in another one.
+///
+/// It owns the value. If it is dropped without being relinquished (via
+/// [`Self::relinquish`]) the component's own destructor runs, so an early
+/// return or a `?` on a migration path leaks nothing.
+pub(crate) struct MovedComponent {
+    /// Which component type these bytes hold.
+    pub(crate) id: ComponentId,
+    /// Destructor, if the type needs one.
+    drop_fn: Option<unsafe fn(*mut u8)>,
+    /// `item_size` bytes of storage holding one moved value.
+    bytes: Vec<u8>,
+    /// Set once ownership has been handed to a destination column.
+    relinquished: bool,
+}
+
+impl MovedComponent {
+    /// Hand ownership of the value to the caller and return a pointer to
+    /// it. After this call the destructor will **not** run here, so the
+    /// caller must move the value somewhere that owns it.
+    pub(crate) fn relinquish(&mut self) -> *const u8 {
+        self.relinquished = true;
+        self.bytes.as_ptr()
+    }
+}
+
+impl Drop for MovedComponent {
+    fn drop(&mut self) {
+        if !self.relinquished {
+            if let Some(drop_fn) = self.drop_fn {
+                // SAFETY: `bytes` holds one initialised value of the
+                // component type `drop_fn` was built for, and this runs
+                // exactly once because `Drop` runs once.
+                unsafe { drop_fn(self.bytes.as_mut_ptr()) }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for MovedComponent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MovedComponent")
+            .field("id", &self.id)
+            .field("drop_fn", &self.drop_fn.is_some())
+            .field("bytes", &self.bytes.len())
+            .field("relinquished", &self.relinquished)
+            .finish()
     }
 }
 
@@ -350,6 +438,51 @@ impl Archetype {
     #[inline]
     pub fn column_mut(&mut self, col_idx: usize) -> &mut ComponentColumn {
         &mut self.columns[col_idx]
+    }
+
+    /// Type-erased metadata for every column, in sorted component order.
+    pub fn column_infos(&self) -> impl Iterator<Item = &ComponentInfo> {
+        self.columns.iter().map(ComponentColumn::info)
+    }
+
+    /// Move an entire row **out** of this archetype without dropping any
+    /// component, leaving the archetype one row shorter.
+    ///
+    /// Returns one owned byte buffer per component (in sorted component
+    /// order) and the entity that was swapped into `row`, if any. The
+    /// caller now owns every value in those buffers and must either push
+    /// them into another archetype or drop them explicitly — leaking them
+    /// leaks whatever the components own.
+    ///
+    /// This is the primitive behind runtime component insert/remove: it
+    /// exists so that migration never has to hold a mutable borrow of two
+    /// archetypes at once.
+    pub(crate) fn move_out_row(&mut self, row: usize) -> (Vec<MovedComponent>, Option<Entity>) {
+        debug_assert!(row < self.entities.len());
+        let mut moved = Vec::with_capacity(self.columns.len());
+        for col in &mut self.columns {
+            let mut bytes = vec![0_u8; col.item_size()];
+            // SAFETY: `bytes` is at least `item_size` ≥ `layout.size()`
+            // long, and `row` is in bounds for every parallel column.
+            unsafe {
+                col.move_out_and_swap_remove(row, bytes.as_mut_ptr());
+            }
+            moved.push(MovedComponent {
+                id: col.component_id(),
+                drop_fn: col.info().drop_fn,
+                bytes,
+                relinquished: false,
+            });
+        }
+
+        let last = self.entities.len() - 1;
+        let swapped = row != last;
+        self.entities.swap_remove(row);
+        if swapped {
+            (moved, Some(self.entities[row]))
+        } else {
+            (moved, None)
+        }
     }
 
     /// Add an entity to this archetype, returning its row index.
