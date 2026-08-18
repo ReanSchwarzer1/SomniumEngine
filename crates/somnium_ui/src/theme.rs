@@ -597,7 +597,43 @@ pub enum ThemeId {
     Dawn = 1,
 }
 
+#[cfg(not(test))]
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+// Under `cargo test` the selector is thread-local instead of global.
+//
+// The editor swaps themes from one UI thread, so a process-global atomic is the
+// right production shape. Rust runs unit tests multi-threaded, though, and this
+// crate has two tests that swap the theme against 46 call sites that read it —
+// a genuine race on observable state that surfaced exactly once, as a single
+// unreproducible failure in a workspace run. Scoping the selector to the thread
+// removes the interference without weakening what the tests actually assert:
+// a swap still changes what `active()` returns, it just cannot be seen by a
+// test running beside it.
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_THEME_TL: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn load_active() -> u8 {
+    ACTIVE_THEME_TL.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+fn load_active() -> u8 {
+    ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn store_active(v: u8) {
+    ACTIVE_THEME_TL.with(|c| c.set(v));
+}
+
+#[cfg(not(test))]
+fn store_active(v: u8) {
+    ACTIVE_THEME.store(v, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// The snapshot every `style.rs` recipe resolves against.
 ///
@@ -606,18 +642,18 @@ static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// user-authored theme would need a different mechanism; this is deliberately
 /// the smallest thing that ships two.
 pub fn active() -> &'static Theme {
-    match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+    match load_active() {
         1 => &DAWN,
         _ => &NOCTURNE,
     }
 }
 
 pub fn set_active(id: ThemeId) {
-    ACTIVE_THEME.store(id as u8, std::sync::atomic::Ordering::Relaxed);
+    store_active(id as u8);
 }
 
 pub fn active_id() -> ThemeId {
-    match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+    match load_active() {
         1 => ThemeId::Dawn,
         _ => ThemeId::Nocturne,
     }
@@ -1048,6 +1084,23 @@ mod asphodel_tests {
         }
         assert!(relative_luminance(ramp_step(base, 50)) > relative_luminance(base));
         assert!(relative_luminance(ramp_step(base, 900)) < relative_luminance(base));
+    }
+
+    #[test]
+    fn a_theme_swap_cannot_leak_into_a_test_running_beside_it() {
+        // The guard on the defect this scoping fixed: swapping here must not be
+        // observable from another thread. If the selector ever goes back to a
+        // process-global under `cfg(test)`, this fails.
+        set_active(ThemeId::Dawn);
+        assert!(active().is_light);
+        let seen_elsewhere = std::thread::spawn(|| active().is_light)
+            .join()
+            .expect("probe thread");
+        assert!(
+            !seen_elsewhere,
+            "a theme swap escaped its thread and can race other tests"
+        );
+        set_active(ThemeId::Nocturne);
     }
 
     #[test]

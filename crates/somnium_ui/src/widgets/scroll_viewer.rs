@@ -77,7 +77,17 @@ impl Control for ScrollViewer {
         final_size
     }
 
-    fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+    fn draw(&self, _widget: &Widget, _ctx: &mut DrawingContext) {
+        // Nothing paints beneath the content. The scrollbar and the edge
+        // fades are overlays and are emitted from `draw_over`, after the
+        // children have painted.
+        //
+        // They used to be emitted here, which put them *under* the very
+        // content they annotate: correct geometry, correct colour, and
+        // completely invisible. See `Control::draw_over`.
+    }
+
+    fn draw_over(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         let t = theme::active();
         let track = Rect::new(b.x + b.w - BAR, b.y, BAR, b.h);

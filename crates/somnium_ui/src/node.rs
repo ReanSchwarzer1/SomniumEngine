@@ -164,6 +164,18 @@ pub trait Control: Send + 'static {
         ctx.push_rect_filled(widget.screen_bounds(), widget.background);
     }
 
+    /// Emit draw commands **after** this widget's children have drawn.
+    ///
+    /// `UserInterface::draw_node` paints a control and then recurses into its
+    /// children, so anything a container needs to render *over* its content —
+    /// a scroll-edge fade, a scrollbar that must not be covered — cannot go in
+    /// [`Control::draw`]. Phase 27-G added this because the scroll fade did go
+    /// there and was silently painted underneath the scrolled content: correct
+    /// geometry, correct colour, invisible.
+    ///
+    /// Default is empty, so no existing widget changes behaviour.
+    fn draw_over(&self, _widget: &Widget, _ctx: &mut DrawingContext) {}
+
     /// Handle a message routed to this widget (ToWidget direction).
     /// Push any outgoing (FromWidget) messages into `emit`; the caller drains it into the queue.
     fn handle_routed_message(
