@@ -40,14 +40,16 @@ impl Control for ContextMenu {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_RAISED);
-        ctx.push_rect_border(b, 1.0, theme::BORDER_MEDIUM);
+        // A context menu floats, so it takes the popup rung and its radius.
+        let t = theme::active();
+        ctx.push_paint(b, &crate::style::popup());
+        let _ = t;
         for (i, item) in self.items.iter().enumerate() {
             let y = b.y + 2.0 + i as f32 * theme::ROW_HEIGHT;
             let color = if item.enabled {
-                theme::TEXT_PRIMARY
+                theme::active().semantic.text.primary.bytes()
             } else {
-                theme::TEXT_DISABLED
+                theme::active().semantic.text.disabled.bytes()
             };
             ctx.push_text(
                 &item.label,

@@ -71,6 +71,7 @@ impl UiCanvas {
         let ui_scale = window.scale_factor() as f32;
         self.ui.set_ui_scale(ui_scale);
         self.ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
+        self.ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
 
         let _ = self.ui.update();
         self.ui.perform_layout();

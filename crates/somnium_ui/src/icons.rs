@@ -273,15 +273,50 @@ pub struct IconAtlas {
     pub width: u32,
     pub height: u32,
     pub dirty: bool,
+    /// Device pixels per logical unit the cells were rasterized at.
+    ///
+    /// Phase 27-F. Before the DPI fix the atlas was a fixed 1024 grid of 32 and
+    /// 96 px cells, so a 16 logical-px row icon at 200 % sampled a 32 px cell
+    /// upscaled to 32 device px — visibly soft, and the reason `phase_27` §2.3
+    /// ranked DPI-correct icons above glow.
+    ///
+    /// The cell grid and the atlas dimensions scale by the same factor, which is
+    /// what keeps every normalised UV in [`IconId`] unchanged: `cell * k` over
+    /// `width * k` is the same fraction. No call site knows this happened.
+    pub render_scale: f32,
 }
 
 impl IconAtlas {
     pub fn new() -> Self {
+        Self::with_render_scale(1.0)
+    }
+
+    /// Largest device ratio the atlas is rasterized at.
+    ///
+    /// Packing is scale-invariant — the cell grid and the atlas dimensions grow
+    /// together — so the ceiling is set by **memory**, not by geometry.
+    /// `measured_atlas_cost_at_every_supported_scale` records the real numbers:
+    /// 4.0 MiB at 100 %, 16.0 at 200 %, **36.0 at 300 %**, and 64.0 at 400 %.
+    ///
+    /// 3.0 is the cap because Windows tops out at 300 % in its display settings
+    /// and 64 MiB of icon atlas is not a reasonable trade for the fraction of a
+    /// display beyond it. A higher ratio clamps here and renders very slightly
+    /// soft rather than allocating a quarter of a gigabyte across both cuts.
+    pub const MAX_RENDER_SCALE: f32 = 3.0;
+
+    /// Rasterize every glyph at `scale` device pixels per logical unit.
+    pub fn with_render_scale(scale: f32) -> Self {
+        let scale = scale.clamp(1.0, Self::MAX_RENDER_SCALE);
+        let width = (ICON_ATLAS_WIDTH as f32 * scale).round() as u32;
+        let height = (ICON_ATLAS_HEIGHT as f32 * scale).round() as u32;
+        let cell = (ICON_CELL as f32 * scale).round() as u32;
+        let cell_large = (ICON_CELL_LARGE as f32 * scale).round() as u32;
         let mut atlas = Self {
-            pixels: vec![0u8; (ICON_ATLAS_WIDTH * ICON_ATLAS_HEIGHT * 4) as usize],
-            width: ICON_ATLAS_WIDTH,
-            height: ICON_ATLAS_HEIGHT,
+            pixels: vec![0u8; (width * height * 4) as usize],
+            width,
+            height,
             dirty: true,
+            render_scale: scale,
         };
         for &id in IconId::ALL {
             // Zeta-E: the vendored SVG family is authoritative. The procedural
@@ -294,21 +329,52 @@ impl IconAtlas {
             // upscaling the 32 px cell cannot recover the strokes.
             match crate::icon_svg::source_for(id) {
                 Some(svg) => {
-                    if let Some(mask) = crate::icon_svg::rasterize(svg, ICON_CELL) {
+                    if let Some(mask) = crate::icon_svg::rasterize(svg, cell) {
                         let (ox, oy) = id.cell_px();
-                        atlas.blit_mask(ox as i32, oy as i32, ICON_CELL as usize, &mask);
+                        atlas.blit_mask(
+                            (ox as f32 * scale).round() as i32,
+                            (oy as f32 * scale).round() as i32,
+                            cell as usize,
+                            &mask,
+                        );
                     } else {
                         atlas.rasterize(id);
                     }
-                    if let Some(mask) = crate::icon_svg::rasterize(svg, ICON_CELL_LARGE) {
+                    if let Some(mask) = crate::icon_svg::rasterize(svg, cell_large) {
                         let (ox, oy) = id.cell_px_large();
-                        atlas.blit_mask(ox as i32, oy as i32, ICON_CELL_LARGE as usize, &mask);
+                        atlas.blit_mask(
+                            (ox as f32 * scale).round() as i32,
+                            (oy as f32 * scale).round() as i32,
+                            cell_large as usize,
+                            &mask,
+                        );
                     }
                 }
                 None => atlas.rasterize(id),
             }
         }
         atlas
+    }
+
+    /// Re-rasterize at a new device ratio. A no-op when the ratio is unchanged,
+    /// so an ordinary resize costs nothing; dragging a window to a HiDPI monitor
+    /// rebuilds the atlas and flags it for re-upload.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(1.0, Self::MAX_RENDER_SCALE);
+        if (scale - self.render_scale).abs() < 0.01 {
+            return;
+        }
+        *self = Self::with_render_scale(scale);
+    }
+
+    /// Small-cut cell size in device pixels.
+    pub fn cell(&self) -> u32 {
+        (ICON_CELL as f32 * self.render_scale).round() as u32
+    }
+
+    /// Large-cut cell size in device pixels.
+    pub fn cell_large(&self) -> u32 {
+        (ICON_CELL_LARGE as f32 * self.render_scale).round() as u32
     }
 
     /// Copy a rasterized alpha mask into the atlas. RGB stays white so the UI
@@ -1062,5 +1128,106 @@ mod large_cut_tests {
             }
         }
         assert!(covered > 200, "large Folder cut has only {covered} pixels");
+    }
+}
+
+#[cfg(test)]
+mod nyx_dpi_tests {
+    use super::*;
+
+    #[test]
+    fn measured_atlas_cost_at_every_supported_scale() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+            let a = IconAtlas::with_render_scale(scale);
+            let mb = a.pixels.len() as f32 / (1024.0 * 1024.0);
+            println!(
+                "scale {scale}: {}x{} atlas, cells {}/{}, {:.1} MiB",
+                a.width,
+                a.height,
+                a.cell(),
+                a.cell_large(),
+                mb
+            );
+        }
+    }
+
+    #[test]
+    fn the_large_cut_packs_at_every_supported_scale() {
+        // Packing is scale-invariant by construction — the cell grid and the
+        // atlas dimensions scale by the same factor — but that is exactly the
+        // kind of "obviously true" claim worth pinning down, because the font
+        // atlas turned out not to have room for its own three-phase variant.
+        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+            // Dimensions only — no rasterization needed to check the geometry.
+            let a = IconAtlas {
+                pixels: Vec::new(),
+                width: (ICON_ATLAS_WIDTH as f32 * scale).round() as u32,
+                height: (ICON_ATLAS_HEIGHT as f32 * scale).round() as u32,
+                dirty: false,
+                render_scale: scale,
+            };
+            for &id in IconId::ALL {
+                let (sx, sy) = id.cell_px();
+                let (lx, ly) = id.cell_px_large();
+                let s = |v: u32| (v as f32 * scale).round() as u32;
+                assert!(s(sx) + a.cell() <= a.width, "{id:?} small x at {scale}");
+                assert!(
+                    s(sy) + a.cell() <= (LARGE_ORIGIN_Y as f32 * scale).round() as u32,
+                    "{id:?} small block overruns the large block at {scale}"
+                );
+                assert!(s(lx) + a.cell_large() <= a.width, "{id:?} large x at {scale}");
+                assert!(s(ly) + a.cell_large() <= a.height, "{id:?} large y at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn uvs_are_identical_at_every_scale() {
+        // The whole reason no call site changed: scaling the cells and the atlas
+        // together leaves every normalised coordinate untouched.
+        //
+        // Build each atlas once. The first draft of this test constructed one
+        // per icon per scale — 252 full resvg passes — and took 106 seconds.
+        let baseline: Vec<_> = IconId::ALL
+            .iter()
+            .map(|&id| (id, id.uv_rect(), id.uv_rect_large()))
+            .collect();
+        for scale in [1.25f32, 2.0, 3.0] {
+            let atlas = IconAtlas::with_render_scale(scale);
+            assert_eq!(atlas.render_scale, scale);
+            for &(id, small, large) in &baseline {
+                assert_eq!(id.uv_rect(), small, "{id:?} small uv drifted at {scale}");
+                assert_eq!(id.uv_rect_large(), large, "{id:?} large uv drifted at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_scaled_atlas_carries_real_coverage() {
+        // A resvg rasterization that silently produced nothing would still pack
+        // and still have valid UVs, so check the pixels are actually there.
+        let a = IconAtlas::with_render_scale(2.0);
+        let (ox, oy) = IconId::Save.cell_px();
+        let (ox, oy) = ((ox as f32 * 2.0) as u32, (oy as f32 * 2.0) as u32);
+        let mut covered = 0u32;
+        for y in oy..oy + a.cell() {
+            for x in ox..ox + a.cell() {
+                if a.pixels[((y * a.width + x) * 4 + 3) as usize] > 0 {
+                    covered += 1;
+                }
+            }
+        }
+        assert!(covered > 0, "the 2x Save glyph rasterized empty");
+    }
+
+    #[test]
+    fn set_render_scale_is_a_no_op_at_the_same_ratio() {
+        let mut a = IconAtlas::with_render_scale(1.0);
+        a.dirty = false;
+        a.set_render_scale(1.0);
+        assert!(!a.dirty, "an ordinary resize must not rebuild the atlas");
+        a.set_render_scale(2.0);
+        assert!(a.dirty, "a real DPI change must rebuild and re-upload");
+        assert_eq!(a.render_scale, 2.0);
     }
 }

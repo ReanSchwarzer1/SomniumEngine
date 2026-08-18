@@ -58,21 +58,44 @@ impl Control for TabControl {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(Rect::new(b.x, b.y, b.w, 22.0), theme::BG_HEADER);
+        let t = theme::active();
+        // The strip is chrome, so it carries the header wash.
+        let strip = Rect::new(b.x, b.y, b.w, 22.0);
+        let g = t.gradient.header_wash;
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(strip, g.from.bytes())
+                .with_gradient(g.to.bytes(), g.axis),
+            None,
+        );
         let n = self.titles.len().max(1) as f32;
         let tw = b.w / n;
         for (i, title) in self.titles.iter().enumerate() {
             let r = Rect::new(b.x + i as f32 * tw, b.y, tw, 22.0);
             if i == self.selected {
-                ctx.push_rect_filled(r, theme::BG_PANEL);
-                ctx.push_rect_filled(Rect::new(r.x, r.y + 20.0, r.w, 2.0), theme::ACCENT);
+                // The active tab reads as the panel surfacing through the strip,
+                // so it rounds only its top corners and keeps its accent rail.
+                let radius = t.geometry.radius_chrome;
+                ctx.push_primitive(
+                    crate::primitive::Primitive::fill(r, t.semantic.surface.panel.bytes())
+                        .with_radii([radius, radius, 0.0, 0.0]),
+                    None,
+                );
+                let rail = t.gradient.rail_accent;
+                ctx.push_primitive(
+                    crate::primitive::Primitive::fill(
+                        Rect::new(r.x, r.y + 20.0, r.w, 2.0),
+                        rail.from.bytes(),
+                    )
+                    .with_gradient(rail.to.bytes(), rail.axis),
+                    None,
+                );
             }
             ctx.push_text(
                 title,
                 Vec2::new(r.x + 8.0, r.y + 4.0),
                 self.font_id,
                 11.0,
-                theme::TEXT_PRIMARY,
+                t.semantic.text.primary.bytes(),
             );
         }
     }

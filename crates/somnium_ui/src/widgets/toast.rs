@@ -53,8 +53,24 @@ impl Control for ToastHost {
             let h = 28.0;
             let x = b.x + b.w - w - 16.0;
             let y = b.y + b.h - 48.0 - i as f32 * 34.0;
-            ctx.push_rect_filled(Rect::new(x, y, w, h), [0x25, 0x28, 0x30, alpha]);
-            ctx.push_rect_border(Rect::new(x, y, w, h), 1.0, theme::BORDER_MEDIUM);
+            // Phase 27-D: a toast is the top rung of the elevation ladder, so
+            // it reads as above the modal rather than pasted onto the status bar.
+            let t = theme::active();
+            let rect = Rect::new(x, y, w, h);
+            let radii = [t.geometry.radius_popup; 4];
+            let mut lifted = t.elevation.toast;
+            // Fade the shadow out with the toast itself.
+            lifted.alpha *= alpha as f32 / 255.0;
+            ctx.push_drop_shadow_rounded(rect, radii, lifted);
+            ctx.push_primitive(
+                crate::primitive::Primitive::fill(
+                    rect,
+                    theme::with_alpha(t.semantic.surface.popup.bytes(), alpha),
+                )
+                .with_radii(radii)
+                .with_border(t.geometry.stroke_hairline, t.semantic.border.default.bytes()),
+                None,
+            );
             ctx.push_text(
                 text,
                 Vec2::new(x + 10.0, y + 7.0),

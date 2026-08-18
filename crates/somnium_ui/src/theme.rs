@@ -623,6 +623,44 @@ pub fn active_id() -> ThemeId {
     }
 }
 
+/// Build a chrome wash from an arbitrary base colour.
+///
+/// The token sheet ships four fixed gradients, but the shell sets most of its
+/// chrome fills directly from a surface token, so a fixed pair cannot cover
+/// them without changing their hue. This derives the same *relative* wash from
+/// whatever base a surface actually uses: a touch lighter at the top, a touch
+/// darker at the bottom, calibrated to the same ~1.05 contrast ratio the token
+/// gradients use, and mixed on linear values so it behaves the same on the
+/// Nocturne ground and the Dawn one.
+pub fn wash_from(base: Srgb8) -> Gradient {
+    const LIGHTEN: f32 = 0.045;
+    const DARKEN: f32 = 0.030;
+    let b = base.bytes();
+    Gradient::vertical(
+        Srgb8(crate::motion::lerp_color(b, [0xFF, 0xFF, 0xFF, b[3]], LIGHTEN)),
+        Srgb8(crate::motion::lerp_color(b, [0x00, 0x00, 0x00, b[3]], DARKEN)),
+    )
+}
+
+/// The wash a chrome surface should carry, or `None` for surfaces that must
+/// stay flat.
+///
+/// Content grounds (`canvas`, `window`) and recessed fields (`input`) are never
+/// washed — §5.3 puts gradients on chrome only. This matches on the token value
+/// because that is how a `Border` declares its role today; when borders take an
+/// explicit surface role, this becomes a lookup instead of a match.
+pub fn wash_for_surface(color: Color) -> Option<Gradient> {
+    let t = active();
+    let s = &t.semantic.surface;
+    if color[3] == 0 {
+        return None;
+    }
+    if color == s.header.bytes() || color == s.raised.bytes() || color == s.popup.bytes() {
+        return Some(wash_from(Srgb8(color)));
+    }
+    None
+}
+
 /// Relative luminance per WCAG 2.x, from authored sRGB bytes.
 pub fn relative_luminance(c: Srgb8) -> f32 {
     let b = c.bytes();

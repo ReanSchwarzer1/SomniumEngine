@@ -66,20 +66,44 @@ impl Control for TreeView {
             } else {
                 Interaction::Rest
             };
-            let paint = tree_row(VisualState::with(interaction));
-            if paint.background[3] != 0 {
-                ctx.push_rect_filled(row, paint.background);
+            let mut paint = tree_row(VisualState::with(interaction));
+
+            // Phase 27-C: cross-fade the row hover. Keyed per row, so moving the
+            // pointer down a list fades each row independently instead of
+            // flashing the whole Outliner.
+            let key = crate::motion::MotionKey::row(
+                widget.handle.index(),
+                i as u32,
+                crate::motion::MotionProperty::HoverWash,
+            );
+            let target = if interaction == Interaction::Hover {
+                1.0
+            } else {
+                0.0
+            };
+            ctx.motion.start(
+                key,
+                0.0,
+                target,
+                theme::active().motion.hover_ms as f32,
+                crate::motion::Easing::Standard,
+            );
+            let wash = ctx.motion.value_or(key, target);
+            // Selection is a different cue entirely and must never be faded
+            // through, or a selected row would blink when the pointer crosses it.
+            if !selected && wash > 0.0 && wash < 1.0 {
+                let rest = tree_row(VisualState::with(Interaction::Rest));
+                let hovered = tree_row(VisualState::with(Interaction::Hover));
+                paint.background =
+                    crate::motion::lerp_color(rest.background, hovered.background, wash);
+                paint.foreground =
+                    crate::motion::lerp_color(rest.foreground, hovered.foreground, wash);
             }
-            if let Some(rail) = paint.rail {
-                ctx.push_rect_filled(
-                    Rect::new(
-                        b.x,
-                        y,
-                        theme::NOCTURNE.geometry.stroke_rail,
-                        theme::TREE_ROW_HEIGHT,
-                    ),
-                    rail,
-                );
+
+            // One call renders fill and rail together in the right order, and
+            // the rail width comes from the live theme rather than a constant.
+            if paint.background[3] != 0 || paint.rail.is_some() {
+                ctx.push_paint(row, &paint);
             }
             let style = if selected { selected_style } else { rest_style };
             let indent = 8.0 + item.depth as f32 * 14.0;
@@ -91,7 +115,12 @@ impl Control for TreeView {
                     IconId::Chevron
                 };
                 let (uv, tex) = icon.draw_quad(chev);
-                ctx.push_textured_rect(chev, uv, theme::TEXT_SECONDARY, tex);
+                ctx.push_textured_rect(
+                    chev,
+                    uv,
+                    theme::active().semantic.text.secondary.bytes(),
+                    tex,
+                );
             }
             let ic = Rect::new(
                 b.x + indent + 18.0,

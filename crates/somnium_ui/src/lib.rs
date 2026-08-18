@@ -990,6 +990,7 @@ impl UiManager {
         // `px * ui_scale * SUPER_SAMPLE` and land in a quad that is exactly
         // `px * ui_scale` device pixels wide.
         native_ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
+        native_ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
 
         let font_id = load_fonts(&mut native_ui);
 
@@ -1198,6 +1199,10 @@ impl UiManager {
         self.native_ui
             .draw_ctx
             .font_atlas
+            .set_render_scale(ui_scale);
+        self.native_ui
+            .draw_ctx
+            .icon_atlas
             .set_render_scale(ui_scale);
         self.native_ui.resize(logical_w, logical_h);
         self.apply_collapse_rules(self.window_size.0);
@@ -4851,6 +4856,107 @@ mod styx_budget_tests {
                 "{w}x{h}: {batches} batches exceeds the measured budget"
             );
         }
+    }
+
+    #[test]
+    fn the_shell_actually_uses_the_new_paint_capabilities() {
+        // The honest check on "does the editor look different yet". Counting
+        // capability use in the real draw list is the only answer that is not a
+        // claim: after 27-A/B alone every one of these was zero.
+        use crate::primitive::{FLAG_GRADIENT, FLAG_INSET, FLAG_SHADOW};
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+
+        let rounded = inst.iter().filter(|p| p.radii[0] > 0.0).count();
+        let gradients = inst.iter().filter(|p| p.flags & FLAG_GRADIENT != 0).count();
+        let shadows = inst
+            .iter()
+            .filter(|p| p.flags & FLAG_SHADOW != 0 && p.flags & FLAG_INSET == 0)
+            .count();
+        let insets = inst.iter().filter(|p| p.flags & FLAG_INSET != 0).count();
+        let borders = inst.iter().filter(|p| p.border_width > 0.0).count();
+
+        println!(
+            "shell paint: {} instances | {rounded} rounded | {gradients} washed |              {shadows} lifted | {insets} recessed | {borders} stroked",
+            inst.len()
+        );
+
+        // Floors, not exact counts: adding chrome should never take these
+        // backwards. The first run after the widget migration measured 49 / 28 /
+        // 20 / 4 / 17, and the wash count was 1 until `wash_from` stopped
+        // treating a caller-supplied background as a request for flatness.
+        assert!(rounded >= 40, "corner radius regressed to {rounded}");
+        assert!(gradients >= 20, "chrome wash regressed to {gradients}");
+        assert!(shadows >= 15, "elevation regressed to {shadows}");
+        assert!(insets >= 4, "recession regressed to {insets}");
+        assert!(borders >= 15, "strokes regressed to {borders}");
+
+        // Content grounds must stay flat: a wash on every surface is exactly the
+        // "lit like a toy" failure §5.2 forbids.
+        let ground = crate::theme::active().semantic.surface.canvas.bytes();
+        assert!(
+            !inst.iter().any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
+            "the canvas ground must never be washed"
+        );
+    }
+
+    #[test]
+    fn every_shell_region_still_paints_something_visible() {
+        // The regression guard for the widget migration. 18 `draw()` methods
+        // changed; the failure mode that matters is a surface that quietly
+        // stopped painting — a transparent fill or a zero-alpha colour looks
+        // like "the panel is gone", and no layout test would catch it because
+        // the bounds are still correct.
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+
+        let visible_in = |r: crate::types::Rect| {
+            inst.iter().any(|p| {
+                let x = p.rect[0] + p.rect[2] * 0.5;
+                let y = p.rect[1] + p.rect[3] * 0.5;
+                let opaque = p.fill_a[3] > 0 || p.border_color[3] > 0 || p.shadow_color[3] > 0;
+                opaque
+                    && x >= r.x
+                    && x <= r.x + r.w
+                    && y >= r.y
+                    && y <= r.y + r.h
+            })
+        };
+
+        let w = 1920.0;
+        let h = 1080.0;
+        for (name, region) in [
+            ("application bar", crate::types::Rect::new(0.0, 0.0, w, 36.0)),
+            ("mode toolbar", crate::types::Rect::new(0.0, 36.0, w, 32.0)),
+            ("left rail", crate::types::Rect::new(0.0, 68.0, 120.0, 400.0)),
+            ("right column", crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0)),
+            ("status bar", crate::types::Rect::new(0.0, h - 26.0, w, 26.0)),
+        ] {
+            assert!(visible_in(region), "{name} paints nothing visible");
+        }
+    }
+
+    #[test]
+    fn no_migrated_surface_became_fully_transparent() {
+        // A `Paint` whose background, border and shadow are all zero-alpha
+        // renders nothing at all. Some are legitimately invisible (a ghost icon
+        // button at rest), so this checks the *proportion* rather than banning
+        // them outright: a migration slip would push it far past this.
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+        let invisible = inst
+            .iter()
+            .filter(|p| {
+                p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0
+            })
+            .count();
+        let ratio = invisible as f32 / inst.len() as f32;
+        println!("invisible instances: {invisible}/{} ({:.1}%)", inst.len(), ratio * 100.0);
+        assert!(
+            ratio < 0.25,
+            "{:.0}% of the draw list paints nothing — a surface was likely lost",
+            ratio * 100.0
+        );
     }
 
     #[test]

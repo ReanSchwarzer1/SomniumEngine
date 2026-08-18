@@ -14,6 +14,8 @@ use std::cell::Cell;
 
 const BAR: f32 = 10.0;
 const MIN_THUMB: f32 = 24.0;
+/// Height of the fade that marks clipped content at a scroll edge.
+const FADE_HEIGHT: f32 = 14.0;
 
 pub struct ScrollViewer {
     pub scroll_y: f32,
@@ -77,20 +79,48 @@ impl Control for ScrollViewer {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
+        let t = theme::active();
         let track = Rect::new(b.x + b.w - BAR, b.y, BAR, b.h);
-        ctx.push_rect_filled(track, theme::BG_INPUT);
-        ctx.push_rect_border(track, 1.0, theme::BORDER_DARK);
+        ctx.push_rect_filled(track, t.semantic.surface.input.bytes());
+        ctx.push_rect_border(track, 1.0, t.semantic.border.subtle.bytes());
+
+        let scrollable = self.content_h.get() > self.view_h.get() + 0.5;
         let thumb = self.thumb_rect(b);
-        let color = if self.content_h.get() > self.view_h.get() + 0.5 {
+        let color = if scrollable {
             if self.dragging {
-                theme::ACCENT
+                t.semantic.accent.default.bytes()
             } else {
-                theme::BORDER_LIGHT
+                t.semantic.border.strong.bytes()
             }
         } else {
-            theme::BORDER_MEDIUM
+            t.semantic.border.default.bytes()
         };
-        ctx.push_rect_filled(thumb, color);
+        // A capsule thumb, so the gutter reads as a control rather than a slot.
+        let thumb_r = (BAR * 0.5 - 1.0).max(0.0);
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(thumb, color).with_radius(thumb_r),
+            None,
+        );
+
+        // Phase 27-D, the §2.4 audit item: a clipped region must say that its
+        // content continues. Drawn only while there is actually more to see, and
+        // only at the edge there is more on, so a short list stays clean.
+        if scrollable {
+            let surface = t.semantic.surface.panel.bytes();
+            let fade_h = FADE_HEIGHT.min(b.h * 0.25);
+            let viewport_w = (b.w - BAR).max(0.0);
+            if self.scroll_y > 0.5 {
+                ctx.push_scroll_fade(Rect::new(b.x, b.y, viewport_w, fade_h), surface, true);
+            }
+            let max_offset = (self.content_h.get() - self.view_h.get()).max(0.0);
+            if self.scroll_y < max_offset - 0.5 {
+                ctx.push_scroll_fade(
+                    Rect::new(b.x, b.y + b.h - fade_h, viewport_w, fade_h),
+                    surface,
+                    false,
+                );
+            }
+        }
     }
 
     fn handle_routed_message(

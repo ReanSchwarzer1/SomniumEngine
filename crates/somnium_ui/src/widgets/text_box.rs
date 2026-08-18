@@ -45,14 +45,12 @@ impl Control for TextBox {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        let bg = theme::BG_INPUT;
-        ctx.push_rect_filled(b, bg);
-        let border_col = if self.focused {
-            theme::BORDER_FOCUS
-        } else {
-            theme::BORDER_MEDIUM
-        };
-        ctx.push_rect_border(b, 1.0, border_col);
+        // Phase 27-D: the input recipe carries the radius, the recession and
+        // the focus ring plus its glow.
+        let paint = crate::style::input(
+            crate::style::VisualState::rest().focused(self.focused),
+        );
+        ctx.push_paint(b, &paint);
         let text_origin = Vec2::new(b.x + 4.0, b.y + 3.0);
         ctx.push_text(&self.text, text_origin, self.font_id, self.px, self.color);
         if self.focused {

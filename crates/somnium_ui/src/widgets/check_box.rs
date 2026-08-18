@@ -38,18 +38,26 @@ impl Control for CheckBox {
             theme::ICON_CHECK,
             theme::ICON_CHECK,
         );
-        ctx.push_rect_filled(box_r, theme::BG_INPUT);
-        ctx.push_rect_border(box_r, 1.0, theme::BORDER_MEDIUM);
+        // A checkbox is a tiny input: same recession and radius as the fields.
+        let t = theme::active();
+        let paint = crate::style::input(crate::style::VisualState::rest());
+        ctx.push_paint(box_r, &paint);
+        let _ = t;
         if self.checked {
             let (uv, tex) = IconId::Check.draw_quad(box_r);
-            ctx.push_textured_rect(box_r, uv, theme::ACCENT, tex);
+            ctx.push_textured_rect(
+                box_r,
+                uv,
+                theme::active().semantic.accent.default.bytes(),
+                tex,
+            );
         }
         ctx.push_text(
             &self.label,
             Vec2::new(b.x + 24.0, b.y + (b.h - self.px) * 0.5),
             self.font_id,
             self.px,
-            theme::TEXT_PRIMARY,
+            theme::active().semantic.text.primary.bytes(),
         );
     }
 

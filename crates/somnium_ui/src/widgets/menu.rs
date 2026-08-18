@@ -52,7 +52,15 @@ impl Control for Menu {
                 bg[3],
             ];
         }
-        ctx.push_rect_filled(widget.screen_bounds(), bg);
+        let b = widget.screen_bounds();
+        match crate::theme::wash_for_surface(bg) {
+            Some(g) => ctx.push_primitive(
+                crate::primitive::Primitive::fill(b, g.from.bytes())
+                    .with_gradient(g.to.bytes(), g.axis),
+                None,
+            ),
+            None => ctx.push_rect_filled(b, bg),
+        }
     }
 
     fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {

@@ -443,6 +443,30 @@ impl UiPass {
         }
 
         if draw_ctx.icon_atlas.dirty {
+            // Phase 27-F: the icon atlas is re-rasterized at the device ratio,
+            // so its dimensions change when the window moves to a HiDPI display.
+            // Recreate the GPU texture whenever they no longer match.
+            let (iw, ih) = (draw_ctx.icon_atlas.width, draw_ctx.icon_atlas.height);
+            if self.icon_tex.width() != iw || self.icon_tex.height() != ih {
+                self.icon_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("UiPass Icon Atlas"),
+                    size: wgpu::Extent3d {
+                        width: iw,
+                        height: ih,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                self.icon_view = self
+                    .icon_tex
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.icon_tex,
@@ -453,12 +477,12 @@ impl UiPass {
                 &draw_ctx.icon_atlas.pixels,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(ICON_ATLAS_WIDTH * 4),
-                    rows_per_image: Some(ICON_ATLAS_HEIGHT),
+                    bytes_per_row: Some(iw * 4),
+                    rows_per_image: Some(ih),
                 },
                 wgpu::Extent3d {
-                    width: ICON_ATLAS_WIDTH,
-                    height: ICON_ATLAS_HEIGHT,
+                    width: iw,
+                    height: ih,
                     depth_or_array_layers: 1,
                 },
             );

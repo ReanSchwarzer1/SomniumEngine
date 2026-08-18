@@ -60,20 +60,27 @@ impl Control for CommandPalette {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_HEADER);
-        ctx.push_rect_border(b, 1.0, theme::BORDER_FOCUS);
+        // The palette is the highest ordinary surface in the shell: modal rung,
+        // modal radius, and the focus border it already had.
+        let t = theme::active();
+        ctx.push_drop_shadow_rounded(b, [t.geometry.radius_modal; 4], t.elevation.modal);
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(b, t.semantic.surface.popup.bytes())
+                .with_radius(t.geometry.radius_modal)
+                .with_border(t.geometry.stroke_focus, t.semantic.border.focus.bytes()),
+            None,
+        );
         let search = Rect::new(b.x + 8.0, b.y + 8.0, b.w - 16.0, 22.0);
-        ctx.push_rect_filled(search, theme::BG_INPUT);
-        ctx.push_rect_border(search, 1.0, theme::BORDER_MEDIUM);
+        ctx.push_paint(search, &crate::style::input(crate::style::VisualState::rest()));
         let shown = if self.query.is_empty() {
             "Search commands…"
         } else {
             self.query.as_str()
         };
         let color = if self.query.is_empty() {
-            theme::TEXT_DISABLED
+            t.semantic.text.disabled.bytes()
         } else {
-            theme::TEXT_PRIMARY
+            t.semantic.text.primary.bytes()
         };
         ctx.push_text(
             shown,
@@ -89,14 +96,17 @@ impl Control for CommandPalette {
             let y = b.y + 36.0 + row as f32 * 22.0;
             let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, 22.0);
             if row == sel {
-                ctx.push_rect_filled(row_r, theme::ACCENT_DIM);
+                let selected = crate::style::tree_row(crate::style::VisualState::with(
+                    crate::style::Interaction::Selected,
+                ));
+                ctx.push_paint(row_r, &selected);
             }
             ctx.push_text(
                 &item.label,
                 Vec2::new(row_r.x + 8.0, y + 4.0),
                 self.font_id,
                 12.0,
-                theme::TEXT_PRIMARY,
+                t.semantic.text.primary.bytes(),
             );
             if !item.hint.is_empty() {
                 ctx.push_text(
@@ -104,7 +114,7 @@ impl Control for CommandPalette {
                     Vec2::new(row_r.x + row_r.w - 80.0, y + 4.0),
                     self.font_id,
                     11.0,
-                    theme::TEXT_SECONDARY,
+                    t.semantic.text.secondary.bytes(),
                 );
             }
         }

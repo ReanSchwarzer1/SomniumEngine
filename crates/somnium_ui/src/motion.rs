@@ -55,12 +55,28 @@ pub struct MotionKey {
     /// `NodeHandle` index. Stored as a plain index so `motion` does not need to
     /// depend on the pool's generational handle type.
     pub node: u32,
+    /// Distinguishes repeated rows *inside* one node.
+    ///
+    /// An Outliner is a single widget that paints N rows in a loop, so a
+    /// node-only key would make every row share one hover track and fade
+    /// together. Widgets that own no repeats pass 0.
+    pub sub: u32,
     pub property: MotionProperty,
 }
 
 impl MotionKey {
+    /// Key for a widget that paints one thing.
     pub fn new(node: u32, property: MotionProperty) -> Self {
-        Self { node, property }
+        Self {
+            node,
+            sub: 0,
+            property,
+        }
+    }
+
+    /// Key for row `sub` of a widget that paints many.
+    pub fn row(node: u32, sub: u32, property: MotionProperty) -> Self {
+        Self { node, sub, property }
     }
 }
 
@@ -291,6 +307,7 @@ mod tests {
 
     const HOVER: MotionKey = MotionKey {
         node: 7,
+        sub: 0,
         property: MotionProperty::HoverWash,
     };
 
@@ -457,6 +474,24 @@ mod tests {
         a.forget_node(7);
         assert!(a.is_idle());
         assert_eq!(a.value_or(HOVER, 0.25), 0.25, "falls back to the default");
+    }
+
+    #[test]
+    fn rows_of_one_widget_animate_independently() {
+        // The Outliner paints N rows from a single node. Without `sub` they
+        // would share one track and fade together.
+        let mut a = Animator::new();
+        let r0 = MotionKey::row(4, 0, MotionProperty::HoverWash);
+        let r1 = MotionKey::row(4, 1, MotionProperty::HoverWash);
+        a.start(r0, 0.0, 1.0, 100.0, Easing::Linear);
+        a.tick(50.0);
+        a.start(r1, 0.0, 1.0, 100.0, Easing::Linear);
+        assert!(a.value_or(r0, 0.0) > a.value_or(r1, 0.0), "rows share a track");
+        assert_eq!(a.active_count(), 2);
+
+        // And forgetting the node clears every row it owns.
+        a.forget_node(4);
+        assert!(a.is_idle());
     }
 
     #[test]

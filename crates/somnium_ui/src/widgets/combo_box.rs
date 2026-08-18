@@ -52,8 +52,15 @@ impl Control for ComboBox {
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         let header = Rect::new(b.x, b.y, b.w, theme::ROW_HEIGHT);
-        ctx.push_rect_filled(header, theme::BG_RAISED);
-        ctx.push_rect_border(header, 1.0, theme::BORDER_MEDIUM);
+        // The closed header is a chrome control, so it takes the button recipe:
+        // radius, wash and the raised rung. It keeps the hairline outline the
+        // pre-Styx header had, because an outline is how a combo says it opens
+        // something — a raised fill alone reads as a plain button.
+        let t = theme::active();
+        let mut paint = crate::style::button(crate::style::VisualState::rest());
+        paint.border = t.semantic.border.default.bytes();
+        paint.border_thickness = t.geometry.stroke_hairline;
+        ctx.push_paint(header, &paint);
         let label = self
             .items
             .get(self.selected)
@@ -64,11 +71,11 @@ impl Control for ComboBox {
             Vec2::new(b.x + 6.0, b.y + 4.0),
             self.font_id,
             self.px,
-            theme::TEXT_PRIMARY,
+            t.semantic.text.primary.bytes(),
         );
         let chev = Rect::new(b.x + b.w - 20.0, b.y + 2.0, 16.0, 16.0);
         let (uv, tex) = IconId::ChevronDown.draw_quad(chev);
-        ctx.push_textured_rect(chev, uv, theme::TEXT_SECONDARY, tex);
+        ctx.push_textured_rect(chev, uv, t.semantic.text.secondary.bytes(), tex);
     }
 
     fn cursor_icon(&self, _widget: &Widget, _pos: Vec2) -> crate::node::CursorKind {
@@ -264,8 +271,9 @@ impl Control for ComboDropdown {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_HEADER);
-        ctx.push_rect_border(b, 1.0, theme::BORDER_MEDIUM);
+        // The open list floats over the inspector, so it takes the popup rung.
+        let t = theme::active();
+        ctx.push_paint(b, &crate::style::popup());
         for (i, item) in self.items.iter().enumerate() {
             let row = Rect::new(
                 b.x,
@@ -274,14 +282,19 @@ impl Control for ComboDropdown {
                 theme::ROW_HEIGHT,
             );
             if i == self.selected {
-                ctx.push_rect_filled(row, theme::ACCENT_DIM);
+                // Selection is fill *and* rail, so it survives a colour-vision
+                // pass (Zeta 8A.4).
+                let sel = crate::style::tree_row(crate::style::VisualState::with(
+                    crate::style::Interaction::Selected,
+                ));
+                ctx.push_paint(row, &sel);
             }
             ctx.push_text(
                 item,
                 Vec2::new(row.x + 8.0, row.y + 4.0),
                 self.font_id,
                 self.px,
-                theme::TEXT_PRIMARY,
+                t.semantic.text.primary.bytes(),
             );
         }
     }
