@@ -25,6 +25,16 @@
 14. [Pattern Index](#14-pattern-index)
 15. [Citation Rules](#15-citation-rules)
 
+Lettered sections, appended per phase after §13 and interleaved with §14–§15 in
+file order — search by heading, not by position:
+
+  - 13B  Phases 24L / 24AE / 25D / 25E / 29
+  - 13C  Phase DOOM — visibility-buffer shade binning (plan reconnaissance)
+  - 13D  Phase 16 — scripting architecture
+  - 13E  Phase 27-A / 27-B — Styx primitive pipeline and Lethe text quality
+  - 13F  Phase 27-C / 27-D / 27-E — motion, depth, and the second theme
+  - 13G  Phase CONTROL — editor reach (plan reconnaissance)
+
   - 13.1 Transform Gizmos
   - 13.2 Editor Grid
   - 13.3 HDR & Tone Mapping
@@ -1785,3 +1795,144 @@ in the previously shipped Nocturne palette on first run.
 description in §13.17 was already superseded by §13E.7; 27 additionally
 replaced its `prepare` signature with `UiSurface`, which carries the logical and
 physical extents as one value.
+
+---
+
+## 13G. Phase CONTROL — editor reach (plan reconnaissance, 2026-08-22)
+
+Read while expanding
+[`dev records/phase_CONTROL.md`](dev%20records/phase_CONTROL.md) from 880 to
+~2,970 lines. **Architecture and interaction conventions studied; no code
+copied, adapted or translated.** Nothing from this section is in tree — Phase
+CONTROL is a plan. CONTROL-A expands each entry below into a full one as it
+lands, and every CONTROL sub-phase adds its own file-level citations here before
+it closes.
+
+Section letter: **G**. §13E and §13F were taken by Phase 27 while this plan sat
+unstarted; the plan's own §16 records the correction.
+
+### 13G.1 Godot 4.7 — editor interaction conventions
+
+**Copyright:** © Juan Linietsky, Ariel Manzur and the Godot Engine contributors.
+**License:** MIT.
+**Source:** `example_repo/godot-4.7.1-stable/editor/`
+
+| Godot source | Pattern studied | Somnium plan |
+|---|---|---|
+| `gui/editor_spin_slider.cpp` (`_grab_start`/`_grab_end`, the `InputEventMouseMotion` branch) | The full drag-scrub contract: threshold on accumulated **relative** motion scaled by speed and DPI; pointer capture on cross; `Shift` × 0.1 for precision; `Ctrl`/`Cmd` rounds; right-click or `Esc` cancels and restores `pre_grab_value`; pointer warped back on release; `drag_step = max(step, default_float_step)` with the floor as an **editor setting**; `deferred_drag_mode` emitting one signal at the end | CONTROL-A1 (modifier delivery, gesture cancel), CONTROL-B step 7; plan §5.2 craft defect C1 |
+| `inspector/editor_resource_preview.cpp` | Worker thread + queue; disk cache keyed by a hash of the path with a sidecar recording size, mtime, source hash; **two-stage invalidation** — mtime first, hash only if mtime differs, sidecar rewritten if the hash still matches; two sizes from one job; the callback fires **even on failure** | CONTROL-C's `PreviewCache` |
+| `inspector/multi_node_edit.cpp` | Multi-selection as a **synthetic object** whose property list is the intersection of the selection's — matched on name *and* type *and* hint, with a `uses` counter equal to the selection size — and whose setter fans out under one undo entry, so the inspector never learns about multi-selection | CONTROL-F's `MultiSelectionTarget` |
+| `settings/editor_command_palette.h` | `HashMap<String, Command>` keyed by a path-like id; `ED_SHORTCUT_AND_COMMAND` registering a keybinding and a palette entry in one declaration; `register_shortcuts_as_command()`; fuzzy score plus persisted recency | CONTROL-A2, plan Seam 6 |
+| `inspector/editor_inspector.h` (`EditorPropertyRevert`, `can_revert_to_default`, the favourites members) | Revert-to-default as a first-class per-property concept; inspector favourites | CONTROL-B steps 8–9 |
+
+Also studied as *published behaviour* rather than source — the Godot 4.5, 4.6
+and 4.7 release posts (<https://godotengine.org/releases/4.5/>, `/4.6/`,
+`/4.7/`): clickable output paths that open at the offending line; select and
+transform decoupled in the 3D viewport; draggable layer flags; property-category
+copy/paste; searchable popup menus. Cited in the plan's §5.1 and mapped to
+CONTROL-I, G, B and F respectively.
+
+### 13G.2 Fyrox — asset previews, field metadata, the editor registry
+
+**Copyright:** © Dmitry Stepanov and Fyrox Engine contributors.
+**License:** MIT.
+**Source:** `example_repo/fyrox/Fyrox-master/`
+
+| Fyrox source | Pattern studied | Somnium plan |
+|---|---|---|
+| `editor/src/asset/preview/cache.rs`, `editor/src/asset/mod.rs` | `AssetPreviewCache`: **loading on a spawned thread**, *generation* on the main thread so the atlas needs no lock; `throughput` counted only on previews actually generated, so cache hits drain free; layered fallback preview → grey-tinted kind icon → placeholder; keyed by resource UUID with a `force_update` flag | CONTROL-C, and the correction to `thumbnail.rs`'s stated threading objection |
+| `fyrox-core/src/reflect/field.rs` (`FieldMetadata`) | `{ name, display_name, tag, doc, read_only, immutable_collection, min_value, max_value, step, precision }`, with `doc` populated by the derive macro **from the field's `///` comment** | Seam 1's `FieldSchema` extension |
+| `fyrox-ui/src/inspector/editors/` (27 modules) | One `PropertyEditorDefinition` per type behind a `TypeId`-keyed `PropertyEditorDefinitionContainer`; and the catalogue of types a mature inspector needs | Seam 1's `PropertyEditor` table |
+| `editor/src/plugins/material/editor.rs` | `MaterialFieldEditor`: text + preview + **Edit / Locate / Make Unique** | CONTROL-C's picker, CONTROL-D |
+| `editor/src/scene/clipboard.rs` | Subgraph copy/paste with handle remapping | CONTROL-F |
+| `fyrox-ui/src/curve/` | Curve widget: keyframes, tangents, zoom/pan | CONTROL-K |
+| `editor/src/settings/keys.rs`, `move_mode.rs`, `rotate_mode.rs` | Keybindings and snap increments as *settings*, not constants | CONTROL-G, CONTROL-H |
+
+### 13G.3 Flax — typed drag payloads and long-operation jobs
+
+**Copyright:** © Wojciech Figat. **License:** Flax Engine source license
+(BSD-like). **Source:** `example_repo/FlaxEngine-master/Source/Editor/`
+
+| Flax source | Pattern studied | Somnium plan |
+|---|---|---|
+| `GUI/Drag/DragHelper.cs`, `DragHandlers.cs`, `DragAssets.cs`, `DragActors.cs`, `DragScripts.cs` | `DragHelper<T,U>` with a `ValidateFunction` supplied **by the drop target**; `OnDragEnter` keeps only the items that passed, so a drag can be **partially valid**; `DragHandlers : List<DragHelper>` for composition; the query returns a `DragDropEffect`, not a bool | Seam 3 — and the reason the 2026-08-17 draft's `can_accept(...) -> bool` was replaced with a filtered `DropAcceptance` |
+| `CustomEditors/` + `CustomEditors/Editors/*.cs` | Per-type editors behind a presenter, with `GenericEditor` as the reflecting fallback | Seam 1 (independent confirmation) |
+| `Progress/Handlers/*.cs` | Long operations as first-class, cancellable, status-bar-visible jobs | CONTROL-C's `JobRegistry`; craft defect C10 |
+| `Options/` | Preferences as typed categories, bindings as data | Seam 4, CONTROL-H |
+| `History/` | Undo history as a navigable list | CONTROL-J |
+
+### 13G.4 Unreal Engine 5 — the thumbnail architecture
+
+**Copyright:** © Epic Games, Inc. **Studied only; never adapted or translated.**
+**Source:** `example_repo/UnrealEngine-release/.../Engine/Source/Editor/UnrealEd/Classes/ThumbnailRendering/`
+
+| UE source | Pattern studied | Somnium plan |
+|---|---|---|
+| `ThumbnailRenderer.h` | `CanVisualizeAsset` / `GetThumbnailSize` / `Draw` / `AllowsRealtimeThumbnails` / `GetThumbnailRenderFrequency`, and `enum class EThumbnailRenderFrequency { Realtime, OnPropertyChange, OnAssetSave, Once }` — **each asset kind declares how often its preview must be redone** | CONTROL-C's `PreviewGenerator` frequency declaration |
+| `ThumbnailManager.h` | `FThumbnailRenderingInfo` mapping class → renderer, lazy-bound by class **name**; shared preview primitives (`EditorCube`, `EditorSphere`, `EditorCylinder`, `EditorPlane`, `EditorSkySphere`) | CONTROL-C / CONTROL-D's shared preview rig |
+
+Also studied as published behaviour: the UE 5.6 **Viewport Toolbar**
+documentation (<https://dev.epicgames.com/documentation/unreal-engine/viewport-toolbar>)
+for its four stated design properties — consistent locations by logical
+category, consolidation, **overflow management on narrow viewports**, and
+extensibility — mapped to CONTROL-G's context bar; and the Details panel's
+Section Bar and per-type Favorites, mapped to CONTROL-B.
+
+### 13G.5 Newly surveyed engines — the concepts that changed the plan
+
+Fifteen engines added to `example_repo` had never been read for this project.
+They were surveyed on 2026-08-22 for editor architecture only. The full triage
+is in the plan's §6.2; the four concepts that **changed a decision** are cited
+here.
+
+| Engine / source | Licence | Concept | Somnium plan |
+|---|---|---|---|
+| **rbfx** — `example_repo/rbfx-master/Source/Urho3D/Core/Attribute.h`, `Source/Editor/Core/{UndoManager,HotkeyManager,SettingsManager}.h`, `Foundation/Shared/CommonEditorActionBuilders.cpp` | MIT | **`AttributeScopeHint`** (`Attribute` / `Serializable` / `Node` / `Scene`): the schema declares how far a change ripples, and the undo builder picks a scalar diff, a subtree snapshot or a scene snapshot from it. Also `EditorAction::MergeWith` for drag coalescing, `UndoException` as a typed desync error, and `EditorHotkey`'s fluent builder with `ToString()` for menu labels | Seam 1's `FieldSchema::scope: ChangeScope` — the control that stops CONTROL-B's generic `SetFieldCmd` silently corrupting a rebuilding field; CONTROL-A2's `Chord`; CONTROL-J's history panel |
+| **Wicked Engine** — `example_repo/New_Engines/WickedEngine-master/WickedEngine/wiArchive.{h,cpp}`, `Editor/ContentBrowserWindow.cpp` | MIT | **The thumbnail lives in the asset file's header** (`Header \| thumbnail JPEG \| data`, `PeekThumbnail` reading only the header bytes). No cache, no invalidation, no throttling — because staleness is structurally impossible | CONTROL-J writes a viewport frame into `.somnium` on save; CONTROL-D does the same for `.sommat`. Third-party files keep the sidecar cache |
+| **Esoterica** — `example_repo/Esoterica-main/Code/EngineTools/PropertyGrid/PropertyGridTypeEditingRules.h`, `Code/Base/TypeSystem/PropertyMetadata.h`, `Code/Applications/Reflector/TypeReflection/Clang/ClangVisitors_Structure.cpp` | MIT | **`TypeEditingRules`** — conditional visibility and read-only as a per-type registry answering a tri-state in *code*, rather than an expression grammar inside the metadata DSL. And `clang_Cursor_getBriefCommentText()` making **the doc comment the tooltip**, corroborating Fyrox from a different direction | CONTROL-B step 3's `EditingRules` registry; Seam 1's `doc` captured from `#[doc]` with no competing argument form |
+| **Stride** — `example_repo/stride-master/sources/presentation/Stride.Core.Quantum/`, `.../Stride.Core.Presentation.Quantum/Presenters/`, `sources/editor/Stride.Core.Assets.Editor/{Quantum/NodePresenters/Updaters,View/Behaviors/DragDrop,Settings}/`, `sources/editor/Stride.Editor/Thumbnails/` | MIT | **`IUnloadable`** — an object whose type failed to load deserialises as a proxy that *retains its raw parsing events* and renders as raw YAML, so **data survives a broken round-trip**. Also: the `INodePresenterUpdater` pipeline (metadata pushed onto nodes, not read by widgets); `CategoryNodeUpdater` making categories real structure; `CombineKey` plus per-key combiners for multi-selection; `TilePanelThumbnailPrioritizationBehavior` prioritising **only on-screen tiles**; `IMergeableOperation`; named transactions; and the settings dialog *being* the property grid | CONTROL-J's retained-unknowns block — which converts a **silent data-loss path in `scene_from_json`** into forward compatibility; CONTROL-C's visible-first prioritisation; Seam 1's `group` as a section node and its `SchemaDecorator` hook; Seam 4 |
+
+Further engines surveyed and cited in the plan's §6.2 without changing a
+decision: **Defold** (`defold-dev/defold-dev/editor/src/clj/` — reactive
+property `dynamic`s; the `op-seq` gesture token for undo coalescing;
+`:child-reqs` plus an ancestor walk for drop targets; per-setting `:scope`
+routing one schema across a global and a project file; the save-value
+round-trip invariant), **NeoAxis** (`NeoAxisEngine-master/Sources/Engine/` —
+`PreviewImagesManager`'s render-at-1024, auto-crop-to-content, downscale-to-128
+pipeline; `[UndoDependentProperty]`; `Reference<T>`), **Unity**
+(`Unity3D/UnityCsReference-master` — `CollapseUndoOperations`, `SettingsProvider`
+with auto-harvested search keywords, the Presets system, the Scene-view piercing
+menu), **s&box** (`sbox-public-master/engine/Sandbox.Tools/` — scored editor
+resolution, and the three-rung editor fallback chain), **Lumina**
+(`LuminaEngine-main/Engine/Editor/Source/Thumbnails/` — a content-hash sidecar
+cache that never rewrites the asset; painter-vs-renderer with
+decline-and-fall-through; `Start`/`Finish` edit-session callbacks with
+`IsNoOp()`), **Overload** (`Overload-main/Sources/OvEditor/` — 77 files as the
+minimum-viable-professional-editor calibration point; gatherer/provider accessor
+pairs), **Falco** (drop-format wildcards), **Luanti**
+(`luanti-master/builtin/settingtypes.txt` — a text settings schema with
+comment-derived descriptions, `Requires:` gating, a hard assert on unknown
+types, and one schema feeding two consumers), **Korge**
+(`korge-main/.../view/property/ViewProperty.kt` — `min`/`max` separate from
+`clampMin`/`clampMax`, plus an explicit `order`), **Babylon.js**
+(`packages/dev/sharedUiComponents/.../propertyLines/` and `Misc/iInspectable.ts`
+— the row catalogue, and `step` plus an `accept` extension filter) and
+**Panda3D**. Recorded as surveyed-and-not-useful so nobody repeats the work:
+jMonkeyEngine (the SDK is a separate repository, absent from this checkout),
+Raylib, Ren'Py, Haxe, mach, and **Solers**, which is a Godot 4.7.1 fork whose
+editor is stock Godot.
+
+### 13G.6 External literature — the rendering half
+
+Studied for CONTROL-M / N / L; nothing implemented.
+
+| Reference | Contribution | Somnium plan |
+|---|---|---|
+| Schneider & Vos, *The Real-Time Volumetric Cloudscapes of Horizon Zero Dawn*, SIGGRAPH 2015 — <https://www.guerrilla-games.com/read/the-real-time-volumetric-cloudscapes-of-horizon-zero-dawn> | The Perlin–Worley + Worley erosion model, and the verified budget: **under 2 ms on PlayStation 4** | CONTROL-M's shape model and target |
+| Schneider, *Nubis: Authoring Real-Time Volumetric Cloudscapes with the Decima Engine*, SIGGRAPH 2017 — <https://www.guerrilla-games.com/read/nubis-authoring-real-time-volumetric-cloudscapes-with-the-decima-engine> | The productionization and **authoring** pass — which is why it is the right reference for a phase about authoring surfaces | CONTROL-M's weather-map painter and presets |
+| *Nubis Evolved* (2022) and *Nubis Cubed* (2023) — `/read/nubis-evolved`, `/read/nubis-cubed` | Flyable clouds at 1080p without temporal upscaling; fast-motion temporal-artifact mitigation; then true voxel clouds with SDF-accelerated marching | Evolved's temporal lesson taken; **Cubed deliberately not taken** (plan §6.3) |
+| Toft & Bowles, *Optimisations for Real-Time Volumetric Cloudscapes*, arXiv:1609.05344 — <https://ar5iv.labs.arxiv.org/html/1609.05344> | The ~128-step × ~6-lighting-step baseline, and a measured ms table on a GTX 1080 including **quarter-res 8-step + jitter + TAA at 2.4 ms** — plus the flagged 2.3 → 7.5 ms cost of jitter through texture-cache incoherence | CONTROL-M's budget, and the rule that its `.somtime` row is taken **with and without** the blue-noise offset |
+| Hillaire, *A Scalable and Production Ready Sky and Atmosphere Rendering Technique*, EGSR 2020 (CGF 39(4), DOI 10.1111/cgf.14050) | Avoiding high-dimensional LUTs so atmosphere composition can change dynamically without a heavy rebuild | CONTROL-L's time-of-day driver |
+| Unreal *Volumetric Cloud Component* docs and the UE 5.6 regression thread — <https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine>, <https://forums.unrealengine.com/t/volumetric-cloud-temporal-artifacts-from-volumetric-render-target-reconstruction/2649937> | Beer Shadow Maps vs ray-marched cloud shadows; the `r.VolumetricRenderTarget` trace/reconstruct/upsample trade-offs; and a shipped regression in exactly that reconstruction stage | CONTROL-M's shadow model, its quality modes, and its named fast-camera-occlusion capture case |
+| Lagarde, *Water drop 3a / 3b — Physically based wet surfaces* (2013) — <https://seblagarde.wordpress.com/2013/03/19/water-drop-3a-physically-based-wet-surfaces/> | Non-linear IOR-dependent albedo darkening; porosity as the discriminating authored channel; BRDF-parameter tweaking rather than separate wet texture sets, with an accumulated-water term flattening the normal; and **specular recovering faster than diffuse during drying** | CONTROL-N's two-time-constant wetness model. *Read via fxguide's summary; the original posts refused fetching and must be opened before implementation — plan §16* |
+| WCAG 2.4.3 Focus Order (Level A) and WCAG 2.2 SC 2.4.11 | Sequential focus preserving meaning; focus moving into new UI and **returning to the invoking control** on dismissal; a ≥ 3:1 focus indicator | CONTROL-A1's traversal, focus-into-view and modal focus trap |

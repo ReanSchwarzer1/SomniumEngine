@@ -2,8 +2,13 @@
 
 > **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
 >
-> **Last updated:** 2026-08-17  
-> **Current phase:** Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
+> **Last updated:** 2026-08-22  
+> **Current phase:** Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
+> layer, motion, elevation, the second theme and the first-impression surfaces.
+> Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.
+> See `dev records/phase_27.md` §18. **Phase CONTROL is planned next** and was
+> expanded 2026-08-22; it is re-based on 27, not on 26-Zeta.
+> Previously: Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
 > D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
 > 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
 > default **off**. Terrain hex/parallax now default **off** on both maps.
@@ -35,19 +40,45 @@
 >
 > Remaining work (independent tracks):
 > - **Phase CONTROL — Northlight (PLAN ONLY, nothing in tree):**
->   `dev records/phase_CONTROL.md`. The editor-reach phase. Premise: the engine
->   is far ahead of the editor — **96** `SOMNIUM_*` variables with ~18 controls,
->   **106** hand-wired `InspectorField` variants, **12** registered component
->   schemas driving **0** generated inspector rows, and `FieldFlags::EDIT` is
->   defined, documented as "shown in the inspector", and read by no code in the
->   repository. CONTROL-B makes that flag true and 26-J finally lands; C–J add
->   an asset database with thumbnails, material authoring, drag and drop,
->   multi-select, viewport snapping and a view-mode menu, preferences over the
->   env vars, clickable diagnostics, and the **scene-load fix** (the `NEXT:`
->   line above). Tracks 2–3 then add curve editing, time of day, volumetric
->   clouds and weather — each gated on its authoring surface shipping with it.
+>   `dev records/phase_CONTROL.md` — **expanded and re-audited 2026-08-22**
+>   (880 -> 2,970 lines) against the tree at `209fd07`, after Phase 27 landed.
+>   The editor-reach phase. Premise: the engine is far ahead of the editor, and
+>   the property surface is maintained by hand at a cost of **675 identifiers** —
+>   106 `InspectorField` + 9 `ColorField` + 27 `PostFxToggle` variants, **226
+>   `InspectorHandles` fields** (a 245-line struct of bare `NodeHandle`s), 106
+>   `field_bindings` rows and 201 `IF::` arms in `app.rs`. Against that: **97**
+>   `SOMNIUM_*` variables of which **exactly 18** have a control (79 have none),
+>   **12** registered component schemas driving **0** generated inspector rows,
+>   and `FieldFlags::EDIT` still read by no code in the repository.
+>   **Six seams now, not four** — the 2026-08-22 pass added Seam 5 (`WidgetMessage`
+>   carries no modifier state, so Ctrl+click, Shift-range, precision-scrub and
+>   Alt-drag are *inexpressible*, blocking E/F/G) and Seam 6 (menus, palette,
+>   keybindings and context menus are four unconnected hand-written lists; the
+>   palette is 15 entries dispatched by array index).
+>   **Measured defect:** `thumbnail.rs` claims a 4096^2 source downscales in
+>   single-digit ms and decodes two per frame on the UI thread;
+>   `assets/terrain/` is 60 PNGs / 1.17 GB, and zlib inflate *alone* on the
+>   largest measures **232-260 ms**. Opening that folder is a multi-second freeze
+>   today. §4.2 has the numbers; CONTROL-C has the fix (Fyrox's thread split +
+>   Stride's visible-tile prioritisation + Godot's two-stage cache invalidation).
+>   **New §5.2 lists eleven craft defects** — existing controls behaving worse
+>   than their counterpart in Godot/Unreal/Unity/Blender, each cited to that
+>   tool's source or docs and each assigned to a sub-phase. That is the
+>   "make the current UX professional" half of the phase, made falsifiable.
+>   Sub-phases: **Track 0** A (audit) / A1 (input seam) / A2 (command registry);
+>   **Track 1** B (property seam, 26-J) through J (scene lifecycle, the `NEXT:`
+>   line above); **Track 2** K/L (curves, time of day); **Track 3** M/N/O
+>   (clouds, weather, decals) — each gated on its authoring surface shipping
+>   with it. §6.2 surveys 15 previously undocumented engines; four ideas changed
+>   the plan (rbfx `AttributeScopeHint` for undo granularity, Wicked's
+>   thumbnail-in-the-file-header, Esoterica's `TypeEditingRules`, and
+>   Stride's `IUnloadable` — which exposed a **silent data-loss path**:
+>   `scene_from_json` drops unknown components and fields with a warning, so
+>   load-then-save in a build missing a component destroys that data).
+>   §16 records source confidence and corrects six claims the 2026-08-17 draft
+>   asserted without verifying.
 >   **Start at CONTROL-A** (the reachability audit); do not write a widget
->   first, and do not restart at 26-A.
+>   first, do not restart at 26-A, and do not repaint anything Phase 27 painted.
 > - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
 >   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
 >   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
