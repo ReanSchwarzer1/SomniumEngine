@@ -54,26 +54,46 @@ impl UiCanvas {
     }
 
     /// Layout + draw. Creates the GPU pass on first call.
+    ///
+    /// A game canvas lays out in logical units exactly like the editor shell
+    /// does, so the HUD keeps its apparent size on a HiDPI display. The scale
+    /// is read from the window each frame rather than cached, because a canvas
+    /// is cheap to lay out and a game may be dragged between monitors.
     pub fn render(
         &mut self,
-        _window: &Window,
+        window: &Window,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         output_format: wgpu::TextureFormat,
     ) {
+        let ui_scale = window.scale_factor() as f32;
+        self.ui.set_ui_scale(ui_scale);
+        self.ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
+        self.ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
+
         let _ = self.ui.update();
         self.ui.perform_layout();
         self.ui.draw();
-        let (w, h) = (
-            self.ui.screen_size.x.max(1.0) as u32,
-            self.ui.screen_size.y.max(1.0) as u32,
+
+        let logical_w = self.ui.screen_size.x.max(1.0);
+        let logical_h = self.ui.screen_size.y.max(1.0);
+        let physical = window.inner_size();
+        let (phys_w, phys_h) = (
+            physical.width.max(1),
+            physical.height.max(1),
         );
+
         let pass = self
             .pass
             .get_or_insert_with(|| UiPass::new(device, queue, output_format));
-        pass.prepare(device, queue, &mut self.ui.draw_ctx, w, h);
+        pass.prepare(
+            device,
+            queue,
+            &mut self.ui.draw_ctx,
+            crate::pass::UiSurface::new((logical_w, logical_h), (phys_w, phys_h)),
+        );
         pass.render(encoder, view);
     }
 

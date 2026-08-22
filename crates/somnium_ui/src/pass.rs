@@ -1,28 +1,56 @@
-// Phase 12B-1 — UiPass: wgpu render pass for native UI draw lists.
+// UiPass — wgpu render pass for native UI draw lists.
 //
-// Uploads vertex/index data from DrawingContext each frame, maintains the
-// font atlas as a GPU texture, and records one indexed draw per DrawCommand
-// with a per-command scissor rect.
+// Phase 12B-1 uploaded a vertex/index pair and issued one indexed draw per
+// DrawCommand. Phase 27-A (Styx) replaced that with a single instanced
+// pipeline: the unit quad is generated in the vertex stage from
+// `@builtin(vertex_index)`, so the only per-frame upload is the `Primitive`
+// instance list, and each DrawCommand becomes one `draw(0..6, instances)`.
 //
 // Bind groups:
-//   BG0 b0 (VERTEX):   mat4 ortho projection (screen-space, y-down).
-//   BG1 b0+b1 (FRAG):  texture2d + sampler.  Two pre-built variants:
-//     - bg1_white  — white 1×1 pixel  (DrawCommand::texture_id = None)
-//     - bg1_atlas  — font atlas        (DrawCommand::texture_id = Some(0))
-//   BG1 is switched only when the texture changes between commands.
+//   BG0 b0 (VERTEX|FRAGMENT): Globals — mat4 ortho projection + text gamma.
+//   BG1 (FRAGMENT): b0 font atlas, b1 icon atlas, b2 shared sampler. Bound once
+//     for the whole pass; each instance names its own atlas in the TEX_* bits of
+//     `Primitive::flags`. The pre-Styx pass rebound BG1 whenever the texture
+//     changed between commands, which measured 164 draw calls for 625 quads on
+//     the real 1920x1080 shell. The white 1x1 texture is gone with them: an
+//     untextured primitive takes no sample at all.
 
 use crate::{
-    draw::{DrawCommand, DrawingContext, Vertex},
-    font::{ATLAS_HEIGHT, ATLAS_WIDTH, FONT_ATLAS_TEXTURE_ID},
-    icons::{ICON_ATLAS_HEIGHT, ICON_ATLAS_TEXTURE_ID, ICON_ATLAS_WIDTH},
+    draw::{DrawCommand, DrawingContext},
+    font::{ATLAS_HEIGHT, ATLAS_WIDTH},
+    icons::{ICON_ATLAS_HEIGHT, ICON_ATLAS_WIDTH},
+    primitive::Primitive,
 };
 use glam::Mat4;
 use std::borrow::Cow;
 
-const INIT_VTX_CAP: u64 = 65536 * 20; // 65 K vertices × 20 B
-const INIT_IDX_CAP: u64 = 131072 * 4; // 128 K indices  × 4 B
+/// 16 K instances before the first grow. Styx emits roughly one instance where
+/// the pre-Styx list emitted four vertices plus six indices, so this is a
+/// smaller allocation than the buffers it replaces.
+const INIT_INSTANCE_CAP: u64 = 16384 * 100;
+
+/// Six vertices per instance: two triangles over the unit quad.
+const VERTS_PER_QUAD: u32 = 6;
 
 const SRGB_OUTPUT_DECLARATION: &str = "const OUTPUT_IS_SRGB: bool = true;";
+
+/// Exponent applied to glyph coverage before blending (Phase 27-B).
+///
+/// The pipeline blends in linear space on an sRGB target, which is correct for
+/// colour but renders light-on-dark stems heavier and softer than the
+/// rasterizer intended, because grayscale antialiasing coverage is authored for
+/// perceptual blending. Raising coverage to a power above 1 thins the stems
+/// back. There is no framebuffer read in this pass, so the background luminance
+/// is unknown and an exact per-pixel correction is impossible; this is a single
+/// constant tuned for the Nocturne ground.
+///
+/// **Empirical.** `dev records/phase_27.md` §17 records it as needing
+/// capture-based tuning; [`UiPass::set_text_gamma`] exists so that can happen
+/// without a shader edit, and 1.0 reproduces pre-Styx text exactly.
+pub const DEFAULT_TEXT_GAMMA: f32 = 1.18;
+
+// Thinning, never fattening: a value below 1.0 would make the problem worse.
+const _: () = assert!(DEFAULT_TEXT_GAMMA > 1.0);
 
 fn shader_source_for_surface_format(format: wgpu::TextureFormat) -> Cow<'static, str> {
     let source = include_str!("ui_pass.wgsl");
@@ -37,39 +65,94 @@ fn shader_source_for_surface_format(format: wgpu::TextureFormat) -> Cow<'static,
     }
 }
 
+/// BG0 uniform. Matches the `Globals` struct in `ui_pass.wgsl`: a mat4x4 is 64
+/// bytes at align 16, so the three trailing pads bring the total to 80.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Globals {
+    proj: [f32; 16],
+    text_gamma: f32,
+    _pad: [f32; 3],
+}
+
+const _: () = assert!(std::mem::size_of::<Globals>() == 80);
+
+/// The two sizes a UI frame is drawn against.
+///
+/// They differ whenever the window scale factor is not 1.0: the widget tree
+/// lays out in `logical` units and the framebuffer is `physical` device pixels.
+/// Bundling them keeps the pair impossible to swap at a call site.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiSurface {
+    /// Layout extent the ortho projection is built from.
+    pub logical: (f32, f32),
+    /// Framebuffer size, for the scissor rect.
+    pub physical: (u32, u32),
+}
+
+impl UiSurface {
+    pub fn new(logical: (f32, f32), physical: (u32, u32)) -> Self {
+        Self { logical, physical }
+    }
+
+    /// Device pixels per layout unit, derived from the two sizes rather than
+    /// from the raw scale factor so rounding cannot drift a clip region off the
+    /// framebuffer edge.
+    pub fn scale(&self) -> (f32, f32) {
+        (
+            self.physical.0 as f32 / self.logical.0.max(1.0),
+            self.physical.1 as f32 / self.logical.1.max(1.0),
+        )
+    }
+}
+
+/// Per-frame counters for the Phase 27-I performance harness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiFrameStats {
+    pub instances: u32,
+    pub batches: u32,
+    pub instance_bytes: u32,
+}
+
 pub struct UiPass {
     pipeline: wgpu::RenderPipeline,
     bg1_layout: wgpu::BindGroupLayout,
-    // BG0 — ortho uniform
-    ortho_buf: wgpu::Buffer,
+    // BG0 — globals uniform
+    globals_buf: wgpu::Buffer,
     bg0: wgpu::BindGroup,
     // Shared sampler
     sampler: wgpu::Sampler,
-    // BG1 variants
-    _white_tex: wgpu::Texture, // kept alive so white_view stays valid
-    _white_view: wgpu::TextureView,
-    bg1_white: wgpu::BindGroup,
+    // BG1 — both atlases, bound once per pass
     atlas_tex: wgpu::Texture,
     atlas_view: wgpu::TextureView,
-    bg1_atlas: wgpu::BindGroup,
     icon_tex: wgpu::Texture,
     icon_view: wgpu::TextureView,
-    bg1_icon: wgpu::BindGroup,
-    // Geometry buffers (recreated on overflow)
-    vtx_buf: wgpu::Buffer,
-    idx_buf: wgpu::Buffer,
-    vtx_capacity: u64,
-    idx_capacity: u64,
+    thumb_tex: wgpu::Texture,
+    thumb_view: wgpu::TextureView,
+    bg1: wgpu::BindGroup,
+    // Instance buffer (recreated on overflow)
+    inst_buf: wgpu::Buffer,
+    inst_capacity: u64,
     // Draw list cached from the last prepare() call
     commands: Vec<DrawCommand>,
+    text_gamma: f32,
+    stats: UiFrameStats,
+    /// Framebuffer size in device pixels, for clamping the scissor rect.
     surface_w: u32,
     surface_h: u32,
+    /// Layout-space size the ortho projection was built from.
+    logical_w: f32,
+    logical_h: f32,
 }
 
 impl UiPass {
+    /// `queue` is retained in the signature for call-site compatibility. Styx
+    /// no longer uploads anything at construction — the white 1x1 texture it
+    /// used to seed here was retired when untextured primitives stopped
+    /// sampling — and the atlases upload lazily in [`Self::prepare`].
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
         // ── Bind group layouts ────────────────────────────────────────────────
@@ -77,7 +160,8 @@ impl UiPass {
             label: Some("UiPass BGL0"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage reads `text_gamma` from the same uniform.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -87,21 +171,24 @@ impl UiPass {
             }],
         });
 
+        let atlas_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let bg1_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("UiPass BGL1"),
             entries: &[
+                atlas_entry(0),
+                atlas_entry(1),
+                atlas_entry(3),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -109,10 +196,10 @@ impl UiPass {
             ],
         });
 
-        // ── Ortho uniform buffer ──────────────────────────────────────────────
-        let ortho_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("UiPass Ortho"),
-            size: 64,
+        // ── Globals uniform buffer ────────────────────────────────────────────
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UiPass Globals"),
+            size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -121,7 +208,7 @@ impl UiPass {
             layout: &bg0_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: ortho_buf.as_entire_binding(),
+                resource: globals_buf.as_entire_binding(),
             }],
         });
 
@@ -135,43 +222,7 @@ impl UiPass {
             ..Default::default()
         });
 
-        // ── White 1×1 texture (solid-colour rects) ────────────────────────────
-        let white_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("UiPass White"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &white_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[255u8, 255, 255, 255],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let white_view = white_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // ── Font atlas texture (512×512, Rgba8Unorm) ──────────────────────────
+        // ── Font atlas texture ────────────────────────────────────────────────
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("UiPass Font Atlas"),
             size: wgpu::Extent3d {
@@ -205,21 +256,36 @@ impl UiPass {
         let icon_view = icon_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // ── BG1 bind groups ───────────────────────────────────────────────────
-        let bg1_white = Self::make_bg1(device, &bg1_layout, &white_view, &sampler);
-        let bg1_atlas = Self::make_bg1(device, &bg1_layout, &atlas_view, &sampler);
-        let bg1_icon = Self::make_bg1(device, &bg1_layout, &icon_view, &sampler);
-
-        // ── Geometry buffers ──────────────────────────────────────────────────
-        let vtx_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("UI Vertices"),
-            size: INIT_VTX_CAP,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let thumb_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("UiPass Thumbnail Atlas"),
+            size: wgpu::Extent3d {
+                width: crate::thumbnail::ATLAS_WIDTH,
+                height: crate::thumbnail::ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
-        let idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("UI Indices"),
-            size: INIT_IDX_CAP,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        let thumb_view = thumb_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bg1 = Self::make_bg1(
+            device,
+            &bg1_layout,
+            &atlas_view,
+            &icon_view,
+            &thumb_view,
+            &sampler,
+        );
+
+        // ── Instance buffer ───────────────────────────────────────────────────
+        let inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UI Instances"),
+            size: INIT_INSTANCE_CAP,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -244,25 +310,9 @@ impl UiPass {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 20,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            shader_location: 0,
-                            offset: 0,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            shader_location: 1,
-                            offset: 8,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            shader_location: 2,
-                            offset: 16,
-                            format: wgpu::VertexFormat::Unorm8x4,
-                        },
-                    ],
+                    array_stride: Primitive::STRIDE,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &Primitive::VERTEX_ATTRS,
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -271,6 +321,7 @@ impl UiPass {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
+                    // Straight (unassociated) alpha, unchanged from Phase 12B-1.
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -300,32 +351,34 @@ impl UiPass {
         Self {
             pipeline,
             bg1_layout,
-            ortho_buf,
+            globals_buf,
             bg0,
             sampler,
-            _white_tex: white_tex,
-            _white_view: white_view,
-            bg1_white,
             atlas_tex,
             atlas_view,
-            bg1_atlas,
             icon_tex,
             icon_view,
-            bg1_icon,
-            vtx_buf,
-            idx_buf,
-            vtx_capacity: INIT_VTX_CAP,
-            idx_capacity: INIT_IDX_CAP,
+            thumb_tex,
+            thumb_view,
+            bg1,
+            inst_buf,
+            inst_capacity: INIT_INSTANCE_CAP,
             commands: Vec::new(),
+            text_gamma: DEFAULT_TEXT_GAMMA,
+            stats: UiFrameStats::default(),
             surface_w: 0,
             surface_h: 0,
+            logical_w: 0.0,
+            logical_h: 0.0,
         }
     }
 
     fn make_bg1(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
-        view: &wgpu::TextureView,
+        font_view: &wgpu::TextureView,
+        icon_view: &wgpu::TextureView,
+        thumb_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -334,42 +387,70 @@ impl UiPass {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(font_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: wgpu::BindingResource::TextureView(icon_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(thumb_view),
                 },
             ],
         })
     }
 
+    /// Glyph-coverage exponent. See [`DEFAULT_TEXT_GAMMA`]. Setting 1.0
+    /// reproduces pre-Styx text exactly, which is how the 27-B change is
+    /// isolated in a capture diff.
+    pub fn set_text_gamma(&mut self, gamma: f32) {
+        self.text_gamma = gamma.clamp(0.5, 2.5);
+    }
+
+    /// Counters from the last [`Self::prepare`] call.
+    pub fn stats(&self) -> UiFrameStats {
+        self.stats
+    }
+
     /// Upload draw data to the GPU. Call once per frame before `render()`.
+    /// `logical_w` / `logical_h` are the widget tree's layout extent; `surface_w`
+    /// / `surface_h` are the framebuffer size in device pixels. They differ
+    /// whenever the window scale factor is not 1.0.
     ///
-    /// - Uploads ortho projection uniform.
-    /// - Re-uploads the font atlas only when `draw_ctx.font_atlas.dirty` is set.
-    /// - Grows vertex/index buffers if needed (doubling strategy).
-    /// - Caches a copy of `draw_ctx.commands` for the subsequent `render()` call.
+    /// The projection is built from the logical extent, so the GPU stretches
+    /// layout space across the whole framebuffer and every density token keeps
+    /// its apparent size at any DPI. Only the scissor rect is converted back to
+    /// device pixels, and it is converted by the *measured* ratio rather than by
+    /// the raw scale factor, so a rounded logical size cannot drift a clip
+    /// region off the framebuffer edge.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         draw_ctx: &mut DrawingContext,
-        surface_w: u32,
-        surface_h: u32,
+        surface: UiSurface,
     ) {
-        self.surface_w = surface_w;
-        self.surface_h = surface_h;
+        self.surface_w = surface.physical.0;
+        self.surface_h = surface.physical.1;
+        self.logical_w = surface.logical.0.max(1.0);
+        self.logical_h = surface.logical.1.max(1.0);
 
-        // Ortho: (0,0) = top-left, (W,H) = bottom-right, y-down.
-        let proj = Mat4::orthographic_rh(0.0, surface_w as f32, surface_h as f32, 0.0, 0.0, 1.0);
-        queue.write_buffer(
-            &self.ortho_buf,
-            0,
-            bytemuck::bytes_of(&proj.to_cols_array()),
-        );
+        // Ortho: (0,0) = top-left, (logical_w, logical_h) = bottom-right, y-down.
+        let proj = Mat4::orthographic_rh(0.0, self.logical_w, self.logical_h, 0.0, 0.0, 1.0);
+        let globals = Globals {
+            proj: proj.to_cols_array(),
+            text_gamma: self.text_gamma,
+            _pad: [0.0; 3],
+        };
+        queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         // Font atlas — dirty flag cleared here so we don't re-upload next frame.
+        let mut atlases_changed = false;
         if draw_ctx.font_atlas.dirty {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -391,14 +472,34 @@ impl UiPass {
                 },
             );
             draw_ctx.font_atlas.dirty = false;
-
-            // Recreate bg1_atlas because the atlas_view is still pointing to the
-            // same GPU texture — just rebind so the sampler is guaranteed fresh.
-            self.bg1_atlas =
-                Self::make_bg1(device, &self.bg1_layout, &self.atlas_view, &self.sampler);
+            atlases_changed = true;
         }
 
         if draw_ctx.icon_atlas.dirty {
+            // Phase 27-F: the icon atlas is re-rasterized at the device ratio,
+            // so its dimensions change when the window moves to a HiDPI display.
+            // Recreate the GPU texture whenever they no longer match.
+            let (iw, ih) = (draw_ctx.icon_atlas.width, draw_ctx.icon_atlas.height);
+            if self.icon_tex.width() != iw || self.icon_tex.height() != ih {
+                self.icon_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("UiPass Icon Atlas"),
+                    size: wgpu::Extent3d {
+                        width: iw,
+                        height: ih,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                self.icon_view = self
+                    .icon_tex
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.icon_tex,
@@ -409,51 +510,82 @@ impl UiPass {
                 &draw_ctx.icon_atlas.pixels,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(ICON_ATLAS_WIDTH * 4),
-                    rows_per_image: Some(ICON_ATLAS_HEIGHT),
+                    bytes_per_row: Some(iw * 4),
+                    rows_per_image: Some(ih),
                 },
                 wgpu::Extent3d {
-                    width: ICON_ATLAS_WIDTH,
-                    height: ICON_ATLAS_HEIGHT,
+                    width: iw,
+                    height: ih,
                     depth_or_array_layers: 1,
                 },
             );
             draw_ctx.icon_atlas.dirty = false;
-            self.bg1_icon =
-                Self::make_bg1(device, &self.bg1_layout, &self.icon_view, &self.sampler);
+            atlases_changed = true;
         }
 
-        // Vertices
-        if !draw_ctx.vertices.is_empty() {
-            let needed = (draw_ctx.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-            if needed > self.vtx_capacity {
-                self.vtx_capacity = needed * 2;
-                self.vtx_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("UI Vertices"),
-                    size: self.vtx_capacity,
+        // One bind group serves the whole pass, so it is rebuilt only when an
+        // atlas texture is replaced.
+        if draw_ctx.thumbnails.dirty {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.thumb_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &draw_ctx.thumbnails.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(crate::thumbnail::ATLAS_WIDTH * 4),
+                    rows_per_image: Some(crate::thumbnail::ATLAS_HEIGHT),
+                },
+                wgpu::Extent3d {
+                    width: crate::thumbnail::ATLAS_WIDTH,
+                    height: crate::thumbnail::ATLAS_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+            );
+            draw_ctx.thumbnails.dirty = false;
+            atlases_changed = true;
+        }
+
+        if atlases_changed {
+            self.bg1 = Self::make_bg1(
+                device,
+                &self.bg1_layout,
+                &self.atlas_view,
+                &self.icon_view,
+                &self.thumb_view,
+                &self.sampler,
+            );
+        }
+
+        // Instances
+        let instance_bytes = (draw_ctx.instances.len() * std::mem::size_of::<Primitive>()) as u64;
+        if !draw_ctx.instances.is_empty() {
+            if instance_bytes > self.inst_capacity {
+                self.inst_capacity = instance_bytes * 2;
+                self.inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("UI Instances"),
+                    size: self.inst_capacity,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
             }
-            queue.write_buffer(&self.vtx_buf, 0, bytemuck::cast_slice(&draw_ctx.vertices));
+            queue.write_buffer(&self.inst_buf, 0, bytemuck::cast_slice(&draw_ctx.instances));
         }
 
-        // Indices
-        if !draw_ctx.indices.is_empty() {
-            let needed = (draw_ctx.indices.len() * 4) as u64;
-            if needed > self.idx_capacity {
-                self.idx_capacity = needed * 2;
-                self.idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("UI Indices"),
-                    size: self.idx_capacity,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-            }
-            queue.write_buffer(&self.idx_buf, 0, bytemuck::cast_slice(&draw_ctx.indices));
-        }
-
-        self.commands = draw_ctx.commands.clone();
+        self.commands.clear();
+        self.commands.extend_from_slice(&draw_ctx.commands);
+        self.stats = UiFrameStats {
+            instances: draw_ctx.instances.len() as u32,
+            batches: draw_ctx
+                .commands
+                .iter()
+                .filter(|c| c.instance_count > 0)
+                .count() as u32,
+            instance_bytes: instance_bytes as u32,
+        };
     }
 
     /// Record the UI render pass. Composites onto the existing surface contents.
@@ -480,27 +612,33 @@ impl UiPass {
         });
 
         rpass.set_pipeline(&self.pipeline);
-        rpass.set_vertex_buffer(0, self.vtx_buf.slice(..));
-        rpass.set_index_buffer(self.idx_buf.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.set_vertex_buffer(0, self.inst_buf.slice(..));
         rpass.set_bind_group(0, &self.bg0, &[]);
 
-        // Start with white; switch lazily per DrawCommand.
-        let mut active_tex: Option<u32> = None;
-        rpass.set_bind_group(1, &self.bg1_white, &[]);
+        // Bound once: every instance names its own atlas.
+        rpass.set_bind_group(1, &self.bg1, &[]);
 
         let sw = self.surface_w;
         let sh = self.surface_h;
+        // Layout units -> device pixels. Derived from the two sizes rather than
+        // from the scale factor so rounding cannot put the scissor off the edge.
+        let scale_x = sw as f32 / self.logical_w;
+        let scale_y = sh as f32 / self.logical_h;
 
         for cmd in &self.commands {
-            if cmd.index_count == 0 {
+            if cmd.instance_count == 0 {
                 continue;
             }
 
-            // Scissor rect clamped to [0, surface_w) × [0, surface_h).
-            let x0 = (cmd.clip_rect.x.max(0.0) as u32).min(sw);
-            let y0 = (cmd.clip_rect.y.max(0.0) as u32).min(sh);
-            let x1 = ((cmd.clip_rect.x + cmd.clip_rect.w).max(0.0) as u32).min(sw);
-            let y1 = ((cmd.clip_rect.y + cmd.clip_rect.h).max(0.0) as u32).min(sh);
+            // Scissor rect in device pixels, clamped to the framebuffer.
+            let px = cmd.clip_rect.x * scale_x;
+            let py = cmd.clip_rect.y * scale_y;
+            let pw = cmd.clip_rect.w * scale_x;
+            let ph = cmd.clip_rect.h * scale_y;
+            let x0 = (px.max(0.0) as u32).min(sw);
+            let y0 = (py.max(0.0) as u32).min(sh);
+            let x1 = ((px + pw).max(0.0).ceil() as u32).min(sw);
+            let y1 = ((py + ph).max(0.0).ceil() as u32).min(sh);
             let cw = x1.saturating_sub(x0);
             let ch = y1.saturating_sub(y0);
             if cw == 0 || ch == 0 {
@@ -508,25 +646,9 @@ impl UiPass {
             }
             rpass.set_scissor_rect(x0, y0, cw, ch);
 
-            // Switch BG1 only when the texture changes.
-            if cmd.texture_id != active_tex {
-                active_tex = cmd.texture_id;
-                match active_tex {
-                    None => rpass.set_bind_group(1, &self.bg1_white, &[]),
-                    Some(id) if id == FONT_ATLAS_TEXTURE_ID => {
-                        rpass.set_bind_group(1, &self.bg1_atlas, &[])
-                    }
-                    Some(id) if id == ICON_ATLAS_TEXTURE_ID => {
-                        rpass.set_bind_group(1, &self.bg1_icon, &[])
-                    }
-                    Some(_) => rpass.set_bind_group(1, &self.bg1_atlas, &[]),
-                }
-            }
-
-            rpass.draw_indexed(
-                cmd.index_offset..(cmd.index_offset + cmd.index_count),
-                0,
-                0..1,
+            rpass.draw(
+                0..VERTS_PER_QUAD,
+                cmd.instance_offset..(cmd.instance_offset + cmd.instance_count),
             );
         }
     }
@@ -546,5 +668,90 @@ mod tests {
     fn linear_surface_does_not_apply_an_extra_decode() {
         let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8Unorm);
         assert!(shader.contains("const OUTPUT_IS_SRGB: bool = false;"));
+    }
+
+    #[test]
+    fn shader_decodes_srgb_exactly_once() {
+        // phase_27 §6.2: the decode must appear in exactly one function, and
+        // every colour path must route through it rather than inlining a second
+        // transfer function.
+        let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(
+            shader.matches("fn decode_srgb").count(),
+            1,
+            "exactly one decode helper may exist"
+        );
+        assert_eq!(
+            shader.matches("1.055").count(),
+            1,
+            "the sRGB transfer constants may appear only inside decode_srgb"
+        );
+        assert_eq!(shader.matches("0.04045").count(), 1);
+        assert_eq!(shader.matches("12.92").count(), 1);
+    }
+
+    #[test]
+    fn shader_decodes_before_gradient_interpolation() {
+        // Mixing authored sRGB and then decoding would make a 50 % stop the
+        // sRGB mean instead of the linear mean.
+        let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8UnormSrgb);
+        let mix_line = shader
+            .lines()
+            .find(|l| l.contains("mix(decode_srgb"))
+            .expect("gradient must mix already-decoded values");
+        assert!(mix_line.contains("in.fill_a.rgb"));
+        assert!(mix_line.contains("in.fill_b.rgb"));
+        assert!(
+            !shader.contains("decode_srgb(mix("),
+            "decoding after the mix would interpolate in the wrong space"
+        );
+    }
+
+    #[test]
+    fn globals_layout_matches_the_wgsl_struct() {
+        assert_eq!(std::mem::size_of::<Globals>(), 80);
+        assert_eq!(std::mem::align_of::<Globals>(), 4);
+        let shader = shader_source_for_surface_format(wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(shader.contains("proj: mat4x4<f32>"));
+        assert!(shader.contains("text_gamma: f32"));
+    }
+
+    #[test]
+    fn declared_attribute_formats_exactly_tile_the_instance() {
+        // Sum the *format* sizes rather than reading the last offset: this is
+        // what catches a gap or an overlap in the middle of the layout, which
+        // would make the shader read one field as another.
+        let total: u64 = Primitive::VERTEX_ATTRS
+            .iter()
+            .map(|a| a.format.size())
+            .sum();
+        assert_eq!(total, Primitive::STRIDE, "attributes must tile the stride");
+
+        // And every attribute must start exactly where the previous one ended.
+        let mut cursor = 0u64;
+        for attr in Primitive::VERTEX_ATTRS {
+            assert_eq!(attr.offset, cursor, "gap or overlap at {attr:?}");
+            cursor += attr.format.size();
+        }
+    }
+
+    #[test]
+    fn text_gamma_thins_partial_coverage_and_preserves_the_extremes() {
+        // Direction: above 1.0 lowers partial coverage, which is what
+        // compensates for linear-space blending of light-on-dark text. The
+        // direction itself is a compile-time invariant (see the `const _`
+        // above); this covers the behaviour across the coverage range.
+        let g = std::hint::black_box(DEFAULT_TEXT_GAMMA);
+        for cov in [0.25f32, 0.5, 0.75] {
+            assert!(
+                cov.powf(g) < cov,
+                "coverage {cov} must be thinned, got {}",
+                cov.powf(g)
+            );
+        }
+        // A fully covered or fully empty texel must not move, or glyph
+        // interiors would lighten and the background would tint.
+        assert_eq!(0.0f32.powf(g), 0.0);
+        assert_eq!(1.0f32.powf(g), 1.0);
     }
 }

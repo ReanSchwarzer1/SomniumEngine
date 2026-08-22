@@ -136,7 +136,9 @@ impl Control for Splitter {
                 Rect::new(b.x, b.y + first, b.w, bar)
             }
         };
-        ctx.push_rect_filled(rect, theme::BORDER_MEDIUM);
+        // A splitter is a seam, not a control: it stays a flat hairline colour.
+        // Rounding or lifting it would read as a floating bar between panels.
+        ctx.push_rect_filled(rect, theme::active().semantic.border.default.bytes());
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> crate::node::CursorKind {

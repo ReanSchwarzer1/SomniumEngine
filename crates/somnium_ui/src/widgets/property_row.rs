@@ -221,17 +221,21 @@ impl Control for PropertyRow {
         if self.modified {
             let cx = b.x + GUTTER * 0.5;
             let cy = b.y + (if m.stacked { 12.0 } else { m.height * 0.5 });
-            let accent = theme::NOCTURNE.semantic.accent.default.bytes();
+            let t = theme::active();
+            let accent = t.semantic.accent.default.bytes();
             if self.hover_gutter {
                 let r = 5.0;
-                ctx.push_rect_border(
+                // A ring, not a square: the pipeline can round it now.
+                ctx.push_round_rect_border(
                     Rect::new(cx - r, cy - r, r * 2.0, r * 2.0),
-                    theme::NOCTURNE.geometry.stroke_hairline,
-                    theme::NOCTURNE.semantic.accent.hover.bytes(),
+                    r,
+                    t.geometry.stroke_hairline,
+                    t.semantic.accent.hover.bytes(),
                 );
             }
             let r = 2.5;
-            ctx.push_rect_filled(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0), accent);
+            // The design calls this a dot, and until Styx it was a 5 px square.
+            ctx.push_round_rect(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0), r, accent);
         }
 
         let (label, _truncated) = ellipsise(&self.label, m.label_w, |s| {

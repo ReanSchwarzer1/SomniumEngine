@@ -89,6 +89,15 @@ pub struct Paint {
     /// 2 px left strip; `None` unless the instance is selected or errored.
     pub rail: Option<Color>,
     pub radius: f32,
+    /// Phase 27-E. A two-stop wash over the fill. Chrome only (§5.3).
+    pub gradient: Option<theme::Gradient>,
+    /// Phase 27-D. Which rung of the elevation ladder this surface sits on.
+    /// `None` means flat, which is what every panel stays.
+    pub elevation: Option<theme::Elevation>,
+    /// Phase 27-D. Outer halo. Focus and armed mode only (§5.4).
+    pub glow: Option<theme::Glow>,
+    /// Phase 27-D. Inner shadow, so an input reads as recessed.
+    pub inset: Option<theme::Inset>,
 }
 
 impl Paint {
@@ -99,30 +108,59 @@ impl Paint {
             border: background,
             border_thickness: 0.0,
             rail: None,
-            radius: theme::NOCTURNE.geometry.radius_chrome,
+            radius: theme::active().geometry.radius_chrome,
+            gradient: None,
+            elevation: None,
+            glow: None,
+            inset: None,
         }
+    }
+
+    /// Wash the fill with a chrome gradient.
+    pub fn with_gradient(mut self, gradient: theme::Gradient) -> Self {
+        self.gradient = Some(gradient);
+        self
+    }
+
+    /// Lift the surface onto a rung of the elevation ladder.
+    pub fn at_elevation(mut self, elevation: theme::Elevation) -> Self {
+        self.elevation = Some(elevation);
+        self
+    }
+
+    /// Sink the surface below its parent.
+    pub fn recessed(mut self, inset: theme::Inset) -> Self {
+        self.inset = Some(inset);
+        self
     }
 
     fn outlined(background: Color, foreground: Color, border: Color) -> Self {
         Self {
             border,
-            border_thickness: theme::NOCTURNE.geometry.stroke_hairline,
+            border_thickness: theme::active().geometry.stroke_hairline,
             ..Self::flat(background, foreground)
         }
     }
 
     /// Apply the shared focus and disabled overrides every recipe honours.
     fn finish(mut self, state: &VisualState) -> Self {
+        let t = theme::active();
         if state.invalid {
-            self.border = theme::STATUS_ERROR;
-            self.border_thickness = theme::NOCTURNE.geometry.stroke_hairline;
+            self.border = t.semantic.status.error.bytes();
+            self.border_thickness = t.geometry.stroke_hairline;
         }
         if state.focused {
-            self.border = theme::NOCTURNE.semantic.border.focus.bytes();
-            self.border_thickness = theme::NOCTURNE.geometry.stroke_focus;
+            self.border = t.semantic.border.focus.bytes();
+            self.border_thickness = t.geometry.stroke_focus;
+            // Phase 27-D: the focus ring is the first of the two roles allowed
+            // a glow. A 1 px hairline alone is easy to lose on a dense surface.
+            self.glow = Some(t.glow.focus);
         }
         if state.is_disabled() {
-            self.foreground = theme::TEXT_DISABLED;
+            self.foreground = t.semantic.text.disabled.bytes();
+            // A disabled control is never lit and never lifted.
+            self.glow = None;
+            self.elevation = None;
         }
         self
     }
@@ -131,16 +169,22 @@ impl Paint {
 /// `Button` and `MenuItem`: a raised chrome surface that washes on hover and
 /// darkens (rather than moves) on press.
 pub fn button(state: VisualState) -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     let base = match state.interaction {
-        Interaction::Rest => Paint::flat(s.surface.raised.bytes(), s.text.primary.bytes()),
-        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), s.text.primary.bytes()),
+        Interaction::Rest => Paint::flat(s.surface.raised.bytes(), s.text.primary.bytes())
+            .with_gradient(t.gradient.chrome_wash)
+            .at_elevation(t.elevation.raised),
+        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), s.text.primary.bytes())
+            .at_elevation(t.elevation.raised),
+        // Press removes the lift as well as darkening the fill, so the control
+        // reads as pushed into the surface rather than merely recoloured.
         Interaction::Pressed => Paint::flat(s.surface.input.bytes(), s.text.primary.bytes()),
         Interaction::Selected => Paint {
             rail: Some(s.accent.selected_rail.bytes()),
             ..Paint::flat(
                 theme::flatten(s.surface.raised.bytes(), s.accent.selected_bg.bytes()),
-                theme::TEXT_PRIMARY,
+                t.semantic.text.primary.bytes(),
             )
         },
         Interaction::Disabled => Paint::flat(s.surface.panel.bytes(), s.text.disabled.bytes()),
@@ -151,25 +195,33 @@ pub fn button(state: VisualState) -> Paint {
 /// The one primary action on a surface — Save scene, Save and continue.
 /// There is never more than one visible at a time.
 pub fn primary_button(state: VisualState) -> Paint {
-    let a = &theme::NOCTURNE.semantic.accent;
+    let t = theme::active();
+    let a = &t.semantic.accent;
     let fill = match state.interaction {
         Interaction::Hover => a.hover.bytes(),
         Interaction::Pressed => a.pressed.bytes(),
-        Interaction::Disabled => theme::NOCTURNE.semantic.surface.panel.bytes(),
+        Interaction::Disabled => theme::active().semantic.surface.panel.bytes(),
         _ => a.default.bytes(),
     };
     let fg = if state.is_disabled() {
-        theme::TEXT_DISABLED
+        t.semantic.text.disabled.bytes()
     } else {
-        theme::NOCTURNE.semantic.text.inverse.bytes()
+        theme::active().semantic.text.inverse.bytes()
     };
-    Paint::flat(fill, fg).finish(&state)
+    let mut paint = Paint::flat(fill, fg);
+    if !state.is_disabled() {
+        paint = paint
+            .with_gradient(t.gradient.accent_primary)
+            .at_elevation(t.elevation.raised);
+    }
+    paint.finish(&state)
 }
 
 /// Icon-only toolbar control. Transparent at rest so the command bands read as
 /// one surface; the 30 px hit box is a layout concern, not a paint one.
 pub fn icon_button(state: VisualState) -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     let base = match state.interaction {
         Interaction::Rest => Paint::flat(theme::TRANSPARENT, s.text.secondary.bytes()),
         Interaction::Hover => Paint::flat(s.surface.hover.bytes(), s.text.primary.bytes()),
@@ -186,7 +238,8 @@ pub fn icon_button(state: VisualState) -> Paint {
 
 /// Recessed text / numeric / search field.
 pub fn input(state: VisualState) -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     let base = match state.interaction {
         Interaction::Disabled => Paint::outlined(
             s.surface.panel.bytes(),
@@ -205,22 +258,25 @@ pub fn input(state: VisualState) -> Paint {
         ),
     };
     Paint {
-        radius: theme::NOCTURNE.geometry.radius_input,
+        radius: t.geometry.radius_input,
         ..base
     }
+    // An input is the one surface that sinks rather than lifts.
+    .recessed(t.inset.input)
     .finish(&state)
 }
 
 /// Outliner / content-tree row. Selection is fill **and** rail together, so it
 /// survives a colour-vision simulation.
 pub fn tree_row(state: VisualState) -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     let base = match state.interaction {
         Interaction::Rest => Paint::flat(theme::TRANSPARENT, s.text.primary.bytes()),
-        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), theme::MOON),
+        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), t.semantic.text.emphasis.bytes()),
         Interaction::Pressed | Interaction::Selected => Paint {
             rail: Some(s.accent.selected_rail.bytes()),
-            ..Paint::flat(s.accent.selected_bg.bytes(), theme::MOON)
+            ..Paint::flat(s.accent.selected_bg.bytes(), t.semantic.text.emphasis.bytes())
         },
         // "Hidden" and "locked" both arrive here: dimmed, never removed.
         Interaction::Disabled => Paint::flat(theme::TRANSPARENT, s.text.disabled.bytes()),
@@ -231,9 +287,9 @@ pub fn tree_row(state: VisualState) -> Paint {
     }
     .finish(&state);
     if state.invalid {
-        paint.background = theme::with_alpha(theme::STATUS_ERROR, 0x1A);
-        paint.foreground = theme::STATUS_ERROR;
-        paint.rail = Some(theme::STATUS_ERROR);
+        paint.background = theme::with_alpha(t.semantic.status.error.bytes(), 0x1A);
+        paint.foreground = t.semantic.status.error.bytes();
+        paint.rail = Some(t.semantic.status.error.bytes());
         paint.border_thickness = 0.0;
     }
     paint
@@ -241,7 +297,8 @@ pub fn tree_row(state: VisualState) -> Paint {
 
 /// Content Browser tile.
 pub fn asset_tile(state: VisualState) -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     let base = match state.interaction {
         Interaction::Hover => Paint::outlined(
             s.surface.canvas.bytes(),
@@ -250,7 +307,7 @@ pub fn asset_tile(state: VisualState) -> Paint {
         ),
         Interaction::Selected | Interaction::Pressed => Paint::outlined(
             s.surface.header.bytes(),
-            theme::MOON,
+            t.semantic.text.emphasis.bytes(),
             s.accent.default.bytes(),
         ),
         Interaction::Disabled => Paint::outlined(
@@ -265,7 +322,7 @@ pub fn asset_tile(state: VisualState) -> Paint {
         ),
     };
     Paint {
-        radius: theme::NOCTURNE.geometry.radius_tile,
+        radius: theme::active().geometry.radius_tile,
         ..base
     }
     .finish(&state)
@@ -274,30 +331,30 @@ pub fn asset_tile(state: VisualState) -> Paint {
 /// Drop-target feedback for a drag in flight. Valid outlines indigo over an
 /// 18 % fill; invalid outlines rose and the reason goes to the status bar.
 pub fn drop_target(valid: bool) -> Paint {
+    let t = theme::active();
     let accent = if valid {
-        theme::NOCTURNE.semantic.accent.default.bytes()
+        t.semantic.accent.default.bytes()
     } else {
-        theme::STATUS_ERROR
+        t.semantic.status.error.bytes()
     };
     let fill = theme::with_alpha(
         accent,
-        (255.0 * theme::NOCTURNE.opacity.drop_valid).round() as u8,
+        (255.0f32 * t.opacity.drop_valid).round() as u8,
     );
     Paint {
-        background: fill,
-        foreground: accent,
         border: accent,
-        border_thickness: theme::NOCTURNE.geometry.stroke_rail,
-        rail: None,
-        radius: theme::NOCTURNE.geometry.radius_tile,
+        border_thickness: t.geometry.stroke_rail,
+        radius: t.geometry.radius_tile,
+        ..Paint::flat(fill, accent)
     }
 }
 
 /// Menu, combo list, tooltip and palette share one popup surface.
 pub fn popup() -> Paint {
-    let s = &theme::NOCTURNE.semantic;
+    let t = theme::active();
+    let s = &t.semantic;
     Paint {
-        radius: theme::NOCTURNE.geometry.radius_popup,
+        radius: theme::active().geometry.radius_popup,
         ..Paint::outlined(
             s.surface.popup.bytes(),
             s.text.primary.bytes(),
@@ -309,12 +366,13 @@ pub fn popup() -> Paint {
 /// Status colour for a log or notification severity, in one place so a status
 /// never becomes a raw hex at a call site.
 pub fn status(kind: StatusKind) -> Color {
+    let s = &theme::active().semantic.status;
     match kind {
-        StatusKind::Info => theme::STATUS_INFO,
-        StatusKind::Success => theme::STATUS_OK,
-        StatusKind::Warning => theme::STATUS_WARN,
-        StatusKind::Error => theme::STATUS_ERROR,
-        StatusKind::Busy => theme::NOCTURNE.semantic.status.busy.bytes(),
+        StatusKind::Info => s.info.bytes(),
+        StatusKind::Success => s.success.bytes(),
+        StatusKind::Warning => s.warning.bytes(),
+        StatusKind::Error => s.error.bytes(),
+        StatusKind::Busy => s.busy.bytes(),
     }
 }
 
@@ -360,41 +418,48 @@ mod tests {
             assert_eq!(paint.border, theme::BORDER_FOCUS);
             assert_eq!(
                 paint.border_thickness,
-                theme::NOCTURNE.geometry.stroke_focus
+                theme::active().geometry.stroke_focus
             );
         }
     }
 
     #[test]
     fn invalid_recolours_the_outline_and_keeps_the_fill() {
+        let t = theme::active();
         let rest = input(VisualState::rest());
         let bad = input(VisualState::rest().invalid(true));
         assert_eq!(rest.background, bad.background);
-        assert_eq!(bad.border, theme::STATUS_ERROR);
+        assert_eq!(bad.border, t.semantic.status.error.bytes());
     }
 
     #[test]
     fn disabled_beats_every_other_interaction_for_foreground() {
+        let t = theme::active();
         assert_eq!(
             button(VisualState::with(Interaction::Disabled)).foreground,
-            theme::TEXT_DISABLED
+            t.semantic.text.disabled.bytes()
         );
         assert_eq!(
             input(VisualState::with(Interaction::Disabled)).foreground,
-            theme::TEXT_DISABLED
+            t.semantic.text.disabled.bytes()
         );
     }
 
     #[test]
     fn drop_targets_separate_valid_from_invalid_by_hue_and_by_reason() {
-        assert_eq!(drop_target(true).border, theme::ACCENT);
-        assert_eq!(drop_target(false).border, theme::STATUS_ERROR);
+        let t = theme::active();
+        assert_eq!(
+            drop_target(true).border,
+            t.semantic.accent.default.bytes()
+        );
+        assert_eq!(drop_target(false).border, t.semantic.status.error.bytes());
         assert_eq!(drop_target(true).border_thickness, 2.0);
     }
 
     #[test]
     fn error_rows_override_the_selection_rail_with_the_error_hue() {
+        let t = theme::active();
         let row = tree_row(VisualState::rest().invalid(true));
-        assert_eq!(row.rail, Some(theme::STATUS_ERROR));
+        assert_eq!(row.rail, Some(t.semantic.status.error.bytes()));
     }
 }

@@ -435,7 +435,15 @@ impl Control for Grid {
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
-        ctx.push_rect_filled(widget.screen_bounds(), widget.background);
+        let gb = widget.screen_bounds();
+        match crate::theme::wash_for_surface(widget.background) {
+            Some(g) => ctx.push_primitive(
+                crate::primitive::Primitive::fill(gb, g.from.bytes())
+                    .with_gradient(g.to.bytes(), g.axis),
+                None,
+            ),
+            None => ctx.push_rect_filled(gb, widget.background),
+        }
         if self.draw_border {
             let b = widget.screen_bounds();
             let fg = widget.foreground;

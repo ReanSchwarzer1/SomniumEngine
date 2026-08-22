@@ -84,7 +84,16 @@ impl Control for StackPanel {
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
-        ctx.push_rect_filled(widget.screen_bounds(), widget.background);
+        // Chrome containers pick up the wash; content grounds stay flat.
+        let b = widget.screen_bounds();
+        match crate::theme::wash_for_surface(widget.background) {
+            Some(g) => ctx.push_primitive(
+                crate::primitive::Primitive::fill(b, g.from.bytes())
+                    .with_gradient(g.to.bytes(), g.axis),
+                None,
+            ),
+            None => ctx.push_rect_filled(b, widget.background),
+        }
     }
 
     fn handle_routed_message(

@@ -1608,3 +1608,180 @@ three is a code donor and none was used as one.
 hand-registering a binding surface per subsystem becomes. Cited as the
 motivation for generating Somnium's script surface from the component
 registry rather than writing it.
+
+---
+
+## 13E. Phase 27-A / 27-B — Styx primitive pipeline and Lethe text quality (2026-08-18)
+
+Phase 27 (Hades) rebuilds the `somnium_ui` paint layer. Everything below is a
+**technique citation**: published rendering approaches that informed original
+Somnium code. **No source, shader, asset, or data was copied from any of these
+projects, and none of them is a dependency.** The framework evaluation that
+rejected Slint, GPUI, Iced/libcosmic and Tauri as dependencies is recorded in
+`dev records/phase_27.md` §3.
+
+### 13E.1 Signed-distance rounded box
+
+**Reference:** Inigo Quilez, "2D distance functions" — the `sdRoundedBox`
+primitive (`https://iquilezles.org/articles/distfunctions2d/`). Public-domain
+technique exposition, widely reimplemented.
+
+**Pattern:** `min(max(q.x, q.y), 0) + length(max(q, 0)) - r` where
+`q = abs(p) - half_extent + r`, evaluated in the fragment stage. Somnium adds a
+per-quadrant radius selection so `Primitive::radii` can carry four different
+corners, which the single-radius formulation does not express.
+
+**Somnium implementation:** `crates/somnium_ui/src/ui_pass.wgsl` —
+`sd_rounded_box`, `corner_radius`. Original WGSL.
+
+### 13E.2 Instanced primitive quad with analytic evaluation
+
+**Reference:** Zed's GPUI (`https://github.com/zed-industries/zed`, Apache-2.0)
+demonstrates that a desktop UI does not need one mesh per shape: a single
+instanced quad carrying rect, corner radii, border, background and shadow, with
+the fragment stage deriving all of them from one distance, is enough to draw a
+whole editor. GPUI itself was evaluated and **rejected as a dependency**
+(`phase_27.md` §3.2) — it renders through blade-graphics rather than wgpu and
+cannot composite into Somnium's swapchain.
+
+**Pattern:** one `VertexStepMode::Instance` buffer; the unit quad is generated
+from `@builtin(vertex_index)` so no vertex or index buffer is uploaded at all.
+
+**Somnium implementation:** `crates/somnium_ui/src/primitive.rs` (`Primitive`,
+100-byte instance, 12 vertex attributes), `pass.rs` (`draw(0..6, instances)`),
+`ui_pass.wgsl` (`vs_main`). Somnium's instance additionally carries a texture
+layer in `flags`, so both atlases are bound once for the whole pass and a run of
+fills, labels and icons is a single draw — a Somnium-specific addition made
+after measuring 164 draw calls for 625 quads on the real shell.
+
+### 13E.3 Analytic antialiasing from screen-space derivatives
+
+**Pattern:** `coverage = 1 - smoothstep(-aa, aa, d)` with `aa = fwidth(d) * 0.5`.
+Standard practice in SDF rendering; no single originator. Chosen over MSAA
+because it needs no extra render target and no resolve, and because it leaves an
+integer-aligned axis-aligned rect at exactly full coverage inside and zero
+outside — which is what allows the pre-Styx flat fills to stay unchanged.
+
+**Somnium implementation:** `ui_pass.wgsl` `fs_main`.
+
+### 13E.4 Rounded-rectangle shadow approximation
+
+**Reference:** Evan Wallace, "Fast Rounded Rectangle Shadows"
+(`https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/`) — the
+observation that a Gaussian-blurred rounded rectangle can be approximated
+analytically in the fragment stage instead of blurred in a separate pass.
+
+**Pattern:** Somnium uses the cheaper end of this idea — a `smoothstep` band
+around the rounded-box distance of the spread-grown shape, evaluated on one
+instance drawn behind the caster. The pre-Styx `push_drop_shadow` drew six
+concentric hard-edged rectangles, which banded visibly at the 12–32 px spreads
+`theme::ElevationTokens` asks for.
+
+**Somnium implementation:** `ui_pass.wgsl` `fs_main` (`FLAG_SHADOW` branch),
+`primitive.rs` (`Primitive::shadow`, `glow`, `inset_shadow`),
+`draw.rs` (`push_drop_shadow`, `push_drop_shadow_rounded`).
+
+### 13E.5 COSMIC theming concepts
+
+**Reference:** System76's COSMIC desktop and `libcosmic`
+(`https://github.com/pop-os/libcosmic`, MPL-2.0). **Not a dependency** — it is a
+Wayland/Linux-first application framework and was rejected in `phase_27.md` §3.4.
+
+**Concept adopted:** container / component / on-colour nesting, where each nested
+surface derives its own background, component and text colours from its parent
+plus an elevation delta, rather than every widget picking from one flat list of
+greys. Scheduled for Phase 27-E; recorded here because the `Primitive` gradient
+and border fields exist to serve it.
+
+### 13E.6 Text coverage gamma
+
+**Pattern:** grayscale antialiasing coverage produced by a font rasterizer is
+authored on the assumption of perceptual blending. A wgpu sRGB target blends in
+linear, which renders light-on-dark stems heavier and softer than intended.
+Applying an exponent to coverage before the blend thins them back. The technique
+is long-standing in font rendering (FreeType's gamma correction, Skia's
+`SkMaskGamma`); the constant is Somnium's own and is empirical.
+
+**Somnium implementation:** `pass.rs` `DEFAULT_TEXT_GAMMA` (1.18, tunable at
+runtime through `UiPass::set_text_gamma`; 1.0 is an exact no-op),
+`ui_pass.wgsl` `FLAG_TEXT` branch. `dev records/phase_27.md` §17 records it as
+needing capture-based tuning.
+
+### 13E.7 Supersession notice for §13.17
+
+§13.17 above describes the Phase 12B-1 `UiPass`: a 20-byte vertex format, an
+index buffer, a 64-byte BG0, a white 1×1 texture, and BG1 rebound per
+DrawCommand. **All five are retired by 27-A.** The wgpu 29 pass conventions it
+records (`immediate_size: 0`, `multiview_mask: None`, `depth_slice: None`, the
+blend equation, the scissor clamp, the doubling buffer-grow strategy) are
+unchanged and still apply. §13.16's fontdue attribution is likewise unchanged —
+27-B altered how glyph quads are *placed* and *blended*, not how they are
+rasterized.
+
+
+---
+
+## 13F. Phase 27-C / 27-D / 27-E — motion, depth, and the second theme (2026-08-18)
+
+Continues §13E. Everything below is a **technique citation**; no source,
+shader, asset, or data was copied, and no dependency was added.
+
+### 13F.1 Easing curves
+
+**Pattern:** Hermite smoothstep (`t*t*(3-2t)`) for the symmetric ease-in-out, and
+a critically damped second-order step response for press feedback. Both are
+standard, long predating any particular UI toolkit. Somnium normalises the spring
+so `f(1) == 1` exactly, because an un-normalised critically damped curve
+asymptotes and would leave a permanent sub-pixel offset when the track retires.
+
+**Somnium implementation:** `crates/somnium_ui/src/motion.rs` — `Easing::apply`.
+The reduced-motion contract (identical end state, timing only) is asserted by
+`reduced_motion_reaches_the_same_end_state_instantly`.
+
+### 13F.2 Elevation ladder
+
+**Reference:** Microsoft's [Fluent 2 elevation](https://fluent2.microsoft.design/)
+and Material's elevation model both establish that a desktop surface hierarchy is
+better expressed as a small ordered ladder of shadow definitions than as ad-hoc
+per-component shadows. Concept only.
+
+**Somnium divergence:** Somnium's ladder deliberately leaves `canvas` and `panel`
+flat — elevation marks z-order, never decoration — which is the opposite of
+Material's practice of lifting cards. Dawn also drops every alpha rather than
+reusing the dark theme's, because the same alpha reads far heavier over a bright
+ground; `shadows_are_lighter_on_the_light_theme` checks all five rungs.
+
+**Somnium implementation:** `theme::ElevationTokens` (raised / popup / drawer /
+modal / toast), `style::Paint::at_elevation`, `draw::DrawingContext::push_paint`.
+
+### 13F.3 COSMIC theming concepts, applied
+
+**Reference:** System76's `libcosmic` (MPL-2.0), rejected as a dependency in
+`phase_27.md` §3.4.
+
+**Concept adopted in 27-E:** a theme is a *snapshot of roles* selected at runtime,
+not a set of constants compiled into the widgets. Somnium's `theme::active()`
+resolves through one relaxed atomic load over two compile-time constants, which is
+the smallest thing that ships two themes; a user-authored theme would need a
+different mechanism and that is recorded rather than pretended.
+
+**Somnium implementation:** `theme::{active, set_active, ThemeId, DAWN}`, and the
+conversion of every `style.rs` recipe from `NOCTURNE` constants to `active()`.
+
+### 13F.4 WCAG 2.x contrast mathematics
+
+**Reference:** [W3C WCAG 2.2 relative luminance and contrast ratio definitions](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html).
+Normative formulas, implemented directly.
+
+**Somnium implementation:** `theme::{relative_luminance, contrast_ratio}` and
+`certified_pairs_meet_wcag_aa_in_both_themes`, which certifies every text pair at
+4.5:1 and every state cue at 3:1 across both snapshots. It found six failing pairs
+in the previously shipped Nocturne palette on first run.
+
+### 13F.5 Note on §13.16 and §13.17
+
+`FontAtlas::render_scale` (27) is unrelated to the fontdue attribution in
+§13.16 — it changes the size glyphs are rasterized at, not how. The `UiPass`
+description in §13.17 was already superseded by §13E.7; 27 additionally
+replaced its `prepare` signature with `UiSurface`, which carries the logical and
+physical extents as one value.

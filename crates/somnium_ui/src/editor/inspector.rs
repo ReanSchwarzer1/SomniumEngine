@@ -57,7 +57,8 @@ pub(crate) fn build_inspector(
                        label_w: f32,
                        font_id: u8,
                        parent: NodeHandle,
-                       drag_step: f32| {
+                       drag_step: f32,
+                       unit: &'static str| {
         let _ = (label_w, font_id);
         let row = PropertyRowBuilder::new(
             WidgetBuilder::new()
@@ -75,6 +76,7 @@ pub(crate) fn build_inspector(
             bottom: 1.0,
         }))
         .with_drag_step(drag_step)
+        .with_unit(unit)
         .build();
         (row_h, ui.add_node(field, row_h))
     };
@@ -96,18 +98,25 @@ pub(crate) fn build_inspector(
     // the right feel for metres and degrees alike.
     let make_row_w =
         |ui: &mut UserInterface, label: &str, label_w: f32, font_id: u8, parent: NodeHandle| {
-            make_row_rw(ui, label, label_w, font_id, parent, 0.05).1
+            make_row_rw(ui, label, label_w, font_id, parent, 0.05, "").1
         };
+    // Phase 27-G. Transform values are three columns of `0.000` with nothing to
+    // say which is metres, which is degrees and which is a multiplier. The unit
+    // rides on the field so it cannot drift from the section heading.
+    let make_row_unit = |ui: &mut UserInterface,
+                         label: &str,
+                         font_id: u8,
+                         parent: NodeHandle,
+                         unit: &'static str| {
+        make_row_rw(ui, label, 0.0, font_id, parent, 0.05, unit).1
+    };
     let make_row_step =
         |ui: &mut UserInterface,
          label: &str,
          label_w: f32,
          font_id: u8,
          parent: NodeHandle,
-         step: f32| { make_row_rw(ui, label, label_w, font_id, parent, step).1 };
-    let make_row = |ui: &mut UserInterface, label: &str, font_id: u8, parent: NodeHandle| {
-        make_row_w(ui, label, 20.0, font_id, parent)
-    };
+         step: f32| { make_row_rw(ui, label, label_w, font_id, parent, step, "").1 };
 
     // Section headers are a 26 px band on `surface.header`, not a floating
     // caption: the band is what separates one group of rows from the next now
@@ -141,19 +150,19 @@ pub(crate) fn build_inspector(
     };
 
     sec_label(ui, "Position", font_id, parent);
-    let pos_x = make_row(ui, "X", font_id, parent);
-    let pos_y = make_row(ui, "Y", font_id, parent);
-    let pos_z = make_row(ui, "Z", font_id, parent);
+    let pos_x = make_row_unit(ui, "X", font_id, parent, "m");
+    let pos_y = make_row_unit(ui, "Y", font_id, parent, "m");
+    let pos_z = make_row_unit(ui, "Z", font_id, parent, "m");
 
     sec_label(ui, "Rotation", font_id, parent);
-    let rot_x = make_row(ui, "X", font_id, parent);
-    let rot_y = make_row(ui, "Y", font_id, parent);
-    let rot_z = make_row(ui, "Z", font_id, parent);
+    let rot_x = make_row_unit(ui, "X", font_id, parent, "°");
+    let rot_y = make_row_unit(ui, "Y", font_id, parent, "°");
+    let rot_z = make_row_unit(ui, "Z", font_id, parent, "°");
 
     sec_label(ui, "Scale", font_id, parent);
-    let sc_x = make_row(ui, "X", font_id, parent);
-    let sc_y = make_row(ui, "Y", font_id, parent);
-    let sc_z = make_row(ui, "Z", font_id, parent);
+    let sc_x = make_row_unit(ui, "X", font_id, parent, "×");
+    let sc_y = make_row_unit(ui, "Y", font_id, parent, "×");
+    let sc_z = make_row_unit(ui, "Z", font_id, parent, "×");
 
     // ── Light section (Phase 13E) ────────────────────────────────────────────
     // Lives in its own panel so it can be hidden when the selection isn't a
@@ -173,18 +182,18 @@ pub(crate) fn build_inspector(
     let light_col_b = NodeHandle::NONE;
     let light_temp_k = make_row_step(ui, "Kelvin", 34.0, font_id, light_section, 5.0);
     let (light_range_row, light_range) =
-        make_row_rw(ui, "Range", 34.0, font_id, light_section, 0.1);
+        make_row_rw(ui, "Range", 34.0, font_id, light_section, 0.1, "m");
     let (light_inner_row, light_inner) =
-        make_row_rw(ui, "Inner angle", 34.0, font_id, light_section, 0.2);
+        make_row_rw(ui, "Inner angle", 34.0, font_id, light_section, 0.2, "°");
     let (light_outer_row, light_outer) =
-        make_row_rw(ui, "Outer angle", 34.0, font_id, light_section, 0.2);
+        make_row_rw(ui, "Outer angle", 34.0, font_id, light_section, 0.2, "°");
     let (light_moon_row, light_moon_int) =
-        make_row_rw(ui, "Moon intensity", 34.0, font_id, light_section, 0.005);
+        make_row_rw(ui, "Moon intensity", 34.0, font_id, light_section, 0.005, "");
     let light_radius = make_row_step(ui, "Radius", 34.0, font_id, light_section, 0.01);
     let (light_width_row, light_width) =
-        make_row_rw(ui, "Half width", 34.0, font_id, light_section, 0.05);
+        make_row_rw(ui, "Half width", 34.0, font_id, light_section, 0.05, "m");
     let (light_height_row, light_height) =
-        make_row_rw(ui, "Half height", 34.0, font_id, light_section, 0.05);
+        make_row_rw(ui, "Half height", 34.0, font_id, light_section, 0.05, "m");
     ui.set_visibility(light_width_row, false);
     ui.set_visibility(light_height_row, false);
     ui.set_visibility(light_section, false);
@@ -380,7 +389,7 @@ pub(crate) fn build_inspector(
     // whole row matters, not just the field — the label lives in the row, and
     // hiding the field alone leaves a stray "Type" caption behind.
     let (foliage_layer_row, foliage_layer) =
-        make_row_rw(ui, "Type", 34.0, font_id, foliage_section, 0.02);
+        make_row_rw(ui, "Type", 34.0, font_id, foliage_section, 0.02, "");
     ui.set_visibility(foliage_layer_row, false);
     let foliage_smin = make_row_step(ui, "Scale min", 34.0, font_id, foliage_section, 0.01);
     let foliage_smax = make_row_step(ui, "Scale max", 34.0, font_id, foliage_section, 0.01);

@@ -10,6 +10,8 @@
 // range they need (the camera-speed control uses an exponential mapping so the
 // low end stays fine-grained).
 
+use crate::primitive::Primitive;
+use crate::theme;
 use crate::{
     draw::DrawingContext,
     message::{MessageDirection, UiMessage, WidgetMessage},
@@ -69,26 +71,42 @@ impl Control for Slider {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
+        let t = theme::active();
         let mid_y = b.y + b.h * 0.5;
+        let track_r = TRACK_H * 0.5;
 
-        // Track.
-        ctx.push_rect_filled(
-            Rect::new(b.x, mid_y - TRACK_H * 0.5, b.w, TRACK_H),
-            self.track,
+        // Phase 27-D. The §2.4 audit called these out as two flat bars. The
+        // track is now a recessed capsule, the filled range takes the accent
+        // gradient, and the handle is a real lifted control.
+        let track = Rect::new(b.x, mid_y - track_r, b.w, TRACK_H);
+        ctx.push_primitive(
+            Primitive::fill(track, self.track).with_radius(track_r),
+            None,
+        );
+        ctx.push_primitive(
+            Primitive::inset_shadow(track, [track_r; 4], t.inset.input.blur, t.inset.input.color.bytes()),
+            None,
         );
 
-        // Filled portion up to the handle.
         let usable = (b.w - HANDLE_W).max(1.0);
         let handle_x = b.x + self.value.clamp(0.0, 1.0) * usable;
-        ctx.push_rect_filled(
-            Rect::new(b.x, mid_y - TRACK_H * 0.5, handle_x - b.x, TRACK_H),
-            self.fill,
-        );
+        let filled_w = (handle_x - b.x).max(0.0);
+        if filled_w > 0.0 {
+            let g = t.gradient.rail_accent;
+            ctx.push_primitive(
+                Primitive::fill(Rect::new(b.x, mid_y - track_r, filled_w, TRACK_H), g.from.bytes())
+                    .with_radius(track_r)
+                    .with_gradient(g.to.bytes(), g.axis),
+                None,
+            );
+        }
 
-        // Handle.
-        ctx.push_rect_filled(
-            Rect::new(handle_x, b.y + 2.0, HANDLE_W, b.h - 4.0),
-            self.fill,
+        let handle = Rect::new(handle_x, b.y + 2.0, HANDLE_W, b.h - 4.0);
+        let handle_r = (HANDLE_W * 0.5).min(t.geometry.radius_popup);
+        ctx.push_drop_shadow_rounded(handle, [handle_r; 4], t.elevation.raised);
+        ctx.push_primitive(
+            Primitive::fill(handle, self.fill).with_radius(handle_r),
+            None,
         );
     }
 

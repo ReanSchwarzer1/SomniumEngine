@@ -34,16 +34,10 @@ impl Control for SearchBox {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_INPUT);
-        ctx.push_rect_border(
-            b,
-            1.0,
-            if self.focused {
-                theme::BORDER_FOCUS
-            } else {
-                theme::BORDER_MEDIUM
-            },
+        let paint = crate::style::input(
+            crate::style::VisualState::rest().focused(self.focused),
         );
+        ctx.push_paint(b, &paint);
         let ic = Rect::new(b.x + 4.0, b.y + 3.0, 16.0, 16.0);
         let (uv, tex) = IconId::Search.draw_quad(ic);
         ctx.push_textured_rect(ic, uv, theme::TEXT_SECONDARY, tex);
@@ -333,8 +327,12 @@ impl Control for Tooltip {
     }
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_RAISED);
-        ctx.push_rect_border(b, 1.0, theme::BORDER_MEDIUM);
+        let t = theme::active();
+        // A tooltip floats over content, so it takes the popup rung rather than
+        // sitting flat on whatever it happens to cover.
+        let paint = crate::style::popup();
+        ctx.push_paint(b, &paint);
+        let _ = t;
         ctx.push_text(
             &self.text,
             Vec2::new(b.x + 6.0, b.y + 4.0),

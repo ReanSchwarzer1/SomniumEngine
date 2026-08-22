@@ -14,6 +14,8 @@ use std::cell::Cell;
 
 const BAR: f32 = 10.0;
 const MIN_THUMB: f32 = 24.0;
+/// Height of the fade that marks clipped content at a scroll edge.
+const FADE_HEIGHT: f32 = 14.0;
 
 pub struct ScrollViewer {
     pub scroll_y: f32,
@@ -53,7 +55,12 @@ impl Control for ScrollViewer {
         let mut content_h = 0.0f32;
         for &ch in &widget.children {
             ctx.measure_child(ch, inner);
-            content_h = content_h.max(ctx.desired_size(ch).y);
+            // Hidden children do not reserve height. A panel that stacks a
+            // content state against an empty state would otherwise always be
+            // as tall as both.
+            if ctx.is_visible(ch) {
+                content_h = content_h.max(ctx.desired_size(ch).y);
+            }
         }
         self.content_h.set(content_h);
         self.view_h.set(available.y.max(1.0));
@@ -65,32 +72,83 @@ impl Control for ScrollViewer {
         let oy = widget.actual_local_position.y;
         let inner_w = (final_size.x - BAR).max(1.0);
         self.view_h.set(final_size.y.max(1.0));
+        // Accumulate the tallest visible child rather than overwriting.
+        //
+        // This loop used to assign `content_h` on every iteration, so with more
+        // than one child it kept the **last** one's height instead of the
+        // largest. It was latent while every scroll viewer had exactly one
+        // child; adding the Details empty state beside the property stack made
+        // it real, and the Details panel silently stopped scrolling because a
+        // short trailing child reported the whole content as viewport-sized.
         let mut content_h = final_size.y;
         for &ch in &widget.children {
+            if !ctx.is_visible(ch) {
+                continue;
+            }
             let ds = ctx.desired_size(ch);
-            content_h = ds.y.max(final_size.y);
+            content_h = content_h.max(ds.y.max(final_size.y));
+        }
+        for &ch in &widget.children {
             ctx.arrange_child(ch, Rect::new(ox, oy - self.scroll_y, inner_w, content_h));
         }
         self.content_h.set(content_h);
         final_size
     }
 
-    fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+    fn draw(&self, _widget: &Widget, _ctx: &mut DrawingContext) {
+        // Nothing paints beneath the content. The scrollbar and the edge
+        // fades are overlays and are emitted from `draw_over`, after the
+        // children have painted.
+        //
+        // They used to be emitted here, which put them *under* the very
+        // content they annotate: correct geometry, correct colour, and
+        // completely invisible. See `Control::draw_over`.
+    }
+
+    fn draw_over(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
+        let t = theme::active();
         let track = Rect::new(b.x + b.w - BAR, b.y, BAR, b.h);
-        ctx.push_rect_filled(track, theme::BG_INPUT);
-        ctx.push_rect_border(track, 1.0, theme::BORDER_DARK);
+        ctx.push_rect_filled(track, t.semantic.surface.input.bytes());
+        ctx.push_rect_border(track, 1.0, t.semantic.border.subtle.bytes());
+
+        let scrollable = self.content_h.get() > self.view_h.get() + 0.5;
         let thumb = self.thumb_rect(b);
-        let color = if self.content_h.get() > self.view_h.get() + 0.5 {
+        let color = if scrollable {
             if self.dragging {
-                theme::ACCENT
+                t.semantic.accent.default.bytes()
             } else {
-                theme::BORDER_LIGHT
+                t.semantic.border.strong.bytes()
             }
         } else {
-            theme::BORDER_MEDIUM
+            t.semantic.border.default.bytes()
         };
-        ctx.push_rect_filled(thumb, color);
+        // A capsule thumb, so the gutter reads as a control rather than a slot.
+        let thumb_r = (BAR * 0.5 - 1.0).max(0.0);
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(thumb, color).with_radius(thumb_r),
+            None,
+        );
+
+        // Phase 27-D, the §2.4 audit item: a clipped region must say that its
+        // content continues. Drawn only while there is actually more to see, and
+        // only at the edge there is more on, so a short list stays clean.
+        if scrollable {
+            let surface = t.semantic.surface.panel.bytes();
+            let fade_h = FADE_HEIGHT.min(b.h * 0.25);
+            let viewport_w = (b.w - BAR).max(0.0);
+            if self.scroll_y > 0.5 {
+                ctx.push_scroll_fade(Rect::new(b.x, b.y, viewport_w, fade_h), surface, true);
+            }
+            let max_offset = (self.content_h.get() - self.view_h.get()).max(0.0);
+            if self.scroll_y < max_offset - 0.5 {
+                ctx.push_scroll_fade(
+                    Rect::new(b.x, b.y + b.h - fade_h, viewport_w, fade_h),
+                    surface,
+                    false,
+                );
+            }
+        }
     }
 
     fn handle_routed_message(

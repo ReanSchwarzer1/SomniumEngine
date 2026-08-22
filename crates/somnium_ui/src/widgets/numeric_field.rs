@@ -51,6 +51,12 @@ impl NumericFieldMessage {
 
 pub struct NumericField {
     pub value: f32,
+    /// Unit shown after the value, muted and right-aligned.
+    ///
+    /// Phase 27-G. A transform inspector reading `0.000` three times over says
+    /// nothing about whether it is metres, degrees or a multiplier, and the
+    /// answer differs per section. Empty means unitless.
+    pub unit: &'static str,
     editing_text: Option<String>,
     pub px: f32,
     pub color: [u8; 4],
@@ -189,30 +195,72 @@ impl Control for NumericField {
             0.0
         };
 
+        // Phase 27-G: this embedded scrub slider was missed by the 27-D widget
+        // sweep and still drew flat bars. It now matches the standalone
+        // `Slider` exactly — recessed capsule track, accent-gradient fill,
+        // lifted handle — so a scrub control reads the same wherever it appears.
+        let tk = theme::active();
         let mid_y = slider.y + slider.h * 0.5;
-        ctx.push_rect_filled(
-            Rect::new(slider.x, mid_y - TRACK_H * 0.5, slider.w, TRACK_H),
-            theme::BORDER_DARK,
+        let track_r = TRACK_H * 0.5;
+        let track = Rect::new(slider.x, mid_y - track_r, slider.w, TRACK_H);
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(track, tk.semantic.surface.input.bytes())
+                .with_radius(track_r),
+            None,
         );
+        ctx.push_primitive(
+            crate::primitive::Primitive::inset_shadow(
+                track,
+                [track_r; 4],
+                tk.inset.input.blur,
+                tk.inset.input.color.bytes(),
+            ),
+            None,
+        );
+
         let usable = (slider.w - HANDLE_W).max(1.0);
         let handle_x = slider.x + t * usable;
-        ctx.push_rect_filled(
-            Rect::new(
-                slider.x,
-                mid_y - TRACK_H * 0.5,
-                handle_x - slider.x,
-                TRACK_H,
-            ),
-            theme::ACCENT,
-        );
-        ctx.push_rect_filled(
-            Rect::new(handle_x, slider.y + 3.0, HANDLE_W, slider.h - 6.0),
-            theme::ACCENT,
+        let filled_w = (handle_x - slider.x).max(0.0);
+        if filled_w > 0.0 {
+            let g = tk.gradient.rail_accent;
+            ctx.push_primitive(
+                crate::primitive::Primitive::fill(
+                    Rect::new(slider.x, mid_y - track_r, filled_w, TRACK_H),
+                    g.from.bytes(),
+                )
+                .with_radius(track_r)
+                .with_gradient(g.to.bytes(), g.axis),
+                None,
+            );
+        }
+        let handle = Rect::new(handle_x, slider.y + 3.0, HANDLE_W, slider.h - 6.0);
+        let handle_r = (HANDLE_W * 0.5).min(tk.geometry.radius_popup);
+        ctx.push_drop_shadow_rounded(handle, [handle_r; 4], tk.elevation.raised);
+        ctx.push_primitive(
+            crate::primitive::Primitive::fill(handle, tk.semantic.accent.default.bytes())
+                .with_radius(handle_r),
+            None,
         );
 
         let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
-        ctx.push_rect_filled(field, paint.background);
-        ctx.push_rect_border(field, paint.border_thickness.max(1.0), paint.border);
+        ctx.push_paint(field, &paint);
+        // Phase 27-G: the unit sits at the right edge, muted, and is dropped
+        // while editing so it can never be mistaken for part of the text being
+        // typed.
+        if !self.unit.is_empty() && self.editing_text.is_none() {
+            let uw = ctx
+                .font_atlas
+                .measure_text(self.unit, self.px - 1.0, self.font_id)
+                .x;
+            ctx.push_text(
+                self.unit,
+                Vec2::new(field.x + field.w - uw - 5.0, field.y + 3.5),
+                self.font_id,
+                self.px - 1.0,
+                tk.semantic.text.muted.bytes(),
+            );
+        }
+
         let text = self.display_text();
         let origin = Vec2::new(field.x + 4.0, field.y + 3.0);
         if self.focused && self.select_all && !text.is_empty() {
@@ -417,6 +465,7 @@ impl Control for NumericField {
 
 pub struct NumericFieldBuilder {
     widget: WidgetBuilder,
+    unit: &'static str,
     value: f32,
     px: f32,
     color: [u8; 4],
@@ -426,6 +475,12 @@ pub struct NumericFieldBuilder {
 }
 
 impl NumericFieldBuilder {
+    /// Unit shown after the value: `"m"`, `"°"`, `"×"`. Empty is unitless.
+    pub fn with_unit(mut self, unit: &'static str) -> Self {
+        self.unit = unit;
+        self
+    }
+
     pub fn new(widget: WidgetBuilder) -> Self {
         // Phase 26-Zeta-D: numeric values default to the mono_strong role.
         // fontdue applies no OpenType features, so the tabular figures the
@@ -435,6 +490,7 @@ impl NumericFieldBuilder {
         let style = crate::typography::text_style(crate::typography::TextRole::MonoStrong);
         Self {
             widget,
+            unit: "",
             value: 0.0,
             px: style.px,
             color: style.color,
@@ -472,6 +528,7 @@ impl NumericFieldBuilder {
             self.widget.build(),
             Box::new(NumericField {
                 value: self.value,
+                unit: self.unit,
                 editing_text: None,
                 px: self.px,
                 color: self.color,
@@ -497,5 +554,84 @@ mod tests {
         let r = Rect::new(0.0, 0.0, 108.0, 18.0);
         assert!((NumericField::value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
         assert!((NumericField::value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use crate::ui::UserInterface;
+
+    /// Glyph quads drawn by a field with the given unit.
+    ///
+    /// Asserted through the draw list because `Control` exposes no downcast, so
+    /// there is no way to read the field's state back directly.
+    /// Load all five cuts, in the order the editor loads them.
+    ///
+    /// `typography::REGISTRY` is a process-global `OnceLock`: once any test has
+    /// called the editor's `load_fonts`, every role resolves to the id that
+    /// mapping assigns. A fixture that registers only two faces then asks for
+    /// `MonoStrong` gets an id that does not exist, `get_or_rasterize` returns
+    /// `None`, and the field renders **zero** glyphs — which passes in isolation
+    /// and fails in the full suite, purely on test order.
+    fn load_all_cuts(ui: &mut UserInterface) {
+        for cut in [
+            include_bytes!("../../assets/fonts/Inter-Regular.ttf").as_slice(),
+            include_bytes!("../../assets/fonts/Inter-Medium.ttf").as_slice(),
+            include_bytes!("../../assets/fonts/Inter-SemiBold.ttf").as_slice(),
+            include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
+            include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf").as_slice(),
+        ] {
+            ui.add_font(cut).expect("bundled OFL cut parses");
+        }
+    }
+
+    fn glyph_count(unit: &'static str) -> usize {
+        let mut ui = UserInterface::new(400.0, 60.0);
+        load_all_cuts(&mut ui);
+        let root = ui.root();
+        let field = NumericFieldBuilder::new(
+            WidgetBuilder::new().with_width(200.0).with_height(22.0),
+        )
+        .with_unit(unit)
+        .build();
+        ui.add_node(field, root);
+        ui.perform_layout();
+        ui.draw();
+        ui.draw_ctx
+            .instances
+            .iter()
+            .filter(|p| p.flags & crate::primitive::FLAG_TEXT != 0)
+            .count()
+    }
+
+    #[test]
+    fn a_unit_adds_exactly_its_own_glyphs() {
+        // "0.000" either way; the unit is the only difference.
+        let bare = glyph_count("");
+        let metres = glyph_count("m");
+        assert_eq!(metres, bare + 1, "one unit character, one extra glyph");
+    }
+
+    #[test]
+    fn a_field_is_unitless_by_default() {
+        let mut ui = UserInterface::new(400.0, 60.0);
+        load_all_cuts(&mut ui);
+        let root = ui.root();
+        let field = NumericFieldBuilder::new(
+            WidgetBuilder::new().with_width(200.0).with_height(22.0),
+        )
+        .build();
+        ui.add_node(field, root);
+        ui.perform_layout();
+        ui.draw();
+        let drawn = ui
+            .draw_ctx
+            .instances
+            .iter()
+            .filter(|p| p.flags & crate::primitive::FLAG_TEXT != 0)
+            .count();
+        assert_eq!(drawn, glyph_count(""), "the default must add nothing");
+        assert!(drawn > 0, "the value itself must still render");
     }
 }

@@ -46,6 +46,18 @@ pub struct UserInterface {
     message_queue: VecDeque<UiMessage>,
     pub draw_ctx: DrawingContext,
     pub cursor_pos: Vec2,
+    /// Device pixels per unit of layout space.
+    ///
+    /// The widget tree lays out in **logical units**, so every density token
+    /// (`theme::TITLEBAR_HEIGHT`, row heights, the 68 px pre-scene budget) means
+    /// the same apparent size at every DPI. This factor exists only at the two
+    /// boundaries where the OS speaks device pixels: pointer positions coming
+    /// in, and the scissor rect going out.
+    ///
+    /// Before Phase 27 the tree was fed `window.inner_size()` directly, which
+    /// winit reports in physical pixels, so at 200 % the whole chrome rendered
+    /// at half its intended apparent size.
+    ui_scale: f32,
     focused_ih: IH,
     #[allow(dead_code)]
     captured_ih: IH,
@@ -75,6 +87,7 @@ impl UserInterface {
             message_queue: VecDeque::new(),
             draw_ctx: DrawingContext::new(screen_w, screen_h),
             cursor_pos: Vec2::ZERO,
+            ui_scale: 1.0,
             focused_ih: IH::NONE,
             captured_ih: IH::NONE,
             hovered_ih: IH::NONE,
@@ -620,6 +633,19 @@ impl UserInterface {
         for ch in children {
             self.draw_node(to_ih(ch));
         }
+        // Overlay pass, still inside this node's clip: whatever a container
+        // needs to paint on top of its own content.
+        {
+            let node = self.nodes.borrow_mut(handle);
+            let widget_ptr = &node.widget as *const Widget;
+            let control_ptr = node.control.as_ref() as *const dyn Control;
+            // SAFETY: as above — the widget lives in the pool record and
+            // `draw_ctx` is a separate allocation, so the two borrows cannot
+            // alias.
+            unsafe {
+                (*control_ptr).draw_over(&*widget_ptr, &mut self.draw_ctx);
+            }
+        }
         self.draw_ctx.pop_clip_rect();
     }
 
@@ -670,6 +696,24 @@ impl UserInterface {
     // Resize
     // -----------------------------------------------------------------------
 
+    /// Device pixels per layout unit. Feed `Window::scale_factor()`.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.ui_scale = scale.clamp(0.5, 8.0);
+    }
+
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Convert an OS pointer position (device pixels) into layout units.
+    pub fn to_logical(&self, physical_x: f64, physical_y: f64) -> Vec2 {
+        Vec2::new(
+            physical_x as f32 / self.ui_scale,
+            physical_y as f32 / self.ui_scale,
+        )
+    }
+
+    /// Resize the tree. `w` and `h` are **logical units**, not device pixels.
     pub fn resize(&mut self, w: f32, h: f32) {
         self.screen_size = Vec2::new(w, h);
         // Update root widget dimensions.
@@ -755,7 +799,7 @@ impl UserInterface {
 
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+                self.cursor_pos = self.to_logical(position.x, position.y);
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;
@@ -999,5 +1043,438 @@ impl Control for RootControl {
         _msg: &mut UiMessage,
         _emit: &mut Vec<UiMessage>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod overlay_order_tests {
+    use super::*;
+    use crate::widget::WidgetBuilder;
+    use crate::widgets::{
+        border::BorderBuilder, scroll_viewer::ScrollViewerBuilder,
+        stack_panel::StackPanelBuilder,
+    };
+
+    /// A container that paints in `draw()` and a marker that paints in
+    /// `draw_over()`, so the ordering can be asserted without depending on any
+    /// particular widget's internals.
+    struct OrderProbe;
+
+    impl Control for OrderProbe {
+        fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+            ctx.push_rect_filled(widget.screen_bounds(), [1, 1, 1, 255]);
+        }
+        fn draw_over(&self, widget: &Widget, ctx: &mut DrawingContext) {
+            ctx.push_rect_filled(widget.screen_bounds(), [3, 3, 3, 255]);
+        }
+    }
+
+    #[test]
+    fn draw_over_paints_after_every_child() {
+        // The defect this hook exists for: a container's overlay emitted from
+        // `draw()` lands *under* its children, so it renders as nothing at all.
+        let mut ui = UserInterface::new(200.0, 200.0);
+        let root = ui.root();
+
+        let probe = UiNode::new(
+            WidgetBuilder::new().with_width(100.0).with_height(100.0).build(),
+            Box::new(OrderProbe),
+        );
+        let probe_h = ui.add_node(probe, root);
+
+        let child = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_width(50.0)
+                .with_height(50.0)
+                .with_background([2, 2, 2, 255]),
+        )
+        .with_stroke_thickness(crate::types::Thickness::ZERO)
+        .build();
+        ui.add_node(child, probe_h);
+
+        ui.perform_layout();
+        ui.draw();
+
+        let order: Vec<u8> = ui
+            .draw_ctx
+            .instances
+            .iter()
+            .map(|p| p.fill_a[0])
+            .filter(|c| (1..=3).contains(c))
+            .collect();
+
+        let under = order.iter().position(|c| *c == 1).expect("draw() ran");
+        let content = order.iter().position(|c| *c == 2).expect("child ran");
+        let over = order.iter().position(|c| *c == 3).expect("draw_over ran");
+
+        assert!(under < content, "draw() must paint beneath its children");
+        assert!(
+            content < over,
+            "draw_over() must paint above its children, got {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_scroll_viewer_paints_its_bar_above_the_content() {
+        // Regression guard for the real bug: the scrollbar and the edge fades
+        // were emitted from `draw()` and were therefore covered by whatever was
+        // scrolling underneath them.
+        let mut ui = UserInterface::new(300.0, 120.0);
+        let root = ui.root();
+
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+
+        // Content taller than the viewport, so the bar is live.
+        let column = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_width(280.0)
+                .with_height(600.0)
+                .with_background([2, 2, 2, 255]),
+        )
+        .build();
+        ui.add_node(column, sv_h);
+
+        ui.perform_layout();
+        ui.draw();
+
+        let instances = &ui.draw_ctx.instances;
+        let last_content = instances
+            .iter()
+            .rposition(|p| p.fill_a == [2, 2, 2, 255])
+            .expect("the scrolled content must paint");
+
+        // The bar track uses the input surface; find it after the content.
+        let bar = crate::theme::active().semantic.surface.input.bytes();
+        let bar_after = instances
+            .iter()
+            .skip(last_content)
+            .any(|p| p.fill_a == bar);
+        assert!(
+            bar_after,
+            "the scrollbar must paint after the content it scrolls"
+        );
+    }
+}
+
+#[cfg(test)]
+mod input_contract_tests {
+    use super::*;
+    use crate::message::{MessageDirection, UiMessage};
+    use crate::widget::WidgetBuilder;
+    use crate::widgets::{
+        check_box::{CheckBoxBuilder, CheckBoxMessage},
+        scroll_viewer::ScrollViewerBuilder,
+        slider::{SliderBuilder, SliderMessage},
+        stack_panel::StackPanelBuilder,
+        tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
+    };
+    use glam::Vec2;
+
+    fn bounds_of(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
+        ui.nodes
+            .try_borrow(handle.transmute())
+            .expect("handle stays valid")
+            .widget
+            .screen_bounds()
+    }
+
+    fn top_of(ui: &UserInterface, handle: NodeHandle) -> f32 {
+        ui.nodes
+            .try_borrow(handle.transmute())
+            .expect("handle stays valid")
+            .widget
+            .screen_bounds()
+            .y
+    }
+
+    /// A scroll viewer whose content is taller than its viewport, laid out.
+    /// Returns (viewer, content).
+    fn scrollable(ui: &mut UserInterface) -> (NodeHandle, NodeHandle) {
+        let root = ui.root();
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+        let column = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(600.0),
+        )
+        .build();
+        let col_h = ui.add_node(column, sv_h);
+        ui.perform_layout();
+        (sv_h, col_h)
+    }
+
+    fn wheel(ui: &mut UserInterface, target: NodeHandle, delta: f32) -> Vec<UiMessage> {
+        ui.send(UiMessage::new(
+            target,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseWheel {
+                pos: Vec2::new(100.0, 50.0),
+                delta,
+            },
+        ));
+        let out = ui.update();
+        ui.perform_layout();
+        out
+    }
+
+    #[test]
+    fn a_short_sibling_does_not_make_tall_content_unscrollable() {
+        // The reported Details bug. The panel stacks the property list against
+        // an empty state inside one scroll viewer; `arrange_override` assigned
+        // `content_h` per child instead of accumulating, so the short trailing
+        // sibling won and the whole panel reported itself as viewport-sized.
+        // Symptom: no scrolling and no visible thumb, on every entity with more
+        // properties than fit.
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let root = ui.root();
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+
+        let tall = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(600.0),
+        )
+        .build();
+        let tall_h = ui.add_node(tall, sv_h);
+
+        // Added *after* the tall child, exactly as the Details empty state is.
+        let short = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(90.0),
+        )
+        .build();
+        ui.add_node(short, sv_h);
+
+        ui.perform_layout();
+        let before = top_of(&ui, tall_h);
+        wheel(&mut ui, sv_h, -60.0);
+        assert!(
+            top_of(&ui, tall_h) < before,
+            "a tall child must still scroll when a short sibling follows it"
+        );
+    }
+
+    #[test]
+    fn a_hidden_child_reserves_no_scroll_height() {
+        // With the property stack hidden, Details should not pretend to have
+        // 600 px of content it is not showing.
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let root = ui.root();
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+
+        let tall = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(600.0),
+        )
+        .build();
+        let tall_h = ui.add_node(tall, sv_h);
+        ui.perform_layout();
+
+        ui.set_visibility(tall_h, false);
+        ui.perform_layout();
+        ui.draw();
+
+        // Nothing visible is taller than the viewport, so the thumb must render
+        // in its inactive colour rather than claiming the panel scrolls.
+        let inactive = crate::theme::active().semantic.border.default.bytes();
+        let claims_scrollable = ui
+            .draw_ctx
+            .instances
+            .iter()
+            .any(|p| p.fill_a == crate::theme::active().semantic.border.strong.bytes());
+        assert!(
+            !claims_scrollable,
+            "a viewer whose only tall child is hidden must not report as scrollable"
+        );
+        let _ = inactive;
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_content() {
+        // The regression this module exists for: ScrollViewer's whole
+        // `handle_routed_message` was deleted and all 184 tests still passed,
+        // because none of them scrolled anything.
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let (sv, content) = scrollable(&mut ui);
+        let before = top_of(&ui, content);
+        wheel(&mut ui, sv, -40.0);
+        let after = top_of(&ui, content);
+        assert!(
+            after < before,
+            "wheel down must move the content up: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn scrolling_is_clamped_at_both_ends() {
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let (sv, content) = scrollable(&mut ui);
+
+        wheel(&mut ui, sv, 100_000.0);
+        let at_top = top_of(&ui, content);
+        wheel(&mut ui, sv, 100_000.0);
+        assert_eq!(top_of(&ui, content), at_top, "must not scroll above the top");
+
+        wheel(&mut ui, sv, -100_000.0);
+        let at_bottom = top_of(&ui, content);
+        wheel(&mut ui, sv, -100_000.0);
+        assert_eq!(
+            top_of(&ui, content),
+            at_bottom,
+            "must not scroll past the end"
+        );
+        assert!(at_bottom < at_top, "the content must actually be scrollable");
+    }
+
+    #[test]
+    fn clicking_the_scroll_track_jumps_the_view() {
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let (sv, content) = scrollable(&mut ui);
+        let before = top_of(&ui, content);
+        // Derived from the live bounds: the root centres its child, so a
+        // hard-coded point lands outside the 10 px gutter and the click is
+        // simply ignored.
+        let b = bounds_of(&ui, sv);
+        let point = Vec2::new(b.x + b.w - 4.0, b.y + b.h * 0.9);
+        ui.send(UiMessage::new(
+            sv,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseDown {
+                pos: point,
+                button: crate::message::MouseButton::Left,
+            },
+        ));
+        ui.update();
+        ui.perform_layout();
+        assert!(
+            top_of(&ui, content) < before,
+            "a track click must move the view"
+        );
+    }
+
+    #[test]
+    fn a_checkbox_reports_its_new_state_when_set() {
+        let mut ui = UserInterface::new(200.0, 60.0);
+        let root = ui.root();
+        let cb = CheckBoxBuilder::new(
+            WidgetBuilder::new().with_width(160.0).with_height(24.0),
+        )
+        .build();
+        let cb_h = ui.add_node(cb, root);
+        ui.perform_layout();
+
+        ui.send(CheckBoxMessage::set_checked(cb_h, true));
+        ui.update();
+        ui.perform_layout();
+        ui.draw();
+
+        // A ticked box paints the Check glyph; an unticked one does not.
+        let (uv, _) = crate::icons::IconId::Check
+            .draw_quad(crate::types::Rect::new(0.0, 0.0, 16.0, 16.0));
+        let tick_u0 = uv[0].x;
+        let ticked = ui
+            .draw_ctx
+            .instances
+            .iter()
+            .any(|p| (p.uv[0] - tick_u0).abs() < 1e-6);
+        assert!(ticked, "a checked box must paint its tick");
+    }
+
+    #[test]
+    fn a_tree_view_hovers_the_row_under_the_pointer() {
+        // The Outliner hover animation reads this. If it stopped being set the
+        // rows would simply never highlight, and nothing else would notice.
+        let mut ui = UserInterface::new(300.0, 200.0);
+        let root = ui.root();
+        let tv = TreeViewBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(180.0),
+        )
+        .build();
+        let tv_h = ui.add_node(tv, root);
+        ui.perform_layout();
+
+        let item = |id: u32, label: &str| TreeItem {
+            id,
+            label: label.into(),
+            depth: 0,
+            has_children: false,
+            expanded: false,
+            icon: crate::icons::IconId::Camera,
+        };
+        ui.send(TreeViewMessage::set_items(
+            tv_h,
+            vec![item(1, "Camera"), item(2, "Terrain")],
+        ));
+        ui.update();
+        ui.perform_layout();
+
+        let hover = crate::style::tree_row(crate::style::VisualState::with(
+            crate::style::Interaction::Hover,
+        ));
+        assert_ne!(hover.background[3], 0, "the hover recipe must be visible");
+
+        let painted = |ui: &UserInterface| {
+            ui.draw_ctx
+                .instances
+                .iter()
+                .any(|p| p.fill_a == hover.background)
+        };
+
+        ui.draw();
+        assert!(!painted(&ui), "nothing is hovered before the pointer moves");
+
+        ui.send(UiMessage::new(
+            tv_h,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseMove {
+                pos: {
+                    let b = bounds_of(&ui, tv_h);
+                    Vec2::new(b.x + 40.0, b.y + crate::theme::TREE_ROW_HEIGHT * 1.5)
+                },
+            },
+        ));
+        ui.update();
+        ui.perform_layout();
+        ui.draw();
+        assert!(painted(&ui), "the row under the pointer must paint a hover fill");
+    }
+
+    #[test]
+    fn pressing_a_slider_track_emits_a_value_change() {
+        let mut ui = UserInterface::new(200.0, 40.0);
+        let root = ui.root();
+        let sl = SliderBuilder::new(
+            WidgetBuilder::new().with_width(160.0).with_height(20.0),
+        )
+        .build();
+        let sl_h = ui.add_node(sl, root);
+        ui.perform_layout();
+
+        let b = bounds_of(&ui, sl_h);
+        ui.send(UiMessage::new(
+            sl_h,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseDown {
+                pos: Vec2::new(b.x + b.w * 0.75, b.y + b.h * 0.5),
+                button: crate::message::MouseButton::Left,
+            },
+        ));
+        let emitted = ui.update();
+        assert!(
+            emitted
+                .iter()
+                .any(|m| matches!(m.data::<SliderMessage>(), Some(SliderMessage::Value(_)))),
+            "pressing the track must emit a value change"
+        );
     }
 }

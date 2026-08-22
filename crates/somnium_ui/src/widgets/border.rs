@@ -54,8 +54,18 @@ impl Control for Border {
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         let st = self.stroke_thickness;
-        // Background fill
-        ctx.push_rect_filled(b, widget.background);
+        // Phase 27-D. `Border` is the shell's panel workhorse, so this is where
+        // most of the editor's surface area gets lit. Content grounds stay flat
+        // — only chrome surfaces carry a wash, and the per-side strokes below
+        // are untouched because a panel seam is a hairline, not a rounded box.
+        match crate::theme::wash_for_surface(widget.background) {
+            Some(g) => ctx.push_primitive(
+                crate::primitive::Primitive::fill(b, g.from.bytes())
+                    .with_gradient(g.to.bytes(), g.axis),
+                None,
+            ),
+            None => ctx.push_rect_filled(b, widget.background),
+        }
         // Per-side stroke (drawn on top)
         let fg = widget.foreground;
         ctx.push_rect_filled(Rect::new(b.x, b.y, b.w, st.top), fg);

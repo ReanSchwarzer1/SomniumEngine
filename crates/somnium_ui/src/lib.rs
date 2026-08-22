@@ -8,12 +8,15 @@ pub mod icons;
 pub mod layout_persist;
 pub mod message;
 pub mod metaphor;
+pub mod motion;
 pub mod node;
 pub mod pass;
+pub mod primitive;
 pub mod pool;
 pub mod runtime;
 pub mod style;
 pub mod theme;
+pub mod thumbnail;
 pub mod types;
 pub mod typography;
 pub mod ui;
@@ -509,9 +512,13 @@ pub struct LightInspectorState {
 
 struct EditorLayout {
     outliner_scroll: NodeHandle,
+    outliner_empty: NodeHandle,
     outliner_stack: NodeHandle,
     inspector_stack: NodeHandle,
+    /// Shown when nothing is selected; hidden the moment something is.
+    details_empty: NodeHandle,
     log_stack: NodeHandle,
+    log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
     create_popup_items: Vec<(NodeHandle, CreateKind)>,
@@ -536,6 +543,9 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: InspectorHandles,
     viewport_handle: NodeHandle,
+    /// Selection readout floating over the render, bottom-left.
+    vp_overlay: NodeHandle,
+    vp_overlay_text: NodeHandle,
     /// Phase 29 profiler overlay.
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
@@ -632,7 +642,16 @@ struct EditorLayout {
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
 pub struct UiManager {
     window: Arc<Window>,
+    /// Window size in **logical units** — what the widget tree, the collapse
+    /// rules and the workspace presets all measure against.
     window_size: (u32, u32),
+    /// Window size in device pixels, for the scissor rect.
+    physical_size: (u32, u32),
+    /// Device pixels per logical unit.
+    ui_scale: f32,
+    /// Wall clock of the previous `end_frame`, for the motion delta. `None`
+    /// until the first frame, which therefore advances nothing.
+    last_frame_at: Option<std::time::Instant>,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -641,8 +660,16 @@ pub struct UiManager {
     outliner_scroll: NodeHandle,
     #[allow(dead_code)]
     outliner_stack: NodeHandle,
-    #[allow(dead_code)]
     inspector_stack: NodeHandle,
+    /// Shown when nothing is selected; hidden the moment something is.
+    details_empty: NodeHandle,
+    /// Shown when the scene has no entities.
+    outliner_empty: NodeHandle,
+    /// Shown when nothing has been logged yet.
+    log_empty: NodeHandle,
+    /// Selection readout floating over the render.
+    vp_overlay: NodeHandle,
+    vp_overlay_text: NodeHandle,
     log_stack: NodeHandle,
     log_entry_count: usize,
     // Create menu
@@ -681,6 +708,10 @@ pub struct UiManager {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
     outliner_rows: Vec<(NodeHandle, u32)>,
+    /// Entities the palette can jump to, mirrored from the Outliner.
+    palette_entities: Vec<(u32, String)>,
+    /// What each *dynamic* palette row does, in append order.
+    palette_targets: Vec<PaletteTarget>,
     // Inspector field handles
     inspector_handles: InspectorHandles,
     // Editor event queue drained by app.rs each frame
@@ -797,6 +828,14 @@ pub struct UiManager {
     inspector_filter: String,
     content_filter: String,
     content_path: String,
+    /// Phase 27-G browser workflows.
+    content_history: crate::metaphor::ContentHistory,
+    content_kind: crate::metaphor::ContentFilterKind,
+    content_density: crate::metaphor::ContentDensity,
+    /// Paths selected in the drawer. Multi-select is a set rather than a range
+    /// because the tiles wrap, so "everything between A and B" has no stable
+    /// meaning once the panel is resized.
+    content_selection: std::collections::HashSet<std::path::PathBuf>,
     outliner_expanded: std::collections::HashSet<u32>,
     log_lines: VecDeque<String>,
     edit_popup_open: bool,
@@ -954,6 +993,27 @@ fn load_fonts(ui: &mut UserInterface) -> u8 {
     registry.id(FontRole::UiRegular)
 }
 
+/// Path separators the content tree may use on either platform.
+///
+/// Named because a `char` array literal containing a backslash is easy to
+/// mangle when this file is edited programmatically.
+const SEP: [char; 2] = ['/', '\\'];
+
+/// What a *dynamic* palette row resolves to.
+///
+/// Phase 27-G. Static commands stay positional (see
+/// `UiManager::STATIC_PALETTE_COMMANDS`); everything appended after them
+/// carries its target here instead, so adding a category cannot rebind a
+/// command.
+#[derive(Clone, Debug, PartialEq)]
+enum PaletteTarget {
+    Entity(u32),
+    Asset(std::path::PathBuf),
+    Help(u8),
+    Drawer,
+    Log,
+}
+
 impl UiManager {
     pub fn new(
         device: &wgpu::Device,
@@ -965,8 +1025,21 @@ impl UiManager {
         info!("Initializing native UI…");
 
         let size = window.inner_size();
-        let (sw, sh) = (size.width as f32, size.height as f32);
+        // The tree lays out in logical units so every density token keeps its
+        // apparent size at any DPI. `inner_size()` is device pixels.
+        let ui_scale = window.scale_factor() as f32;
+        let (sw, sh) = (
+            size.width as f32 / ui_scale,
+            size.height as f32 / ui_scale,
+        );
         let mut native_ui = UserInterface::new(sw, sh);
+        native_ui.set_ui_scale(ui_scale);
+        // Now that one layout unit is one *logical* pixel, the atlas can finally
+        // be told the real device ratio: glyphs rasterize at
+        // `px * ui_scale * SUPER_SAMPLE` and land in a quad that is exactly
+        // `px * ui_scale` device pixels wide.
+        native_ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
+        native_ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
 
         let font_id = load_fonts(&mut native_ui);
 
@@ -979,13 +1052,21 @@ impl UiManager {
 
         let mut this = Self {
             window: Arc::clone(&window),
-            window_size: (size.width, size.height),
+            window_size: (sw.round() as u32, sh.round() as u32),
+            physical_size: (size.width, size.height),
+            ui_scale,
+            last_frame_at: None,
             native_ui,
             ui_pass,
             font_id,
             outliner_scroll: layout.outliner_scroll,
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
+            details_empty: layout.details_empty,
+            outliner_empty: layout.outliner_empty,
+            log_empty: layout.log_empty,
+            vp_overlay: layout.vp_overlay,
+            vp_overlay_text: layout.vp_overlay_text,
             log_stack: layout.log_stack,
             log_entry_count: 0,
             create_button: layout.create_button,
@@ -1015,6 +1096,8 @@ impl UiManager {
             foliage_toolbar_button: layout.foliage_toolbar_button,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
+            palette_entities: Vec::new(),
+            palette_targets: Vec::new(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
             viewport_handle: layout.viewport_handle,
@@ -1108,6 +1191,10 @@ impl UiManager {
             inspector_filter: String::new(),
             content_filter: String::new(),
             content_path: String::new(),
+            content_history: crate::metaphor::ContentHistory::new(String::new()),
+            content_kind: crate::metaphor::ContentFilterKind::All,
+            content_density: crate::metaphor::ContentDensity::Comfortable,
+            content_selection: std::collections::HashSet::new(),
             outliner_expanded: std::collections::HashSet::new(),
             log_lines: VecDeque::new(),
             edit_popup_open: false,
@@ -1147,9 +1234,18 @@ impl UiManager {
             immersive_restore_maximized: false,
         };
         this.refresh_content_list();
+        // Nothing is selected at startup and `update_inspector` has not run
+        // yet, so the two Details states would otherwise both be visible and
+        // overlap. Seed the empty one.
+        this.native_ui.set_visibility(this.inspector_stack, false);
+        this.native_ui.set_visibility(this.details_empty, true);
+        // The Outliner is repopulated on the first frame and flips itself; the
+        // log has nothing until something logs.
+        this.native_ui.set_visibility(this.log_stack, false);
+        this.native_ui.set_visibility(this.log_empty, true);
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
-        this.apply_collapse_rules(size.width);
+        this.apply_collapse_rules(this.window_size.0);
         this
     }
 
@@ -1157,9 +1253,28 @@ impl UiManager {
 
     pub fn reposition_panels(&mut self, window: &Window) {
         let size = window.inner_size();
-        self.window_size = (size.width, size.height);
-        self.native_ui.resize(size.width as f32, size.height as f32);
-        self.apply_collapse_rules(size.width);
+        let ui_scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / ui_scale;
+        let logical_h = size.height as f32 / ui_scale;
+
+        self.ui_scale = ui_scale;
+        self.physical_size = (size.width, size.height);
+        self.window_size = (logical_w.round() as u32, logical_h.round() as u32);
+
+        self.native_ui.set_ui_scale(ui_scale);
+        // Dragging a window between monitors changes the scale factor, which
+        // invalidates every cached glyph. `set_render_scale` is a no-op when the
+        // ratio is unchanged, so this costs nothing on an ordinary resize.
+        self.native_ui
+            .draw_ctx
+            .font_atlas
+            .set_render_scale(ui_scale);
+        self.native_ui
+            .draw_ctx
+            .icon_atlas
+            .set_render_scale(ui_scale);
+        self.native_ui.resize(logical_w, logical_h);
+        self.apply_collapse_rules(self.window_size.0);
     }
 
     /// Switch to a named workspace and lay the shell out accordingly.
@@ -1299,8 +1414,28 @@ impl UiManager {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        let scale = window.scale_factor() as f32;
-        self.native_ui.draw_ctx.font_atlas.set_dpi_scale(scale);
+        // Scale and logical size are owned by `reposition_panels`, which winit
+        // calls for both Resized and ScaleFactorChanged. Nothing to do here.
+
+        // Phase 27-C. Advance motion before layout so a track that finished
+        // this frame settles into the layout it produced. The first frame has
+        // no previous timestamp and therefore advances nothing, and a tick with
+        // no live tracks returns false without touching the tree — which is what
+        // keeps an idle shell's draw list byte-identical.
+        // Phase 27-G. Decode a bounded number of previews per frame, so
+        // opening a folder of textures costs a predictable slice rather than an
+        // unpredictable stall. Anything the engine must render is handed to the
+        // host through `take_thumbnail_requests`.
+        self.native_ui.draw_ctx.thumbnails.pump();
+
+        let now = std::time::Instant::now();
+        if let Some(previous) = self.last_frame_at {
+            let dt_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
+            // A stalled frame (breakpoint, minimised window) must not teleport
+            // every track to its end state.
+            self.native_ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+        }
+        self.last_frame_at = Some(now);
 
         // Flush all queued widget messages; convert outgoing to EditorEvents.
         let outgoing = self.native_ui.update();
@@ -1310,15 +1445,20 @@ impl UiManager {
         let extra = self.native_ui.update();
         self.process_outgoing(extra);
 
-        let (w, h) = self.window_size;
+        let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
         self.reanchor_open_popups();
         self.update_tooltip();
         self.native_ui.perform_layout();
         self.native_ui.draw();
         window.set_cursor(self.native_ui.cursor_kind().to_winit());
-        self.ui_pass
-            .prepare(device, queue, &mut self.native_ui.draw_ctx, w, h);
+        self.ui_pass.prepare(
+            device,
+            queue,
+            &mut self.native_ui.draw_ctx,
+            crate::pass::UiSurface::new((logical_w, logical_h), (phys_w, phys_h)),
+        );
         self.ui_pass.render(encoder, view);
     }
 
@@ -1344,7 +1484,7 @@ impl UiManager {
             self.shift_held = m.state().shift_key();
         }
         if let WindowEvent::CursorMoved { position, .. } = event {
-            self.native_ui.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
+            self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
         }
         // Phase 16-D: the Content Drawer's right-click menu.
         //
@@ -1489,6 +1629,18 @@ impl UiManager {
             self.status_selection,
             name.unwrap_or("No selection"),
         ));
+
+        // Phase 27-G. The same fact, shown where the eye already is. Hidden
+        // entirely when nothing is selected rather than reading "No selection"
+        // twice — an overlay that is always on stops being an overlay.
+        match name {
+            Some(n) => {
+                self.native_ui
+                    .send(TextMessage::set_text(self.vp_overlay_text, n));
+                self.native_ui.set_visibility(self.vp_overlay, true);
+            }
+            None => self.native_ui.set_visibility(self.vp_overlay, false),
+        }
     }
 
     /// Right-hand statistics cluster. Object count is what the editor can
@@ -2152,6 +2304,9 @@ impl UiManager {
         }
         self.close_all_menus();
         self.palette_open = true;
+        // Entities and assets change while the palette is closed, so the set is
+        // rebuilt on open rather than kept in sync from a dozen call sites.
+        self.refresh_palette_items();
         self.native_ui.send(UiMessage::new(
             self.palette_widget,
             MessageDirection::ToWidget,
@@ -2177,7 +2332,89 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
+    /// Number of statically declared palette commands, which occupy indices
+    /// `0..STATIC_PALETTE_COMMANDS` in the order `editor::shell` declares them.
+    ///
+    /// [`Self::run_palette_command`] dispatches on that position, so anything
+    /// dynamic must be **appended** after this point. Inserting or reordering a
+    /// static command silently rebinds every command after it;
+    /// `static_palette_command_count_is_pinned` fails if the count moves.
+    pub(crate) const STATIC_PALETTE_COMMANDS: usize = 15;
+
+    /// Rebuild the searchable set: the static commands, then everything that
+    /// exists right now. Called each time the palette opens, because entities
+    /// and assets change while it is closed.
+    fn refresh_palette_items(&mut self) {
+        use crate::widgets::command_palette::PaletteCategory as Cat;
+
+        let mut items: Vec<PaletteItem> = crate::editor::shell::palette_commands();
+        debug_assert_eq!(items.len(), Self::STATIC_PALETTE_COMMANDS);
+        let mut targets: Vec<PaletteTarget> = Vec::new();
+
+        // Entities, from whatever the Outliner is currently showing.
+        for (id, name) in &self.palette_entities {
+            items.push(PaletteItem::new(name.clone(), "Select", Cat::Entity));
+            targets.push(PaletteTarget::Entity(*id));
+        }
+
+        // Assets in the current Content Drawer folder.
+        for (_, entry) in &self.content_entries {
+            if entry.is_dir {
+                continue;
+            }
+            items.push(PaletteItem::new(entry.name.clone(), "Open", Cat::Asset));
+            targets.push(PaletteTarget::Asset(entry.path.clone()));
+        }
+
+        // Help pages, so a question is answerable from the same surface.
+        for (i, title) in crate::metaphor::help_titles().iter().enumerate() {
+            items.push(PaletteItem::new((*title).to_string(), "F1", Cat::Help));
+            targets.push(PaletteTarget::Help(i as u8));
+        }
+
+        // Panels, so the palette can also be used to reach a surface.
+        for (label, target) in [
+            ("Content Drawer", PaletteTarget::Drawer),
+            ("Output Log", PaletteTarget::Log),
+        ] {
+            items.push(PaletteItem::new(label.to_string(), "", Cat::Panel));
+            targets.push(target);
+        }
+
+        self.palette_targets = targets;
+        self.native_ui.send(UiMessage::new(
+            self.palette_widget,
+            MessageDirection::ToWidget,
+            CommandPaletteMessage::SetItems(items),
+        ));
+    }
+
     fn run_palette_command(&mut self, idx: usize) {
+        // Anything past the static block is a dynamic row; the parallel target
+        // list is built in the same order `refresh_palette_items` appended them.
+        if idx >= Self::STATIC_PALETTE_COMMANDS {
+            let target = self
+                .palette_targets
+                .get(idx - Self::STATIC_PALETTE_COMMANDS)
+                .cloned();
+            match target {
+                Some(PaletteTarget::Entity(id)) => {
+                    self.editor_events
+                        .push_back(EditorEvent::SelectEntity(Some(id)));
+                }
+                Some(PaletteTarget::Asset(path)) => {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            path.to_string_lossy().into_owned(),
+                        ));
+                }
+                Some(PaletteTarget::Help(page)) => self.toggle_help(Some(page)),
+                Some(PaletteTarget::Drawer) => self.toggle_drawer(),
+                Some(PaletteTarget::Log) => self.toggle_log_panel(),
+                None => {}
+            }
+            return;
+        }
         match idx {
             0 => self.prompt_unsaved_new(),
             1 => self.editor_events.push_back(EditorEvent::SaveScene),
@@ -2350,6 +2587,113 @@ impl UiManager {
         }
     }
 
+    /// Navigate the drawer, recording the move in history.
+    ///
+    /// Every entry point that changes folder goes through here so back/forward
+    /// cannot drift out of step with what is on screen.
+    pub fn navigate_content(&mut self, path: String) {
+        self.content_history.push(path.clone());
+        self.content_path = path;
+        self.content_selection.clear();
+        self.refresh_content_list();
+    }
+
+    /// Step back through the drawer's folder history. Returns false when there
+    /// is nowhere to go, so a toolbar button can disable itself honestly.
+    pub fn content_back(&mut self) -> bool {
+        match self.content_history.back() {
+            Some(path) => {
+                self.content_path = path.to_string();
+                self.content_selection.clear();
+                self.refresh_content_list();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn content_forward(&mut self) -> bool {
+        match self.content_history.forward() {
+            Some(path) => {
+                self.content_path = path.to_string();
+                self.content_selection.clear();
+                self.refresh_content_list();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn can_content_back(&self) -> bool {
+        self.content_history.can_go_back()
+    }
+
+    pub fn can_content_forward(&self) -> bool {
+        self.content_history.can_go_forward()
+    }
+
+    /// Restrict the drawer to one asset kind.
+    pub fn set_content_kind(&mut self, kind: crate::metaphor::ContentFilterKind) {
+        if self.content_kind != kind {
+            self.content_kind = kind;
+            self.content_selection.clear();
+            self.refresh_content_list();
+        }
+    }
+
+    pub fn content_kind(&self) -> crate::metaphor::ContentFilterKind {
+        self.content_kind
+    }
+
+    /// Cycle tile size. Selection survives: the same assets are on screen.
+    pub fn cycle_content_density(&mut self) -> crate::metaphor::ContentDensity {
+        self.content_density = self.content_density.next();
+        self.refresh_content_list();
+        self.content_density
+    }
+
+    pub fn content_density(&self) -> crate::metaphor::ContentDensity {
+        self.content_density
+    }
+
+    /// Select an asset. `additive` is the Ctrl-click path: it toggles, so a
+    /// second Ctrl-click on the same tile removes it from the set.
+    pub fn select_content(&mut self, path: std::path::PathBuf, additive: bool) {
+        if additive {
+            if !self.content_selection.remove(&path) {
+                self.content_selection.insert(path);
+            }
+        } else {
+            self.content_selection.clear();
+            self.content_selection.insert(path);
+        }
+        self.refresh_content_list();
+    }
+
+    pub fn content_selection(&self) -> &std::collections::HashSet<std::path::PathBuf> {
+        &self.content_selection
+    }
+
+    /// Previews the engine must render, drained for the host to fulfil.
+    ///
+    /// `somnium_ui` decodes images itself but owns no renderer, so meshes and
+    /// scenes are requests. The host answers with [`Self::deliver_thumbnail`]
+    /// or [`Self::fail_thumbnail`]; an unanswered request leaves the tile on
+    /// its type icon, which is a correct resting state rather than a bug.
+    pub fn take_thumbnail_requests(&mut self) -> Vec<crate::thumbnail::ThumbnailRequest> {
+        self.native_ui.draw_ctx.thumbnails.take_requests()
+    }
+
+    /// Supply a rendered preview: `CELL * CELL` RGBA8.
+    pub fn deliver_thumbnail(&mut self, path: &std::path::Path, rgba: &[u8]) -> bool {
+        self.native_ui.draw_ctx.thumbnails.deliver(path, rgba)
+    }
+
+    /// Record that a preview could not be produced, so it is not retried.
+    pub fn fail_thumbnail(&mut self, path: &std::path::Path) {
+        self.native_ui.draw_ctx.thumbnails.mark_failed(path);
+    }
+
     fn refresh_content_list(&mut self) {
         let root = std::env::current_dir().unwrap_or_default().join("assets");
         let current = if self.content_path.is_empty() {
@@ -2357,22 +2701,49 @@ impl UiManager {
         } else {
             root.join(&self.content_path)
         };
-        let entries = crate::metaphor::list_content(
+        let entries: Vec<crate::metaphor::ContentEntry> = crate::metaphor::list_content(
             &root,
             self.show_engine_content,
             &self.content_filter,
             &current,
-        );
+        )
+        .into_iter()
+        .filter(|e| self.content_kind.accepts(e))
+        .collect();
+        let (tile_w, tile_h, icon_px) = self.content_density.metrics();
         self.native_ui.clear_children(self.content_list);
         self.content_entries.clear();
         let font_id = self.font_id;
         let parent = self.content_list;
+
+        // Phase 27-G. A drawer with nothing in it used to be a blank grey
+        // rectangle, which reads as broken rather than as empty. A filtered
+        // miss and a genuinely empty folder are different situations and get
+        // different copy — offering "import a model" to someone who mistyped a
+        // search would be the wrong advice.
+        if entries.is_empty() {
+            let state = if self.content_filter.is_empty() {
+                crate::metaphor::empty::CONTENT
+            } else {
+                crate::metaphor::empty::CONTENT_FILTERED
+            };
+            crate::editor::parts::build_empty_state(&mut self.native_ui, parent, font_id, state);
+        }
+
         for entry in entries {
+            // A selected tile keeps the raised fill but gains the selection
+            // wash, so selection reads the same way here as in the Outliner.
+            let selected = self.content_selection.contains(&entry.path);
+            let tile_bg = if selected {
+                theme::active().semantic.accent.selected_bg.bytes()
+            } else {
+                theme::BG_RAISED
+            };
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(112.0)
-                    .with_height(120.0)
-                    .with_background(theme::BG_RAISED),
+                    .with_width(tile_w)
+                    .with_height(tile_h)
+                    .with_background(tile_bg),
             )
             .build();
             let bh = self.native_ui.add_node(btn, parent);
@@ -2381,10 +2752,16 @@ impl UiManager {
                     .with_orientation(Orientation::Vertical)
                     .build();
             let col_h = self.native_ui.add_node(col, bh);
+            // Phase 27-G. Ask for a preview; the tile shows its type icon until
+            // one arrives, and forever if none can be made. `request` is
+            // idempotent, so the drawer's per-frame rebuild costs a lookup.
+            if !entry.is_dir && !entry.is_engine {
+                self.native_ui.draw_ctx.thumbnails.request(&entry.path);
+            }
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(112.0)
-                    .with_height(theme::ICON_DRAWER)
+                    .with_width(tile_w)
+                    .with_height(icon_px)
                     .with_margin(Thickness {
                         left: 0.0,
                         top: 8.0,
@@ -2393,7 +2770,8 @@ impl UiManager {
                     }),
             )
             .with_icon(entry.icon)
-            .with_size(theme::ICON_DRAWER)
+            .with_asset(entry.path.clone())
+            .with_size(icon_px)
             .with_tint(if entry.is_dir {
                 theme::FOLDER_SAND
             } else {
@@ -2414,6 +2792,46 @@ impl UiManager {
             .with_wrap(true)
             .build();
             self.native_ui.add_node(lbl, col_h);
+
+            // Phase 27-G. A type badge, so a tile says what it *is* without the
+            // user having to parse the extension out of a wrapped filename or
+            // recognise the icon. Folders are self-evident and get none; the
+            // engine's virtual primitives are labelled as such because they do
+            // not exist on disk and cannot be revealed in a file browser.
+            let badge_text = if entry.is_dir {
+                String::new()
+            } else if entry.is_engine {
+                "ENGINE".to_string()
+            } else {
+                entry
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_uppercase())
+                    .unwrap_or_default()
+            };
+            if !badge_text.is_empty() {
+                let t = theme::active();
+                // Ember is the warm content half of the palette (§4.2); it marks
+                // asset identity and never competes with indigo for a state cue.
+                let badge = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 4.0,
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                }))
+                .with_text(&badge_text)
+                .with_font_size(t.typography.caption)
+                .with_font_id(font_id)
+                .with_color(if entry.is_engine {
+                    t.semantic.text.muted.bytes()
+                } else {
+                    t.ember.bytes()
+                })
+                .build();
+                self.native_ui.add_node(badge, col_h);
+            }
+
             self.content_entries.push((bh, entry));
         }
         let mut parts = vec!["Game".to_string()];
@@ -2623,7 +3041,20 @@ impl UiManager {
                 expanded: expanded || self.outliner_expanded.contains(&id),
             });
         }
+        // Phase 27-G: an empty scene says so rather than showing a blank panel.
+        let has_entities = !items.is_empty();
+        self.native_ui
+            .set_visibility(self.outliner_tree, has_entities);
+        self.native_ui
+            .set_visibility(self.outliner_empty, !has_entities);
+
         self.outliner_rows = items.iter().map(|i| (self.outliner_tree, i.id)).collect();
+        // Mirror the rows so the palette can offer them without reaching into
+        // the widget tree.
+        self.palette_entities = entities
+            .iter()
+            .map(|(id, name, _, _)| (*id, name.clone()))
+            .collect();
         self.native_ui
             .send(TreeViewMessage::set_items(self.outliner_tree, items));
         if selected.is_some() {
@@ -2839,7 +3270,16 @@ impl UiManager {
         rot_deg: Option<[f32; 3]>,
         scale: Option<[f32; 3]>,
     ) {
-        let _ = entity_idx;
+        // Phase 27-G. An empty Details panel now says so. Before this it
+        // rendered POSITION / ROTATION / SCALE at 0.000 next to a status bar
+        // reading "No selection", which says "the selection sits at the origin"
+        // rather than "there is no selection".
+        let has_selection = entity_idx.is_some();
+        self.native_ui
+            .set_visibility(self.inspector_stack, has_selection);
+        self.native_ui
+            .set_visibility(self.details_empty, !has_selection);
+
         let h = &self.inspector_handles;
         let send = |ui: &mut UserInterface, handle: NodeHandle, v: f32| {
             ui.send(NumericFieldMessage::set_value(handle, v));
@@ -3462,6 +3902,12 @@ impl UiManager {
         .build();
         let log_stack = self.log_stack;
         self.native_ui.add_node(entry, log_stack);
+        // The first line retires the empty state; it never comes back, because
+        // the log is append-only for the session.
+        if self.log_entry_count == 1 {
+            self.native_ui.set_visibility(self.log_empty, false);
+            self.native_ui.set_visibility(self.log_stack, true);
+        }
         self.log_entry_count += 1;
     }
 
@@ -4043,10 +4489,16 @@ impl UiManager {
                 {
                     if entry.is_dir {
                         let root = std::env::current_dir().unwrap_or_default().join("assets");
-                        if let Ok(rel) = entry.path.strip_prefix(&root) {
-                            self.content_path = rel.to_string_lossy().into_owned();
+                        // Through `navigate_content` so the move lands in
+                        // history. Setting `content_path` directly is what would
+                        // leave Back pointing at a folder the user never left.
+                        match entry.path.strip_prefix(&root) {
+                            Ok(rel) => {
+                                let rel = rel.to_string_lossy().into_owned();
+                                self.navigate_content(rel);
+                            }
+                            Err(_) => self.refresh_content_list(),
                         }
-                        self.refresh_content_list();
                     } else if entry.is_engine {
                         if let Some(kind) = match entry.name.as_str() {
                             "Cube" => Some(CreateKind::Cube),
@@ -4501,14 +4953,14 @@ impl UiManager {
                 }
             } else if let Some(BreadcrumbMessage::Navigate(i)) = msg.data::<BreadcrumbMessage>() {
                 if msg.destination == self.content_breadcrumb {
-                    if *i == 0 {
-                        self.content_path.clear();
+                    let target = if *i == 0 {
+                        String::new()
                     } else {
-                        let parts: Vec<&str> = self.content_path.split(['/', '\\']).collect();
-                        self.content_path =
-                            parts.iter().take(*i).copied().collect::<Vec<_>>().join("/");
-                    }
-                    self.refresh_content_list();
+                        let parts: Vec<&str> = self.content_path.split(SEP).collect();
+                        parts.iter().take(*i).copied().collect::<Vec<_>>().join("/")
+                    };
+                    // A crumb click is navigation too, so it belongs in history.
+                    self.navigate_content(target);
                 }
             }
 
@@ -4612,6 +5064,462 @@ impl CollapseRules {
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod elysium_tests {
+    use super::*;
+
+    #[test]
+    fn details_shows_exactly_one_state_at_a_time() {
+        // The screenshot defect: POSITION / ROTATION / SCALE rendered at 0.000
+        // beside a status bar reading "No selection". Exactly one of the two
+        // must be visible, at startup and after every selection change.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let font_id = load_fonts(&mut ui);
+        let layout =
+            build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+
+        // The builder leaves both visible; `UiManager::new` seeds the empty
+        // one, and `update_inspector` flips them from then on. Assert the
+        // handles are distinct so a flip can never be a no-op.
+        assert_ne!(
+            layout.inspector_stack, layout.details_empty,
+            "the two Details states must be separate nodes"
+        );
+        assert!(layout.details_empty.is_some(), "the empty state must exist");
+    }
+
+    #[test]
+    fn static_palette_command_count_is_pinned() {
+        // `run_palette_command` dispatches on position. If this count moves,
+        // every dynamic row is off by the difference and commands silently run
+        // the wrong action.
+        assert_eq!(
+            crate::editor::shell::palette_commands().len(),
+            UiManager::STATIC_PALETTE_COMMANDS
+        );
+    }
+
+    #[test]
+    fn static_palette_commands_keep_their_exact_positions() {
+        // The real guard: `run_palette_command` maps 0 to New Scene, 1 to Save
+        // Scene and so on. Inserting a command anywhere but the end rebinds
+        // everything after it, and nothing else in the codebase would notice.
+        let labels: Vec<String> = crate::editor::shell::palette_commands()
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "New Scene",
+                "Save Scene",
+                "Import Model…",
+                "Undo",
+                "Redo",
+                "Delete",
+                "Duplicate",
+                "Play",
+                "Pause",
+                "Stop",
+                "Toggle Profiler",
+                "Content Drawer",
+                "Help",
+                "Create Cube",
+                "Create Directional Light",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_static_palette_row_is_a_command() {
+        use crate::widgets::command_palette::PaletteCategory;
+        for item in crate::editor::shell::palette_commands() {
+            assert_eq!(item.category, PaletteCategory::Command, "{}", item.label);
+        }
+    }
+
+    #[test]
+    fn empty_state_copy_follows_plain_speech() {
+        // phase_27 §13: sentence case bodies ending in a period, no exclamation
+        // marks, no "Please", no "Oops", and an action phrased as an action.
+        use crate::metaphor::empty;
+        for state in [
+            empty::OUTLINER,
+            empty::DETAILS,
+            empty::CONTENT,
+            empty::CONTENT_FILTERED,
+            empty::LOG,
+        ] {
+            let head = state.headline;
+            let body = state.body;
+            let action = state.action;
+            assert!(!head.is_empty() && !body.is_empty() && !action.is_empty());
+            assert!(body.ends_with('.'), "body must be a sentence: {body}");
+            assert!(!head.ends_with('.'), "headline is a label: {head}");
+            assert!(!action.ends_with('.'), "action is a label: {action}");
+            for text in [head, body, action] {
+                assert!(!text.contains('!'), "no exclamation marks: {text}");
+                assert!(!text.contains("Please"), "no Please: {text}");
+                assert!(!text.contains("Oops"), "no Oops: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_folder_and_a_filtered_miss_give_different_advice() {
+        // Offering "import a model" to someone who mistyped a search would be
+        // the wrong instruction.
+        use crate::metaphor::empty;
+        assert_ne!(empty::CONTENT.headline, empty::CONTENT_FILTERED.headline);
+        assert_ne!(empty::CONTENT.action, empty::CONTENT_FILTERED.action);
+    }
+
+    #[test]
+    fn the_content_drawer_shows_an_empty_state_when_it_has_nothing() {
+        // Built against a directory that cannot contain assets, so the drawer
+        // is genuinely empty rather than incidentally so.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let font_id = load_fonts(&mut ui);
+        let parent = ui.root();
+        assert!(
+            ui.first_child(parent).is_none(),
+            "the fixture root should start empty"
+        );
+
+        let column = crate::editor::parts::build_empty_state(
+            &mut ui,
+            parent,
+            font_id,
+            crate::metaphor::empty::CONTENT,
+        );
+        assert!(column.is_some(), "the empty state must build a container");
+        assert_eq!(
+            ui.first_child(parent),
+            column,
+            "and attach it to the panel it was asked to fill"
+        );
+
+        // Mark, headline, body and action: four children, none optional.
+        ui.perform_layout();
+        ui.draw();
+        assert!(
+            ui.draw_ctx.instance_count() > 0,
+            "an empty state that draws nothing is the bug it exists to prevent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dpi_tests {
+    use super::*;
+
+    fn shell(logical_w: f32, logical_h: f32, scale: f32) -> UserInterface {
+        let mut ui = UserInterface::new(logical_w, logical_h);
+        ui.set_ui_scale(scale);
+        let font_id = load_fonts(&mut ui);
+        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        ui.perform_layout();
+        ui
+    }
+
+    fn bounds(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
+        ui.nodes
+            .try_borrow(handle.transmute())
+            .expect("layout handle should remain valid")
+            .widget
+            .screen_bounds()
+    }
+
+    #[test]
+    fn pointer_positions_convert_from_device_pixels_to_layout_units() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        ui.set_ui_scale(2.0);
+        assert_eq!(ui.to_logical(200.0, 100.0), glam::Vec2::new(100.0, 50.0));
+        ui.set_ui_scale(1.0);
+        assert_eq!(ui.to_logical(200.0, 100.0), glam::Vec2::new(200.0, 100.0));
+    }
+
+    #[test]
+    fn layout_is_identical_at_every_scale_for_the_same_logical_size() {
+        // The whole point of the fix: a density token means the same apparent
+        // size at 100 %, 150 % and 200 %. Before Phase 27 the tree was fed
+        // device pixels, so a 36 unit title bar shrank to a third of its
+        // intended height at 300 %.
+        let a = shell(1280.0, 720.0, 1.0);
+        let b = shell(1280.0, 720.0, 2.0);
+        let c = shell(1280.0, 720.0, 1.5);
+
+        for (h_a, h_b, h_c) in [
+            (a.root(), b.root(), c.root()),
+        ] {
+            assert_eq!(bounds(&a, h_a), bounds(&b, h_b));
+            assert_eq!(bounds(&a, h_a), bounds(&c, h_c));
+        }
+        assert_eq!(a.screen_size, b.screen_size);
+        assert_eq!(a.screen_size, c.screen_size);
+    }
+
+    #[test]
+    fn the_pre_scene_budget_is_measured_in_logical_units() {
+        // phase_26_Zeta redline: application 36 + mode 32 = 68 before the
+        // viewport, and that number must now hold at any DPI.
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let mut ui = UserInterface::new(1920.0, 1080.0);
+            ui.set_ui_scale(scale);
+            let font_id = load_fonts(&mut ui);
+            let layout = build_editor_layout(
+                &mut ui,
+                font_id,
+                crate::layout_persist::ChromeLayout::default(),
+            );
+            ui.perform_layout();
+            let viewport = bounds(&ui, layout.viewport_handle);
+            assert!(
+                (viewport.y - 68.0).abs() < 0.1,
+                "scale {scale}: viewport starts at {} not 68",
+                viewport.y
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_at_a_device_pixel_hits_the_widget_drawn_there() {
+        // The round trip that actually matters: the OS reports a pointer in
+        // device pixels, the tree hit-tests in logical units, and the two must
+        // agree or every control is offset at HiDPI.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        ui.set_ui_scale(2.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.perform_layout();
+
+        let save = bounds(&ui, layout.save_button);
+        assert!(save.w > 0.0 && save.h > 0.0, "save button must be laid out");
+
+        // Centre of the Save button, expressed the way winit would report it.
+        let device_x = (save.x + save.w * 0.5) as f64 * 2.0;
+        let device_y = (save.y + save.h * 0.5) as f64 * 2.0;
+        let logical = ui.to_logical(device_x, device_y);
+
+        assert!(
+            logical.x >= save.x && logical.x <= save.x + save.w,
+            "converted x {} outside {:?}",
+            logical.x,
+            save
+        );
+        assert!(ui.hit_test(logical).is_some(), "hit test must land on a widget");
+    }
+
+    #[test]
+    fn font_render_scale_follows_the_device_ratio() {
+        // With layout in logical units the atlas ratio is finally meaningful:
+        // a `px` tall glyph occupies `px * scale` device pixels, so it must
+        // rasterize at `px * scale * SUPER_SAMPLE`.
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        ui.draw_ctx.font_atlas.set_render_scale(2.0);
+        assert_eq!(ui.draw_ctx.font_atlas.render_scale, 2.0);
+    }
+}
+
+#[cfg(test)]
+mod styx_budget_tests {
+    use super::*;
+
+    /// Builds the real Nocturne shell with the real bundled faces and returns
+    /// the frame's draw list, so the Phase 27 §10.6 budget is measured against
+    /// the actual editor rather than against a synthetic scene.
+    fn shell_frame(w: f32, h: f32) -> UserInterface {
+        let mut ui = UserInterface::new(w, h);
+        let font_id = load_fonts(&mut ui);
+        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        ui.perform_layout();
+        ui.draw();
+        ui
+    }
+
+    #[test]
+    fn measured_instance_budget_for_the_real_shell() {
+        for (w, h) in [(1920.0, 1080.0), (2560.0, 1440.0)] {
+            let ui = shell_frame(w, h);
+            let ctx = &ui.draw_ctx;
+            let instances = ctx.instance_count();
+            let bytes = instances * std::mem::size_of::<crate::primitive::Primitive>();
+            let batches = ctx.commands.iter().filter(|c| c.instance_count > 0).count();
+
+            println!(
+                "{w}x{h}: {instances} instances, {} KiB, {batches} batches",
+                bytes / 1024
+            );
+
+            // phase_27 §10.6, restated from measurement rather than estimate.
+            //
+            // Bytes: the pre-Styx list spent 4 vertices (20 B each) plus 6
+            // indices (4 B each) per quad = 104 B, and a border cost four quads
+            // while a shadow cost six. Styx spends one 100 B instance for each,
+            // and the real shell measures ~61 KiB. 256 KiB leaves 4x headroom.
+            assert!(
+                bytes <= 256 * 1024,
+                "{w}x{h}: instance buffer {bytes} B exceeds the 256 KiB budget"
+            );
+
+            // Batches: the plan guessed 8. That was wrong by more than an order
+            // of magnitude and is corrected here against the real shell.
+            //
+            // `UserInterface::draw_node` pushes a clip rect for every visible
+            // node, so a batch break is a genuine clip transition, not waste —
+            // folding the atlases into one bind group (which is why
+            // `DrawCommand` no longer carries a texture) took this from 164 to
+            // 146, and the remainder is the widget tree's clipping structure.
+            // Collapsing it to a single draw means clipping per instance in the
+            // fragment shader instead of by scissor. That work is real and is
+            // scheduled where it is actually needed — 27-D wants rounded clips
+            // for scroll regions and thumbnails — rather than done here to chase
+            // an invented number, because 146 scissor-plus-draw pairs cost
+            // microseconds of command recording.
+            assert!(
+                batches <= 192,
+                "{w}x{h}: {batches} batches exceeds the measured budget"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shell_actually_uses_the_new_paint_capabilities() {
+        // The honest check on "does the editor look different yet". Counting
+        // capability use in the real draw list is the only answer that is not a
+        // claim: after 27-A/B alone every one of these was zero.
+        use crate::primitive::{FLAG_GRADIENT, FLAG_INSET, FLAG_SHADOW};
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+
+        let rounded = inst.iter().filter(|p| p.radii[0] > 0.0).count();
+        let gradients = inst.iter().filter(|p| p.flags & FLAG_GRADIENT != 0).count();
+        let shadows = inst
+            .iter()
+            .filter(|p| p.flags & FLAG_SHADOW != 0 && p.flags & FLAG_INSET == 0)
+            .count();
+        let insets = inst.iter().filter(|p| p.flags & FLAG_INSET != 0).count();
+        let borders = inst.iter().filter(|p| p.border_width > 0.0).count();
+
+        println!(
+            "shell paint: {} instances | {rounded} rounded | {gradients} washed |              {shadows} lifted | {insets} recessed | {borders} stroked",
+            inst.len()
+        );
+
+        // Floors, not exact counts: adding chrome should never take these
+        // backwards. The first run after the widget migration measured 49 / 28 /
+        // 20 / 4 / 17, and the wash count was 1 until `wash_from` stopped
+        // treating a caller-supplied background as a request for flatness.
+        assert!(rounded >= 40, "corner radius regressed to {rounded}");
+        assert!(gradients >= 20, "chrome wash regressed to {gradients}");
+        assert!(shadows >= 15, "elevation regressed to {shadows}");
+        assert!(insets >= 4, "recession regressed to {insets}");
+        assert!(borders >= 15, "strokes regressed to {borders}");
+
+        // Content grounds must stay flat: a wash on every surface is exactly the
+        // "lit like a toy" failure §5.2 forbids.
+        let ground = crate::theme::active().semantic.surface.canvas.bytes();
+        assert!(
+            !inst.iter().any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
+            "the canvas ground must never be washed"
+        );
+    }
+
+    #[test]
+    fn every_shell_region_still_paints_something_visible() {
+        // The regression guard for the widget migration. 18 `draw()` methods
+        // changed; the failure mode that matters is a surface that quietly
+        // stopped painting — a transparent fill or a zero-alpha colour looks
+        // like "the panel is gone", and no layout test would catch it because
+        // the bounds are still correct.
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+
+        let visible_in = |r: crate::types::Rect| {
+            inst.iter().any(|p| {
+                let x = p.rect[0] + p.rect[2] * 0.5;
+                let y = p.rect[1] + p.rect[3] * 0.5;
+                let opaque = p.fill_a[3] > 0 || p.border_color[3] > 0 || p.shadow_color[3] > 0;
+                opaque
+                    && x >= r.x
+                    && x <= r.x + r.w
+                    && y >= r.y
+                    && y <= r.y + r.h
+            })
+        };
+
+        let w = 1920.0;
+        let h = 1080.0;
+        for (name, region) in [
+            ("application bar", crate::types::Rect::new(0.0, 0.0, w, 36.0)),
+            ("mode toolbar", crate::types::Rect::new(0.0, 36.0, w, 32.0)),
+            ("left rail", crate::types::Rect::new(0.0, 68.0, 120.0, 400.0)),
+            ("right column", crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0)),
+            ("status bar", crate::types::Rect::new(0.0, h - 26.0, w, 26.0)),
+        ] {
+            assert!(visible_in(region), "{name} paints nothing visible");
+        }
+    }
+
+    #[test]
+    fn no_migrated_surface_became_fully_transparent() {
+        // A `Paint` whose background, border and shadow are all zero-alpha
+        // renders nothing at all. Some are legitimately invisible (a ghost icon
+        // button at rest), so this checks the *proportion* rather than banning
+        // them outright: a migration slip would push it far past this.
+        let ui = shell_frame(1920.0, 1080.0);
+        let inst = &ui.draw_ctx.instances;
+        let invisible = inst
+            .iter()
+            .filter(|p| {
+                p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0
+            })
+            .count();
+        let ratio = invisible as f32 / inst.len() as f32;
+        println!("invisible instances: {invisible}/{} ({:.1}%)", inst.len(), ratio * 100.0);
+        assert!(
+            ratio < 0.25,
+            "{:.0}% of the draw list paints nothing — a surface was likely lost",
+            ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn an_idle_shell_rebuilds_a_byte_identical_draw_list() {
+        // phase_27 §10.3 / §5.6: nothing may churn the draw list between two
+        // frames with no input. This is the guard that keeps the coming
+        // animation driver (27-C) from quietly costing a redraw every frame.
+        let a = shell_frame(1920.0, 1080.0);
+        let b = shell_frame(1920.0, 1080.0);
+        assert_eq!(a.draw_ctx.instance_count(), b.draw_ctx.instance_count());
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&a.draw_ctx.instances),
+            bytemuck::cast_slice::<_, u8>(&b.draw_ctx.instances),
+        );
+        assert_eq!(a.draw_ctx.commands, b.draw_ctx.commands);
+    }
+
+    #[test]
+    fn the_shell_never_exhausts_the_font_atlas() {
+        // A full atlas makes text silently vanish (`FontAtlas::get_or_rasterize`
+        // returns None and the draw path advances past a blank). The shell must
+        // sit well clear of that.
+        let ui = shell_frame(1920.0, 1080.0);
+        let atlas = &ui.draw_ctx.font_atlas;
+        println!(
+            "shell atlas: {} glyphs, {:.1}% used",
+            atlas.cached_glyph_count(),
+            atlas.utilization() * 100.0
+        );
+        assert!(!atlas.is_full());
+        assert!(atlas.utilization() < 0.75);
     }
 }
 

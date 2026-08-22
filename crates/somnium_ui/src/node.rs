@@ -45,6 +45,21 @@ impl LayoutCtx {
         }
     }
 
+    /// Whether a child is visible.
+    ///
+    /// A container that sizes itself to its content must skip hidden children,
+    /// or a panel that hides one of two stacked states still reserves room for
+    /// both.
+    pub fn is_visible(&self, handle: NodeHandle) -> bool {
+        unsafe {
+            (*self.ui_ptr)
+                .nodes
+                .try_borrow(handle.transmute())
+                .map(|n| n.widget.visibility)
+                .unwrap_or(false)
+        }
+    }
+
     /// Read a child's desired local position (set by WidgetBuilder or animation).
     pub fn desired_local_position(&self, handle: NodeHandle) -> Vec2 {
         unsafe {
@@ -163,6 +178,18 @@ pub trait Control: Send + 'static {
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         ctx.push_rect_filled(widget.screen_bounds(), widget.background);
     }
+
+    /// Emit draw commands **after** this widget's children have drawn.
+    ///
+    /// `UserInterface::draw_node` paints a control and then recurses into its
+    /// children, so anything a container needs to render *over* its content —
+    /// a scroll-edge fade, a scrollbar that must not be covered — cannot go in
+    /// [`Control::draw`]. Phase 27-G added this because the scroll fade did go
+    /// there and was silently painted underneath the scrolled content: correct
+    /// geometry, correct colour, invisible.
+    ///
+    /// Default is empty, so no existing widget changes behaviour.
+    fn draw_over(&self, _widget: &Widget, _ctx: &mut DrawingContext) {}
 
     /// Handle a message routed to this widget (ToWidget direction).
     /// Push any outgoing (FromWidget) messages into `emit`; the caller drains it into the queue.

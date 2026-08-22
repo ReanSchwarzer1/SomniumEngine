@@ -2,6 +2,7 @@
 // Button: captures mouse on MouseDown; emits ButtonMessage::Click on MouseUp within bounds.
 // Hover / press / selected fills so chrome controls read as buttons, not dead labels.
 
+use crate::motion::{Easing, MotionKey, MotionProperty, lerp_color};
 use crate::{
     draw::DrawingContext,
     message::{MessageDirection, UiMessage, WidgetMessage},
@@ -92,22 +93,55 @@ impl Control for Button {
         } else {
             style_button(state)
         };
-        let fill = if !ghost && state.interaction == Interaction::Rest {
-            widget.background
+        // Phase 27-D. An explicit caller background still wins at rest, but
+        // everything else — radius, the chrome wash, the elevation lift, the
+        // focus glow and the selection rail — now comes from the recipe and is
+        // rendered in one call so the layer order cannot be got wrong here.
+        let mut paint = paint;
+        if !ghost && state.interaction == Interaction::Rest && widget.background[3] > 0 {
+            paint.background = widget.background;
+            // The caller picked the *hue*, not the flatness. Re-derive the wash
+            // from that base so the button still reads as a lit chrome surface.
+            // Suppressing it here is what left the shell looking unchanged after
+            // the recipes already described the depth.
+            paint.gradient = Some(theme::wash_from(theme::Srgb8(widget.background)));
+        }
+
+        // Phase 27-C. Cross-fade the hover wash instead of snapping to it. The
+        // track is keyed on this node, so two buttons hovered in sequence do not
+        // share state, and it retires the moment it completes.
+        let t = theme::active();
+        let key = MotionKey::new(widget.handle.index(), MotionProperty::HoverWash);
+        let target = if state.interaction == Interaction::Hover {
+            1.0
         } else {
-            paint.background
+            0.0
         };
-        if fill[3] > 0 {
-            ctx.push_rect_filled(b, fill);
+        ctx.motion.start(
+            key,
+            0.0,
+            target,
+            t.motion.hover_ms as f32,
+            Easing::Standard,
+        );
+        let wash = ctx.motion.value_or(key, target);
+        if wash > 0.0 && wash < 1.0 && state.interaction != Interaction::Pressed {
+            let rest = if ghost {
+                style_icon_button(VisualState::rest())
+            } else {
+                style_button(VisualState::rest())
+            };
+            let hovered = if ghost {
+                style_icon_button(VisualState::with(Interaction::Hover))
+            } else {
+                style_button(VisualState::with(Interaction::Hover))
+            };
+            paint.background = lerp_color(rest.background, hovered.background, wash);
+            paint.foreground = lerp_color(rest.foreground, hovered.foreground, wash);
         }
-        if let Some(rail) = paint.rail {
-            ctx.push_rect_filled(
-                Rect::new(b.x, b.y, theme::NOCTURNE.geometry.stroke_rail, b.h),
-                rail,
-            );
-        }
-        if self.focused {
-            ctx.push_rect_border(b, theme::NOCTURNE.geometry.stroke_focus, paint.border);
+
+        if paint.background[3] > 0 || paint.rail.is_some() || paint.glow.is_some() {
+            ctx.push_paint(b, &paint);
         }
     }
 

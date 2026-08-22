@@ -51,6 +51,32 @@ use glam::Vec2;
 
 // ── Editor layout builder ─────────────────────────────────────────────────────
 
+/// The statically declared palette commands.
+///
+/// Order is load-bearing: `UiManager::run_palette_command` dispatches on
+/// position, so inserting or reordering an entry here silently rebinds every
+/// command after it. Append only, and update
+/// `UiManager::STATIC_PALETTE_COMMANDS` when you do.
+pub(crate) fn palette_commands() -> Vec<PaletteItem> {
+    vec![
+        PaletteItem::command("New Scene", "Ctrl+N"),
+        PaletteItem::command("Save Scene", "Ctrl+S"),
+        PaletteItem::command("Import Model…", ""),
+        PaletteItem::command("Undo", "Ctrl+Z"),
+        PaletteItem::command("Redo", "Ctrl+Y"),
+        PaletteItem::command("Delete", "Del"),
+        PaletteItem::command("Duplicate", "Ctrl+D"),
+        PaletteItem::command("Play", ""),
+        PaletteItem::command("Pause", ""),
+        PaletteItem::command("Stop", ""),
+        PaletteItem::command("Toggle Profiler", ""),
+        PaletteItem::command("Content Drawer", "Ctrl+Space"),
+        PaletteItem::command("Help", "F1"),
+        PaletteItem::command("Create Cube", ""),
+        PaletteItem::command("Create Directional Light", ""),
+    ]
+}
+
 pub(crate) fn build_editor_layout(
     ui: &mut UserInterface,
     font_id: u8,
@@ -622,6 +648,44 @@ pub(crate) fn build_editor_layout(
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
+    // Phase 27-G. A selection readout pinned to the bottom-left of the render.
+    //
+    // The status bar already carries scene-wide counts; this answers "what am I
+    // holding" without the eye leaving the viewport, which is the whole point of
+    // an overlay rather than another status slot. Bottom-left because the
+    // context bar owns the top and the gizmo tends to sit centre-right.
+    let vp_overlay = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Bottom)
+            .with_margin(Thickness {
+                left: 12.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 12.0,
+            })
+            .with_background(theme::active().semantic.surface.popup.bytes())
+            .with_foreground(theme::active().semantic.border.default.bytes())
+            .with_visibility(false),
+    )
+    .with_stroke_thickness(Thickness::uniform(theme::active().geometry.stroke_hairline))
+    .build();
+    let vp_overlay_h = ui.add_node(vp_overlay, viewport_handle);
+    let vp_overlay_text = TextBuilder::new(
+        WidgetBuilder::new().with_margin(Thickness {
+            left: 10.0,
+            top: 6.0,
+            right: 10.0,
+            bottom: 6.0,
+        }),
+    )
+    .with_text("")
+    .with_font_size(theme::active().typography.caption)
+    .with_font_id(font_id)
+    .with_color(theme::active().semantic.text.secondary.bytes())
+    .build();
+    let vp_overlay_text = ui.add_node(vp_overlay_text, vp_overlay_h);
+
     let profiler_panel = ui.add_node(prof_panel, viewport_handle);
 
     let prof_stack =
@@ -782,6 +846,15 @@ pub(crate) fn build_editor_layout(
         ui.add_node(t, outliner_scroll)
     };
     let outliner_stack = outliner_tree;
+    // Sibling of the tree inside the same scroll viewer, toggled by visibility.
+    // `ScrollViewer` skips hidden children when sizing its content, so the
+    // hidden one reserves no scroll range (Phase 27-G, ninth pass).
+    let outliner_empty = crate::editor::parts::build_empty_state(
+        ui,
+        outliner_scroll,
+        font_id,
+        crate::metaphor::empty::OUTLINER,
+    );
 
     // Inspector header
     let ins_hdr = BorderBuilder::new(
@@ -838,6 +911,18 @@ pub(crate) fn build_editor_layout(
     let inspector_stack = ui.add_node(inspector_stack, ins_content_h);
 
     let inspector_handles = build_inspector(ui, inspector_stack, font_id);
+
+    // Phase 27-G. Sibling of the property stack, not a child: `update_inspector`
+    // toggles the two so a selection change is a visibility flip rather than a
+    // subtree rebuild. Without this the Details panel showed POSITION /
+    // ROTATION / SCALE at 0.000 while the status bar said "No selection", which
+    // reads as "the selection is at the origin" rather than "there is none".
+    let details_empty = crate::editor::parts::build_empty_state(
+        ui,
+        ins_content_h,
+        font_id,
+        crate::metaphor::empty::DETAILS,
+    );
 
     // ── Row 5: docked Content Drawer / Output Log ────────────────────────────
     let bottom = BorderBuilder::new(
@@ -919,6 +1004,12 @@ pub(crate) fn build_editor_layout(
             .with_orientation(Orientation::Vertical)
             .build();
     let log_stack = ui.add_node(log_stack_node, log_scroll_h);
+    let log_empty = crate::editor::parts::build_empty_state(
+        ui,
+        log_scroll_h,
+        font_id,
+        crate::metaphor::empty::LOG,
+    );
 
     // ── Row 6: status bar ────────────────────────────────────────────────────
     let status_bar = BorderBuilder::new(
@@ -1115,68 +1206,7 @@ pub(crate) fn build_editor_layout(
     let content_menu = ui.add_node(content_menu_node, content_menu_popup);
 
 
-    let palette_items = vec![
-        PaletteItem {
-            label: "New Scene".into(),
-            hint: "Ctrl+N".into(),
-        },
-        PaletteItem {
-            label: "Save Scene".into(),
-            hint: "Ctrl+S".into(),
-        },
-        PaletteItem {
-            label: "Import Model…".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Undo".into(),
-            hint: "Ctrl+Z".into(),
-        },
-        PaletteItem {
-            label: "Redo".into(),
-            hint: "Ctrl+Y".into(),
-        },
-        PaletteItem {
-            label: "Delete".into(),
-            hint: "Del".into(),
-        },
-        PaletteItem {
-            label: "Duplicate".into(),
-            hint: "Ctrl+D".into(),
-        },
-        PaletteItem {
-            label: "Play".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Pause".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Stop".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Toggle Profiler".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Content Drawer".into(),
-            hint: "Ctrl+Space".into(),
-        },
-        PaletteItem {
-            label: "Help".into(),
-            hint: "F1".into(),
-        },
-        PaletteItem {
-            label: "Create Cube".into(),
-            hint: String::new(),
-        },
-        PaletteItem {
-            label: "Create Directional Light".into(),
-            hint: String::new(),
-        },
-    ];
+    let palette_items = palette_commands();
     let palette_popup_node = PopupBuilder::new(
         WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
     )
@@ -1330,9 +1360,12 @@ pub(crate) fn build_editor_layout(
 
     EditorLayout {
         outliner_scroll,
+        outliner_empty,
         outliner_stack,
         inspector_stack,
+        details_empty,
         log_stack,
+        log_empty,
         create_button,
         create_popup,
         create_popup_items,
@@ -1357,6 +1390,8 @@ pub(crate) fn build_editor_layout(
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
+        vp_overlay: vp_overlay_h,
+        vp_overlay_text,
         profiler_panel,
         profiler_toggle,
         profiler_toggle_lbl,
