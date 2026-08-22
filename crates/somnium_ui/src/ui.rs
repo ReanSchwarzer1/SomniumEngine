@@ -1224,6 +1224,82 @@ mod input_contract_tests {
     }
 
     #[test]
+    fn a_short_sibling_does_not_make_tall_content_unscrollable() {
+        // The reported Details bug. The panel stacks the property list against
+        // an empty state inside one scroll viewer; `arrange_override` assigned
+        // `content_h` per child instead of accumulating, so the short trailing
+        // sibling won and the whole panel reported itself as viewport-sized.
+        // Symptom: no scrolling and no visible thumb, on every entity with more
+        // properties than fit.
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let root = ui.root();
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+
+        let tall = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(600.0),
+        )
+        .build();
+        let tall_h = ui.add_node(tall, sv_h);
+
+        // Added *after* the tall child, exactly as the Details empty state is.
+        let short = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(90.0),
+        )
+        .build();
+        ui.add_node(short, sv_h);
+
+        ui.perform_layout();
+        let before = top_of(&ui, tall_h);
+        wheel(&mut ui, sv_h, -60.0);
+        assert!(
+            top_of(&ui, tall_h) < before,
+            "a tall child must still scroll when a short sibling follows it"
+        );
+    }
+
+    #[test]
+    fn a_hidden_child_reserves_no_scroll_height() {
+        // With the property stack hidden, Details should not pretend to have
+        // 600 px of content it is not showing.
+        let mut ui = UserInterface::new(400.0, 200.0);
+        let root = ui.root();
+        let sv = ScrollViewerBuilder::new(
+            WidgetBuilder::new().with_width(300.0).with_height(120.0),
+        )
+        .build();
+        let sv_h = ui.add_node(sv, root);
+
+        let tall = StackPanelBuilder::new(
+            WidgetBuilder::new().with_width(280.0).with_height(600.0),
+        )
+        .build();
+        let tall_h = ui.add_node(tall, sv_h);
+        ui.perform_layout();
+
+        ui.set_visibility(tall_h, false);
+        ui.perform_layout();
+        ui.draw();
+
+        // Nothing visible is taller than the viewport, so the thumb must render
+        // in its inactive colour rather than claiming the panel scrolls.
+        let inactive = crate::theme::active().semantic.border.default.bytes();
+        let claims_scrollable = ui
+            .draw_ctx
+            .instances
+            .iter()
+            .any(|p| p.fill_a == crate::theme::active().semantic.border.strong.bytes());
+        assert!(
+            !claims_scrollable,
+            "a viewer whose only tall child is hidden must not report as scrollable"
+        );
+        let _ = inactive;
+    }
+
+    #[test]
     fn the_mouse_wheel_scrolls_the_content() {
         // The regression this module exists for: ScrollViewer's whole
         // `handle_routed_message` was deleted and all 184 tests still passed,

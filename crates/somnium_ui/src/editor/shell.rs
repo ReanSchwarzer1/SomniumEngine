@@ -865,6 +865,18 @@ pub(crate) fn build_editor_layout(
 
     let inspector_handles = build_inspector(ui, inspector_stack, font_id);
 
+    // Phase 27-G. Sibling of the property stack, not a child: `update_inspector`
+    // toggles the two so a selection change is a visibility flip rather than a
+    // subtree rebuild. Without this the Details panel showed POSITION /
+    // ROTATION / SCALE at 0.000 while the status bar said "No selection", which
+    // reads as "the selection is at the origin" rather than "there is none".
+    let details_empty = crate::editor::parts::build_empty_state(
+        ui,
+        ins_content_h,
+        font_id,
+        crate::metaphor::empty::DETAILS,
+    );
+
     // ── Row 5: docked Content Drawer / Output Log ────────────────────────────
     let bottom = BorderBuilder::new(
         WidgetBuilder::new()
@@ -1297,6 +1309,7 @@ pub(crate) fn build_editor_layout(
         outliner_scroll,
         outliner_stack,
         inspector_stack,
+        details_empty,
         log_stack,
         create_button,
         create_popup,

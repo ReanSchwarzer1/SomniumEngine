@@ -381,3 +381,297 @@ pub mod empty {
         action: "Press Play to run the scene",
     };
 }
+
+/// A type filter chip in the Content Browser.
+///
+/// Phase 27-G. Deliberately a closed set mapped onto the icon the entry already
+/// resolves to, so a chip cannot disagree with the tile it filters: both answer
+/// "what kind of thing is this" from `icon_for_path`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentFilterKind {
+    All,
+    Folders,
+    Models,
+    Textures,
+    Scripts,
+    Scenes,
+    Audio,
+}
+
+impl ContentFilterKind {
+    pub const ALL: [ContentFilterKind; 7] = [
+        ContentFilterKind::All,
+        ContentFilterKind::Folders,
+        ContentFilterKind::Models,
+        ContentFilterKind::Textures,
+        ContentFilterKind::Scripts,
+        ContentFilterKind::Scenes,
+        ContentFilterKind::Audio,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ContentFilterKind::All => "All",
+            ContentFilterKind::Folders => "Folders",
+            ContentFilterKind::Models => "Models",
+            ContentFilterKind::Textures => "Textures",
+            ContentFilterKind::Scripts => "Scripts",
+            ContentFilterKind::Scenes => "Scenes",
+            ContentFilterKind::Audio => "Audio",
+        }
+    }
+
+    /// Whether an entry belongs in this chip.
+    pub fn accepts(self, entry: &ContentEntry) -> bool {
+        use IconId as I;
+        match self {
+            ContentFilterKind::All => true,
+            ContentFilterKind::Folders => entry.is_dir,
+            _ if entry.is_dir => false,
+            ContentFilterKind::Models => entry.icon == I::Mesh,
+            ContentFilterKind::Textures => entry.icon == I::Texture,
+            ContentFilterKind::Scripts => entry.icon == I::Script,
+            ContentFilterKind::Scenes => entry.icon == I::Scene,
+            ContentFilterKind::Audio => entry.icon == I::Audio,
+        }
+    }
+}
+
+/// Tile size in the Content Browser.
+///
+/// Three steps rather than a continuous slider: the icon atlas has two cuts, so
+/// a free-form size would spend most of its range resampling one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentDensity {
+    Compact,
+    Comfortable,
+    Large,
+}
+
+impl ContentDensity {
+    pub const ALL: [ContentDensity; 3] = [
+        ContentDensity::Compact,
+        ContentDensity::Comfortable,
+        ContentDensity::Large,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ContentDensity::Compact => "Compact",
+            ContentDensity::Comfortable => "Comfortable",
+            ContentDensity::Large => "Large",
+        }
+    }
+
+    /// (tile width, tile height, icon size).
+    pub const fn metrics(self) -> (f32, f32, f32) {
+        match self {
+            // Below the 40 px large-cut threshold, so these sample the 32 px cut.
+            ContentDensity::Compact => (72.0, 78.0, 32.0),
+            ContentDensity::Comfortable => (112.0, 120.0, 80.0),
+            ContentDensity::Large => (160.0, 172.0, 120.0),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ContentDensity::Compact => ContentDensity::Comfortable,
+            ContentDensity::Comfortable => ContentDensity::Large,
+            ContentDensity::Large => ContentDensity::Compact,
+        }
+    }
+}
+
+/// Back/forward history for the Content Browser.
+///
+/// Standard browser semantics, which are easy to get subtly wrong: navigating
+/// somewhere new **truncates** the forward stack, and going back then forward
+/// must land exactly where you started.
+#[derive(Clone, Debug, Default)]
+pub struct ContentHistory {
+    entries: Vec<String>,
+    cursor: usize,
+}
+
+impl ContentHistory {
+    pub fn new(root: String) -> Self {
+        Self {
+            entries: vec![root],
+            cursor: 0,
+        }
+    }
+
+    pub fn current(&self) -> &str {
+        self.entries.get(self.cursor).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Navigate somewhere new. A no-op when it is where we already are, so
+    /// re-clicking the current folder does not stack duplicate entries.
+    pub fn push(&mut self, path: String) {
+        if self.current() == path {
+            return;
+        }
+        self.entries.truncate(self.cursor + 1);
+        self.entries.push(path);
+        self.cursor = self.entries.len() - 1;
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.cursor > 0
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    pub fn back(&mut self) -> Option<&str> {
+        if !self.can_go_back() {
+            return None;
+        }
+        self.cursor -= 1;
+        Some(self.current())
+    }
+
+    pub fn forward(&mut self) -> Option<&str> {
+        if !self.can_go_forward() {
+            return None;
+        }
+        self.cursor += 1;
+        Some(self.current())
+    }
+}
+
+#[cfg(test)]
+mod browser_workflow_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(name: &str, is_dir: bool) -> ContentEntry {
+        let path = PathBuf::from(name);
+        ContentEntry {
+            icon: icon_for_path(&path, is_dir),
+            is_dir,
+            is_engine: false,
+            name: name.to_string(),
+            path,
+        }
+    }
+
+    #[test]
+    fn the_all_chip_accepts_everything_and_folders_only_folders() {
+        let items = [
+            entry("models", true),
+            entry("ship.glb", false),
+            entry("rock.png", false),
+            entry("boot.luau", false),
+        ];
+        for e in &items {
+            assert!(ContentFilterKind::All.accepts(e), "All rejected {}", e.name);
+        }
+        let folders: Vec<_> = items
+            .iter()
+            .filter(|e| ContentFilterKind::Folders.accepts(e))
+            .collect();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "models");
+    }
+
+    #[test]
+    fn a_type_chip_never_matches_a_folder() {
+        // A folder called "textures" must not appear under the Textures chip.
+        let dir = entry("textures", true);
+        for kind in ContentFilterKind::ALL {
+            if matches!(kind, ContentFilterKind::All | ContentFilterKind::Folders) {
+                continue;
+            }
+            assert!(!kind.accepts(&dir), "{kind:?} matched a folder");
+        }
+    }
+
+    #[test]
+    fn type_chips_route_by_the_same_answer_the_tile_shows() {
+        // The chip and the tile icon must never disagree.
+        for (name, kind) in [
+            ("ship.glb", ContentFilterKind::Models),
+            ("rock.png", ContentFilterKind::Textures),
+            ("boot.luau", ContentFilterKind::Scripts),
+            ("level.somnium", ContentFilterKind::Scenes),
+            ("hit.wav", ContentFilterKind::Audio),
+        ] {
+            let e = entry(name, false);
+            assert!(kind.accepts(&e), "{name} did not match {kind:?}");
+            for other in ContentFilterKind::ALL {
+                if other == kind || other == ContentFilterKind::All {
+                    continue;
+                }
+                assert!(!other.accepts(&e), "{name} also matched {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn density_steps_stay_ordered_and_cycle() {
+        let mut seen = ContentDensity::Compact;
+        let mut sizes = Vec::new();
+        for _ in 0..3 {
+            sizes.push(seen.metrics());
+            seen = seen.next();
+        }
+        assert_eq!(seen, ContentDensity::Compact, "next() must cycle");
+        assert!(sizes[0].0 < sizes[1].0 && sizes[1].0 < sizes[2].0, "widths ascend");
+        assert!(sizes[0].2 < sizes[1].2 && sizes[1].2 < sizes[2].2, "icons ascend");
+    }
+
+    #[test]
+    fn compact_tiles_stay_under_the_large_icon_cut() {
+        // Above 40 px a glyph samples the 96 px cut; a compact tile should not,
+        // or the atlas does three times the work for a smaller picture.
+        assert!(ContentDensity::Compact.metrics().2 <= 40.0);
+    }
+
+    #[test]
+    fn history_moves_back_and_forward_to_the_same_places() {
+        let mut h = ContentHistory::new(String::new());
+        h.push("models".into());
+        h.push("models/ships".into());
+        assert_eq!(h.current(), "models/ships");
+
+        assert_eq!(h.back(), Some("models"));
+        assert_eq!(h.back(), Some(""));
+        assert!(!h.can_go_back(), "the root is the end of the line");
+        assert_eq!(h.back(), None);
+
+        assert_eq!(h.forward(), Some("models"));
+        assert_eq!(h.forward(), Some("models/ships"));
+        assert!(!h.can_go_forward());
+        assert_eq!(h.forward(), None);
+    }
+
+    #[test]
+    fn navigating_somewhere_new_truncates_the_forward_stack() {
+        // The classic browser-history mistake: going back, then somewhere else,
+        // must discard what was ahead rather than leaving it reachable.
+        let mut h = ContentHistory::new(String::new());
+        h.push("models".into());
+        h.push("models/ships".into());
+        h.back();
+        h.push("terrain".into());
+        assert!(!h.can_go_forward(), "models/ships must no longer be ahead");
+        assert_eq!(h.current(), "terrain");
+
+        // The trail behind is root -> models -> terrain: the branch that was
+        // discarded is gone, but everything before the branch point remains.
+        assert_eq!(h.back(), Some("models"));
+        assert_eq!(h.back(), Some(""));
+        assert!(!h.can_go_back());
+    }
+
+    #[test]
+    fn re_entering_the_current_folder_does_not_stack_duplicates() {
+        let mut h = ContentHistory::new(String::new());
+        h.push("models".into());
+        h.push("models".into());
+        h.back();
+        assert_eq!(h.current(), "", "one back should reach the root");
+    }
+}

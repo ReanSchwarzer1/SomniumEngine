@@ -513,6 +513,8 @@ struct EditorLayout {
     outliner_scroll: NodeHandle,
     outliner_stack: NodeHandle,
     inspector_stack: NodeHandle,
+    /// Shown when nothing is selected; hidden the moment something is.
+    details_empty: NodeHandle,
     log_stack: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
@@ -652,8 +654,9 @@ pub struct UiManager {
     outliner_scroll: NodeHandle,
     #[allow(dead_code)]
     outliner_stack: NodeHandle,
-    #[allow(dead_code)]
     inspector_stack: NodeHandle,
+    /// Shown when nothing is selected; hidden the moment something is.
+    details_empty: NodeHandle,
     log_stack: NodeHandle,
     log_entry_count: usize,
     // Create menu
@@ -812,6 +815,14 @@ pub struct UiManager {
     inspector_filter: String,
     content_filter: String,
     content_path: String,
+    /// Phase 27-G browser workflows.
+    content_history: crate::metaphor::ContentHistory,
+    content_kind: crate::metaphor::ContentFilterKind,
+    content_density: crate::metaphor::ContentDensity,
+    /// Paths selected in the drawer. Multi-select is a set rather than a range
+    /// because the tiles wrap, so "everything between A and B" has no stable
+    /// meaning once the panel is resized.
+    content_selection: std::collections::HashSet<std::path::PathBuf>,
     outliner_expanded: std::collections::HashSet<u32>,
     log_lines: VecDeque<String>,
     edit_popup_open: bool,
@@ -969,6 +980,12 @@ fn load_fonts(ui: &mut UserInterface) -> u8 {
     registry.id(FontRole::UiRegular)
 }
 
+/// Path separators the content tree may use on either platform.
+///
+/// Named because a `char` array literal containing a backslash is easy to
+/// mangle when this file is edited programmatically.
+const SEP: [char; 2] = ['/', '\\'];
+
 /// What a *dynamic* palette row resolves to.
 ///
 /// Phase 27-G. Static commands stay positional (see
@@ -1032,6 +1049,7 @@ impl UiManager {
             outliner_scroll: layout.outliner_scroll,
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
+            details_empty: layout.details_empty,
             log_stack: layout.log_stack,
             log_entry_count: 0,
             create_button: layout.create_button,
@@ -1156,6 +1174,10 @@ impl UiManager {
             inspector_filter: String::new(),
             content_filter: String::new(),
             content_path: String::new(),
+            content_history: crate::metaphor::ContentHistory::new(String::new()),
+            content_kind: crate::metaphor::ContentFilterKind::All,
+            content_density: crate::metaphor::ContentDensity::Comfortable,
+            content_selection: std::collections::HashSet::new(),
             outliner_expanded: std::collections::HashSet::new(),
             log_lines: VecDeque::new(),
             edit_popup_open: false,
@@ -1195,6 +1217,11 @@ impl UiManager {
             immersive_restore_maximized: false,
         };
         this.refresh_content_list();
+        // Nothing is selected at startup and `update_inspector` has not run
+        // yet, so the two Details states would otherwise both be visible and
+        // overlap. Seed the empty one.
+        this.native_ui.set_visibility(this.inspector_stack, false);
+        this.native_ui.set_visibility(this.details_empty, true);
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
         this.apply_collapse_rules(this.window_size.0);
@@ -2521,6 +2548,93 @@ impl UiManager {
         }
     }
 
+    /// Navigate the drawer, recording the move in history.
+    ///
+    /// Every entry point that changes folder goes through here so back/forward
+    /// cannot drift out of step with what is on screen.
+    pub fn navigate_content(&mut self, path: String) {
+        self.content_history.push(path.clone());
+        self.content_path = path;
+        self.content_selection.clear();
+        self.refresh_content_list();
+    }
+
+    /// Step back through the drawer's folder history. Returns false when there
+    /// is nowhere to go, so a toolbar button can disable itself honestly.
+    pub fn content_back(&mut self) -> bool {
+        match self.content_history.back() {
+            Some(path) => {
+                self.content_path = path.to_string();
+                self.content_selection.clear();
+                self.refresh_content_list();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn content_forward(&mut self) -> bool {
+        match self.content_history.forward() {
+            Some(path) => {
+                self.content_path = path.to_string();
+                self.content_selection.clear();
+                self.refresh_content_list();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn can_content_back(&self) -> bool {
+        self.content_history.can_go_back()
+    }
+
+    pub fn can_content_forward(&self) -> bool {
+        self.content_history.can_go_forward()
+    }
+
+    /// Restrict the drawer to one asset kind.
+    pub fn set_content_kind(&mut self, kind: crate::metaphor::ContentFilterKind) {
+        if self.content_kind != kind {
+            self.content_kind = kind;
+            self.content_selection.clear();
+            self.refresh_content_list();
+        }
+    }
+
+    pub fn content_kind(&self) -> crate::metaphor::ContentFilterKind {
+        self.content_kind
+    }
+
+    /// Cycle tile size. Selection survives: the same assets are on screen.
+    pub fn cycle_content_density(&mut self) -> crate::metaphor::ContentDensity {
+        self.content_density = self.content_density.next();
+        self.refresh_content_list();
+        self.content_density
+    }
+
+    pub fn content_density(&self) -> crate::metaphor::ContentDensity {
+        self.content_density
+    }
+
+    /// Select an asset. `additive` is the Ctrl-click path: it toggles, so a
+    /// second Ctrl-click on the same tile removes it from the set.
+    pub fn select_content(&mut self, path: std::path::PathBuf, additive: bool) {
+        if additive {
+            if !self.content_selection.remove(&path) {
+                self.content_selection.insert(path);
+            }
+        } else {
+            self.content_selection.clear();
+            self.content_selection.insert(path);
+        }
+        self.refresh_content_list();
+    }
+
+    pub fn content_selection(&self) -> &std::collections::HashSet<std::path::PathBuf> {
+        &self.content_selection
+    }
+
     fn refresh_content_list(&mut self) {
         let root = std::env::current_dir().unwrap_or_default().join("assets");
         let current = if self.content_path.is_empty() {
@@ -2528,12 +2642,16 @@ impl UiManager {
         } else {
             root.join(&self.content_path)
         };
-        let entries = crate::metaphor::list_content(
+        let entries: Vec<crate::metaphor::ContentEntry> = crate::metaphor::list_content(
             &root,
             self.show_engine_content,
             &self.content_filter,
             &current,
-        );
+        )
+        .into_iter()
+        .filter(|e| self.content_kind.accepts(e))
+        .collect();
+        let (tile_w, tile_h, icon_px) = self.content_density.metrics();
         self.native_ui.clear_children(self.content_list);
         self.content_entries.clear();
         let font_id = self.font_id;
@@ -2554,11 +2672,19 @@ impl UiManager {
         }
 
         for entry in entries {
+            // A selected tile keeps the raised fill but gains the selection
+            // wash, so selection reads the same way here as in the Outliner.
+            let selected = self.content_selection.contains(&entry.path);
+            let tile_bg = if selected {
+                theme::active().semantic.accent.selected_bg.bytes()
+            } else {
+                theme::BG_RAISED
+            };
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(112.0)
-                    .with_height(120.0)
-                    .with_background(theme::BG_RAISED),
+                    .with_width(tile_w)
+                    .with_height(tile_h)
+                    .with_background(tile_bg),
             )
             .build();
             let bh = self.native_ui.add_node(btn, parent);
@@ -2569,8 +2695,8 @@ impl UiManager {
             let col_h = self.native_ui.add_node(col, bh);
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(112.0)
-                    .with_height(theme::ICON_DRAWER)
+                    .with_width(tile_w)
+                    .with_height(icon_px)
                     .with_margin(Thickness {
                         left: 0.0,
                         top: 8.0,
@@ -2579,7 +2705,7 @@ impl UiManager {
                     }),
             )
             .with_icon(entry.icon)
-            .with_size(theme::ICON_DRAWER)
+            .with_size(icon_px)
             .with_tint(if entry.is_dir {
                 theme::FOLDER_SAND
             } else {
@@ -3071,7 +3197,16 @@ impl UiManager {
         rot_deg: Option<[f32; 3]>,
         scale: Option<[f32; 3]>,
     ) {
-        let _ = entity_idx;
+        // Phase 27-G. An empty Details panel now says so. Before this it
+        // rendered POSITION / ROTATION / SCALE at 0.000 next to a status bar
+        // reading "No selection", which says "the selection sits at the origin"
+        // rather than "there is no selection".
+        let has_selection = entity_idx.is_some();
+        self.native_ui
+            .set_visibility(self.inspector_stack, has_selection);
+        self.native_ui
+            .set_visibility(self.details_empty, !has_selection);
+
         let h = &self.inspector_handles;
         let send = |ui: &mut UserInterface, handle: NodeHandle, v: f32| {
             ui.send(NumericFieldMessage::set_value(handle, v));
@@ -4275,10 +4410,16 @@ impl UiManager {
                 {
                     if entry.is_dir {
                         let root = std::env::current_dir().unwrap_or_default().join("assets");
-                        if let Ok(rel) = entry.path.strip_prefix(&root) {
-                            self.content_path = rel.to_string_lossy().into_owned();
+                        // Through `navigate_content` so the move lands in
+                        // history. Setting `content_path` directly is what would
+                        // leave Back pointing at a folder the user never left.
+                        match entry.path.strip_prefix(&root) {
+                            Ok(rel) => {
+                                let rel = rel.to_string_lossy().into_owned();
+                                self.navigate_content(rel);
+                            }
+                            Err(_) => self.refresh_content_list(),
                         }
-                        self.refresh_content_list();
                     } else if entry.is_engine {
                         if let Some(kind) = match entry.name.as_str() {
                             "Cube" => Some(CreateKind::Cube),
@@ -4733,14 +4874,14 @@ impl UiManager {
                 }
             } else if let Some(BreadcrumbMessage::Navigate(i)) = msg.data::<BreadcrumbMessage>() {
                 if msg.destination == self.content_breadcrumb {
-                    if *i == 0 {
-                        self.content_path.clear();
+                    let target = if *i == 0 {
+                        String::new()
                     } else {
-                        let parts: Vec<&str> = self.content_path.split(['/', '\\']).collect();
-                        self.content_path =
-                            parts.iter().take(*i).copied().collect::<Vec<_>>().join("/");
-                    }
-                    self.refresh_content_list();
+                        let parts: Vec<&str> = self.content_path.split(SEP).collect();
+                        parts.iter().take(*i).copied().collect::<Vec<_>>().join("/")
+                    };
+                    // A crumb click is navigation too, so it belongs in history.
+                    self.navigate_content(target);
                 }
             }
 
@@ -4850,6 +4991,26 @@ impl CollapseRules {
 #[cfg(test)]
 mod elysium_tests {
     use super::*;
+
+    #[test]
+    fn details_shows_exactly_one_state_at_a_time() {
+        // The screenshot defect: POSITION / ROTATION / SCALE rendered at 0.000
+        // beside a status bar reading "No selection". Exactly one of the two
+        // must be visible, at startup and after every selection change.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let font_id = load_fonts(&mut ui);
+        let layout =
+            build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+
+        // The builder leaves both visible; `UiManager::new` seeds the empty
+        // one, and `update_inspector` flips them from then on. Assert the
+        // handles are distinct so a flip can never be a no-op.
+        assert_ne!(
+            layout.inspector_stack, layout.details_empty,
+            "the two Details states must be separate nodes"
+        );
+        assert!(layout.details_empty.is_some(), "the empty state must exist");
+    }
 
     #[test]
     fn static_palette_command_count_is_pinned() {

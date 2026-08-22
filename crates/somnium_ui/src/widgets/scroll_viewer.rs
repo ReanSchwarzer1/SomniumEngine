@@ -55,7 +55,12 @@ impl Control for ScrollViewer {
         let mut content_h = 0.0f32;
         for &ch in &widget.children {
             ctx.measure_child(ch, inner);
-            content_h = content_h.max(ctx.desired_size(ch).y);
+            // Hidden children do not reserve height. A panel that stacks a
+            // content state against an empty state would otherwise always be
+            // as tall as both.
+            if ctx.is_visible(ch) {
+                content_h = content_h.max(ctx.desired_size(ch).y);
+            }
         }
         self.content_h.set(content_h);
         self.view_h.set(available.y.max(1.0));
@@ -67,10 +72,23 @@ impl Control for ScrollViewer {
         let oy = widget.actual_local_position.y;
         let inner_w = (final_size.x - BAR).max(1.0);
         self.view_h.set(final_size.y.max(1.0));
+        // Accumulate the tallest visible child rather than overwriting.
+        //
+        // This loop used to assign `content_h` on every iteration, so with more
+        // than one child it kept the **last** one's height instead of the
+        // largest. It was latent while every scroll viewer had exactly one
+        // child; adding the Details empty state beside the property stack made
+        // it real, and the Details panel silently stopped scrolling because a
+        // short trailing child reported the whole content as viewport-sized.
         let mut content_h = final_size.y;
         for &ch in &widget.children {
+            if !ctx.is_visible(ch) {
+                continue;
+            }
             let ds = ctx.desired_size(ch);
-            content_h = ds.y.max(final_size.y);
+            content_h = content_h.max(ds.y.max(final_size.y));
+        }
+        for &ch in &widget.children {
             ctx.arrange_child(ch, Rect::new(ox, oy - self.scroll_y, inner_w, content_h));
         }
         self.content_h.set(content_h);

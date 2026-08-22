@@ -45,6 +45,21 @@ impl LayoutCtx {
         }
     }
 
+    /// Whether a child is visible.
+    ///
+    /// A container that sizes itself to its content must skip hidden children,
+    /// or a panel that hides one of two stacked states still reserves room for
+    /// both.
+    pub fn is_visible(&self, handle: NodeHandle) -> bool {
+        unsafe {
+            (*self.ui_ptr)
+                .nodes
+                .try_borrow(handle.transmute())
+                .map(|n| n.widget.visibility)
+                .unwrap_or(false)
+        }
+    }
+
     /// Read a child's desired local position (set by WidgetBuilder or animation).
     pub fn desired_local_position(&self, handle: NodeHandle) -> Vec2 {
         unsafe {
