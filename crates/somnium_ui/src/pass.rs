@@ -127,6 +127,8 @@ pub struct UiPass {
     atlas_view: wgpu::TextureView,
     icon_tex: wgpu::Texture,
     icon_view: wgpu::TextureView,
+    thumb_tex: wgpu::Texture,
+    thumb_view: wgpu::TextureView,
     bg1: wgpu::BindGroup,
     // Instance buffer (recreated on overflow)
     inst_buf: wgpu::Buffer,
@@ -184,6 +186,7 @@ impl UiPass {
             entries: &[
                 atlas_entry(0),
                 atlas_entry(1),
+                atlas_entry(3),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -253,7 +256,30 @@ impl UiPass {
         let icon_view = icon_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // ── BG1 bind groups ───────────────────────────────────────────────────
-        let bg1 = Self::make_bg1(device, &bg1_layout, &atlas_view, &icon_view, &sampler);
+        let thumb_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("UiPass Thumbnail Atlas"),
+            size: wgpu::Extent3d {
+                width: crate::thumbnail::ATLAS_WIDTH,
+                height: crate::thumbnail::ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let thumb_view = thumb_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bg1 = Self::make_bg1(
+            device,
+            &bg1_layout,
+            &atlas_view,
+            &icon_view,
+            &thumb_view,
+            &sampler,
+        );
 
         // ── Instance buffer ───────────────────────────────────────────────────
         let inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -332,6 +358,8 @@ impl UiPass {
             atlas_view,
             icon_tex,
             icon_view,
+            thumb_tex,
+            thumb_view,
             bg1,
             inst_buf,
             inst_capacity: INIT_INSTANCE_CAP,
@@ -350,6 +378,7 @@ impl UiPass {
         layout: &wgpu::BindGroupLayout,
         font_view: &wgpu::TextureView,
         icon_view: &wgpu::TextureView,
+        thumb_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -367,6 +396,10 @@ impl UiPass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(thumb_view),
                 },
             ],
         })
@@ -492,12 +525,37 @@ impl UiPass {
 
         // One bind group serves the whole pass, so it is rebuilt only when an
         // atlas texture is replaced.
+        if draw_ctx.thumbnails.dirty {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.thumb_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &draw_ctx.thumbnails.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(crate::thumbnail::ATLAS_WIDTH * 4),
+                    rows_per_image: Some(crate::thumbnail::ATLAS_HEIGHT),
+                },
+                wgpu::Extent3d {
+                    width: crate::thumbnail::ATLAS_WIDTH,
+                    height: crate::thumbnail::ATLAS_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+            );
+            draw_ctx.thumbnails.dirty = false;
+            atlases_changed = true;
+        }
+
         if atlases_changed {
             self.bg1 = Self::make_bg1(
                 device,
                 &self.bg1_layout,
                 &self.atlas_view,
                 &self.icon_view,
+                &self.thumb_view,
                 &self.sampler,
             );
         }

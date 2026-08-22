@@ -46,6 +46,9 @@ pub struct DrawingContext {
     /// also the moment it knows its own interaction state, so it can both read
     /// a wash value and retarget the track in one place.
     pub motion: crate::motion::Animator,
+    /// Asset previews for the Content Drawer. Lives beside the atlases because
+    /// it *is* one, and because widgets reach it the same way.
+    pub thumbnails: crate::thumbnail::ThumbnailCache,
 }
 
 impl DrawingContext {
@@ -59,6 +62,7 @@ impl DrawingContext {
             font_atlas: FontAtlas::new(),
             icon_atlas: IconAtlas::new(),
             motion: crate::motion::Animator::new(),
+            thumbnails: crate::thumbnail::ThumbnailCache::new(),
         }
     }
 

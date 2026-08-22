@@ -648,6 +648,44 @@ pub(crate) fn build_editor_layout(
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
+    // Phase 27-G. A selection readout pinned to the bottom-left of the render.
+    //
+    // The status bar already carries scene-wide counts; this answers "what am I
+    // holding" without the eye leaving the viewport, which is the whole point of
+    // an overlay rather than another status slot. Bottom-left because the
+    // context bar owns the top and the gizmo tends to sit centre-right.
+    let vp_overlay = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Bottom)
+            .with_margin(Thickness {
+                left: 12.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 12.0,
+            })
+            .with_background(theme::active().semantic.surface.popup.bytes())
+            .with_foreground(theme::active().semantic.border.default.bytes())
+            .with_visibility(false),
+    )
+    .with_stroke_thickness(Thickness::uniform(theme::active().geometry.stroke_hairline))
+    .build();
+    let vp_overlay_h = ui.add_node(vp_overlay, viewport_handle);
+    let vp_overlay_text = TextBuilder::new(
+        WidgetBuilder::new().with_margin(Thickness {
+            left: 10.0,
+            top: 6.0,
+            right: 10.0,
+            bottom: 6.0,
+        }),
+    )
+    .with_text("")
+    .with_font_size(theme::active().typography.caption)
+    .with_font_id(font_id)
+    .with_color(theme::active().semantic.text.secondary.bytes())
+    .build();
+    let vp_overlay_text = ui.add_node(vp_overlay_text, vp_overlay_h);
+
     let profiler_panel = ui.add_node(prof_panel, viewport_handle);
 
     let prof_stack =
@@ -808,6 +846,15 @@ pub(crate) fn build_editor_layout(
         ui.add_node(t, outliner_scroll)
     };
     let outliner_stack = outliner_tree;
+    // Sibling of the tree inside the same scroll viewer, toggled by visibility.
+    // `ScrollViewer` skips hidden children when sizing its content, so the
+    // hidden one reserves no scroll range (Phase 27-G, ninth pass).
+    let outliner_empty = crate::editor::parts::build_empty_state(
+        ui,
+        outliner_scroll,
+        font_id,
+        crate::metaphor::empty::OUTLINER,
+    );
 
     // Inspector header
     let ins_hdr = BorderBuilder::new(
@@ -957,6 +1004,12 @@ pub(crate) fn build_editor_layout(
             .with_orientation(Orientation::Vertical)
             .build();
     let log_stack = ui.add_node(log_stack_node, log_scroll_h);
+    let log_empty = crate::editor::parts::build_empty_state(
+        ui,
+        log_scroll_h,
+        font_id,
+        crate::metaphor::empty::LOG,
+    );
 
     // ── Row 6: status bar ────────────────────────────────────────────────────
     let status_bar = BorderBuilder::new(
@@ -1307,10 +1360,12 @@ pub(crate) fn build_editor_layout(
 
     EditorLayout {
         outliner_scroll,
+        outliner_empty,
         outliner_stack,
         inspector_stack,
         details_empty,
         log_stack,
+        log_empty,
         create_button,
         create_popup,
         create_popup_items,
@@ -1335,6 +1390,8 @@ pub(crate) fn build_editor_layout(
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
+        vp_overlay: vp_overlay_h,
+        vp_overlay_text,
         profiler_panel,
         profiler_toggle,
         profiler_toggle_lbl,

@@ -46,6 +46,7 @@ struct Globals {
 @group(1) @binding(0) var t_font: texture_2d<f32>;
 @group(1) @binding(1) var t_icon: texture_2d<f32>;
 @group(1) @binding(2) var s_tex: sampler;
+@group(1) @binding(3) var t_thumb: texture_2d<f32>;
 
 // Texture-layer selector, matching `primitive::TEX_SHIFT` / `TEX_MASK` and the
 // historical texture_id constants: 0 = font atlas, 1 = icon atlas. Carrying it
@@ -56,6 +57,11 @@ const TEX_MASK:  u32 = 255u;
 fn sample_atlas(layer: u32, uv: vec2<f32>) -> vec4<f32> {
     if layer == 1u {
         return textureSample(t_icon, s_tex, uv);
+    }
+    // Layer 2 is the thumbnail atlas: real colour, not a coverage mask, so it
+    // is the one atlas whose RGB carries meaning.
+    if layer == 2u {
+        return textureSample(t_thumb, s_tex, uv);
     }
     return textureSample(t_font, s_tex, uv);
 }

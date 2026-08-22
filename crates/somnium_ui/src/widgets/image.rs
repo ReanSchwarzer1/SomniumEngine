@@ -14,6 +14,13 @@ pub struct Image {
     pub icon: IconId,
     pub tint: [u8; 4],
     pub size: f32,
+    /// Asset this image stands for, if any.
+    ///
+    /// Phase 27-G. When the thumbnail cache has a preview for this path the
+    /// image draws it; otherwise it falls back to `icon`. The fallback is the
+    /// normal state, not an error state: previews arrive over several frames
+    /// and some assets never get one.
+    pub asset: Option<std::path::PathBuf>,
 }
 
 impl Control for Image {
@@ -30,6 +37,19 @@ impl Control for Image {
             side,
             side,
         );
+        // A ready preview wins; the tint is dropped with it, because a
+        // thumbnail carries real colour and tinting it would wash it out.
+        if let Some(uv) = self
+            .asset
+            .as_deref()
+            .and_then(|p| ctx.thumbnails.uv(p))
+        {
+            ctx.push_primitive(
+                crate::primitive::Primitive::textured(rect, uv, [255, 255, 255, 255]),
+                Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),
+            );
+            return;
+        }
         let (uv, tex) = self.icon.draw_quad(rect);
         ctx.push_textured_rect(rect, uv, self.tint, tex);
     }
@@ -46,6 +66,7 @@ impl Control for Image {
 pub struct ImageBuilder {
     widget: WidgetBuilder,
     icon: IconId,
+    asset: Option<std::path::PathBuf>,
     tint: [u8; 4],
     size: f32,
 }
@@ -55,12 +76,19 @@ impl ImageBuilder {
         Self {
             widget,
             icon: IconId::Unknown,
+            asset: None,
             tint: crate::theme::TEXT_PRIMARY,
             size: 16.0,
         }
     }
     pub fn with_icon(mut self, icon: IconId) -> Self {
         self.icon = icon;
+        self
+    }
+
+    /// Draw this asset's preview when one exists, falling back to the icon.
+    pub fn with_asset(mut self, asset: std::path::PathBuf) -> Self {
+        self.asset = Some(asset);
         self
     }
     pub fn with_tint(mut self, tint: [u8; 4]) -> Self {
@@ -76,6 +104,7 @@ impl ImageBuilder {
             self.widget.build(),
             Box::new(Image {
                 icon: self.icon,
+                asset: self.asset,
                 tint: self.tint,
                 size: self.size,
             }),
@@ -93,6 +122,7 @@ mod tests {
     #[test]
     fn image_measures_to_requested_size() {
         let img = Image {
+            asset: None,
             icon: IconId::Play,
             tint: [255, 255, 255, 255],
             size: 20.0,

@@ -16,6 +16,7 @@ pub mod pool;
 pub mod runtime;
 pub mod style;
 pub mod theme;
+pub mod thumbnail;
 pub mod types;
 pub mod typography;
 pub mod ui;
@@ -511,11 +512,13 @@ pub struct LightInspectorState {
 
 struct EditorLayout {
     outliner_scroll: NodeHandle,
+    outliner_empty: NodeHandle,
     outliner_stack: NodeHandle,
     inspector_stack: NodeHandle,
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
     log_stack: NodeHandle,
+    log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
     create_popup_items: Vec<(NodeHandle, CreateKind)>,
@@ -540,6 +543,9 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: InspectorHandles,
     viewport_handle: NodeHandle,
+    /// Selection readout floating over the render, bottom-left.
+    vp_overlay: NodeHandle,
+    vp_overlay_text: NodeHandle,
     /// Phase 29 profiler overlay.
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
@@ -657,6 +663,13 @@ pub struct UiManager {
     inspector_stack: NodeHandle,
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
+    /// Shown when the scene has no entities.
+    outliner_empty: NodeHandle,
+    /// Shown when nothing has been logged yet.
+    log_empty: NodeHandle,
+    /// Selection readout floating over the render.
+    vp_overlay: NodeHandle,
+    vp_overlay_text: NodeHandle,
     log_stack: NodeHandle,
     log_entry_count: usize,
     // Create menu
@@ -1050,6 +1063,10 @@ impl UiManager {
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
             details_empty: layout.details_empty,
+            outliner_empty: layout.outliner_empty,
+            log_empty: layout.log_empty,
+            vp_overlay: layout.vp_overlay,
+            vp_overlay_text: layout.vp_overlay_text,
             log_stack: layout.log_stack,
             log_entry_count: 0,
             create_button: layout.create_button,
@@ -1222,6 +1239,10 @@ impl UiManager {
         // overlap. Seed the empty one.
         this.native_ui.set_visibility(this.inspector_stack, false);
         this.native_ui.set_visibility(this.details_empty, true);
+        // The Outliner is repopulated on the first frame and flips itself; the
+        // log has nothing until something logs.
+        this.native_ui.set_visibility(this.log_stack, false);
+        this.native_ui.set_visibility(this.log_empty, true);
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
         this.apply_collapse_rules(this.window_size.0);
@@ -1401,6 +1422,12 @@ impl UiManager {
         // no previous timestamp and therefore advances nothing, and a tick with
         // no live tracks returns false without touching the tree — which is what
         // keeps an idle shell's draw list byte-identical.
+        // Phase 27-G. Decode a bounded number of previews per frame, so
+        // opening a folder of textures costs a predictable slice rather than an
+        // unpredictable stall. Anything the engine must render is handed to the
+        // host through `take_thumbnail_requests`.
+        self.native_ui.draw_ctx.thumbnails.pump();
+
         let now = std::time::Instant::now();
         if let Some(previous) = self.last_frame_at {
             let dt_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
@@ -1602,6 +1629,18 @@ impl UiManager {
             self.status_selection,
             name.unwrap_or("No selection"),
         ));
+
+        // Phase 27-G. The same fact, shown where the eye already is. Hidden
+        // entirely when nothing is selected rather than reading "No selection"
+        // twice — an overlay that is always on stops being an overlay.
+        match name {
+            Some(n) => {
+                self.native_ui
+                    .send(TextMessage::set_text(self.vp_overlay_text, n));
+                self.native_ui.set_visibility(self.vp_overlay, true);
+            }
+            None => self.native_ui.set_visibility(self.vp_overlay, false),
+        }
     }
 
     /// Right-hand statistics cluster. Object count is what the editor can
@@ -2635,6 +2674,26 @@ impl UiManager {
         &self.content_selection
     }
 
+    /// Previews the engine must render, drained for the host to fulfil.
+    ///
+    /// `somnium_ui` decodes images itself but owns no renderer, so meshes and
+    /// scenes are requests. The host answers with [`Self::deliver_thumbnail`]
+    /// or [`Self::fail_thumbnail`]; an unanswered request leaves the tile on
+    /// its type icon, which is a correct resting state rather than a bug.
+    pub fn take_thumbnail_requests(&mut self) -> Vec<crate::thumbnail::ThumbnailRequest> {
+        self.native_ui.draw_ctx.thumbnails.take_requests()
+    }
+
+    /// Supply a rendered preview: `CELL * CELL` RGBA8.
+    pub fn deliver_thumbnail(&mut self, path: &std::path::Path, rgba: &[u8]) -> bool {
+        self.native_ui.draw_ctx.thumbnails.deliver(path, rgba)
+    }
+
+    /// Record that a preview could not be produced, so it is not retried.
+    pub fn fail_thumbnail(&mut self, path: &std::path::Path) {
+        self.native_ui.draw_ctx.thumbnails.mark_failed(path);
+    }
+
     fn refresh_content_list(&mut self) {
         let root = std::env::current_dir().unwrap_or_default().join("assets");
         let current = if self.content_path.is_empty() {
@@ -2693,6 +2752,12 @@ impl UiManager {
                     .with_orientation(Orientation::Vertical)
                     .build();
             let col_h = self.native_ui.add_node(col, bh);
+            // Phase 27-G. Ask for a preview; the tile shows its type icon until
+            // one arrives, and forever if none can be made. `request` is
+            // idempotent, so the drawer's per-frame rebuild costs a lookup.
+            if !entry.is_dir && !entry.is_engine {
+                self.native_ui.draw_ctx.thumbnails.request(&entry.path);
+            }
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
                     .with_width(tile_w)
@@ -2705,6 +2770,7 @@ impl UiManager {
                     }),
             )
             .with_icon(entry.icon)
+            .with_asset(entry.path.clone())
             .with_size(icon_px)
             .with_tint(if entry.is_dir {
                 theme::FOLDER_SAND
@@ -2975,6 +3041,13 @@ impl UiManager {
                 expanded: expanded || self.outliner_expanded.contains(&id),
             });
         }
+        // Phase 27-G: an empty scene says so rather than showing a blank panel.
+        let has_entities = !items.is_empty();
+        self.native_ui
+            .set_visibility(self.outliner_tree, has_entities);
+        self.native_ui
+            .set_visibility(self.outliner_empty, !has_entities);
+
         self.outliner_rows = items.iter().map(|i| (self.outliner_tree, i.id)).collect();
         // Mirror the rows so the palette can offer them without reaching into
         // the widget tree.
@@ -3829,6 +3902,12 @@ impl UiManager {
         .build();
         let log_stack = self.log_stack;
         self.native_ui.add_node(entry, log_stack);
+        // The first line retires the empty state; it never comes back, because
+        // the log is append-only for the session.
+        if self.log_entry_count == 1 {
+            self.native_ui.set_visibility(self.log_empty, false);
+            self.native_ui.set_visibility(self.log_stack, true);
+        }
         self.log_entry_count += 1;
     }
 
