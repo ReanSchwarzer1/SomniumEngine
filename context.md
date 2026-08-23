@@ -159,6 +159,22 @@
 >   (`InstanceUpgrader.cs`, `UpdateReferences.cs`) is why **§14.11 now warns that
 >   shader and asset hot reload are easy only because their live state is a
 >   handle table**, and code reload is a different, much harder feature.
+>   **Both `phase_CONTROL.md` and `phase_MORROWIND.md` gained an Appendix A
+>   (2026-08-23) so either can be handed to a cold session or a different
+>   model.** Each carries a code-reading order over the real tree with line
+>   counts, Rust and WGSL sketches written against the *actual* types in
+>   `reflect.rs` / `primitive.rs`, a file-by-file change map, and a
+>   "how to tell this is genuinely finished" table. CONTROL's A.2 walks
+>   `WaterComponent::roughness` end to end — schema → generated panel →
+>   one `EditorEvent` → one `app.rs` handler → scope-aware undo → disk — which is
+>   the fastest way to understand Seam 1. MORROWIND's A.5 names the three
+>   integrations that carry real risk (skinning vs the visibility buffer, the
+>   shaper vs Phase 27's frozen snapping rule, prefabs vs `scene_schema`).
+>   **One cross-document conflict is resolved in both files:** CONTROL Seam 2's
+>   `JobRegistry` in `somnium_core` and MORROWIND-B's `somnium_jobs` are the
+>   same system — MORROWIND **promotes** CONTROL's rather than writing a second,
+>   and CONTROL should keep its surface narrow and name every job at the call
+>   site to make that a rename rather than a rewrite.
 >   §9.3 names the honest cut if the whole thing cannot be run: **eleven
 >   sub-phases** (Track 0, then D+E+G, U+V, Q+R, AE+AG), which closes seven of
 >   the nine rows in §5.1's capability table. §16 records source confidence and
