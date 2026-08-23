@@ -9,6 +9,7 @@ pub mod font;
 pub mod icon_svg;
 pub mod icons;
 pub mod layout_persist;
+pub mod log;
 pub mod message;
 pub mod metaphor;
 pub mod motion;
@@ -389,6 +390,12 @@ struct EditorLayout {
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
     log_stack: NodeHandle,
+    log_severity_chips: Vec<(NodeHandle, crate::log::LogSeverity)>,
+    log_search: NodeHandle,
+    log_pin_only: NodeHandle,
+    log_copy: NodeHandle,
+    log_clear: NodeHandle,
+    log_jobs_toggle: NodeHandle,
     log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
@@ -427,6 +434,7 @@ struct EditorLayout {
     status_dirty: NodeHandle,
     status_selection: NodeHandle,
     status_stats: NodeHandle,
+    status_stats_button: NodeHandle,
     /// Floating viewport-context scope; a child of the viewport, not a grid row.
     /// Held for the layout regression test that pins the 68 px scene budget.
     #[allow(dead_code)]
@@ -543,7 +551,12 @@ pub struct UiManager {
     vp_overlay: NodeHandle,
     vp_overlay_text: NodeHandle,
     log_stack: NodeHandle,
-    log_entry_count: usize,
+    log_severity_chips: Vec<(NodeHandle, crate::log::LogSeverity)>,
+    log_search: NodeHandle,
+    log_pin_only: NodeHandle,
+    log_copy: NodeHandle,
+    log_clear: NodeHandle,
+    log_jobs_toggle: NodeHandle,
     // Create menu
     create_button: NodeHandle,
     create_popup: NodeHandle,
@@ -613,6 +626,7 @@ pub struct UiManager {
     status_dirty: NodeHandle,
     status_selection: NodeHandle,
     status_stats: NodeHandle,
+    status_stats_button: NodeHandle,
     /// Value each inspector field held at the last baseline reset — a scene
     /// load, a save, or a change of selection. The modified dot lights when the
     /// live value differs from this, and reverting writes it back.
@@ -729,7 +743,22 @@ pub struct UiManager {
     /// meaning once the panel is resized.
     content_selection: std::collections::HashSet<std::path::PathBuf>,
     outliner_expanded: std::collections::HashSet<u32>,
-    log_lines: VecDeque<String>,
+    /// The structured log. Replaced the flat `VecDeque<String>` in CONTROL-I:
+    /// a severity chip, a category filter and a clickable `file:line` all need
+    /// facts a string does not carry. The policy lives in `crate::log` so it
+    /// is testable without a GPU device; this holds only the widget side.
+    log: crate::log::OutputLog,
+    /// `(row, entry id)` for the rows currently mounted.
+    log_rows: Vec<(NodeHandle, u64)>,
+    /// Showing the job list instead of the log.
+    log_jobs_view: bool,
+    /// How many error toasts are waiting to be dismissed. Mirrored here
+    /// because the host owns them and `Esc` needs the answer synchronously.
+    sticky_toasts: usize,
+    /// Seconds since the editor started, for timestamps.
+    log_clock: std::time::Instant,
+    /// Background jobs, as the status surface last reported them.
+    job_rows: Vec<(u64, String, f32, bool)>,
     edit_popup_open: bool,
     view_popup_open: bool,
     window_popup_open: bool,
@@ -1073,7 +1102,12 @@ impl UiManager {
             vp_overlay: layout.vp_overlay,
             vp_overlay_text: layout.vp_overlay_text,
             log_stack: layout.log_stack,
-            log_entry_count: 0,
+            log_severity_chips: layout.log_severity_chips,
+            log_search: layout.log_search,
+            log_pin_only: layout.log_pin_only,
+            log_copy: layout.log_copy,
+            log_clear: layout.log_clear,
+            log_jobs_toggle: layout.log_jobs_toggle,
             create_button: layout.create_button,
             create_popup: layout.create_popup,
             create_popup_open: false,
@@ -1121,6 +1155,7 @@ impl UiManager {
             status_dirty: layout.status_dirty,
             status_selection: layout.status_selection,
             status_stats: layout.status_stats,
+            status_stats_button: layout.status_stats_button,
             generated_root: NodeHandle::NONE,
             generated_entity: None,
             generated_signature: Vec::new(),
@@ -1215,7 +1250,12 @@ impl UiManager {
             content_sort_descending: false,
             content_selection: std::collections::HashSet::new(),
             outliner_expanded: std::collections::HashSet::new(),
-            log_lines: VecDeque::new(),
+            log: crate::log::OutputLog::default(),
+            log_rows: Vec::new(),
+            log_jobs_view: false,
+            sticky_toasts: 0,
+            log_clock: std::time::Instant::now(),
+            job_rows: Vec::new(),
             edit_popup_open: false,
             view_popup_open: false,
             window_popup_open: false,
@@ -1699,11 +1739,22 @@ impl UiManager {
                         self.native_ui.set_modifiers(modifiers);
                     }
                     KeyCode::Escape if pressed => {
-                        // A viewport rubber-band is the outermost gesture and
-                        // is cancelled first, ahead of drags, control gestures
-                        // and every overlay — the same precedence CONTROL-A1
-                        // gave `Esc` and CONTROL-E kept.
+                        // `Esc` runs outermost-first, which is the precedence
+                        // CONTROL-A1 established and every sub-phase since has
+                        // extended rather than rearranged:
+                        //
+                        //   a pending rebind · a persistent error toast ·
+                        //   a viewport rubber-band · a drag or control gesture ·
+                        //   the overlay stack.
+                        //
+                        // A rebind is first because it is *listening* — every
+                        // other key would be swallowed by it. An error toast is
+                        // next because it is the one overlay that outlives the
+                        // action that raised it, so nothing else will remove it.
                         if self.rebinding.take().is_some() {
+                            return true;
+                        }
+                        if self.dismiss_toast() {
                             return true;
                         }
                         if self.marquee_active {
@@ -2068,14 +2119,44 @@ impl UiManager {
         self.viewport_drop_probe = (entity, terrain_hit);
     }
 
+    /// Raise a transient toast, and mirror it into the status text.
+    ///
+    /// A toast whose text reads as a failure becomes a *sticky* one, which is
+    /// CONTROL-I's rule: errors persist until dismissed. Inferring it from the
+    /// text rather than adding a severity argument keeps the seventy-odd
+    /// existing call sites correct without touching one of them, and uses the
+    /// same `LogSeverity::infer` the Output Log already trusts.
     pub fn push_toast(&mut self, text: &str) {
+        let error = crate::log::LogSeverity::infer(text) == crate::log::LogSeverity::Error;
         self.native_ui.send(UiMessage::new(
             self.toast_host,
             MessageDirection::ToWidget,
-            ToastMessage::Push(text.to_string()),
+            if error {
+                self.sticky_toasts += 1;
+                ToastMessage::PushError(text.to_string())
+            } else {
+                ToastMessage::Push(text.to_string())
+            },
         ));
         self.native_ui
             .send(TextMessage::set_text(self.status_text, text.to_string()));
+    }
+
+    /// Dismiss the oldest sticky toast, reporting whether there was one.
+    ///
+    /// The boolean matters: `Esc` must fall through to the rest of the chain
+    /// when there is no error to dismiss, or it would stop closing popups.
+    pub fn dismiss_toast(&mut self) -> bool {
+        if self.sticky_toasts == 0 {
+            return false;
+        }
+        self.sticky_toasts -= 1;
+        self.native_ui.send(UiMessage::new(
+            self.toast_host,
+            MessageDirection::ToWidget,
+            ToastMessage::DismissOldest,
+        ));
+        true
     }
 
     /// Show the highest-priority active job and expose cancellation.
@@ -4903,39 +4984,229 @@ impl UiManager {
         }
     }
 
-    /// Append a line to the output log panel (ring buffer, max 200).
+    /// Append a line to the Output Log.
+    ///
+    /// The ring buffer is still 200 entries, but pinned lines are exempt: a
+    /// line you deliberately kept should not be evicted by two hundred lines
+    /// of import chatter arriving behind it.
     pub fn append_log(&mut self, text: &str) {
-        const MAX: usize = 200;
-        self.log_lines.push_back(text.to_string());
-        if self.log_lines.len() > MAX {
-            self.log_lines.pop_front();
-            let first = self.native_ui.first_child(self.log_stack);
-            if first.is_some() {
-                self.native_ui.remove_node(first);
-            }
-            self.log_entry_count = self.log_entry_count.saturating_sub(1);
+        self.log
+            .append(self.log_clock.elapsed().as_secs_f64(), text);
+        self.rebuild_log_rows();
+    }
+
+    /// The Output Log's state.
+    #[must_use]
+    pub fn log(&self) -> &crate::log::OutputLog {
+        &self.log
+    }
+
+    /// Background jobs, for the Jobs view. `(id, label, progress, failed)`.
+    pub fn set_job_rows(&mut self, rows: Vec<(u64, String, f32, bool)>) {
+        if self.job_rows == rows {
+            return;
+        }
+        self.job_rows = rows;
+        if self.log_jobs_view {
+            self.rebuild_log_rows();
+        }
+    }
+
+    /// Show the first error, opening the panel and filtering to errors.
+    ///
+    /// This is what the status bar's "N script errors" clicks through to. It
+    /// filters rather than merely scrolling, because a lone error thirty lines
+    /// up in a busy log is not findable by scrolling to it.
+    pub fn reveal_first_error(&mut self) {
+        self.log_jobs_view = false;
+        self.log.reveal_errors();
+        if !self.log_open {
+            self.toggle_log_panel();
+        }
+        self.rebuild_log_rows();
+    }
+
+    /// Rebuild the panel from the model.
+    ///
+    /// Wholesale rather than incrementally: the list is bounded at 200 rows,
+    /// a filter change invalidates all of them anyway, and an incremental path
+    /// would be a second place for the view and the model to disagree.
+    fn rebuild_log_rows(&mut self) {
+        for (row, _) in std::mem::take(&mut self.log_rows) {
+            self.native_ui.remove_node(row);
         }
         let font_id = self.font_id;
-        let entry = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 8.0,
-            top: 1.0,
-            right: 0.0,
-            bottom: 0.0,
-        }))
-        .with_text(text)
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
-        let log_stack = self.log_stack;
-        self.native_ui.add_node(entry, log_stack);
-        // The first line retires the empty state; it never comes back, because
-        // the log is append-only for the session.
-        if self.log_entry_count == 1 {
-            self.native_ui.set_visibility(self.log_empty, false);
-            self.native_ui.set_visibility(self.log_stack, true);
+        let stack = self.log_stack;
+        let mut rows = Vec::new();
+
+        if self.log_jobs_view {
+            for (id, label, progress, failed) in self.job_rows.clone() {
+                let text = if failed {
+                    format!("{label} — failed")
+                } else if progress >= 1.0 {
+                    format!("{label} — done")
+                } else {
+                    format!("{label} — {:.0}%", progress * 100.0)
+                };
+                let node =
+                    TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
+                        .with_text(&text)
+                        .with_font_size(11.0)
+                        .with_font_id(font_id)
+                        .with_color(if failed {
+                            theme::active().semantic.status.error.bytes()
+                        } else {
+                            theme::TEXT_SECONDARY
+                        })
+                        .build();
+                rows.push((self.native_ui.add_node(node, stack), id));
+            }
+        } else {
+            let visible: Vec<_> = self.log.visible().into_iter().cloned().collect();
+            for entry in visible {
+                // A line carrying a source reference is a button, so it can be
+                // clicked; a line without one is text, so it cannot pretend to
+                // be. Craft: a link that does nothing teaches people not to
+                // click links.
+                let colour = match entry.severity {
+                    crate::log::LogSeverity::Error => theme::active().semantic.status.error.bytes(),
+                    crate::log::LogSeverity::Warn => {
+                        theme::active().semantic.status.warning.bytes()
+                    }
+                    crate::log::LogSeverity::Debug => theme::TEXT_DISABLED,
+                    crate::log::LogSeverity::Info => theme::TEXT_PRIMARY,
+                };
+                let label = format!("{:>7.2}s  {}", entry.timestamp, entry.text);
+                let row = if entry.sources.is_empty() {
+                    let node = TextBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)),
+                    )
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(font_id)
+                    .with_color(colour)
+                    .build();
+                    self.native_ui.add_node(node, stack)
+                } else {
+                    let button = ButtonBuilder::new(
+                        WidgetBuilder::new()
+                            .with_height(15.0)
+                            .with_tooltip(&format!(
+                                "Open {}:{}",
+                                entry.sources[0].file, entry.sources[0].line
+                            ))
+                            .with_background(theme::TRANSPARENT),
+                    )
+                    .build();
+                    let button = self.native_ui.add_node(button, stack);
+                    let node = TextBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)),
+                    )
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(font_id)
+                    .with_color(theme::active().semantic.accent.default.bytes())
+                    .build();
+                    self.native_ui.add_node(node, button);
+                    button
+                };
+                rows.push((row, entry.id));
+            }
         }
-        self.log_entry_count += 1;
+
+        let empty = rows.is_empty();
+        self.log_rows = rows;
+        self.native_ui.set_visibility(self.log_empty, empty);
+        self.native_ui.set_visibility(self.log_stack, !empty);
+        for (chip, severity) in self.log_severity_chips.clone() {
+            self.native_ui.send(ButtonMessage::set_selected(
+                chip,
+                self.log.filter.severities.contains(&severity),
+            ));
+        }
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_pin_only,
+            self.log.filter.pinned_only,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_jobs_toggle,
+            self.log_jobs_view,
+        ));
+        self.native_ui.invalidate_ancestors(self.log_stack);
+    }
+
+    /// Everything the Output Log's toolbar and rows do with a message.
+    fn handle_log_message(&mut self, msg: &UiMessage) -> bool {
+        if msg.destination == self.log_search
+            && let Some(SearchBoxMessage::Query(query)) = msg.data::<SearchBoxMessage>()
+        {
+            self.log.filter.search = query.clone();
+            self.rebuild_log_rows();
+            return true;
+        }
+        if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            return false;
+        }
+        if let Some((_, severity)) = self
+            .log_severity_chips
+            .iter()
+            .find(|(chip, _)| *chip == msg.destination)
+            .copied()
+        {
+            self.log.filter.toggle(severity);
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.status_stats_button {
+            self.reveal_first_error();
+            return true;
+        }
+        if msg.destination == self.log_pin_only {
+            self.log.filter.pinned_only = !self.log.filter.pinned_only;
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_jobs_toggle {
+            self.log_jobs_view = !self.log_jobs_view;
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_clear {
+            // Pinned lines survive Clear. That is the whole point of a pin.
+            self.log.clear();
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_copy {
+            let text = self.log.copy_text();
+            self.editor_events.push_back(EditorEvent::CopyText(text));
+            self.push_toast("Copied the visible log");
+            return true;
+        }
+        // A row with a source reference. `command()`-click pins instead of
+        // opening, so the two useful things a log line can do are one gesture
+        // apart rather than behind a menu.
+        if let Some((_, id)) = self
+            .log_rows
+            .iter()
+            .find(|(row, _)| *row == msg.destination)
+            .copied()
+        {
+            if self.native_ui.modifiers().command() {
+                self.log.toggle_pin(id);
+                self.rebuild_log_rows();
+                return true;
+            }
+            if let Some(source) = self.log.source_of(id).cloned() {
+                self.editor_events.push_back(EditorEvent::OpenSource {
+                    file: source.file,
+                    line: source.line,
+                    column: source.column.unwrap_or(1),
+                });
+            }
+            return true;
+        }
+        false
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
@@ -4965,6 +5236,9 @@ impl UiManager {
                 continue;
             }
             if self.handle_snap_message(&msg) {
+                continue;
+            }
+            if self.handle_log_message(&msg) {
                 continue;
             }
             if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))

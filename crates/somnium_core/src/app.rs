@@ -954,6 +954,41 @@ impl<G: GameApp> Engine<G> {
         (panels, overrides)
     }
 
+    /// Show a file in the OS file browser.
+    ///
+    /// The fallback when no external editor is configured. It cannot open at
+    /// the line — no file browser can — which is exactly why the setting
+    /// exists and why the Preferences row for it says so.
+    fn reveal_in_file_browser(&mut self, file: &str) {
+        let path = std::path::Path::new(file);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.config.content_root.join(path)
+        };
+        let target = if path.exists() {
+            path
+        } else {
+            let Some(parent) = path.parent().map(std::path::Path::to_path_buf) else {
+                return;
+            };
+            parent
+        };
+        let launched = if cfg!(target_os = "windows") {
+            std::process::Command::new("explorer").arg(&target).spawn()
+        } else if cfg!(target_os = "macos") {
+            std::process::Command::new("open").arg(&target).spawn()
+        } else {
+            std::process::Command::new("xdg-open").arg(&target).spawn()
+        };
+        if let Err(error) = launched {
+            warn!(%error, "could not reveal the file");
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.push_toast("Could not reveal the file");
+            }
+        }
+    }
+
     /// Resolve a settings field by name. `None` for a stale address, so a
     /// renamed setting makes a control inert rather than panicking.
     fn settings_field_id(
@@ -3398,6 +3433,27 @@ impl<G: GameApp> Engine<G> {
                 })
                 .collect();
             ui.update_jobs(&status);
+            // CONTROL-I: the same jobs, in a panel rather than a chip, so a
+            // cancelled or failed import is inspectable after the chip has
+            // gone. `progress >= 1.0` reads as done; a failed job reports
+            // itself rather than simply disappearing.
+            ui.set_job_rows(
+                active
+                    .iter()
+                    .rev()
+                    .map(|job| {
+                        (
+                            job.id,
+                            job.name.to_string(),
+                            job.progress,
+                            matches!(
+                                job.status,
+                                crate::jobs::JobStatus::Failed | crate::jobs::JobStatus::Cancelled
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
         }
         self.jobs.prune_finished();
     }
@@ -5133,6 +5189,50 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::OpenSource { file, line, column } => {
+                let source = somnium_ui::log::SourceRef {
+                    file: file.clone(),
+                    line,
+                    column: Some(column),
+                    span: (0, 0),
+                };
+                let template = self.settings.project().external_editor.clone();
+                // A configured editor opens at the line — the detail §17.18.6
+                // says is the part that matters. Without one the file is
+                // revealed instead, because silently doing nothing is how a
+                // clickable link becomes a thing people stop clicking.
+                match somnium_ui::log::external_editor_command(&template, &source) {
+                    Some(parts) => {
+                        let (program, arguments) = parts.split_first().expect("non-empty");
+                        match std::process::Command::new(program).args(arguments).spawn() {
+                            Ok(_) => {}
+                            Err(error) => {
+                                warn!(%error, "external editor failed to start");
+                                if let Some(ui) = self.ui_manager.as_mut() {
+                                    ui.push_toast("External editor failed to start");
+                                }
+                                self.reveal_in_file_browser(&file);
+                            }
+                        }
+                    }
+                    None => self.reveal_in_file_browser(&file),
+                }
+            }
+
+            EditorEvent::CopyText(text) => match copy_to_clipboard(&text) {
+                Ok(()) => {
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast("Copied");
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "clipboard write failed");
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast("Could not reach the clipboard");
+                    }
+                }
+            },
+
             EditorEvent::CancelMarquee => {
                 self.marquee = None;
                 if let Some(ui) = self.ui_manager.as_mut() {
@@ -6798,6 +6898,48 @@ fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> 
         tags.push("script");
     }
     tags
+}
+
+/// The platform command that reads stdin onto the clipboard.
+///
+/// A shell-out rather than a dependency. Every desktop this editor runs on
+/// ships one of these three, and adding a crate — with its own X11/Wayland
+/// backends and its own thread — to move a few hundred bytes of log text
+/// would be a poor trade. Returned as data so the choice is testable without
+/// actually spawning anything.
+fn clipboard_command() -> (&'static str, &'static [&'static str]) {
+    if cfg!(target_os = "windows") {
+        ("cmd", &["/C", "clip"])
+    } else if cfg!(target_os = "macos") {
+        ("pbcopy", &[])
+    } else {
+        // `-selection clipboard`, because the default is the middle-click
+        // primary selection, which is not what "Copy" means to anyone.
+        ("xclip", &["-selection", "clipboard"])
+    }
+}
+
+/// Put `text` on the system clipboard.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    let (program, arguments) = clipboard_command();
+    let mut child = std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "clipboard helper refused stdin".to_string())?
+        .write_all(text.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("clipboard helper exited with {status}"))
+    }
 }
 
 /// Slab-test a ray against a local-space AABB, returning the nearest positive

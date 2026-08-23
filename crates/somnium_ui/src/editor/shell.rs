@@ -1098,6 +1098,80 @@ pub(crate) fn build_editor_layout(
     .build();
     ui.add_node(log_header, log_hdr_h);
 
+    // ── CONTROL-I: the log's own toolbar ────────────────────────────────────
+    //
+    // In the header rather than a second row because the panel is short and
+    // Zeta's budget is tight; four chips, a search box and three verbs fit
+    // beside a title, and a second 22 px band would cost a line of log.
+    let log_tools = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Right)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let log_tools = ui.add_node(log_tools, log_hdr_h);
+
+    let mut log_severity_chips = Vec::new();
+    for severity in crate::log::LogSeverity::ALL {
+        let (chip, _) = labeled_icon_button(
+            ui,
+            log_tools,
+            IconId::Filter,
+            severity.label(),
+            "Show or hide this severity.",
+            font_id,
+            18.0,
+        );
+        log_severity_chips.push((chip, severity));
+    }
+    let log_search = ui.add_node(
+        SearchBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(160.0)
+                .with_margin(Thickness::axes(6.0, 1.0)),
+        )
+        .with_font_id(font_id)
+        .build(),
+        log_tools,
+    );
+    let (log_pin_only, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Visibility,
+        "Pinned",
+        "Show only pinned lines.",
+        font_id,
+        18.0,
+    );
+    let (log_copy, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Duplicate,
+        "Copy",
+        "Copy the visible lines.",
+        font_id,
+        18.0,
+    );
+    let (log_clear, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Delete,
+        "Clear",
+        "Clear the log. Pinned lines survive.",
+        font_id,
+        18.0,
+    );
+    let (log_jobs_toggle, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Import,
+        "Jobs",
+        "Background jobs, including failed and cancelled ones.",
+        font_id,
+        18.0,
+    );
+
     let log_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
             .with_row(1)
@@ -1229,16 +1303,28 @@ pub(crate) fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let status_stats_stack_h = ui.add_node(status_stats_stack, status_grid_h);
+    // CONTROL-I: the cluster is a button, because "N script errors" is the one
+    // thing in it that needs acting on and a count you cannot click through to
+    // is a count that makes you go looking.
+    let status_stats_button = ui.add_node(
+        ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_tooltip("Scene objects and frame rate. Click to show the first error.")
+                .with_background(theme::TRANSPARENT),
+        )
+        .build(),
+        status_stats_stack_h,
+    );
     let status_stats_n = TextBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_margin(Thickness::axes(10.0, 0.0))
-            .with_tooltip("Scene objects and frame rate"),
+            .with_margin(Thickness::axes(10.0, 0.0)),
     )
     .with_role(TextRole::Mono)
     .with_text("— objects · — fps")
     .build();
-    let status_stats = ui.add_node(status_stats_n, status_stats_stack_h);
+    let status_stats = ui.add_node(status_stats_n, status_stats_button);
 
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
@@ -1475,6 +1561,12 @@ pub(crate) fn build_editor_layout(
         details_empty,
         log_stack,
         log_empty,
+        log_severity_chips,
+        log_search,
+        log_pin_only,
+        log_copy,
+        log_clear,
+        log_jobs_toggle,
         create_button,
         create_popup,
         create_popup_items,
@@ -1516,6 +1608,7 @@ pub(crate) fn build_editor_layout(
         status_dirty,
         status_selection,
         status_stats,
+        status_stats_button,
         vp_bar_h,
         snap_cluster,
         snap_grid_combo,

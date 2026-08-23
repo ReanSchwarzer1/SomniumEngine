@@ -21,10 +21,10 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_AERIAL_HERO` | `crates/somnium_renderer/src/renderer.rs:837` | Aerial hero | bool | off (unset/other) | command | `editor.view.pipeline.aerial_hero` |
 | `SOMNIUM_AERIAL_SPLIT` | `crates/somnium_renderer/src/pass/classify.rs:245` | SOMNIUM_AERIAL_SPLIT exists for one specific job: pushing it past the far plane makes every terrain tile take the near (full) pipeline, which turns the binned path into an exact re… | text/selector | 150.0 | harness | Forces every terrain tile onto the near pipeline for an A/B timing run. |
 | `SOMNIUM_ANALYTIC_GRAD` | `crates/somnium_core/src/lib.rs:930` | Analytic grad | bool | on (unset/other) | schema | `somnium.PostProcess.analytic_grad` |
-| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1287` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
+| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1327` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
 | `SOMNIUM_AUDIT_LOG` | `crates/somnium_renderer/src/renderer.rs:3889` | Audit log | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: where the renderer audit log is written. |
 | `SOMNIUM_AUDIT_SELECT_ENTITY` | `examples/hello_engine/src/main.rs:1369` | Audit select entity | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which entity to select before capture. |
-| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1325` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
+| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1365` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
 | `SOMNIUM_AUDIT_WINDOW_SIZE` | `examples/hello_engine/src/main.rs:2718` | Audit window size | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: the exact logical size to capture at. |
 | `SOMNIUM_AUDIT_YAW_JUMP_DEGREES` | `examples/hello_engine/src/main.rs:1691` | Audit yaw jump degrees | float | 1.0 | harness | Recorded fast-camera repro: the yaw step to inject. |
 | `SOMNIUM_AUDIT_YAW_JUMP_FRAME` | `examples/hello_engine/src/main.rs:1686` | Audit yaw jump frame | integer | unset / source-defined fallback | harness | Recorded fast-camera repro: the frame to inject it on. |
@@ -61,7 +61,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_LIGHT_SHAFTS` | `crates/somnium_core/src/lib.rs:884` | Light shafts | bool | on (unset/other) | schema | `somnium.PostProcess.light_shafts` |
 | `SOMNIUM_LOD_MORPH` | `crates/somnium_renderer/src/terrain/mod.rs:510` | Lod morph | bool | off (unset/other) | command | `editor.view.pipeline.terrain_lod_morph` |
 | `SOMNIUM_MAP` | `examples/hello_engine/src/main.rs:354` | Map | path/text | unset / source-defined fallback | harness | Startup scene for a headless run; the editor route is File > Open. |
-| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1641` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
+| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1676` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
 | `SOMNIUM_MESH_SDF` | `crates/somnium_core/src/lib.rs:927` | Mesh sdf | bool | off (unset/other) | schema | `somnium.PostProcess.mesh_sdf` |
 | `SOMNIUM_MOTION_BLUR` | `crates/somnium_core/src/lib.rs:880` | Motion blur | bool | off (unset/other) | schema | `somnium.PostProcess.motion_blur_enabled` |
 | `SOMNIUM_NO_MESHLETS` | `crates/somnium_renderer/src/renderer.rs:805` | No meshlets | bool | unset / source-defined fallback | command | `editor.view.pipeline.meshlets` |

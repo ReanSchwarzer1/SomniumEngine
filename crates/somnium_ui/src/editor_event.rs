@@ -203,6 +203,15 @@ pub enum EditorEvent {
     },
     /// Restore every setting to its declared default.
     ResetAllSettings,
+    /// Open a source file at a line in the configured external editor, or
+    /// reveal it in the OS file browser when none is configured.
+    OpenSource {
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    /// Put text on the system clipboard.
+    CopyText(String),
     /// Write a setting addressed by field *name*.
     ///
     /// The by-`FieldId` form is what a generated row emits, because it already
