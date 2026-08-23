@@ -260,6 +260,63 @@ impl UndoStack {
         !self.redo_stack.is_empty()
     }
 
+    /// The history as a list, oldest first, with the current position.
+    ///
+    /// CONTROL-J's history panel, following Flax's `History`. Entries are
+    /// named after what changed — "Set wave_height", not "Change" — because a
+    /// list of twenty rows all reading "Change" is not a history, it is a
+    /// count.
+    ///
+    /// The position is the number of *executed* commands: index `0` is the
+    /// state before anything happened, and index `n` is the state after the
+    /// `n`th entry.
+    #[must_use]
+    pub fn history(&self) -> (Vec<&str>, usize) {
+        let mut names: Vec<&str> = self
+            .executed
+            .iter()
+            .map(|command| command.description())
+            .collect();
+        // The redo stack is stored newest-first, so it reads backwards.
+        names.extend(
+            self.redo_stack
+                .iter()
+                .rev()
+                .map(|command| command.description()),
+        );
+        let position = self.executed.len();
+        (names, position)
+    }
+
+    /// Move to a position in the history, undoing or redoing as needed.
+    ///
+    /// Returns how many steps were taken. A target beyond either end is
+    /// clamped rather than refused: a click on the last row of a list that
+    /// shrank under you should land on the end, not do nothing.
+    pub fn jump_to(
+        &mut self,
+        target: usize,
+        world: &mut World,
+        selected: &mut Option<Entity>,
+    ) -> usize {
+        let total = self.executed.len() + self.redo_stack.len();
+        let target = target.min(total);
+        let mut steps = 0;
+        while self.executed.len() > target {
+            if !self.undo(world, selected) {
+                break;
+            }
+            steps += 1;
+        }
+        while self.executed.len() < target {
+            if !self.redo(world, selected) {
+                break;
+            }
+            steps += 1;
+        }
+        steps
+    }
+
     /// Push a command whose effect has already been applied to the world.
     /// Skips calling `execute()` — the command is only available to undo.
     pub fn push_silent(&mut self, cmd: Box<dyn EditorCommand>) {
@@ -1866,6 +1923,108 @@ mod landscape_tests {
         assert!(live.exists(), "redo restores the same collision-safe name");
         assert_eq!(std::fs::read(&live).unwrap(), b"png");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The history panel's model: a named list, and where in it we are.
+    #[test]
+    fn the_history_reads_as_a_list_with_a_position() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(8);
+        let entity = world.spawn((
+            Transform::default(),
+            Name::new("box"),
+            WorldTransform::identity(),
+        ));
+
+        for name in ["one", "two", "three"] {
+            undo.push(
+                Box::new(SetNameCmd::new(
+                    entity.index(),
+                    *world.get::<Name>(entity).unwrap(),
+                    Name::new(name),
+                )),
+                &mut world,
+                &mut selected,
+            );
+        }
+        let (names, position) = undo.history();
+        assert_eq!(names.len(), 3);
+        assert_eq!(position, 3, "we are at the end");
+        assert!(
+            names.iter().all(|name| *name == "Rename Entity"),
+            "entries are named after what changed: {names:?}"
+        );
+
+        // Undoing moves the marker without shortening the list — the point of
+        // a history panel is that you can see where you could go back to.
+        assert!(undo.undo(&mut world, &mut selected));
+        let (names, position) = undo.history();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert_eq!(position, 2);
+    }
+
+    /// Clicking a row jumps there, in either direction, and the world follows.
+    #[test]
+    fn jumping_to_a_position_moves_the_world_both_ways() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(8);
+        let entity = world.spawn((
+            Transform::default(),
+            Name::new("start"),
+            WorldTransform::identity(),
+        ));
+        for name in ["one", "two", "three"] {
+            undo.push(
+                Box::new(SetNameCmd::new(
+                    entity.index(),
+                    *world.get::<Name>(entity).unwrap(),
+                    Name::new(name),
+                )),
+                &mut world,
+                &mut selected,
+            );
+        }
+        assert_eq!(world.get::<Name>(entity).unwrap().as_str(), "three");
+
+        assert_eq!(undo.jump_to(1, &mut world, &mut selected), 2);
+        assert_eq!(world.get::<Name>(entity).unwrap().as_str(), "one");
+        assert_eq!(undo.history().1, 1);
+
+        assert_eq!(undo.jump_to(3, &mut world, &mut selected), 2);
+        assert_eq!(world.get::<Name>(entity).unwrap().as_str(), "three");
+
+        // Position zero is the state before anything happened.
+        undo.jump_to(0, &mut world, &mut selected);
+        assert_eq!(world.get::<Name>(entity).unwrap().as_str(), "start");
+    }
+
+    /// A target beyond either end is clamped. A click on the last row of a
+    /// list that shrank under you should land on the end, not do nothing.
+    #[test]
+    fn a_jump_past_either_end_is_clamped() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(4);
+        let entity = world.spawn((
+            Transform::default(),
+            Name::new("start"),
+            WorldTransform::identity(),
+        ));
+        undo.push(
+            Box::new(SetNameCmd::new(
+                entity.index(),
+                Name::new("start"),
+                Name::new("one"),
+            )),
+            &mut world,
+            &mut selected,
+        );
+        assert_eq!(undo.jump_to(99, &mut world, &mut selected), 0);
+        assert_eq!(undo.history().1, 1);
+        assert_eq!(undo.jump_to(0, &mut world, &mut selected), 1);
+        assert_eq!(undo.history().1, 0);
     }
 
     /// CONTROL-F's exit clause, literally: select twelve entities, set their

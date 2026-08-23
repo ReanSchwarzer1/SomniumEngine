@@ -396,6 +396,7 @@ struct EditorLayout {
     log_copy: NodeHandle,
     log_clear: NodeHandle,
     log_jobs_toggle: NodeHandle,
+    log_history_toggle: NodeHandle,
     log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
@@ -509,6 +510,7 @@ struct EditorLayout {
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     title_drag: NodeHandle,
+    title_label: NodeHandle,
     win_min: NodeHandle,
     win_max: NodeHandle,
     win_close: NodeHandle,
@@ -520,6 +522,21 @@ struct EditorLayout {
 // ── UiManager ────────────────────────────────────────────────────────────────
 
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
+/// Which list the bottom panel is showing.
+///
+/// One enum rather than two booleans: the three are mutually exclusive and a
+/// pair of flags would make "jobs and history at once" a representable state
+/// that nothing implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogView {
+    /// The Output Log.
+    Log,
+    /// Background jobs, CONTROL-C's, including failed and cancelled ones.
+    Jobs,
+    /// The undo history, CONTROL-J's.
+    History,
+}
+
 pub struct UiManager {
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
@@ -557,6 +574,7 @@ pub struct UiManager {
     log_copy: NodeHandle,
     log_clear: NodeHandle,
     log_jobs_toggle: NodeHandle,
+    log_history_toggle: NodeHandle,
     // Create menu
     create_button: NodeHandle,
     create_popup: NodeHandle,
@@ -750,8 +768,8 @@ pub struct UiManager {
     log: crate::log::OutputLog,
     /// `(row, entry id)` for the rows currently mounted.
     log_rows: Vec<(NodeHandle, u64)>,
-    /// Showing the job list instead of the log.
-    log_jobs_view: bool,
+    /// Which of the three lists the bottom panel is showing.
+    log_view: LogView,
     /// How many error toasts are waiting to be dismissed. Mirrored here
     /// because the host owns them and `Esc` needs the answer synchronously.
     sticky_toasts: usize,
@@ -759,6 +777,12 @@ pub struct UiManager {
     log_clock: std::time::Instant,
     /// Background jobs, as the status surface last reported them.
     job_rows: Vec<(u64, String, f32, bool)>,
+    /// The scene the title bar names.
+    scene_name: Option<String>,
+    /// Undo history entry names, oldest first.
+    history_rows: Vec<String>,
+    /// How many history entries have been applied.
+    history_position: usize,
     edit_popup_open: bool,
     view_popup_open: bool,
     window_popup_open: bool,
@@ -854,6 +878,7 @@ pub struct UiManager {
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
     title_drag: NodeHandle,
+    title_label: NodeHandle,
     win_min: NodeHandle,
     win_max: NodeHandle,
     win_close: NodeHandle,
@@ -1108,6 +1133,7 @@ impl UiManager {
             log_copy: layout.log_copy,
             log_clear: layout.log_clear,
             log_jobs_toggle: layout.log_jobs_toggle,
+            log_history_toggle: layout.log_history_toggle,
             create_button: layout.create_button,
             create_popup: layout.create_popup,
             create_popup_open: false,
@@ -1252,10 +1278,13 @@ impl UiManager {
             outliner_expanded: std::collections::HashSet::new(),
             log: crate::log::OutputLog::default(),
             log_rows: Vec::new(),
-            log_jobs_view: false,
+            log_view: LogView::Log,
             sticky_toasts: 0,
             log_clock: std::time::Instant::now(),
             job_rows: Vec::new(),
+            scene_name: None,
+            history_rows: Vec::new(),
+            history_position: 0,
             edit_popup_open: false,
             view_popup_open: false,
             window_popup_open: false,
@@ -1309,6 +1338,7 @@ impl UiManager {
             chrome_layout: layout_sizes,
             log_open: false,
             title_drag: layout.title_drag,
+            title_label: layout.title_label,
             win_min: layout.win_min,
             win_max: layout.win_max,
             win_close: layout.win_close,
@@ -2179,6 +2209,36 @@ impl UiManager {
             self.status_dirty,
             if dirty { "Unsaved changes" } else { "Saved" },
         ));
+        self.refresh_title();
+    }
+
+    /// The scene the title bar names. `None` is an unsaved scene.
+    pub fn set_scene_name(&mut self, name: Option<String>) {
+        if self.scene_name == name {
+            return;
+        }
+        self.scene_name = name;
+        self.refresh_title();
+    }
+
+    /// `Somnium Engine — scene.somnium •` — CONTROL-J's accurate title bar.
+    ///
+    /// The bullet is the convention every editor uses for unsaved work, and
+    /// the title bar is the one place that state is visible without looking
+    /// down at the status bar. Composed here rather than at the two call
+    /// sites so the facts it combines cannot get out of step.
+    fn refresh_title(&mut self) {
+        let mut title = "Somnium Engine".to_string();
+        if let Some(name) = &self.scene_name {
+            title.push_str(" \u{2014} ");
+            title.push_str(name);
+        }
+        if self.scene_dirty {
+            title.push_str(" \u{2022}");
+        }
+        self.native_ui
+            .send(TextMessage::set_text(self.title_label, title.clone()));
+        self.window.set_title(&title);
     }
 
     /// Name of the current selection, shown in the status bar. `None` clears
@@ -5001,13 +5061,26 @@ impl UiManager {
         &self.log
     }
 
+    /// The undo history, for the History view: the entry names in order, and
+    /// how many of them have been applied.
+    pub fn set_history(&mut self, entries: Vec<String>, position: usize) {
+        if self.history_rows == entries && self.history_position == position {
+            return;
+        }
+        self.history_rows = entries;
+        self.history_position = position;
+        if self.log_view == LogView::History {
+            self.rebuild_log_rows();
+        }
+    }
+
     /// Background jobs, for the Jobs view. `(id, label, progress, failed)`.
     pub fn set_job_rows(&mut self, rows: Vec<(u64, String, f32, bool)>) {
         if self.job_rows == rows {
             return;
         }
         self.job_rows = rows;
-        if self.log_jobs_view {
+        if self.log_view == LogView::Jobs {
             self.rebuild_log_rows();
         }
     }
@@ -5018,7 +5091,7 @@ impl UiManager {
     /// filters rather than merely scrolling, because a lone error thirty lines
     /// up in a busy log is not findable by scrolling to it.
     pub fn reveal_first_error(&mut self) {
-        self.log_jobs_view = false;
+        self.log_view = LogView::Log;
         self.log.reveal_errors();
         if !self.log_open {
             self.toggle_log_panel();
@@ -5039,7 +5112,47 @@ impl UiManager {
         let stack = self.log_stack;
         let mut rows = Vec::new();
 
-        if self.log_jobs_view {
+        if self.log_view == LogView::History {
+            // Row 0 is the state before anything happened, so the list is one
+            // longer than the entry list. Marking the current position rather
+            // than only the last row is what makes this a *history* instead of
+            // a list of things that already happened.
+            let entries = self.history_rows.clone();
+            let position = self.history_position;
+            for index in 0..=entries.len() {
+                let label = if index == 0 {
+                    "\u{2014} before any change \u{2014}".to_string()
+                } else {
+                    format!("{index}. {}", entries[index - 1])
+                };
+                let current = index == position;
+                let button = ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(15.0)
+                        .with_background(theme::TRANSPARENT),
+                )
+                .build();
+                let button = self.native_ui.add_node(button, stack);
+                let marker = if current { "\u{25b8} " } else { "  " };
+                let node =
+                    TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
+                        .with_text(&format!("{marker}{label}"))
+                        .with_font_size(11.0)
+                        .with_font_id(font_id)
+                        .with_color(if current {
+                            theme::active().semantic.accent.default.bytes()
+                        } else if index > position {
+                            // Everything past the marker is redo: still there, but not
+                            // part of the current state.
+                            theme::TEXT_DISABLED
+                        } else {
+                            theme::TEXT_PRIMARY
+                        })
+                        .build();
+                self.native_ui.add_node(node, button);
+                rows.push((button, index as u64));
+            }
+        } else if self.log_view == LogView::Jobs {
             for (id, label, progress, failed) in self.job_rows.clone() {
                 let text = if failed {
                     format!("{label} — failed")
@@ -5130,7 +5243,11 @@ impl UiManager {
         ));
         self.native_ui.send(ButtonMessage::set_selected(
             self.log_jobs_toggle,
-            self.log_jobs_view,
+            self.log_view == LogView::Jobs,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_history_toggle,
+            self.log_view == LogView::History,
         ));
         self.native_ui.invalidate_ancestors(self.log_stack);
     }
@@ -5167,8 +5284,34 @@ impl UiManager {
             return true;
         }
         if msg.destination == self.log_jobs_toggle {
-            self.log_jobs_view = !self.log_jobs_view;
+            self.log_view = if self.log_view == LogView::Jobs {
+                LogView::Log
+            } else {
+                LogView::Jobs
+            };
             self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_history_toggle {
+            self.log_view = if self.log_view == LogView::History {
+                LogView::Log
+            } else {
+                LogView::History
+            };
+            self.rebuild_log_rows();
+            return true;
+        }
+        if self.log_view == LogView::History
+            && let Some(index) = self
+                .log_rows
+                .iter()
+                .position(|(row, _)| *row == msg.destination)
+        {
+            // Row 0 is "before anything happened", so the click target is the
+            // position *after* the entry named on the row — which is what
+            // "take me back to there" means when you click the row itself.
+            self.editor_events
+                .push_back(EditorEvent::JumpToHistory(index));
             return true;
         }
         if msg.destination == self.log_clear {

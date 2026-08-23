@@ -46,6 +46,7 @@
 
 /// Core application lifecycle and event loop management.
 pub mod app;
+pub mod autosave;
 pub mod character;
 pub mod clipboard;
 pub mod config;
@@ -59,6 +60,14 @@ pub mod light_units;
 pub mod log_capture;
 pub mod map;
 pub mod reflect_registry;
+/// The `.somnium` container: a framed header the Content Drawer can read
+/// without parsing the scene, and the three-format routing that goes with it.
+///
+/// Re-exported rather than defined here — it lives in `somnium_asset` because
+/// that crate owns file containers and because the drawer's preview generator
+/// needs it, and the dependency edge runs this way.
+pub use somnium_asset::scene_file;
+
 pub mod scene_schema;
 pub mod scene_serial;
 pub mod script_bridge;
@@ -568,6 +577,63 @@ pub struct EditorFlags {
     /// Cannot be picked, dragged or transformed in the viewport. The Outliner
     /// still selects it, because otherwise a locked object becomes unreachable.
     pub locked: bool,
+}
+
+/// Scene data this build does not understand, kept verbatim so saving cannot
+/// destroy it — CONTROL-J, following Stride's `IUnloadable`.
+///
+/// Before this, `scene_from_json` skipped an unregistered component with a
+/// warning and dropped an unknown field with a warning. A load-then-save in a
+/// build missing a component therefore **destroyed that component's data
+/// permanently**, and the only sign was a line in a log nobody was reading.
+///
+/// The rule is simple and total: anything the registry cannot name is stored
+/// as opaque JSON on the entity it came from, and written back byte-for-byte
+/// on the next save. A build that gains the component later reads its own data
+/// again; a build that never gains it still does not corrupt anybody else's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RetainedUnknowns {
+    /// Whole components, keyed by their stable id: the untouched
+    /// `{ "version": …, "fields": … }` body exactly as it was read.
+    pub components: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Fields of *known* components that the schema no longer declares, keyed
+    /// `component.field`. A renamed field survives a round trip through the
+    /// build that renamed it.
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl somnium_ecs::Component for RetainedUnknowns {}
+
+impl RetainedUnknowns {
+    /// Whether anything is being carried.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty() && self.fields.is_empty()
+    }
+
+    /// Record a whole component this build cannot name.
+    pub fn keep_component(&mut self, name: &str, body: serde_json::Value) {
+        self.components.insert(name.to_owned(), body);
+    }
+
+    /// Record one field of a component this build *can* name.
+    pub fn keep_field(&mut self, component: &str, field: &str, value: serde_json::Value) {
+        self.fields.insert(format!("{component}.{field}"), value);
+    }
+
+    /// The retained fields belonging to `component`, as `(field, value)`.
+    pub fn fields_of<'a>(
+        &'a self,
+        component: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a serde_json::Value)> + 'a {
+        self.fields.iter().filter_map(move |(key, value)| {
+            // Split at the *last* dot: a stable id is dotted
+            // (`somnium.Name`) and a field name is not, so splitting at the
+            // first one would read the owner as `somnium`.
+            let (owner, field) = key.rsplit_once('.')?;
+            (owner == component).then_some((field, value))
+        })
+    }
 }
 
 impl somnium_ecs::Component for EditorFlags {}

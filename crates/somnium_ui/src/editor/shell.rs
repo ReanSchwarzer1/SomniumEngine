@@ -154,7 +154,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::BodyStrong)
     .with_text("Somnium Engine")
     .build();
-    ui.add_node(title_lbl, title_left_h);
+    let title_label = ui.add_node(title_lbl, title_left_h);
 
     let title_right = StackPanelBuilder::new(
         WidgetBuilder::new()
@@ -1171,6 +1171,15 @@ pub(crate) fn build_editor_layout(
         font_id,
         18.0,
     );
+    let (log_history_toggle, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Undo,
+        "History",
+        "The undo history. Click a row to go there.",
+        font_id,
+        18.0,
+    );
 
     let log_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
@@ -1567,6 +1576,7 @@ pub(crate) fn build_editor_layout(
         log_copy,
         log_clear,
         log_jobs_toggle,
+        log_history_toggle,
         create_button,
         create_popup,
         create_popup_items,
@@ -1678,6 +1688,7 @@ pub(crate) fn build_editor_layout(
         color_popup,
         color_picker,
         title_drag,
+        title_label,
         win_min,
         win_max,
         win_close,

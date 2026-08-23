@@ -82,7 +82,7 @@ impl PreviewGeneratorRegistry {
                     name: "scene",
                     kind: AssetKind::Scene,
                     frequency: PreviewFrequency::OnAssetSave,
-                    generate: |_| None,
+                    generate: |r| decode_scene(&r.absolute_path),
                 },
                 PreviewGenerator {
                     name: "script-document",
@@ -111,6 +111,22 @@ impl PreviewGeneratorRegistry {
             .filter(|generator| generator.kind == record.kind)
             .find_map(|generator| (generator.generate)(record))
     }
+}
+
+/// CONTROL-J: a scene's thumbnail comes out of its own header.
+///
+/// Free, and never stale — it is written by the same operation that writes the
+/// scene, so the two cannot disagree. It is also cheap: `read_header` stops
+/// after a few hundred bytes rather than parsing a scene that may be
+/// megabytes, which is the whole reason the container is framed.
+///
+/// A scene with no thumbnail — every one written before this phase — produces
+/// no preview rather than a wrong one.
+fn decode_scene(path: &Path) -> Option<Vec<u8>> {
+    let header = crate::scene_file::read_header(path).ok()??;
+    let png = header.thumbnail_png()?;
+    let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok()?;
+    Some(fit_to_cell(image))
 }
 
 fn decode_material(path: &Path) -> Option<Vec<u8>> {

@@ -464,6 +464,10 @@ pub struct Engine<G: GameApp> {
     camera_pose_request: Option<(glam::Vec3, f32, f32)>,
     /// Entities under the cursor, newest piercing menu first.
     piercing_candidates: Vec<somnium_ecs::entity::Entity>,
+    /// When the next interval autosave is due.
+    autosave: crate::autosave::AutosaveClock,
+    /// A recoverable autosave found at launch, until the person answers.
+    pending_recovery: Option<crate::autosave::Recovery>,
     /// Most-recently-opened scenes, newest first.
     recent_scenes: Vec<std::path::PathBuf>,
     /// The entity clipboard. Values, never handles — see `clipboard.rs`.
@@ -613,6 +617,7 @@ impl<G: GameApp + 'static> Engine<G> {
             crate::settings::default_global_path(),
             config_project_path(&config),
         );
+        let autosave_interval = settings_store.project().autosave_interval_s;
         let resolved_root = std::path::PathBuf::from(&settings_store.project().content_root);
         if resolved_root.as_os_str().is_empty() {
             // An empty root would silently point the drawer at the working
@@ -654,6 +659,8 @@ impl<G: GameApp + 'static> Engine<G> {
             orbit_selection: false,
             camera_pose_request: None,
             piercing_candidates: Vec::new(),
+            autosave: crate::autosave::AutosaveClock::new(autosave_interval),
+            pending_recovery: None,
             recent_scenes: crate::settings::load_recent_scenes(),
             entity_clipboard: crate::clipboard::EntityClipboard::default(),
             camera_focus_request: None,
@@ -952,6 +959,278 @@ impl<G: GameApp> Engine<G> {
             .map(|(component, field, name)| (component, field, format!("overridden by {name}")))
             .collect();
         (panels, overrides)
+    }
+
+    /// Write an autosave, without disturbing the scene's dirty state.
+    ///
+    /// An autosave is a copy, not a save: it must not mark the scene clean,
+    /// because the person has not saved anything and the title bar would be
+    /// lying to them.
+    fn write_autosave(&mut self, reason: crate::autosave::AutosaveReason) {
+        let path = crate::autosave::autosave_path(&self.config.content_root, reason);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            warn!(%error, "could not create the autosave folder");
+            return;
+        }
+        match crate::scene_schema::save_scene_schema(
+            &mut self.world,
+            &self.type_registry,
+            &path.to_string_lossy(),
+        ) {
+            Ok(()) => info!(?reason, "autosaved"),
+            Err(error) => warn!(%error, "autosave failed"),
+        }
+    }
+
+    /// Per-frame autosave tick, and the interval setting tracking its control.
+    fn tick_autosave(&mut self, dt: f32) {
+        self.autosave
+            .set_interval(self.settings.project().autosave_interval_s);
+        if self.autosave.tick(dt, self.scene_dirty) {
+            self.write_autosave(crate::autosave::AutosaveReason::Interval);
+        }
+    }
+
+    /// Offer a recoverable autosave, once, at launch.
+    ///
+    /// Offered rather than applied: silently replacing the scene somebody
+    /// opened with a file they have never seen is a worse failure than losing
+    /// the autosave, and they are the only one who knows which they want.
+    fn check_crash_recovery(&mut self) {
+        let scene = std::path::PathBuf::from("scene.somnium");
+        self.pending_recovery = crate::autosave::find_recovery(&self.config.content_root, &scene);
+        if let Some(recovery) = &self.pending_recovery {
+            let reason = match recovery.reason {
+                crate::autosave::AutosaveReason::BeforePlay => "before Play",
+                crate::autosave::AutosaveReason::Interval => "autosave",
+            };
+            let message = format!("Unsaved work was recovered ({reason}) — File > Open it");
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.append_log(&format!(
+                    "[scene] recovered {} ({reason})",
+                    recovery.path.display()
+                ));
+                ui.push_toast(&message);
+            }
+        }
+    }
+
+    /// Open a `.somnium` file, routing on what it actually is.
+    ///
+    /// CONTROL-J's first bullet, and the `NEXT:` line at the top of
+    /// `context.md`. Until now every `LoadScene` went to `map::load_map`,
+    /// which only accepts version-2 map recipes — so a scene the editor had
+    /// just saved could not be opened by the editor that saved it.
+    ///
+    /// Three formats, three routes, chosen by name rather than by a number:
+    /// a map recipe rebuilds through the map factory, a schema scene rebuilds
+    /// through the registry plus GPU reconstruction, and anything else is
+    /// refused with a reason rather than half-read.
+    fn load_scene_file(&mut self, path: &str) {
+        use crate::scene_file::SceneKind;
+
+        let (header, document) = match crate::scene_file::read(std::path::Path::new(path)) {
+            Ok(parts) => parts,
+            Err(error) => {
+                warn!(%error, "could not read scene");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast("Could not read that scene");
+                }
+                return;
+            }
+        };
+        let kind = SceneKind::of(&document);
+        let _ = header;
+
+        // The renderer's scene-side state is torn down once, for every route,
+        // so a half-loaded scene cannot inherit the previous one's colliders.
+        for (_, (_, body)) in self.terrain_colliders.drain() {
+            if let Some(p) = self.physics.as_mut() {
+                p.destroy_body(body);
+            }
+        }
+
+        match kind {
+            SceneKind::MapRecipe | SceneKind::LegacyDump => {
+                let Some((renderer, render_ctx)) =
+                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
+                else {
+                    return;
+                };
+                match crate::load_map(&mut self.world, renderer, render_ctx, path) {
+                    Ok(result) => {
+                        info!("Loaded map {path} ({:?})", result.kind);
+                        self.after_scene_load(path);
+                        self.pending_map_load = Some(result);
+                    }
+                    Err(error) => {
+                        warn!("LoadScene failed: {error}");
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.push_toast("Scene failed to load");
+                        }
+                    }
+                }
+            }
+            SceneKind::Schema => self.load_schema_scene(path, &document),
+            SceneKind::Unsupported(version) => {
+                warn!(version, "scene version this build does not read");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(&format!("Scene version {version} is not supported"));
+                }
+            }
+        }
+    }
+
+    /// Rebuild the world from a version-3 schema scene, then rebuild the GPU
+    /// state the file deliberately does not contain.
+    ///
+    /// A scene stores *authored* facts. Vertex offsets, renderer material
+    /// slots and terrain GPU buffers are session state — CONTROL-D was
+    /// explicit that runtime pool ids must never reach disk — so loading one
+    /// means reconstructing all three from what the file does say.
+    fn load_schema_scene(&mut self, path: &str, document: &serde_json::Value) {
+        if let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+            renderer.wait_gpu(render_ctx);
+            renderer.reset_scene_gpu();
+        }
+        for entity in self.world.entities().collect::<Vec<_>>() {
+            self.world.despawn(entity);
+        }
+
+        let report = match crate::scene_schema::scene_from_json(
+            &mut self.world,
+            &self.type_registry,
+            document,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                warn!(%error, "scene failed to load");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast("Scene failed to load");
+                }
+                return;
+            }
+        };
+        for warning in &report.warnings {
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.append_log(&format!("[scene] {} — {}", warning.entity, warning.message));
+            }
+        }
+
+        self.reconstruct_scene_gpu(path);
+        crate::propagate_transforms(&mut self.world);
+        info!(
+            "Loaded scene {path} ({} entities, {} warnings)",
+            report.entities.len(),
+            report.warnings.len()
+        );
+        self.after_scene_load(path);
+    }
+
+    /// Re-upload the GPU state a schema scene does not carry.
+    fn reconstruct_scene_gpu(&mut self, path: &str) {
+        // ── primitives ──────────────────────────────────────────────────────
+        // A `MeshKind` says what the geometry *is*; the `MeshComponent` beside
+        // it holds offsets into a buffer that no longer exists. Regenerating
+        // and overwriting in place keeps the entity's identity, its parent and
+        // its authored material — which is why this is not the game layer's
+        // despawn-and-respawn auto-attach.
+        let primitives: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| Some((entity, *self.world.get::<MeshKind>(entity)?)))
+            .collect();
+        if !primitives.is_empty()
+            && let Some((renderer, render_ctx)) =
+                self.renderer.as_mut().zip(self.render_ctx.as_ref())
+        {
+            for (entity, kind) in primitives {
+                let (vertices, indices) = match kind {
+                    MeshKind::Cube => somnium_asset::generate_cube(1.0),
+                    MeshKind::Plane => somnium_asset::generate_plane(1.0, 1),
+                    MeshKind::Sphere => somnium_asset::generate_sphere(0.5, 16, 16),
+                    MeshKind::Cylinder => somnium_asset::generate_cylinder(0.5, 1.0, 16),
+                };
+                let material = self
+                    .world
+                    .get::<MaterialComponent>(entity)
+                    .map_or(0, |material| material.runtime_id);
+                let alloc =
+                    renderer
+                        .geometry
+                        .upload_mesh(&render_ctx.queue, &vertices, &indices, material);
+                let mesh = MeshComponent {
+                    vertex_offset: alloc.vertex_offset,
+                    index_offset: alloc.index_offset,
+                    index_count: alloc.index_count,
+                };
+                if let Some(existing) = self.world.get_mut::<MeshComponent>(entity) {
+                    *existing = mesh;
+                } else {
+                    let _ = self.world.insert_component(entity, mesh);
+                }
+            }
+        }
+
+        // ── terrain sidecars ────────────────────────────────────────────────
+        // Heightmaps and splatmaps are megabytes of painted data and live
+        // beside the scene rather than inside it. Each is named after the
+        // scene, so moving a scene moves its terrain with it.
+        let terrains: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| self.world.get::<TerrainComponent>(entity).copied())
+            .collect();
+        for component in terrains {
+            let sidecar = format!("{path}.terrain{}.bin", component.terrain_id);
+            if !std::path::Path::new(&sidecar).exists() {
+                continue;
+            }
+            let Some(renderer) = self.renderer.as_mut() else {
+                break;
+            };
+            let Some(terrain) = renderer.terrain_mut(component.terrain_id) else {
+                warn!(sidecar, "no renderer terrain to restore into");
+                continue;
+            };
+            match terrain.load_binary(&sidecar) {
+                Ok(()) => info!("Terrain {} restored from {sidecar}", component.terrain_id),
+                Err(error) => warn!(%error, "terrain sidecar failed to load"),
+            }
+        }
+
+        // ── materials ───────────────────────────────────────────────────────
+        // Authored `AssetId`s resolve back to renderer pool slots by the same
+        // path an ordinary edit uses, so there is one implementation of
+        // "what does this material mean right now".
+        self.sync_authored_material_components();
+    }
+
+    /// The state every route resets after a scene arrives.
+    ///
+    /// One function because "undo is cleared" and "the scene is not dirty" are
+    /// facts about *having loaded*, not about which format was loaded, and
+    /// three copies of them would eventually disagree.
+    fn after_scene_load(&mut self, path: &str) {
+        self.remember_recent_scene(std::path::Path::new(path));
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.set_scene_name(name);
+        }
+        self.selection.clear();
+        self.material_sessions.clear();
+        // Scene load is not undoable: the stack describes a world that no
+        // longer exists. CONTROL-J states this rather than leaving entries
+        // that would corrupt the new scene if replayed.
+        self.undo_stack = UndoStack::new(128);
+        self.scene_dirty = false;
+        self.terrain_edit_active = false;
+        self.terrain_stroke = None;
+        self.after_selection_change();
     }
 
     /// Show a file in the OS file browser.
@@ -1426,6 +1705,11 @@ impl<G: GameApp> Engine<G> {
     /// Capture the authored world so Stop can put it back, and start the
     /// script clock from zero.
     fn begin_play_session(&mut self) {
+        // A snapshot before the risky operation. `WorldCheckpoint` restores
+        // the ECS but explicitly not the renderer's terrain and map state, so
+        // a file on disk is the only thing that survives a play session that
+        // ends badly enough to need it.
+        self.write_autosave(crate::autosave::AutosaveReason::BeforePlay);
         self.play_checkpoint = Some(crate::script_input::WorldCheckpoint::capture(
             &mut self.world,
             &self.type_registry,
@@ -1695,6 +1979,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.ui_manager = Some(ui_manager);
 
                 self.state = LifecycleState::Running;
+                // Craft defect C11's other half: work that survived a crash is
+                // offered on the next launch, once, rather than sitting in a
+                // folder nobody looks in.
+                self.check_crash_recovery();
 
                 let mut ctx = EngineContext::new(
                     &self.time,
@@ -2122,6 +2410,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
+        self.tick_autosave(dt);
         // Phase 16-F: the script profiler counters are per frame, and the
         // frame starts here.
         self.scripts.begin_frame();
@@ -2598,6 +2887,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // the same call the entity inspector uses — against the settings
             // store's private world instead of the scene's.
             let (settings_panels, settings_overrides) = self.settings_panels();
+            // Named after what changed, so a history of twenty rows is not
+            // twenty rows reading "Change".
+            let (history_entries, history_position) = {
+                let (names, position) = self.undo_stack.history();
+                (
+                    names.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    position,
+                )
+            };
             // The corner axis widget's three directions, projected with the
             // live view matrix so it turns with the camera. The rotation is
             // taken without translation: the widget shows orientation, not
@@ -2654,6 +2952,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.set_outliner_entity_handles(all_entities.iter().copied());
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
+                ui.set_history(history_entries, history_position);
                 ui.set_viewport_statistics(viewport_statistics);
                 ui.set_axis_widget(axis_directions);
                 ui.set_snap_state(
@@ -5233,6 +5532,18 @@ impl<G: GameApp> Engine<G> {
                 }
             },
 
+            EditorEvent::JumpToHistory(target) => {
+                let steps =
+                    self.undo_stack
+                        .jump_to(target, &mut self.world, &mut self.selection.primary);
+                if steps > 0 {
+                    self.scene_dirty = true;
+                    self.after_selection_change();
+                }
+            }
+
+            EditorEvent::RequestHistory => {}
+
             EditorEvent::CancelMarquee => {
                 self.marquee = None;
                 if let Some(ui) = self.ui_manager.as_mut() {
@@ -5733,7 +6044,15 @@ impl<G: GameApp> Engine<G> {
                     Ok(()) => {
                         info!("Scene saved to {}", path);
                         self.scene_dirty = false;
+                        // A clean manual save is the moment there is nothing
+                        // left to recover, so the autosaves go with it. Leaving
+                        // them would offer the person older work next launch.
+                        self.autosave.saved();
+                        crate::autosave::clear(&self.config.content_root);
                         self.remember_recent_scene(std::path::Path::new(path));
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.set_scene_name(Some(path.to_string()));
+                        }
                         if let Some(ui) = &mut self.ui_manager {
                             ui.push_toast("Scene saved");
                             // Saving is what "modified" was measured against.
@@ -5882,33 +6201,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::LoadScene(path) => {
-                let Some((renderer, render_ctx)) =
-                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
-                else {
-                    return;
-                };
-                for (_, (_, body)) in self.terrain_colliders.drain() {
-                    if let Some(p) = self.physics.as_mut() {
-                        p.destroy_body(body);
-                    }
-                }
-                match crate::load_map(&mut self.world, renderer, render_ctx, &path) {
-                    Ok(result) => {
-                        info!("Loaded map {path} ({:?})", result.kind);
-                        let opened = std::path::PathBuf::from(&path);
-                        self.remember_recent_scene(&opened);
-                        self.selection.primary = None;
-                        self.material_sessions.clear();
-                        self.undo_stack = UndoStack::new(128);
-                        self.scene_dirty = false;
-                        self.terrain_edit_active = false;
-                        self.terrain_stroke = None;
-                        self.pending_map_load = Some(result);
-                    }
-                    Err(error) => warn!("LoadScene failed: {error}"),
-                }
-            }
+            EditorEvent::LoadScene(path) => self.load_scene_file(&path),
 
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);

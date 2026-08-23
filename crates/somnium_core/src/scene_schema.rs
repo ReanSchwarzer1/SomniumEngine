@@ -380,6 +380,17 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         .iter()
         .map(|&(id, entity)| {
             let mut components = serde_json::Map::new();
+            // CONTROL-J: whatever the last reader could not name is written
+            // back first, so a build that lacks a component still returns the
+            // file with that component in it. Known components are written
+            // over the top, which is the right precedence — this build's
+            // understanding wins wherever it has one.
+            let retained = world.get::<crate::RetainedUnknowns>(entity).cloned();
+            if let Some(retained) = &retained {
+                for (name, body) in &retained.components {
+                    components.insert(name.clone(), body.clone());
+                }
+            }
             for schema in registry.schemas_on(world, entity) {
                 let Some(record) = (schema.snapshot)(world, entity) else {
                     continue;
@@ -391,6 +402,13 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
                     }
                     if let Some(value) = record.get(&field.id) {
                         fields.insert(field.name.to_owned(), value_to_json(world, value));
+                    }
+                }
+                // Fields this build's schema no longer declares, restored
+                // beside the ones it does.
+                if let Some(retained) = &retained {
+                    for (name, value) in retained.fields_of(schema.stable_id.as_str()) {
+                        fields.insert(name.to_owned(), value.clone());
                     }
                 }
                 if fields.is_empty() {
@@ -433,10 +451,40 @@ pub fn save_scene_schema(
     registry: &TypeRegistry,
     path: &str,
 ) -> Result<(), SceneError> {
+    save_scene_schema_with_thumbnail(world, registry, path, None)
+}
+
+/// Write a version-3 scene, with an optional viewport PNG in the container
+/// header — CONTROL-J, §6.2.3.
+///
+/// The thumbnail goes ahead of the data so the Content Drawer can read it with
+/// a `seek` rather than by parsing the scene, and it is written by the same
+/// operation that writes the data, so the two can never disagree.
+///
+/// # Errors
+///
+/// [`SceneError::Io`] if the file cannot be written.
+pub fn save_scene_schema_with_thumbnail(
+    world: &mut World,
+    registry: &TypeRegistry,
+    path: &str,
+    thumbnail_png: Option<&[u8]>,
+) -> Result<(), SceneError> {
     let document = scene_to_json(world, registry);
-    let text = serde_json::to_string_pretty(&document)
-        .map_err(|e| SceneError::Malformed(e.to_string()))?;
-    std::fs::write(path, text).map_err(|e| SceneError::Io(e.to_string()))
+    let mut header = crate::scene_file::SceneHeader {
+        container: crate::scene_file::CONTAINER_VERSION,
+        document_version: SCENE_VERSION,
+        saved_unix_secs: crate::scene_file::now_unix_secs(),
+        entity_count: document
+            .get("entities")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len),
+        thumbnail_png_base64: None,
+    };
+    if let Some(png) = thumbnail_png {
+        header.set_thumbnail_png(png);
+    }
+    crate::scene_file::write(std::path::Path::new(path), &header, &document).map_err(SceneError::Io)
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -504,15 +552,22 @@ pub fn scene_from_json(
             .unwrap_or("?")
             .to_owned();
 
+        let mut retained = crate::RetainedUnknowns::default();
         if let Some(components) = entry
             .get("components")
             .and_then(serde_json::Value::as_object)
         {
             for (name, body) in components {
                 let Some(schema) = registry.by_name(name) else {
+                    // Kept, not skipped. This is the whole of CONTROL-J's
+                    // §6.2.3: the previous behaviour destroyed the data on the
+                    // next save and only said so in a log line.
+                    retained.keep_component(name, body.clone());
                     report.warnings.push(SceneWarning {
                         entity: entity_label.clone(),
-                        message: format!("no component named `{name}` in this build; skipped"),
+                        message: format!(
+                            "no component named `{name}` in this build; retained verbatim"
+                        ),
                     });
                     continue;
                 };
@@ -529,9 +584,12 @@ pub fn scene_from_json(
                 let mut record = ReflectObject::new();
                 for (field_name, value_json) in fields_json {
                     let Some(field) = schema.field_by_name(field_name) else {
+                        retained.keep_field(name, field_name, value_json.clone());
                         report.warnings.push(SceneWarning {
                             entity: entity_label.clone(),
-                            message: format!("`{name}` has no field `{field_name}`; dropped"),
+                            message: format!(
+                                "`{name}` has no field `{field_name}`; retained verbatim"
+                            ),
                         });
                         continue;
                     };
@@ -586,6 +644,17 @@ pub fn scene_from_json(
             }
         }
 
+        // Attached only when there is something to carry, so the
+        // overwhelming majority of entities gain no component at all.
+        if !retained.is_empty()
+            && let Err(err) = world.insert_component(entity, retained)
+        {
+            report.warnings.push(SceneWarning {
+                entity: entity_label.clone(),
+                message: format!("could not retain unknown data: {err}"),
+            });
+        }
+
         if let Some(scripts) = entry.get("scripts").and_then(serde_json::Value::as_array) {
             if scripts.is_empty() {
                 continue;
@@ -625,10 +694,211 @@ pub fn load_scene_schema(
     registry: &TypeRegistry,
     path: &str,
 ) -> Result<LoadReport, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(|e| SceneError::Io(e.to_string()))?;
-    let document: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| SceneError::Malformed(e.to_string()))?;
+    // The container reader accepts both a framed file and a bare document, so
+    // every scene written before CONTROL-J still loads with no migration.
+    let (_, document) =
+        crate::scene_file::read(std::path::Path::new(path)).map_err(SceneError::Io)?;
     scene_from_json(world, registry, &document)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::reflect_registry::component_registry;
+    use crate::{LightComponent, Name, Transform};
+
+    fn scene_with_a_light() -> serde_json::Value {
+        let mut world = World::new();
+        let registry = component_registry();
+        world.spawn((
+            Transform::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
+            Name::new("Lamp"),
+            LightComponent {
+                intensity: 4200.0,
+                ..LightComponent::default()
+            },
+        ));
+        scene_to_json(&mut world, &registry)
+    }
+
+    /// CONTROL-J's headline defect, as a test: a build missing a component
+    /// used to **destroy that component's data permanently** on the next save,
+    /// with only a log line to say so.
+    #[test]
+    fn a_build_without_a_component_returns_the_file_with_it_intact() {
+        // A scene saved by a build that has a component this one does not.
+        // Renaming it in the document is exactly that situation and tests the
+        // general case, rather than one component's absence in particular.
+        let mut original = scene_with_a_light();
+        let light = original["entities"][0]["components"]["somnium.Light"].clone();
+        assert!(light.is_object(), "the fixture really has a light");
+        let components = original["entities"][0]["components"]
+            .as_object_mut()
+            .expect("components object");
+        components.remove("somnium.Light");
+        components.insert("acme.HoloProjector".into(), light.clone());
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report = scene_from_json(&mut world, &registry, &original).expect("loads");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("retained verbatim")),
+            "the load says what it kept: {:?}",
+            report.warnings
+        );
+
+        let round_tripped = scene_to_json(&mut world, &registry);
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["acme.HoloProjector"], light,
+            "the component survived a build that cannot read it"
+        );
+        // …and the components this build *does* know are still written.
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["value"],
+            serde_json::json!("Lamp")
+        );
+    }
+
+    /// A field the schema no longer declares survives the same way.
+    #[test]
+    fn a_field_this_build_does_not_declare_survives_a_round_trip() {
+        let mut document = scene_with_a_light();
+        document["entities"][0]["components"]["somnium.Name"]["fields"]["nickname"] =
+            serde_json::json!("the good lamp");
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report = scene_from_json(&mut world, &registry, &document).expect("loads");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("nickname")),
+            "{:?}",
+            report.warnings
+        );
+
+        let round_tripped = scene_to_json(&mut world, &registry);
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["nickname"],
+            serde_json::json!("the good lamp")
+        );
+        // …and the fields this build *does* know are still its own.
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["value"],
+            serde_json::json!("Lamp")
+        );
+    }
+
+    /// Defold's round-trip invariant: what is read equals what is written
+    /// back. Asserted on the component graph rather than on bytes, because
+    /// `serde_json` may legitimately reformat whitespace.
+    #[test]
+    fn a_scene_is_byte_stable_across_save_load_save() {
+        let registry = component_registry();
+        let first = scene_with_a_light();
+
+        let mut world = World::new();
+        scene_from_json(&mut world, &registry, &first).expect("loads");
+        let second = scene_to_json(&mut world, &registry);
+        assert_eq!(first, second, "one round trip must change nothing");
+
+        let mut again = World::new();
+        scene_from_json(&mut again, &registry, &second).expect("loads");
+        let third = scene_to_json(&mut again, &registry);
+        assert_eq!(second, third, "and neither must the next");
+    }
+
+    /// The exit clause, as far as a headless test can carry it: save, drop the
+    /// world entirely, reopen from the file, and every component is the one
+    /// that was saved.
+    #[test]
+    fn save_quit_reopen_returns_the_same_scene() {
+        let dir = std::env::temp_dir().join(format!(
+            "somnium_scene_lifecycle_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("scene.somnium");
+        let text = path.to_string_lossy().into_owned();
+        let registry = component_registry();
+
+        let saved = {
+            let mut world = World::new();
+            world.spawn((
+                Transform::from_translation(glam::Vec3::new(4.0, 5.0, 6.0)),
+                Name::new("Lamp"),
+                LightComponent {
+                    intensity: 4200.0,
+                    ..LightComponent::default()
+                },
+            ));
+            save_scene_schema_with_thumbnail(
+                &mut world,
+                &registry,
+                &text,
+                Some(&[0x89, b'P', b'N', b'G']),
+            )
+            .expect("saves");
+            scene_to_json(&mut world, &registry)
+        };
+
+        // The world is gone. Everything now comes from the file.
+        let mut reopened = World::new();
+        load_scene_schema(&mut reopened, &registry, &text).expect("loads");
+        assert_eq!(scene_to_json(&mut reopened, &registry), saved);
+
+        let entity = reopened.entities().next().expect("one entity");
+        assert_eq!(reopened.get::<Name>(entity).unwrap().as_str(), "Lamp");
+        assert_eq!(
+            reopened.get::<Transform>(entity).unwrap().translation.x,
+            4.0
+        );
+        assert_eq!(
+            reopened.get::<LightComponent>(entity).unwrap().intensity,
+            4200.0
+        );
+
+        // And the drawer can read the thumbnail without parsing any of it.
+        let header = crate::scene_file::read_header(&path)
+            .expect("header reads")
+            .expect("header present");
+        assert_eq!(header.document_version, SCENE_VERSION);
+        assert_eq!(header.entity_count, 1);
+        assert_eq!(
+            header.thumbnail_png().unwrap(),
+            vec![0x89, b'P', b'N', b'G']
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A scene written before CONTROL-J is bare JSON, and must keep loading.
+    #[test]
+    fn a_pre_container_scene_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "somnium_scene_legacy_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("old.somnium");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&scene_with_a_light()).unwrap(),
+        )
+        .unwrap();
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report =
+            load_scene_schema(&mut world, &registry, &path.to_string_lossy()).expect("loads");
+        assert_eq!(report.entities.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]

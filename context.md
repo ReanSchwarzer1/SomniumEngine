@@ -1,25 +1,49 @@
 # Somnium Engine — Project Context
 
-> **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
->
 > **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B/C/D complete 2026-08-23**.
+> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B
+> through CONTROL-J complete 2026-08-23. Track 1 is finished; Track 2
+> (CONTROL-K/L/M/N) and Track 3 have not started.**
+>
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
-> a measured terrain-thumbnail baseline, and
-> opt-in red completeness gates; CONTROL-A1 ships the modifier/input, gesture,
-> traversal and modal-focus seam; CONTROL-A2 ships the 52-command registry.
-> CONTROL-B ships the schema-generated production Details path for all 160
-> editable fields across 16 registered schemas, generic scoped undo/coalescing,
-> and a zero legacy hand-wiring census. CONTROL-C ships the immutable queried
-> asset database, bounded cancellable jobs, visible-first off-thread cached
-> previews, drawer workflows and the schema Asset picker. Its 60-PNG proof is
-> deterministic; no post-C live redline is claimed. CONTROL-D ships the native
+> a measured terrain-thumbnail baseline, and opt-in completeness gates;
+> CONTROL-A1 ships the modifier/input, gesture, traversal and modal-focus seam;
+> CONTROL-A2 ships the command registry.
+> CONTROL-B ships the schema-generated production Details path for all editable
+> fields across every registered schema, generic scoped undo/coalescing, and a
+> zero legacy hand-wiring census. CONTROL-C ships the immutable queried asset
+> database, bounded cancellable jobs, visible-first off-thread cached previews,
+> drawer workflows and the schema Asset picker. CONTROL-D ships the native
 > `.sommat` format and embedded preview header, generated material Details with
 > a live shared sphere, `MaterialComponent` authored `AssetId`/derived renderer
 > slot separation, job-decoded five-slot textures, registry-backed creation,
 > glTF material/embedded-texture siblings, vector assignment and Make Unique.
-> The polished-metal scene/material schema round-trip is covered at roughness
-> 0.2 and metallic 1.0. **Next: CONTROL-E.**
+> CONTROL-E ships one semantic drop seam covering all seven routes, each
+> exactly one undo step, with acceptance computed before the button comes up.
+> CONTROL-F ships multi-selection as an ordered set with a primary, multi-edit
+> in Details as a schema intersection with mixed rows, the entity clipboard,
+> hide/lock as a real component, typed Outliner filters and a registry-derived
+> context menu. CONTROL-G ships the generated view-mode menu — every one of the
+> 34 shader debug codes and 18 pipeline switches is a named command — plus
+> snapping from settings, gizmo local/pivot/multi-entity transforms, the
+> piercing menu, camera bookmarks and presets, and the statistics overlay.
+> CONTROL-H ships Seam 4: preferences as schema-backed properties with the
+> `default → project.toml → editor.toml → SOMNIUM_*` order, the generated
+> Preferences window, a sparse keybinding override store, recent scenes and the
+> unblocked project picker. **All 106 `SOMNIUM_*` variables now have a verified
+> route — 24 schema, 6 setting, 23 command, 53 harness-with-a-reason, zero
+> unexplained — enforced by an opt-in gate.** CONTROL-I ships the Output Log's
+> severity chips, category filter, search, pins, jump-to-source and job panel,
+> with persistent error toasts. CONTROL-J ships scene lifecycle: `LoadScene`
+> routes by format at last, unknown components and fields are retained verbatim
+> instead of being destroyed on the next save, the `.somnium` container carries
+> a header thumbnail the drawer reads without parsing the body, autosave and
+> crash recovery are in, and the undo history is a list you can click into.
+>
+> **Next: CONTROL-K** (curve and gradient editing), which is a hard dependency
+> of MORROWIND-H, MORROWIND-L and MORROWIND-AG. Track 2 and Track 3 are **not**
+> optional: §9.1 records that dropping them would silently remove a
+> prerequisite from three MORROWIND sub-phases.
 > Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
 > layer, motion, elevation, the second theme and the first-impression surfaces.
 > Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.
@@ -83,8 +107,9 @@
 >   tool's source or docs and each assigned to a sub-phase. That is the
 >   "make the current UX professional" half of the phase, made falsifiable.
 >   Sub-phases: **Track 0** A (audit) / A1 (input seam) / A2 (command registry);
->   **Track 1** B (property seam, 26-J) through J (scene lifecycle, the `NEXT:`
->   line above); **Track 2** K/L (curves, time of day); **Track 3** M/N/O
+>   **Track 1** B (property seam, 26-J) through J (scene lifecycle, which
+>   closed the long-standing "a saved scene cannot be reopened" gap);
+>   **Track 2** K/L (curves, time of day); **Track 3** M/N/O
 >   (clouds, weather, decals) — each gated on its authoring surface shipping
 >   with it. §6.2 surveys 15 previously undocumented engines; four ideas changed
 >   the plan (rbfx `AttributeScopeHint` for undo granularity, Wicked's

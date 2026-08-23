@@ -7,6 +7,7 @@
 pub mod database;
 pub mod material;
 pub mod preview;
+pub mod scene_file;
 
 use std::collections::HashMap;
 use std::path::Path;

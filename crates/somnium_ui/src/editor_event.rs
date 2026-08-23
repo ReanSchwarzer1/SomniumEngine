@@ -212,6 +212,11 @@ pub enum EditorEvent {
     },
     /// Put text on the system clipboard.
     CopyText(String),
+    /// Move to a position in the undo history. `0` is the state before
+    /// anything happened.
+    JumpToHistory(usize),
+    /// Publish the undo history so the panel can draw it.
+    RequestHistory,
     /// Write a setting addressed by field *name*.
     ///
     /// The by-`FieldId` form is what a generated row emits, because it already
