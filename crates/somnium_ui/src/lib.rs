@@ -67,7 +67,7 @@ use crate::{
         splitter::SplitterMessage,
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
-        text_box::TextBoxMessage,
+        text_box::{TextBoxBuilder, TextBoxMessage},
         toast::ToastMessage,
         tree_view::{TreeItem, TreeViewMessage},
     },
@@ -90,8 +90,6 @@ enum NamePrompt {
     NewFolder { parent: String },
     /// Create a script in this content-relative directory.
     NewScript { parent: String },
-    /// Rename this absolute path.
-    Rename { path: String },
 }
 
 /// What one generated widget in the Scripts section does.
@@ -592,8 +590,7 @@ pub struct UiManager {
     generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
     generated_rows: HashMap<NodeHandle, GeneratedBinding>,
     generated_gestures: HashMap<NodeHandle, GestureId>,
-    generated_asset_choices:
-        HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
+    generated_asset_choices: HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
     generated_asset_searches: HashMap<NodeHandle, GeneratedAssetPicker>,
     generated_asset_actions: HashMap<NodeHandle, (NodeHandle, AssetPickerAction)>,
     inner_h: NodeHandle,
@@ -705,6 +702,7 @@ pub struct UiManager {
     /// Which folder a right-click happened in, so a "New Folder" from
     /// inside `scripts/` lands in `scripts/` and not at the root.
     content_menu_folder: String,
+    content_inline_rename: Option<(NodeHandle, std::path::PathBuf)>,
     /// What confirming the name prompt will do.
     name_prompt: Option<NamePrompt>,
     /// What is currently typed in the name prompt.
@@ -1127,6 +1125,7 @@ impl UiManager {
             color_live: [1.0, 1.0, 1.0, 1.0],
             content_menu_target: None,
             content_menu_folder: String::new(),
+            content_inline_rename: None,
             name_prompt: None,
             name_text: String::new(),
             script_state: ScriptInspectorState::default(),
@@ -1645,7 +1644,8 @@ impl UiManager {
     pub fn update_jobs(&mut self, jobs: &[UiJobStatus]) {
         let job = jobs.first();
         self.status_cancel_job = job.map(|job| job.id);
-        self.native_ui.set_visibility(self.status_cancel, job.is_some());
+        self.native_ui
+            .set_visibility(self.status_cancel, job.is_some());
         if let Some(job) = job {
             self.native_ui.send(TextMessage::set_text(
                 self.status_text,
@@ -1712,6 +1712,30 @@ impl UiManager {
     /// next unrelated refresh looks like the create failed.
     pub fn refresh_content(&mut self) {
         self.refresh_content_list();
+    }
+
+    fn begin_inline_content_rename(&mut self, entry: crate::metaphor::ContentEntry) {
+        if let Some((handle, _)) = self.content_inline_rename.take() {
+            self.native_ui.remove_node(handle);
+        }
+        let Some(tile) = self
+            .content_entries
+            .iter()
+            .find_map(|(handle, candidate)| (candidate.path == entry.path).then_some(*handle))
+        else {
+            return;
+        };
+        let field = TextBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_height(theme::ROW_HEIGHT)
+                .with_background(theme::BG_INPUT),
+        )
+        .with_text(entry.name)
+        .with_font_id(self.font_id)
+        .build();
+        let field = self.native_ui.add_node(field, tile);
+        self.native_ui.set_focus(field);
+        self.content_inline_rename = Some((field, entry.path));
     }
 
     // ── Content Drawer right-click ───────────────────────────────────────
@@ -1856,7 +1880,6 @@ impl UiManager {
         let event = match prompt {
             NamePrompt::NewFolder { parent } => EditorEvent::CreateContentFolder { parent, name },
             NamePrompt::NewScript { parent } => EditorEvent::CreateContentScript { parent, name },
-            NamePrompt::Rename { path } => EditorEvent::RenameContentItem { path, name },
         };
         self.editor_events.push_back(event);
     }
@@ -2537,13 +2560,7 @@ impl UiManager {
             ),
             A::ContentRename => {
                 if let Some(entry) = self.content_menu_target.clone() {
-                    self.open_name_prompt(
-                        NamePrompt::Rename {
-                            path: entry.path.to_string_lossy().into_owned(),
-                        },
-                        "Rename to",
-                        &entry.name,
-                    );
+                    self.begin_inline_content_rename(entry);
                 }
             }
             A::ContentShowInFolder => {
@@ -2892,11 +2909,7 @@ impl UiManager {
     }
 
     /// Select sort order for the current database query.
-    pub fn set_content_sort(
-        &mut self,
-        sort: somnium_asset::database::AssetSort,
-        descending: bool,
-    ) {
+    pub fn set_content_sort(&mut self, sort: somnium_asset::database::AssetSort, descending: bool) {
         self.content_sort = sort;
         self.content_sort_descending = descending;
         self.refresh_content_list();
@@ -2958,8 +2971,8 @@ impl UiManager {
         if self.show_engine_content && self.content_path.is_empty() {
             entries.extend(
                 crate::metaphor::virtual_engine_content(&self.content_filter)
-                .into_iter()
-                .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
+                    .into_iter()
+                    .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
             );
         }
         let (tile_w, tile_h, icon_px) = self.content_density.metrics();
@@ -3509,13 +3522,14 @@ impl UiManager {
             self.generated_asset_choices.clear();
             self.generated_asset_searches.clear();
             self.generated_asset_actions.clear();
-            let (root, bindings, rows, asset_choices, asset_searches, asset_actions) = build_generated_details(
-                &mut self.native_ui,
-                self.inspector_stack,
-                self.font_id,
-                &panels,
-                &self.asset_db,
-            );
+            let (root, bindings, rows, asset_choices, asset_searches, asset_actions) =
+                build_generated_details(
+                    &mut self.native_ui,
+                    self.inspector_stack,
+                    self.font_id,
+                    &panels,
+                    &self.asset_db,
+                );
             self.generated_root = root;
             self.generated_bindings = bindings;
             self.generated_rows = rows;
@@ -4043,8 +4057,12 @@ impl UiManager {
                     .copied()
                 {
                     match action {
-                        ContentToolbarAction::Back => { self.content_back(); }
-                        ContentToolbarAction::Forward => { self.content_forward(); }
+                        ContentToolbarAction::Back => {
+                            self.content_back();
+                        }
+                        ContentToolbarAction::Forward => {
+                            self.content_forward();
+                        }
                         ContentToolbarAction::Up => {
                             let up = std::path::Path::new(&self.content_path)
                                 .parent()
@@ -4055,21 +4073,29 @@ impl UiManager {
                         ContentToolbarAction::Kind(kind) => self.set_content_kind(kind),
                         ContentToolbarAction::Sort => {
                             self.content_sort = match self.content_sort {
-                                somnium_asset::database::AssetSort::Name => somnium_asset::database::AssetSort::Kind,
-                                somnium_asset::database::AssetSort::Kind => somnium_asset::database::AssetSort::Size,
-                                somnium_asset::database::AssetSort::Size => somnium_asset::database::AssetSort::Modified,
-                                somnium_asset::database::AssetSort::Modified => somnium_asset::database::AssetSort::Name,
+                                somnium_asset::database::AssetSort::Name => {
+                                    somnium_asset::database::AssetSort::Kind
+                                }
+                                somnium_asset::database::AssetSort::Kind => {
+                                    somnium_asset::database::AssetSort::Size
+                                }
+                                somnium_asset::database::AssetSort::Size => {
+                                    somnium_asset::database::AssetSort::Modified
+                                }
+                                somnium_asset::database::AssetSort::Modified => {
+                                    somnium_asset::database::AssetSort::Name
+                                }
                             };
                             self.refresh_content_list();
                         }
-                        ContentToolbarAction::Density => { self.cycle_content_density(); }
+                        ContentToolbarAction::Density => {
+                            self.cycle_content_density();
+                        }
                     }
                     continue;
                 }
-                if let Some((combo, action)) = self
-                    .generated_asset_actions
-                    .get(&msg.destination)
-                    .copied()
+                if let Some((combo, action)) =
+                    self.generated_asset_actions.get(&msg.destination).copied()
                 {
                     let binding = self.generated_bindings.get(&combo).cloned();
                     let record = binding.as_ref().and_then(|binding| match binding.value {
@@ -4390,7 +4416,10 @@ impl UiManager {
                     } else {
                         let additive = self.native_ui.modifiers().ctrl;
                         self.select_content(entry.path.clone(), additive);
-                        if entry.path.extension().and_then(|e| e.to_str())
+                        if entry
+                            .path
+                            .extension()
+                            .and_then(|e| e.to_str())
                             .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
                         {
                             self.editor_events.push_back(EditorEvent::AttachScript(
@@ -4702,7 +4731,9 @@ impl UiManager {
                     let mut paths = vec![None];
                     paths.extend(candidates.iter().map(|candidate| {
                         self.asset_db
-                            .get(somnium_asset::database::AssetId::from_raw(candidate.id.raw()))
+                            .get(somnium_asset::database::AssetId::from_raw(
+                                candidate.id.raw(),
+                            ))
                             .map(|record| record.absolute_path.clone())
                     }));
                     self.generated_asset_choices.insert(picker.combo, choices);
@@ -4859,6 +4890,20 @@ impl UiManager {
                 }
             }
             if let Some(TextBoxMessage::TextCommit(value)) = msg.data::<TextBoxMessage>() {
+                if self
+                    .content_inline_rename
+                    .as_ref()
+                    .is_some_and(|(handle, _)| *handle == msg.destination)
+                {
+                    let (_, path) = self.content_inline_rename.take().expect("checked above");
+                    self.editor_events
+                        .push_back(EditorEvent::RenameContentItem {
+                            path: path.to_string_lossy().into_owned(),
+                            name: value.clone(),
+                        });
+                    self.native_ui.remove_node(msg.destination);
+                    continue;
+                }
                 if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
                     let gesture = self.allocate_property_gesture();
                     self.queue_generated_binding(

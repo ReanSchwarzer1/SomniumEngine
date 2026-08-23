@@ -1931,6 +1931,15 @@ jMonkeyEngine (the SDK is a separate repository, absent from this checkout),
 Raylib, Ren'Py, Haxe, mach, and **Solers**, which is a Godot 4.7.1 fork whose
 editor is stock Godot.
 
+### 13G.5a CONTROL-C implementation mapping (2026-08-23)
+
+No third-party code was copied. `somnium_asset::{database,preview}`,
+`somnium_core::jobs`, and `somnium_ui::{thumbnail,editor}` apply these studied
+patterns: Fyrox's worker-load/UI-apply split and layered fallback; Stride's
+visible-tile promotion; Godot's mtime-then-content-hash invalidation; NeoAxis's
+render-large, auto-crop, downsample mesh preview; Unreal's generator frequency;
+Lumina's decline/fall-through registry; and Flax's cancellable progress surface.
+
 ### 13G.6 External literature — the rendering half
 
 Studied for CONTROL-M / N / L; nothing implemented.

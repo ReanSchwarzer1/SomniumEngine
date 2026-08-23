@@ -93,7 +93,10 @@ pub(crate) fn build_content_drawer(
     let engine_h = ui.add_node(engine, grid_h);
 
     let toolbar = StackPanelBuilder::new(
-        WidgetBuilder::new().with_row(1).with_column(0).with_background(theme::TRANSPARENT),
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT),
     )
     .with_orientation(Orientation::Horizontal)
     .build();
@@ -103,10 +106,22 @@ pub(crate) fn build_content_drawer(
         ("‹", crate::ContentToolbarAction::Back),
         ("›", crate::ContentToolbarAction::Forward),
         ("↑", crate::ContentToolbarAction::Up),
-        ("All", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::All)),
-        ("Models", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Models)),
-        ("Textures", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Textures)),
-        ("Scripts", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Scripts)),
+        (
+            "All",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::All),
+        ),
+        (
+            "Models",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Models),
+        ),
+        (
+            "Textures",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Textures),
+        ),
+        (
+            "Scripts",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Scripts),
+        ),
         ("Sort", crate::ContentToolbarAction::Sort),
         ("Size", crate::ContentToolbarAction::Density),
     ] {
@@ -120,12 +135,10 @@ pub(crate) fn build_content_drawer(
         ui.add_node(text, button);
         toolbar_actions.push((button, action));
     }
-    let crumb = BreadcrumbBuilder::new(
-        WidgetBuilder::new().with_background(theme::TRANSPARENT),
-    )
-    .with_parts(["Game"])
-    .with_font_id(font_id)
-    .build();
+    let crumb = BreadcrumbBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_parts(["Game"])
+        .with_font_id(font_id)
+        .build();
     let crumb_h = ui.add_node(crumb, toolbar);
 
     let list_scroll = ScrollViewerBuilder::new(

@@ -143,7 +143,8 @@ impl ThumbnailCache {
         }
         let slot = self.allocate_slot(path);
         self.copy_into(slot, rgba);
-        self.states.insert(path.to_path_buf(), ThumbState::Ready(slot));
+        self.states
+            .insert(path.to_path_buf(), ThumbState::Ready(slot));
         self.touch(path);
         true
     }
@@ -195,12 +196,18 @@ impl ThumbnailCache {
 
     /// Number of ready cells.
     pub fn ready_count(&self) -> usize {
-        self.states.values().filter(|s| matches!(s, ThumbState::Ready(_))).count()
+        self.states
+            .values()
+            .filter(|s| matches!(s, ThumbState::Ready(_)))
+            .count()
     }
 
     /// Number of outstanding requests.
     pub fn pending_count(&self) -> usize {
-        self.states.values().filter(|s| **s == ThumbState::Pending).count()
+        self.states
+            .values()
+            .filter(|s| **s == ThumbState::Pending)
+            .count()
     }
 
     /// Clears all paths and pixels.

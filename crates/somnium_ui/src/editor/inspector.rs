@@ -20,12 +20,12 @@ use crate::{
         combo_box::ComboBoxBuilder,
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         numeric_field::NumericFieldBuilder,
+        popup::{PopupBuilder, PopupPlacement},
         property_row::PropertyRowBuilder,
+        search_box::SearchBoxBuilder,
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
         text_box::TextBoxBuilder,
-        search_box::SearchBoxBuilder,
-        popup::{PopupBuilder, PopupPlacement},
     },
 };
 
@@ -430,19 +430,24 @@ pub(crate) fn build_generated_details(
                             .build(),
                         row_handle,
                     );
-                    let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::BG_PANEL))
-                        .with_anchor(handle)
-                        .with_placement(PopupPlacement::AnchorBelow)
-                        .build();
+                    let popup =
+                        PopupBuilder::new(WidgetBuilder::new().with_background(theme::BG_PANEL))
+                            .with_anchor(handle)
+                            .with_placement(PopupPlacement::AnchorBelow)
+                            .build();
                     let popup = ui.add_node(popup, ui.root());
                     let column = StackPanelBuilder::new(
-                        WidgetBuilder::new().with_width(360.0).with_background(theme::BG_PANEL),
+                        WidgetBuilder::new()
+                            .with_width(360.0)
+                            .with_background(theme::BG_PANEL),
                     )
                     .with_orientation(Orientation::Vertical)
                     .build();
                     let column = ui.add_node(column, popup);
                     let search = SearchBoxBuilder::new(
-                        WidgetBuilder::new().with_height(theme::ROW_HEIGHT).with_background(theme::BG_INPUT),
+                        WidgetBuilder::new()
+                            .with_height(theme::ROW_HEIGHT)
+                            .with_background(theme::BG_INPUT),
                     )
                     .with_font_id(font_id)
                     .build();
@@ -450,7 +455,9 @@ pub(crate) fn build_generated_details(
                     let paths = std::iter::once(None)
                         .chain(candidates.iter().map(|candidate| {
                             assets
-                                .get(somnium_asset::database::AssetId::from_raw(candidate.id.raw()))
+                                .get(somnium_asset::database::AssetId::from_raw(
+                                    candidate.id.raw(),
+                                ))
                                 .map(|record| record.absolute_path.clone())
                         }))
                         .collect::<Vec<_>>();
@@ -471,21 +478,28 @@ pub(crate) fn build_generated_details(
                         ("Locate", AssetPickerAction::Locate),
                         ("Make Unique", AssetPickerAction::MakeUnique),
                     ] {
-                        let button = ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT)).build();
+                        let button =
+                            ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
+                                .build();
                         let button = ui.add_node(button, actions);
-                        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(7.0, 4.0)))
-                            .with_role(TextRole::Caption)
-                            .with_text(label)
-                            .build();
+                        let text = TextBuilder::new(
+                            WidgetBuilder::new().with_margin(Thickness::axes(7.0, 4.0)),
+                        )
+                        .with_role(TextRole::Caption)
+                        .with_text(label)
+                        .build();
                         ui.add_node(text, button);
                         asset_actions.insert(button, (handle, action));
                     }
                     ui.send(ComboBoxMessage::bind_popup(handle, popup, list));
-                    asset_searches.insert(search, GeneratedAssetPicker {
-                        combo: handle,
-                        list,
-                        kind_mask: model.asset_kind_mask,
-                    });
+                    asset_searches.insert(
+                        search,
+                        GeneratedAssetPicker {
+                            combo: handle,
+                            list,
+                            kind_mask: model.asset_kind_mask,
+                        },
+                    );
                     asset_choices.insert(handle, choices);
                     bindings.insert(handle, base);
                 }
@@ -501,5 +515,12 @@ pub(crate) fn build_generated_details(
             }
         }
     }
-    (root, bindings, rows, asset_choices, asset_searches, asset_actions)
+    (
+        root,
+        bindings,
+        rows,
+        asset_choices,
+        asset_searches,
+        asset_actions,
+    )
 }

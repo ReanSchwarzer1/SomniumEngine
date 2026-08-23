@@ -10,12 +10,12 @@
 > from its systems, and it is the game that made ray-traced reflections
 > mainstream. This phase is a UI phase with a rendering half, in that order.
 >
-> **Status:** **IN PROGRESS — Track 0 and CONTROL-B complete 2026-08-23.** CONTROL-A's
+> **Status:** **IN PROGRESS — Track 0 and CONTROL-B/C complete 2026-08-23.** CONTROL-A's
 > regenerable audit, red gates, two-width surface captures, and terrain timing are in tree;
 > CONTROL-A1's input seam and CONTROL-A2's command registry are complete.
 > CONTROL-B's schema-generated production Details path covers all 160 editable
 > fields across 16 schemas; its legacy hand-wiring census is zero. **Next:
-> CONTROL-C.** Plan written 2026-08-17;
+> CONTROL-D.** Plan written 2026-08-17;
 > **re-audited and expanded 2026-08-22** against the
 > tree at `209fd07`, after Phase 27 landed. Every count in §4 was re-measured
 > on that date; the 2026-08-17 figures are superseded and the differences are

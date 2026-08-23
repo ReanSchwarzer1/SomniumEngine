@@ -210,23 +210,23 @@ pub fn virtual_engine_content(filter: &str) -> Vec<ContentEntry> {
     let filter = filter.to_ascii_lowercase();
     let mut out = Vec::new();
     for (name, icon) in [
-            ("Cube", IconId::Cube),
-            ("Sphere", IconId::Sphere),
-            ("Plane", IconId::Plane),
-            ("Cylinder", IconId::Cylinder),
-            ("Inter-Regular.ttf", IconId::Font),
-        ] {
-            if filter.is_empty() || name.to_ascii_lowercase().contains(&filter) {
-                out.push(ContentEntry {
-                    path: PathBuf::from("/Engine").join(name),
-                    name: name.into(),
-                    is_dir: false,
-                    icon,
-                    is_engine: true,
-                    asset_id: None,
-                    tooltip: "Built-in Engine asset".into(),
-                });
-            }
+        ("Cube", IconId::Cube),
+        ("Sphere", IconId::Sphere),
+        ("Plane", IconId::Plane),
+        ("Cylinder", IconId::Cylinder),
+        ("Inter-Regular.ttf", IconId::Font),
+    ] {
+        if filter.is_empty() || name.to_ascii_lowercase().contains(&filter) {
+            out.push(ContentEntry {
+                path: PathBuf::from("/Engine").join(name),
+                name: name.into(),
+                is_dir: false,
+                icon,
+                is_engine: true,
+                asset_id: None,
+                tooltip: "Built-in Engine asset".into(),
+            });
+        }
     }
     out
 }

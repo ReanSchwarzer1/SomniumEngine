@@ -18,7 +18,10 @@ use glam::Vec2;
 pub enum ComboBoxMessage {
     SelectionChanged(usize),
     SetSelected(usize),
-    BindPopup { popup: NodeHandle, list: NodeHandle },
+    BindPopup {
+        popup: NodeHandle,
+        list: NodeHandle,
+    },
     Open,
     Close,
     /// Replace filtered entries without replacing/focusing the widget.

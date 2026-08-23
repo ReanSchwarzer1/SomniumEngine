@@ -3,14 +3,17 @@
 > **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
 >
 > **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B complete 2026-08-23**.
+> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B/C complete 2026-08-23**.
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and
 > opt-in red completeness gates; CONTROL-A1 ships the modifier/input, gesture,
 > traversal and modal-focus seam; CONTROL-A2 ships the 52-command registry.
 > CONTROL-B ships the schema-generated production Details path for all 160
 > editable fields across 16 registered schemas, generic scoped undo/coalescing,
-> and a zero legacy hand-wiring census. **Next: CONTROL-C.**
+> and a zero legacy hand-wiring census. CONTROL-C ships the immutable queried
+> asset database, bounded cancellable jobs, visible-first off-thread cached
+> previews, drawer workflows and the schema Asset picker. Its 60-PNG proof is
+> deterministic; no post-C live redline is claimed. **Next: CONTROL-D.**
 > Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
 > layer, motion, elevation, the second theme and the first-impression surfaces.
 > Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.

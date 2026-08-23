@@ -176,7 +176,9 @@ impl AssetDbSnapshot {
 
     #[must_use]
     pub fn get(&self, id: AssetId) -> Option<&AssetRecord> {
-        self.by_id.get(&id).and_then(|index| self.records.get(*index))
+        self.by_id
+            .get(&id)
+            .and_then(|index| self.records.get(*index))
     }
 
     #[must_use]
@@ -202,7 +204,10 @@ impl AssetDbSnapshot {
                 return folders;
             }
             let order = match query.sort {
-                AssetSort::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
+                AssetSort::Name => a
+                    .name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase()),
                 AssetSort::Kind => a.kind.label().cmp(b.kind.label()),
                 AssetSort::Size => a.metadata.bytes.cmp(&b.metadata.bytes),
                 AssetSort::Modified => a
@@ -223,7 +228,11 @@ impl AssetDbSnapshot {
     #[must_use]
     pub fn search(&self, text: &str, kind_mask: u64) -> Vec<AssetRecord> {
         let needle = text.trim().to_ascii_lowercase();
-        let mask = if kind_mask == 0 { ASSET_KIND_ALL } else { kind_mask };
+        let mask = if kind_mask == 0 {
+            ASSET_KIND_ALL
+        } else {
+            kind_mask
+        };
         self.records
             .iter()
             .filter(|row| row.kind != AssetKind::Folder && row.kind.bit() & mask != 0)
@@ -278,7 +287,11 @@ impl DebouncedAssetDb {
             self.pending = None;
             return None;
         }
-        if self.pending.as_ref().is_some_and(|(pending, _)| pending == &revision) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == &revision)
+        {
             self.pending = None;
             self.published_revision = Some(revision);
             self.published = Some(candidate.clone());
@@ -368,7 +381,11 @@ fn scan_dir(
             .unwrap_or_default();
         let kind = classify(&path, metadata.is_dir());
         let modified_unix_ms = modified_ms(&metadata);
-        let bytes = if metadata.is_file() { metadata.len() } else { 0 };
+        let bytes = if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        };
         let content_hash = if metadata.is_file() {
             match old.records.get(&relative_path) {
                 Some(previous)
@@ -442,10 +459,7 @@ pub fn classify(path: &Path, is_dir: bool) -> AssetKind {
     }
 }
 
-fn kind_facts(
-    path: &Path,
-    kind: AssetKind,
-) -> (Option<(u32, u32)>, Option<u64>, Option<String>) {
+fn kind_facts(path: &Path, kind: AssetKind) -> (Option<(u32, u32)>, Option<u64>, Option<String>) {
     match kind {
         AssetKind::Texture => {
             let dimensions = image::ImageReader::open(path)
@@ -459,10 +473,14 @@ fn kind_facts(
                     .meshes()
                     .flat_map(|mesh| mesh.primitives())
                     .map(|primitive| {
-                        primitive
-                            .indices()
-                            .map_or_else(|| primitive.get(&gltf::Semantic::Positions).map_or(0, |a| a.count()), |a| a.count())
-                            as u64
+                        primitive.indices().map_or_else(
+                            || {
+                                primitive
+                                    .get(&gltf::Semantic::Positions)
+                                    .map_or(0, |a| a.count())
+                            },
+                            |a| a.count(),
+                        ) as u64
                             / 3
                     })
                     .sum()
@@ -494,7 +512,9 @@ fn modified_ms(metadata: &fs::Metadata) -> u64 {
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
 }
 
 fn normalise_relative(path: &Path) -> String {
@@ -560,7 +580,11 @@ mod tests {
             kind_mask: ASSET_KIND_TEXTURE,
             ..Default::default()
         });
-        assert_eq!(rows.len(), 1, "snapshot must survive the source disappearing");
+        assert_eq!(
+            rows.len(),
+            1,
+            "snapshot must survive the source disappearing"
+        );
         assert_eq!(rows[0].name, "rock.png");
         let _ = fs::remove_dir_all(root);
     }
@@ -588,7 +612,10 @@ mod tests {
         assert!(all[0].kind == AssetKind::Folder);
         let scripts = db.search("boot", AssetKind::Script.bit());
         assert_eq!(scripts.len(), 1);
-        assert_eq!(scripts[0].metadata.doc_line.as_deref(), Some("Starts the game"));
+        assert_eq!(
+            scripts[0].metadata.doc_line.as_deref(),
+            Some("Starts the game")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

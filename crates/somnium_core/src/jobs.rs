@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering as AtomicOrdering},
         mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
     },
     thread::JoinHandle,
@@ -113,7 +113,10 @@ impl JobState {
             name: self.name,
             status,
             progress: self.progress.load(AtomicOrdering::Relaxed) as f32 / 10_000.0,
-            cancellable: !matches!(status, JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled),
+            cancellable: !matches!(
+                status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            ),
         }
     }
 }
@@ -311,7 +314,15 @@ impl JobRegistry {
         let mut command = std::process::Command::new("cargo");
         command
             .current_dir(workspace)
-            .args(["run", "--release", "-p", "somnium_asset", "--example", "pack_terrain", "--"])
+            .args([
+                "run",
+                "--release",
+                "-p",
+                "somnium_asset",
+                "--example",
+                "pack_terrain",
+                "--",
+            ])
             .args(arguments);
         self.submit_process("Terrain bake", JobPriority::User, command)
     }
@@ -375,9 +386,7 @@ impl JobRegistry {
         self.states
             .values()
             .map(|state| state.snapshot())
-            .filter(|snapshot| {
-                matches!(snapshot.status, JobStatus::Queued | JobStatus::Running)
-            })
+            .filter(|snapshot| matches!(snapshot.status, JobStatus::Queued | JobStatus::Running))
             .collect()
     }
 
@@ -514,8 +523,14 @@ mod tests {
             })
             .unwrap();
         release_tx.send(()).unwrap();
-        assert_eq!(order_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "high");
-        assert_eq!(order_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "low");
+        assert_eq!(
+            order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "high"
+        );
+        assert_eq!(
+            order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "low"
+        );
     }
 
     #[test]

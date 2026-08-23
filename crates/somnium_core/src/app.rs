@@ -26,8 +26,8 @@ use crate::editor_commands::{
 };
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
-use crate::time::TimeState;
 use crate::jobs::{JobHandle, JobPriority, JobRegistry};
+use crate::time::TimeState;
 use crate::{
     CameraSettingsComponent, FoliageComponent, LightComponent, LightType, MaterialComponent,
     MeshComponent, MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent,
@@ -2287,12 +2287,15 @@ impl<G: GameApp> Engine<G> {
         let now = std::time::Instant::now();
         if self.asset_scan.is_none() && now >= self.next_asset_scan {
             let root = self.config.content_root.clone();
-            match self.jobs.submit("Asset inventory", JobPriority::Background, move |ctx| {
-                ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
-                let snapshot = somnium_asset::database::AssetDb::scan(root)?;
-                ctx.set_progress(1.0);
-                Ok(snapshot)
-            }) {
+            match self
+                .jobs
+                .submit("Asset inventory", JobPriority::Background, move |ctx| {
+                    ctx.check_cancelled()
+                        .map_err(|error| format!("{error:?}"))?;
+                    let snapshot = somnium_asset::database::AssetDb::scan(root)?;
+                    ctx.set_progress(1.0);
+                    Ok(snapshot)
+                }) {
                 Ok(handle) => self.asset_scan = Some(handle),
                 Err(error) => warn!(?error, "asset scan queue is full"),
             }
@@ -2311,7 +2314,12 @@ impl<G: GameApp> Engine<G> {
             let record = self
                 .asset_gate
                 .published()
-                .and_then(|snapshot| snapshot.records().iter().find(|r| r.absolute_path == request.path))
+                .and_then(|snapshot| {
+                    snapshot
+                        .records()
+                        .iter()
+                        .find(|r| r.absolute_path == request.path)
+                })
                 .cloned();
             let Some(record) = record else {
                 if let Some(ui) = self.ui_manager.as_mut() {
@@ -2320,15 +2328,22 @@ impl<G: GameApp> Engine<G> {
                 continue;
             };
             let cache_root = self.config.content_root.join(".somnium/thumbnails");
-            let priority = if request.visible { JobPriority::Visible } else { JobPriority::Background };
+            let priority = if request.visible {
+                JobPriority::Visible
+            } else {
+                JobPriority::Background
+            };
             let key = request.path.clone();
             match self.jobs.submit("Asset preview", priority, move |ctx| {
-                ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
+                ctx.check_cancelled()
+                    .map_err(|error| format!("{error:?}"))?;
                 let result = somnium_asset::preview::prepare_preview(&record, &cache_root)?;
                 ctx.set_progress(1.0);
                 Ok(result)
             }) {
-                Ok(handle) => { self.preview_jobs.insert(key, handle); }
+                Ok(handle) => {
+                    self.preview_jobs.insert(key, handle);
+                }
                 Err(error) => warn!(?error, "preview queue is full"),
             }
         }
@@ -2770,13 +2785,16 @@ impl<G: GameApp> Engine<G> {
         }
         let path_str = path.to_string_lossy().to_string();
         let worker_path = path_str.clone();
-        match self.jobs.submit("glTF import", JobPriority::User, move |ctx| {
-            ctx.set_progress(0.05);
-            ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
-            let scene = somnium_asset::load_gltf(&worker_path)?;
-            ctx.set_progress(1.0);
-            Ok((worker_path, scene))
-        }) {
+        match self
+            .jobs
+            .submit("glTF import", JobPriority::User, move |ctx| {
+                ctx.set_progress(0.05);
+                ctx.check_cancelled()
+                    .map_err(|error| format!("{error:?}"))?;
+                let scene = somnium_asset::load_gltf(&worker_path)?;
+                ctx.set_progress(1.0);
+                Ok((worker_path, scene))
+            }) {
             Ok(handle) => {
                 self.import_job = Some(handle);
                 if let Some(ui) = self.ui_manager.as_mut() {
@@ -4594,9 +4612,17 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::MakeAssetUnique { source, entity, component, field } => {
+            EditorEvent::MakeAssetUnique {
+                source,
+                entity,
+                component,
+                field,
+            } => {
                 let source = std::path::PathBuf::from(source);
-                let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("Asset");
+                let stem = source
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Asset");
                 let extension = source.extension().and_then(|s| s.to_str());
                 let mut suffix = 1_u32;
                 let target = loop {
@@ -4611,7 +4637,9 @@ impl<G: GameApp> Engine<G> {
                 };
                 match std::fs::copy(&source, &target) {
                     Ok(_) => {
-                        let relative = target.strip_prefix(&self.config.content_root).unwrap_or(&target);
+                        let relative = target
+                            .strip_prefix(&self.config.content_root)
+                            .unwrap_or(&target);
                         let asset = somnium_ecs::reflect::AssetRef::from_raw(
                             somnium_asset::database::AssetId::from_relative_path(relative).raw(),
                         );

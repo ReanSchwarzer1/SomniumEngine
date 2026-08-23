@@ -179,11 +179,18 @@ mod tests {
         struct Catalog;
         impl AssetEditorContext for Catalog {
             fn query(&self, _: &str, _: u64) -> Vec<AssetCandidate> {
-                vec![AssetCandidate { id: AssetRef::from_raw(7), label: "rock.png".into(), kind_bit: 2 }]
+                vec![AssetCandidate {
+                    id: AssetRef::from_raw(7),
+                    label: "rock.png".into(),
+                    kind_bit: 2,
+                }]
             }
         }
         assert_eq!(Catalog.commit(None, 2).unwrap(), ReflectValue::Asset(None));
         assert!(Catalog.commit(Some(AssetRef::from_raw(7)), 4).is_err());
-        assert_eq!(Catalog.commit(Some(AssetRef::from_raw(7)), 2).unwrap(), ReflectValue::Asset(Some(AssetRef::from_raw(7))));
+        assert_eq!(
+            Catalog.commit(Some(AssetRef::from_raw(7)), 2).unwrap(),
+            ReflectValue::Asset(Some(AssetRef::from_raw(7)))
+        );
     }
 }

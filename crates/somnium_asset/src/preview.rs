@@ -1,8 +1,9 @@
 //! Worker-side asset preview preparation and disk cache.
 
 use crate::{
+    LoadedMesh, LoadedScene, Vertex,
     database::{AssetKind, AssetRecord},
-    LoadedMesh, LoadedScene, Vertex, load_gltf,
+    load_gltf,
 };
 use glam::{Mat4, Vec3, Vec4};
 use image::{DynamicImage, ImageBuffer, Rgba, imageops::FilterType};
@@ -58,11 +59,36 @@ impl PreviewGeneratorRegistry {
     pub fn standard() -> Self {
         Self {
             generators: vec![
-                PreviewGenerator { name: "texture", kind: AssetKind::Texture, frequency: PreviewFrequency::Once, generate: |r| decode_texture(&r.absolute_path) },
-                PreviewGenerator { name: "mesh-studio", kind: AssetKind::Mesh, frequency: PreviewFrequency::OnAssetSave, generate: |r| render_mesh(&r.absolute_path) },
-                PreviewGenerator { name: "material", kind: AssetKind::Material, frequency: PreviewFrequency::OnPropertyChange, generate: |_| None },
-                PreviewGenerator { name: "scene", kind: AssetKind::Scene, frequency: PreviewFrequency::OnAssetSave, generate: |_| None },
-                PreviewGenerator { name: "script-document", kind: AssetKind::Script, frequency: PreviewFrequency::Once, generate: |_| Some(script_card()) },
+                PreviewGenerator {
+                    name: "texture",
+                    kind: AssetKind::Texture,
+                    frequency: PreviewFrequency::Once,
+                    generate: |r| decode_texture(&r.absolute_path),
+                },
+                PreviewGenerator {
+                    name: "mesh-studio",
+                    kind: AssetKind::Mesh,
+                    frequency: PreviewFrequency::OnAssetSave,
+                    generate: |r| render_mesh(&r.absolute_path),
+                },
+                PreviewGenerator {
+                    name: "material",
+                    kind: AssetKind::Material,
+                    frequency: PreviewFrequency::OnPropertyChange,
+                    generate: |_| None,
+                },
+                PreviewGenerator {
+                    name: "scene",
+                    kind: AssetKind::Scene,
+                    frequency: PreviewFrequency::OnAssetSave,
+                    generate: |_| None,
+                },
+                PreviewGenerator {
+                    name: "script-document",
+                    kind: AssetKind::Script,
+                    frequency: PreviewFrequency::Once,
+                    generate: |_| Some(script_card()),
+                },
             ],
         }
     }
@@ -90,7 +116,10 @@ impl PreviewGeneratorRegistry {
 ///
 /// Texture decode and the compact mesh studio render both run in a worker.
 /// The UI-thread half is only the final 16 KiB atlas copy.
-pub fn prepare_preview(record: &AssetRecord, cache_root: &Path) -> Result<Option<PreparedPreview>, String> {
+pub fn prepare_preview(
+    record: &AssetRecord,
+    cache_root: &Path,
+) -> Result<Option<PreparedPreview>, String> {
     if record.kind == AssetKind::Folder {
         return Ok(None);
     }
@@ -226,20 +255,25 @@ fn append_mesh(mesh: &LoadedMesh, transform: Mat4, out: &mut Vec<[PreviewVertex;
     }
 }
 
-fn raster_triangle(
-    p: [(f32, f32, f32); 3],
-    shade: f32,
-    color: &mut [u8],
-    depth: &mut [f32],
-) {
-    let min_x = p.iter().map(|v| v.0).fold(f32::INFINITY, f32::min).floor().max(0.0) as u32;
+fn raster_triangle(p: [(f32, f32, f32); 3], shade: f32, color: &mut [u8], depth: &mut [f32]) {
+    let min_x = p
+        .iter()
+        .map(|v| v.0)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as u32;
     let max_x = p
         .iter()
         .map(|v| v.0)
         .fold(f32::NEG_INFINITY, f32::max)
         .ceil()
         .min((MESH_RENDER_SIZE - 1) as f32) as u32;
-    let min_y = p.iter().map(|v| v.1).fold(f32::INFINITY, f32::min).floor().max(0.0) as u32;
+    let min_y = p
+        .iter()
+        .map(|v| v.1)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as u32;
     let max_y = p
         .iter()
         .map(|v| v.1)
@@ -304,14 +338,9 @@ fn crop_and_downsample(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> 
     max_x = (max_x + BORDER).min(width - 1);
     max_y = (max_y + BORDER).min(height - 1);
     let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())?;
-    let cropped = image::imageops::crop_imm(
-        &source,
-        min_x,
-        min_y,
-        max_x - min_x + 1,
-        max_y - min_y + 1,
-    )
-    .to_image();
+    let cropped =
+        image::imageops::crop_imm(&source, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+            .to_image();
     let mut side = cropped.width().max(cropped.height());
     side = side.max(1);
     let mut square = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(side, side);
@@ -362,7 +391,10 @@ mod tests {
             name: "preview.png".into(),
             parent: String::new(),
             kind,
-            metadata: AssetMetadata { content_hash: hash.into(), ..Default::default() },
+            metadata: AssetMetadata {
+                content_hash: hash.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -375,7 +407,10 @@ mod tests {
         }
         let result = crop_and_downsample(&image, 96, 96).unwrap();
         let occupied = result.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
-        assert!(occupied > 100, "thin mesh stayed a speck: {occupied} pixels");
+        assert!(
+            occupied > 100,
+            "thin mesh stayed a speck: {occupied} pixels"
+        );
     }
 
     #[test]
@@ -386,8 +421,18 @@ mod tests {
     #[test]
     fn registry_decline_falls_through_and_exposes_frequency() {
         let mut registry = PreviewGeneratorRegistry::default();
-        registry.register(PreviewGenerator { name: "declines", kind: AssetKind::Script, frequency: PreviewFrequency::Realtime, generate: |_| None });
-        registry.register(PreviewGenerator { name: "answer", kind: AssetKind::Script, frequency: PreviewFrequency::Once, generate: |_| Some(script_card()) });
+        registry.register(PreviewGenerator {
+            name: "declines",
+            kind: AssetKind::Script,
+            frequency: PreviewFrequency::Realtime,
+            generate: |_| None,
+        });
+        registry.register(PreviewGenerator {
+            name: "answer",
+            kind: AssetKind::Script,
+            frequency: PreviewFrequency::Once,
+            generate: |_| Some(script_card()),
+        });
         let asset = record(PathBuf::from("missing.luau"), AssetKind::Script, "script");
         assert!(registry.generate(&asset).is_some());
         assert_eq!(registry.entries()[0].frequency, PreviewFrequency::Realtime);
