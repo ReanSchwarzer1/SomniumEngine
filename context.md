@@ -181,6 +181,38 @@
 >   states plainly that **the web-research pass did not complete**, so the
 >   document contains no third-party version claims and every wgpu-dependent
 >   sub-phase opens with a capability probe instead. **Start at MORROWIND-A.**
+> - **Phase KENSHI — OGRE (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_KENSHI.md` — written 2026-08-23. **The scale phase, and
+>   it is third: CONTROL → MORROWIND → KENSHI.** Premise: after MORROWIND every
+>   feature will have been accepted on a *single-feature* `.somtime` row on the
+>   two shipped maps, and **nobody will ever have run the frame that has skinned
+>   crowds, streaming cells, GPU particles and navmesh agents in it at once.**
+>   Four tracks: **THE HUB** (fixed-timestep determinism with seeded RNG and
+>   replayable input traces; **`.somtime` v2**, which adds a scale axis and a
+>   computed shape classification while still parsing every v1 file — the DOOM-A
+>   baselines stay byte-identical; the sweep harness; a seeded scale rig),
+>   **BEEP** (the profiler finished — §4.2 measures what it lacks today: **no
+>   memory accounting at all**, no real CPU depth, no job-queue visibility, no
+>   capture-to-file, no per-system attribution, no remote client; Panda3D's
+>   `pstatclient` is the model for the last), **WORLD'S END** (the sweep, whose
+>   deliverable is a publishable `limits.md` naming, per axis, the number, the
+>   subsystem that broke first, and which of three shapes — cliff, slope or
+>   curve — it was), and **SKELETON** (the fixes: multi-threaded recording via
+>   Panda3D pipeline cycling — MORROWIND §14.8 parked it as "a phase of its
+>   own", this is it — plus MORROWIND-W2's pose task graph and MORROWIND-AD's
+>   virtual texturing).
+>   **Judging rule: no optimisation is authorized until a measurement names it.**
+>   Every Track 3 sub-phase is marked `BLOCKED` until the sweep indicts it, on
+>   the DOOM precedent that shipping tile binning and aerial terrain **default
+>   off** because they measured slower was worth more than either feature.
+>   **Structural caveat, stated in the document rather than hidden:** unlike
+>   CONTROL and MORROWIND it cannot open with a measured audit, because the tree
+>   it measures does not exist yet — half of §4 is tagged `[P]` (predicted) and
+>   KENSHI-A's entire job is to replace those with `[M]`. Grounded on what *is*
+>   measured today: `profiler.rs`'s API, `timing.rs`'s v1 format and env vars,
+>   and `jobs.rs:3`'s own admission that **"record still happens on the render
+>   thread."** **Successor named in §14.1: packaging and distribution** — no
+>   plan in this repository yet produces a distributable artifact.
 > - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
 >   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
 >   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
