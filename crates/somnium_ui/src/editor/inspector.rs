@@ -286,6 +286,7 @@ pub(crate) fn build_generated_details(
                 value: model.value.clone(),
                 default: model.default.clone(),
                 edit: GeneratedEdit::Whole,
+                asset_kind_mask: model.asset_kind_mask,
             };
             rows.insert(row_handle, base.clone());
             let widget = WidgetBuilder::new()

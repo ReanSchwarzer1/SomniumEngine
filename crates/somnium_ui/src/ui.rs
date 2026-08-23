@@ -77,6 +77,11 @@ pub struct UserInterface {
     hovered_ih: IH,
     modifiers: Modifiers,
     active_gesture: Option<GestureToken>,
+    drag_drop: crate::drag_drop::DragDropState,
+    /// Screen bounds of the widget the current acceptance resolved against.
+    /// Kept beside the acceptance so the highlight, the cursor and the adorner
+    /// text cannot disagree about what is under the pointer.
+    drop_highlight: Option<Rect>,
     modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
@@ -109,6 +114,8 @@ impl UserInterface {
             hovered_ih: IH::NONE,
             modifiers: Modifiers::default(),
             active_gesture: None,
+            drag_drop: crate::drag_drop::DragDropState::default(),
+            drop_highlight: None,
             modal_focus: None,
             viewport_handle: NodeHandle::NONE,
         }
@@ -116,6 +123,42 @@ impl UserInterface {
 
     pub fn root(&self) -> NodeHandle {
         to_nh(self.root_ih)
+    }
+
+    pub fn arm_drag(&mut self, payload: crate::drag_drop::DragPayload) {
+        self.drag_drop.arm(self.cursor_pos, payload);
+    }
+
+    pub fn begin_external_drag(&mut self, payload: crate::drag_drop::DragPayload) {
+        self.drag_drop.begin_external(payload);
+    }
+
+    #[must_use]
+    pub fn is_dragging(&self) -> bool { self.drag_drop.is_dragging() }
+
+    pub fn set_drop_acceptance(&mut self, value: Option<crate::drag_drop::DropAcceptance>) {
+        self.drag_drop.set_acceptance(value);
+    }
+
+    /// Bounds the resolved drop target occupies on screen, or `None` when the
+    /// pointer is over nothing that accepts the payload.
+    pub fn set_drop_highlight(&mut self, bounds: Option<Rect>) {
+        self.drop_highlight = bounds;
+    }
+
+    #[must_use]
+    pub fn drop_highlight(&self) -> Option<Rect> {
+        self.drop_highlight
+    }
+
+    pub fn drag_payload(&self) -> Option<&crate::drag_drop::DragPayload> { self.drag_drop.payload() }
+
+    pub fn take_completed_drop(&mut self) -> Option<crate::drag_drop::CompletedDrop> {
+        self.drag_drop.release()
+    }
+
+    pub fn parent(&self, handle: NodeHandle) -> NodeHandle {
+        self.nodes.try_borrow(to_ih(handle)).map(|n| n.widget.parent).unwrap_or(NodeHandle::NONE)
     }
 
     /// Screen-space bounds of a node after layout.
@@ -476,6 +519,13 @@ impl UserInterface {
 
     /// Cursor for the widget under the pointer (or the captured widget while dragging).
     pub fn cursor_kind(&self) -> crate::node::CursorKind {
+        if self.drag_drop.is_dragging() {
+            return match self.drag_drop.acceptance().map(|a| a.effect) {
+                Some(crate::drag_drop::DropEffect::Move) => crate::node::CursorKind::Move,
+                Some(crate::drag_drop::DropEffect::Copy | crate::drag_drop::DropEffect::Link) => crate::node::CursorKind::Copy,
+                _ => crate::node::CursorKind::NoDrop,
+            };
+        }
         let handle = if self.captured_ih.is_some() {
             to_nh(self.captured_ih)
         } else {
@@ -596,6 +646,10 @@ impl UserInterface {
     /// Cancel the active gesture before any overlay is dismissed. Returns true
     /// only when a control accepted cancellation.
     pub fn cancel_active_gesture(&mut self) -> bool {
+        if self.drag_drop.cancel() {
+            self.captured_ih = IH::NONE;
+            return true;
+        }
         let Some(token) = self.active_gesture.take() else {
             return false;
         };
@@ -826,6 +880,69 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
+        self.draw_drag_overlay();
+    }
+
+    /// The drag ghost and the drop-target adorner, painted after the whole
+    /// tree so they are never clipped by the panel the pointer happens to be
+    /// over. Everything here reads the *cached* acceptance — the same value
+    /// the release will execute — which is what makes the pre-drop feedback
+    /// truthful rather than merely plausible.
+    fn draw_drag_overlay(&mut self) {
+        if !self.drag_drop.is_dragging() {
+            return;
+        }
+        let effect = self
+            .drag_drop
+            .acceptance()
+            .map_or(crate::drag_drop::DropEffect::Forbidden, |a| a.effect);
+        if let Some(bounds) = self.drop_highlight {
+            let paint = crate::style::drop_target(effect);
+            self.draw_ctx.push_paint(bounds, &paint);
+        }
+
+        let label = self.drag_ghost_label();
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        let px = style.px;
+        let width = self.draw_ctx.font_atlas.measure_text(&label, px, font).x + 16.0;
+        let ghost = Rect::new(
+            self.cursor_pos.x + 14.0,
+            self.cursor_pos.y + 14.0,
+            width,
+            px + 10.0,
+        );
+        let paint = crate::style::drop_target(effect);
+        self.draw_ctx.push_paint(ghost, &paint);
+        self.draw_ctx.push_text(
+            &label,
+            Vec2::new(ghost.x + 8.0, ghost.y + 5.0),
+            font,
+            px,
+            crate::theme::active().semantic.text.primary.bytes(),
+        );
+    }
+
+    /// The adorner's words. A rejection states *why*; a partial accept states
+    /// the exact count, so "2 of 5 · Copy" is never guessed from the cursor.
+    fn drag_ghost_label(&self) -> String {
+        let total = match self.drag_drop.payload() {
+            Some(crate::drag_drop::DragPayload::Assets(v)) => v.len(),
+            Some(crate::drag_drop::DragPayload::Entities(v)) => v.len(),
+            Some(crate::drag_drop::DragPayload::ExternalFiles(v)) => v.len(),
+            None => 0,
+        };
+        match self.drag_drop.acceptance() {
+            Some(acceptance) if acceptance.can_drop() => acceptance
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{total} · {:?}", acceptance.effect)),
+            Some(acceptance) => acceptance
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Can't drop here".to_string()),
+            None => format!("{total} item(s)"),
+        }
     }
 
     fn update_global_visibility(&mut self, handle: IH, parent_visible: bool) {
@@ -1043,6 +1160,12 @@ impl UserInterface {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = self.to_logical(position.x, position.y);
+                let crossed = self.drag_drop.pointer_moved(self.cursor_pos);
+                if crossed {
+                    // The drag owns pointer capture from this point. Cancel the
+                    // pressed widget so release cannot also become a Click.
+                    self.captured_ih = IH::NONE;
+                }
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;
@@ -1075,10 +1198,17 @@ impl UserInterface {
                     }
                     self.hovered_ih = new_hover;
                 }
-                false // Never consumed — both UI and game need cursor tracking
+                self.drag_drop.is_dragging()
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                if *button == winit::event::MouseButton::Left
+                    && matches!(state, ElementState::Released)
+                    && self.drag_drop.is_dragging()
+                {
+                    self.captured_ih = IH::NONE;
+                    return true;
+                }
                 let pos = self.cursor_pos;
                 let hit = self.hit_test(pos);
                 // RMB over the viewport is fly-cam. RMB over chrome can open
@@ -1916,6 +2046,131 @@ mod input_contract_tests {
                 .iter()
                 .any(|m| matches!(m.data::<SliderMessage>(), Some(SliderMessage::Value(_)))),
             "pressing the track must emit a value change"
+        );
+    }
+}
+
+#[cfg(test)]
+mod drag_overlay_tests {
+    use super::*;
+    use crate::drag_drop::{DragPayload, DropAcceptance, DropEffect, DropTarget};
+
+    fn payload() -> DragPayload {
+        DragPayload::ExternalFiles(vec![
+            std::path::PathBuf::from("a.png"),
+            std::path::PathBuf::from("b.png"),
+        ])
+    }
+
+    fn acceptance(effect: DropEffect, reason: Option<&str>) -> DropAcceptance {
+        DropAcceptance {
+            accepted: vec![0],
+            effect,
+            reason: reason.map(str::to_string),
+            target: DropTarget::DrawerFolder(std::path::PathBuf::from("textures")),
+        }
+    }
+
+    fn dragging(effect: DropEffect) -> UserInterface {
+        let mut ui = UserInterface::new(400.0, 300.0);
+        ui.arm_drag(payload());
+        ui.cursor_pos = Vec2::new(50.0, 50.0);
+        assert!(ui.drag_drop.pointer_moved(Vec2::new(50.0, 50.0)));
+        ui.set_drop_acceptance(Some(acceptance(effect, None)));
+        ui
+    }
+
+    /// The cursor is read from the cached effect, not from the widget the
+    /// gesture was captured on. Getting this wrong is how a drag ends up
+    /// showing a text caret over a valid target.
+    #[test]
+    fn the_cursor_reports_the_cached_drop_effect() {
+        assert_eq!(
+            dragging(DropEffect::Move).cursor_kind(),
+            crate::node::CursorKind::Move
+        );
+        assert_eq!(
+            dragging(DropEffect::Copy).cursor_kind(),
+            crate::node::CursorKind::Copy
+        );
+        assert_eq!(
+            dragging(DropEffect::Link).cursor_kind(),
+            crate::node::CursorKind::Copy
+        );
+        assert_eq!(
+            dragging(DropEffect::Forbidden).cursor_kind(),
+            crate::node::CursorKind::NoDrop
+        );
+
+        // With no acceptance yet, the honest answer is "not here".
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_acceptance(None);
+        assert_eq!(ui.cursor_kind(), crate::node::CursorKind::NoDrop);
+    }
+
+    /// A drag in flight owns the pointer: motion and the release are consumed
+    /// so neither reaches the gizmo or the fly-cam behind the viewport.
+    #[test]
+    fn an_active_drag_consumes_viewport_pointer_input() {
+        let mut ui = dragging(DropEffect::Copy);
+        let moved = WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(80.0, 80.0),
+        };
+        assert!(ui.process_os_event(&moved), "motion must not reach the game");
+
+        let release = WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: winit::event::MouseButton::Left,
+        };
+        assert!(ui.process_os_event(&release), "release must not reach the game");
+        assert!(ui.take_completed_drop().is_some());
+    }
+
+    /// Escape cancels the drag before any overlay is dismissed, and nothing is
+    /// left behind for the release to execute.
+    #[test]
+    fn escape_cancels_the_drag_before_control_gestures() {
+        let mut ui = dragging(DropEffect::Copy);
+        assert!(ui.cancel_active_gesture());
+        assert!(!ui.is_dragging());
+        assert!(ui.take_completed_drop().is_none());
+    }
+
+    /// The adorner states the count and the effect on a partial accept, and
+    /// the reason on a rejection — never a bare "can't drop here" when the
+    /// acceptance actually knows why.
+    #[test]
+    fn the_adorner_says_what_the_release_will_do() {
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_acceptance(Some(acceptance(DropEffect::Copy, Some("1 of 2 \u{b7} Copy"))));
+        assert_eq!(ui.drag_ghost_label(), "1 of 2 \u{b7} Copy");
+
+        ui.set_drop_acceptance(Some(DropAcceptance::rejected(
+            DropTarget::DrawerFolder(std::path::PathBuf::new()),
+            "This asset kind is not accepted by the field",
+        )));
+        assert_eq!(
+            ui.drag_ghost_label(),
+            "This asset kind is not accepted by the field"
+        );
+    }
+
+    /// The ghost and the highlight are painted after the whole tree, so a
+    /// panel's clip rect cannot swallow them.
+    #[test]
+    fn the_overlay_paints_above_the_tree() {
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_highlight(Some(Rect::new(0.0, 0.0, 120.0, 24.0)));
+        ui.draw();
+        let painted = ui.draw_ctx.instances.len();
+
+        let mut quiet = UserInterface::new(400.0, 300.0);
+        quiet.draw();
+        assert!(
+            painted > quiet.draw_ctx.instances.len(),
+            "an active drag must add the highlight and the ghost"
         );
     }
 }

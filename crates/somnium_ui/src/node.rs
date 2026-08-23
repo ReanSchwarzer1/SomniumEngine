@@ -143,6 +143,12 @@ pub enum CursorKind {
     RowResize,
     /// Slider track or numeric slider.
     EwResize,
+    /// Accepted drag whose operation preserves the source.
+    Copy,
+    /// Accepted drag whose operation relocates the source.
+    Move,
+    /// Drag target rejects the payload.
+    NoDrop,
 }
 
 impl CursorKind {
@@ -155,6 +161,9 @@ impl CursorKind {
             Self::ColResize => CursorIcon::ColResize,
             Self::RowResize => CursorIcon::RowResize,
             Self::EwResize => CursorIcon::EwResize,
+            Self::Copy => CursorIcon::Copy,
+            Self::Move => CursorIcon::Move,
+            Self::NoDrop => CursorIcon::NoDrop,
         }
     }
 }

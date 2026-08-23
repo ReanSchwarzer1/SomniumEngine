@@ -12,7 +12,7 @@ use crate::{
 use somnium_ecs::reflect::{
     ChangeScope, FieldFlags, FieldId, ReflectObject, ReflectValue, StableId,
 };
-use somnium_ecs::{Entity, World};
+use somnium_ecs::{Entity, PersistentId, World};
 use somnium_ui::GestureId;
 
 /// Assign one authored material asset to any number of entities as one
@@ -488,7 +488,7 @@ impl EditorCommand for SetFieldCmd {
 ///
 /// Used by [`DeleteEntityCmd`] to restore an entity on undo, and by
 /// [`CreateEntityCmd`] to re-spawn a deleted creation on redo.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct EntitySnapshot {
     pub transform: Option<Transform>,
     pub name: Option<Name>,
@@ -910,6 +910,115 @@ impl EditorCommand for DeleteEntityCmd {
 }
 
 // ─── ReparentCmd ─────────────────────────────────────────────────────────
+
+/// A set of commands presented to the undo stack as one authoring gesture.
+pub struct CommandGroup {
+    description: &'static str,
+    commands: Vec<Box<dyn EditorCommand>>,
+}
+
+impl CommandGroup {
+    pub fn new(description: &'static str, commands: Vec<Box<dyn EditorCommand>>) -> Self {
+        Self { description, commands }
+    }
+}
+
+impl EditorCommand for CommandGroup {
+    fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        for command in &mut self.commands { command.execute(world, selected); }
+    }
+    fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        for command in self.commands.iter_mut().rev() { command.undo(world, selected); }
+    }
+    fn description(&self) -> &str { self.description }
+    fn is_no_op(&self) -> bool { self.commands.is_empty() || self.commands.iter().all(|c| c.is_no_op()) }
+}
+
+/// Recoverable content import. Worker-created destination files are already
+/// live when this command is recorded, so it is pushed silently; undo moves
+/// them aside and redo restores the same collision-safe names.
+pub struct FileImportCmd {
+    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl FileImportCmd {
+    pub fn new(destinations: Vec<std::path::PathBuf>) -> Self {
+        let files = destinations.into_iter().enumerate().map(|(index, live)| {
+            let recovery = live.with_extension(format!("somnium-undo-{index}"));
+            (live, recovery)
+        }).collect();
+        Self { files }
+    }
+}
+
+impl EditorCommand for FileImportCmd {
+    fn execute(&mut self, _world: &mut World, _selected: &mut Option<Entity>) {
+        for (live, recovery) in &self.files {
+            if recovery.exists() && !live.exists() { let _ = std::fs::rename(recovery, live); }
+        }
+    }
+    fn undo(&mut self, _world: &mut World, _selected: &mut Option<Entity>) {
+        for (live, recovery) in &self.files {
+            if live.exists() && !recovery.exists() { let _ = std::fs::rename(live, recovery); }
+        }
+    }
+    fn description(&self) -> &str { "Import Files" }
+}
+
+/// Durable, validated multi-entity hierarchy move.
+pub struct ReparentBatchCmd {
+    children: Vec<PersistentId>,
+    old_parents: Vec<Option<PersistentId>>,
+    new_parent: Option<PersistentId>,
+}
+
+impl ReparentBatchCmd {
+    pub fn new(world: &mut World, children: Vec<Entity>, new_parent: Option<Entity>) -> Result<Self, String> {
+        if children.is_empty() { return Err("No entities were dragged".into()); }
+        if let Some(parent) = new_parent {
+            if children.contains(&parent) { return Err("An entity cannot be parented to itself".into()); }
+            for child in &children {
+                let mut cursor = Some(parent);
+                while let Some(entity) = cursor {
+                    if entity == *child { return Err("An entity cannot be parented to its descendant".into()); }
+                    cursor = world.get::<Parent>(entity).and_then(|p| world.is_alive(p.entity).then_some(p.entity));
+                }
+            }
+        }
+        let new_parent_id = match new_parent { Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?), None => None };
+        let mut ids = Vec::with_capacity(children.len());
+        let mut old = Vec::with_capacity(children.len());
+        let mut changed = false;
+        for child in children {
+            ids.push(world.ensure_persistent_id(child).map_err(|e| e.to_string())?);
+            let old_entity = world.get::<Parent>(child).and_then(|p| world.is_alive(p.entity).then_some(p.entity));
+            let old_id = match old_entity { Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?), None => None };
+            changed |= old_id != new_parent_id;
+            old.push(old_id);
+        }
+        if !changed { return Err("The hierarchy would not change".into()); }
+        Ok(Self { children: ids, old_parents: old, new_parent: new_parent_id })
+    }
+
+    fn apply(&self, world: &mut World, parents: impl Iterator<Item = Option<PersistentId>>) {
+        let pairs: Vec<_> = self.children.iter().copied().zip(parents).collect();
+        for (child_id, parent_id) in pairs {
+            let Some(child) = world.entity_by_persistent_id(child_id) else { continue };
+            let parent = parent_id.and_then(|id| world.entity_by_persistent_id(id));
+            do_reparent_entity(world, child, parent);
+        }
+    }
+}
+
+impl EditorCommand for ReparentBatchCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.apply(world, std::iter::repeat(self.new_parent).take(self.children.len()));
+    }
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.apply(world, self.old_parents.iter().copied());
+    }
+    fn description(&self) -> &str { "Reparent Entities" }
+}
 
 /// Reversible hierarchy reparent.
 pub struct ReparentCmd {
@@ -1418,9 +1527,165 @@ fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {
     }
 }
 
+fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entity>) {
+    if let Some(old) = world
+        .get::<Parent>(child)
+        .and_then(|p| world.is_alive(p.entity).then_some(p.entity))
+    {
+        if let Some(children) = world.get_mut::<Children>(old) {
+            children.remove(child);
+        }
+    }
+    match new_parent {
+        Some(parent) => {
+            let _ = world.insert_component(child, Parent { entity: parent });
+            if let Some(children) = world.get_mut::<Children>(parent) {
+                if !children.as_slice().contains(&child) {
+                    children.push(child);
+                }
+            } else {
+                let mut children = Children::empty();
+                children.push(child);
+                let _ = world.insert_component(parent, children);
+            }
+        }
+        None => {
+            let _ = world.remove_component::<Parent>(child);
+        }
+    }
+}
+
 #[cfg(test)]
 mod landscape_tests {
     use super::*;
+
+    /// Every CONTROL-E route places a sentinel history entry beneath the drop
+    /// and proves one undo removes only the drop. This is the model-node case:
+    /// a glTF that spawns four entities is still one gesture, and the sentinel
+    /// underneath it is untouched.
+    #[test]
+    fn imported_model_batch_is_one_undo_above_a_sentinel() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(8);
+
+        // The sentinel: an unrelated authoring step the drop must not consume.
+        undo.push(
+            Box::new(CreateEntityCmd::new(EntitySnapshot {
+                name: Some(Name::new("sentinel")),
+                ..EntitySnapshot::default()
+            })),
+            &mut world,
+            &mut selected,
+        );
+        let before = world.entities().count();
+
+        let nodes: Vec<Box<dyn EditorCommand>> = (0..4)
+            .map(|index| {
+                Box::new(CreateEntityCmd::new(EntitySnapshot {
+                    name: Some(Name::new(&format!("node{index}"))),
+                    transform: Some(Transform {
+                        translation: glam::Vec3::new(5.0, 1.0, 5.0),
+                        ..Transform::default()
+                    }),
+                    ..EntitySnapshot::default()
+                })) as Box<dyn EditorCommand>
+            })
+            .collect();
+        undo.push(
+            Box::new(CommandGroup::new("Import Model", nodes)),
+            &mut world,
+            &mut selected,
+        );
+        assert_eq!(world.entities().count(), before + 4);
+
+        assert!(undo.undo(&mut world, &mut selected));
+        assert_eq!(
+            world.entities().count(),
+            before,
+            "one undo must remove every imported node"
+        );
+        assert!(
+            world.entities().any(|e| world
+                .get::<Name>(e)
+                .is_some_and(|n| n.as_str() == "sentinel")),
+            "the sentinel beneath the drop must survive"
+        );
+        assert!(undo.redo(&mut world, &mut selected));
+        assert_eq!(world.entities().count(), before + 4);
+    }
+
+    /// An empty group is a no-op, so a drop that resolved to nothing cannot
+    /// leave a phantom row in the history panel CONTROL-J will show.
+    #[test]
+    fn an_empty_command_group_is_a_no_op() {
+        assert!(CommandGroup::new("Attach Scripts", Vec::new()).is_no_op());
+    }
+
+    /// OS-file import completes asynchronously, so its undo entry is recorded
+    /// after the copy already exists. Undo moves the file aside rather than
+    /// deleting it, and redo restores the same collision-safe name.
+    #[test]
+    fn external_file_import_undo_is_recoverable_and_redoable() {
+        let root = std::env::temp_dir().join(format!(
+            "somnium_file_import_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let live = root.join("tree.png");
+        std::fs::write(&live, b"png").unwrap();
+
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(4);
+        undo.push_silent(Box::new(FileImportCmd::new(vec![live.clone()])));
+        assert!(live.exists(), "a silent push must not re-run the copy");
+
+        assert!(undo.undo(&mut world, &mut selected));
+        assert!(!live.exists(), "undo moves the import out of Content");
+
+        assert!(undo.redo(&mut world, &mut selected));
+        assert!(live.exists(), "redo restores the same collision-safe name");
+        assert_eq!(std::fs::read(&live).unwrap(), b"png");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn batch_reparent_is_one_undo_and_survives_entity_handles() {
+        let mut world = World::new();
+        let old = world.spawn((Children::empty(),));
+        let next = world.spawn((Children::empty(),));
+        let a = world.spawn((Parent { entity: old },));
+        let b = world.spawn((Parent { entity: old },));
+        world.get_mut::<Children>(old).unwrap().push(a);
+        world.get_mut::<Children>(old).unwrap().push(b);
+        let cmd = ReparentBatchCmd::new(&mut world, vec![a, b], Some(next)).unwrap();
+        let mut undo = UndoStack::new(4);
+        let mut selected = Some(a);
+        undo.push(Box::new(cmd), &mut world, &mut selected);
+        assert_eq!(world.get::<Parent>(a).unwrap().entity, next);
+        assert_eq!(world.get::<Parent>(b).unwrap().entity, next);
+        assert!(undo.undo(&mut world, &mut selected));
+        assert_eq!(world.get::<Parent>(a).unwrap().entity, old);
+        assert_eq!(world.get::<Parent>(b).unwrap().entity, old);
+        assert!(!undo.undo(&mut world, &mut selected));
+    }
+
+    #[test]
+    fn reparent_rejects_self_descendant_and_noop_before_mutation() {
+        let mut world = World::new();
+        let root = world.spawn((Children::empty(),));
+        let child = world.spawn((Parent { entity: root }, Children::empty()));
+        let grandchild = world.spawn((Parent { entity: child },));
+        world.get_mut::<Children>(root).unwrap().push(child);
+        world.get_mut::<Children>(child).unwrap().push(grandchild);
+        assert!(ReparentBatchCmd::new(&mut world, vec![root], Some(root)).is_err());
+        assert!(ReparentBatchCmd::new(&mut world, vec![root], Some(grandchild)).is_err());
+        assert!(ReparentBatchCmd::new(&mut world, vec![child], Some(root)).is_err());
+        assert_eq!(world.get::<Parent>(child).unwrap().entity, root);
+    }
 
     #[test]
     fn vector_material_assignment_is_exactly_one_undo_step() {

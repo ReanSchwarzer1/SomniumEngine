@@ -1,6 +1,7 @@
 pub mod color;
 pub mod commands;
 pub mod draw;
+pub mod drag_drop;
 pub mod editor;
 pub mod editor_event;
 pub mod font;
@@ -37,6 +38,7 @@ pub use editor_event::{
     CreateKind, EditorEvent, FoliageBrushField, GestureId, ScriptAttachmentRow, ScriptFieldKind,
     ScriptFieldRow, ScriptInspectorState, TerrainToolField,
 };
+pub use drag_drop::{DragPayload, DropAcceptance, DropEffect, DropRequest, DropTarget};
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
 
@@ -136,6 +138,7 @@ struct GeneratedBinding {
     value: somnium_ecs::reflect::ReflectValue,
     default: somnium_ecs::reflect::ReflectValue,
     edit: GeneratedEdit,
+    asset_kind_mask: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -683,9 +686,13 @@ pub struct UiManager {
     tooltip_since: Option<(NodeHandle, std::time::Instant)>,
     help_page: u8,
     content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
+    outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
+    viewport_drop_probe: (Option<somnium_ecs::Entity>, Option<[f32; 3]>),
+    external_drag_files: Vec<std::path::PathBuf>,
     outliner_filter: String,
     palette_open: bool,
     unsaved_open: bool,
+    pending_scene_action: Option<EditorEvent>,
     color_open: bool,
     color_target: Option<ColorTarget>,
     color_gesture: Option<GestureId>,
@@ -1113,9 +1120,13 @@ impl UiManager {
             tooltip_since: None,
             help_page: 0,
             content_entries: Vec::new(),
+            outliner_entity_handles: HashMap::new(),
+            viewport_drop_probe: (None, None),
+            external_drag_files: Vec::new(),
             outliner_filter: String::new(),
             palette_open: false,
             unsaved_open: false,
+            pending_scene_action: None,
             color_open: false,
             color_target: None,
             color_gesture: None,
@@ -1456,6 +1467,25 @@ impl UiManager {
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
         }
+        if let WindowEvent::HoveredFile(path) = event {
+            if !self.external_drag_files.contains(path) { self.external_drag_files.push(path.clone()); }
+            self.native_ui.begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(self.external_drag_files.clone()));
+            self.refresh_drop_acceptance();
+            return true;
+        }
+        if matches!(event, WindowEvent::HoveredFileCancelled) {
+            self.external_drag_files.clear();
+            self.native_ui.cancel_active_gesture();
+            return true;
+        }
+        if let WindowEvent::DroppedFile(path) = event {
+            if !self.external_drag_files.contains(path) { self.external_drag_files.push(path.clone()); }
+            self.native_ui.begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(self.external_drag_files.clone()));
+            self.refresh_drop_acceptance();
+            self.complete_drop();
+            self.external_drag_files.clear();
+            return true;
+        }
         // Phase 16-D: the Content Drawer's right-click menu.
         //
         // Intercepted here rather than as a widget message because the
@@ -1582,6 +1612,7 @@ impl UiManager {
             ..
         } = event
         {
+            self.arm_internal_drag();
             let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
             if self.is_title_chrome_hit(hit) {
                 if hit == self.win_min || hit == self.win_max || hit == self.win_close {
@@ -1625,7 +1656,107 @@ impl UiManager {
                 }
             }
         }
-        self.native_ui.process_os_event(event)
+        let consumed = self.native_ui.process_os_event(event);
+        if matches!(event, WindowEvent::CursorMoved { .. }) && self.native_ui.is_dragging() {
+            self.refresh_drop_acceptance();
+            return true;
+        }
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. }) {
+            self.complete_drop();
+        }
+        consumed
+    }
+
+    fn arm_internal_drag(&mut self) {
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        if let Some(entry) = self.content_entries.iter().find_map(|(handle, entry)|
+            self.native_ui.is_under(hit, *handle).then_some(entry))
+        {
+            let mut ids: Vec<_> = if self.content_selection.contains(&entry.path) {
+                self.content_entries.iter().filter(|(_, e)| self.content_selection.contains(&e.path)).filter_map(|(_, e)| e.asset_id).collect()
+            } else { entry.asset_id.into_iter().collect() };
+            ids.sort_by_key(|id| id.raw()); ids.dedup();
+            if !ids.is_empty() { self.native_ui.arm_drag(crate::drag_drop::DragPayload::Assets(ids)); }
+            return;
+        }
+        if self.native_ui.is_under(hit, self.outliner_tree) {
+            let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
+            if let Some((_, id)) = self.outliner_rows.get(row)
+                && let Some(entity) = self.outliner_entity_handles.get(id).copied()
+            { self.native_ui.arm_drag(crate::drag_drop::DragPayload::Entities(vec![entity])); }
+        }
+    }
+
+    fn refresh_drop_acceptance(&mut self) {
+        let Some(payload) = self.native_ui.drag_payload().cloned() else { return };
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        // Resolution order is the ancestor walk in practice: the innermost
+        // registered surface under the pointer wins, and each branch reports
+        // the exact rectangle it will highlight so the adorner cannot claim a
+        // target the release would not use.
+        let resolved = if self.native_ui.is_under(hit, self.viewport_handle) || hit == self.viewport_handle {
+            Some((
+                crate::drag_drop::DropTarget::Viewport { entity: self.viewport_drop_probe.0, terrain_hit: self.viewport_drop_probe.1 },
+                self.native_ui.screen_bounds(self.viewport_handle),
+            ))
+        } else if let Some((row, binding)) = self.generated_rows.iter().find(|(row, binding)|
+            self.native_ui.is_under(hit, **row) && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_)))
+        {
+            self.generated_entity.map(|entity| (
+                crate::drag_drop::DropTarget::AssetField { entity, component: binding.component, field: binding.field, kind_mask: binding.asset_kind_mask },
+                self.native_ui.screen_bounds(*row),
+            ))
+        } else if self.native_ui.is_under(hit, self.outliner_tree) {
+            let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
+            let entity = self.outliner_rows.get(row).and_then(|(_, id)| self.outliner_entity_handles.get(id)).copied();
+            let highlight = if entity.is_some() {
+                types::Rect::new(bounds.x, bounds.y + row as f32 * crate::theme::TREE_ROW_HEIGHT, bounds.w, crate::theme::TREE_ROW_HEIGHT)
+            } else {
+                bounds
+            };
+            Some((crate::drag_drop::DropTarget::Outliner(entity), highlight))
+        } else if self.native_ui.is_under(hit, self.content_drawer) {
+            Some((
+                crate::drag_drop::DropTarget::DrawerFolder(std::path::PathBuf::from(&self.content_path)),
+                self.native_ui.screen_bounds(self.content_drawer),
+            ))
+        } else {
+            None
+        };
+        let Some((target, highlight)) = resolved else {
+            self.native_ui.set_drop_acceptance(None);
+            self.native_ui.set_drop_highlight(None);
+            return;
+        };
+        let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
+        let acceptance = match crate::drag_drop::semantic_request(&self.asset_db, &payload, &candidate) {
+            Ok(_) => candidate,
+            Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
+        };
+        self.native_ui.set_drop_highlight(Some(highlight));
+        self.native_ui.set_drop_acceptance(Some(acceptance));
+    }
+
+    fn complete_drop(&mut self) {
+        self.native_ui.set_drop_highlight(None);
+        let Some(drop) = self.native_ui.take_completed_drop() else { return };
+        match crate::drag_drop::semantic_request(&self.asset_db, &drop.payload, &drop.acceptance) {
+            Ok(request @ crate::drag_drop::DropRequest::LoadScene { .. }) => {
+                self.prompt_unsaved_action(EditorEvent::CompleteDrop(request));
+            }
+            Ok(request) => self.editor_events.push_back(EditorEvent::CompleteDrop(request)),
+            Err(reason) => self.push_toast(&reason),
+        }
+    }
+
+    pub fn set_outliner_entity_handles(&mut self, entities: impl IntoIterator<Item = somnium_ecs::Entity>) {
+        self.outliner_entity_handles = entities.into_iter().map(|entity| (entity.index(), entity)).collect();
+    }
+
+    pub fn set_viewport_drop_probe(&mut self, entity: Option<somnium_ecs::Entity>, terrain_hit: Option<[f32; 3]>) {
+        self.viewport_drop_probe = (entity, terrain_hit);
     }
 
     pub fn push_toast(&mut self, text: &str) {
@@ -1926,10 +2057,15 @@ impl UiManager {
     }
 
     pub fn prompt_unsaved_new(&mut self) {
+        self.prompt_unsaved_action(EditorEvent::NewScene);
+    }
+
+    fn prompt_unsaved_action(&mut self, action: EditorEvent) {
         if !self.scene_dirty {
-            self.editor_events.push_back(EditorEvent::NewScene);
+            self.editor_events.push_back(action);
             return;
         }
+        self.pending_scene_action = Some(action);
         self.unsaved_open = true;
         self.native_ui.send(UiMessage::new(
             self.unsaved_popup,
@@ -4006,7 +4142,7 @@ impl UiManager {
                             .and_then(|e| e.to_str())
                             .is_some_and(|e| e.eq_ignore_ascii_case("somnium"));
                     if is_map {
-                        self.editor_events.push_back(EditorEvent::LoadScene(
+                        self.prompt_unsaved_action(EditorEvent::LoadScene(
                             entry.path.to_string_lossy().into_owned(),
                         ));
                     }
@@ -4101,16 +4237,21 @@ impl UiManager {
                 if msg.destination == self.unsaved_save {
                     self.close_unsaved();
                     self.editor_events.push_back(EditorEvent::SaveScene);
-                    self.editor_events.push_back(EditorEvent::NewScene);
+                    if let Some(action) = self.pending_scene_action.take() {
+                        self.editor_events.push_back(action);
+                    }
                     continue;
                 }
                 if msg.destination == self.unsaved_discard {
                     self.close_unsaved();
-                    self.editor_events.push_back(EditorEvent::NewScene);
+                    if let Some(action) = self.pending_scene_action.take() {
+                        self.editor_events.push_back(action);
+                    }
                     continue;
                 }
                 if msg.destination == self.unsaved_cancel {
                     self.close_unsaved();
+                    self.pending_scene_action = None;
                     continue;
                 }
                 if msg.destination == self.name_ok {

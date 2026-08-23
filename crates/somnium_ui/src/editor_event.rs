@@ -132,6 +132,9 @@ pub struct ScriptInspectorState {
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
+    /// One completed editor drop. The core maps this semantic operation to
+    /// exactly one command/undo record.
+    CompleteDrop(crate::drag_drop::DropRequest),
     SelectEntity(Option<u32>),
     CreateEntity(CreateKind),
     DeleteSelected,

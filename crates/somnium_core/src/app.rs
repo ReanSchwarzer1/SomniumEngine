@@ -428,6 +428,8 @@ pub struct Engine<G: GameApp> {
             Vec<somnium_asset::database::AssetId>,
         )>,
     >,
+    import_spawn_at: [f32; 3],
+    external_import_job: Option<JobHandle<Vec<(std::path::PathBuf, std::path::PathBuf)>>>,
     selected_entity: Option<somnium_ecs::entity::Entity>,
     state: LifecycleState,
     /// Bounded command history for editor undo/redo (128-command capacity).
@@ -581,6 +583,8 @@ impl<G: GameApp + 'static> Engine<G> {
             material_texture_jobs: std::collections::HashMap::new(),
             material_sessions: std::collections::HashMap::new(),
             import_job: None,
+            import_spawn_at: [0.0; 3],
+            external_import_job: None,
             selected_entity: None,
             state: LifecycleState::Uninitialized,
             undo_stack: UndoStack::new(128),
@@ -2015,8 +2019,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     panels
                 })
                 .unwrap_or_default();
+            let drop_probe_entity = self.viewport_entity_drop_pick();
+            let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
+                ui.set_outliner_entity_handles(all_entities.iter().copied());
+                ui.set_viewport_drop_probe(drop_probe_entity, drop_probe_hit);
                 ui.set_fps(self.time.fps());
                 // Phase 26-Zeta: the status bar is an instrument panel, so it
                 // gets the same per-frame facts the Outliner does.
@@ -2737,6 +2745,19 @@ impl<G: GameApp> Engine<G> {
                 }
             }
         }
+        let completed_external = self.external_import_job.as_ref().and_then(JobHandle::try_take);
+        if let Some(result) = completed_external {
+            self.external_import_job = None;
+            match result {
+                Ok(files) => {
+                    let destinations = files.into_iter().map(|(_, destination)| destination).collect();
+                    self.undo_stack.push_silent(Box::new(crate::editor_commands::FileImportCmd::new(destinations)));
+                    self.next_asset_scan = std::time::Instant::now();
+                    if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast("Files imported"); }
+                }
+                Err(error) => warn!(?error, "external file import failed"),
+            }
+        }
         let active = self.jobs.active();
         if let Some(ui) = self.ui_manager.as_mut() {
             let status: Vec<_> = active
@@ -2824,6 +2845,42 @@ impl<G: GameApp> Engine<G> {
 
     /// World-space cursor ray (origin, direction) from the camera through
     /// the current cursor position.
+    fn viewport_terrain_drop_hit(&mut self) -> Option<[f32; 3]> {
+        let (origin, direction) = self.cursor_ray()?;
+        let terrains: Vec<_> = self.world.entities().filter_map(|entity| {
+            let component = self.world.get::<TerrainComponent>(entity)?;
+            let model = self.world.get::<Transform>(entity).map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+            Some((component.terrain_id, model))
+        }).collect();
+        let renderer = self.renderer.as_mut()?;
+        let mut nearest: Option<(f32, glam::Vec3)> = None;
+        for (id, model) in terrains {
+            let Some(terrain) = renderer.terrain_mut(id) else { continue };
+            terrain.model = model;
+            let Some(hit) = terrain.raycast(origin, direction) else { continue };
+            let distance = origin.distance_squared(hit);
+            if nearest.is_none_or(|(best, _)| distance < best) { nearest = Some((distance, hit)); }
+        }
+        nearest.map(|(_, hit)| hit.to_array())
+    }
+
+    fn viewport_entity_drop_pick(&self) -> Option<somnium_ecs::Entity> {
+        let (origin, direction) = self.cursor_ray()?;
+        let renderer = self.renderer.as_ref()?;
+        self.world.entities().filter_map(|entity| {
+            let mesh = self.world.get::<MeshComponent>(entity)?;
+            let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
+            let model = self.world.get::<WorldTransform>(entity).map(|w| w.0)
+                .or_else(|| self.world.get::<Transform>(entity).map(Transform::to_matrix))?;
+            let inverse = model.inverse();
+            let local_origin = inverse.transform_point3(origin);
+            let local_direction = inverse.transform_vector3(direction);
+            let t = ray_aabb_distance(local_origin, local_direction, glam::Vec3::from_array(min), glam::Vec3::from_array(max))?;
+            let world_hit = model.transform_point3(local_origin + local_direction * t);
+            Some((origin.distance_squared(world_hit), entity))
+        }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, entity)| entity)
+    }
+
     fn cursor_ray(&self) -> Option<(glam::Vec3, glam::Vec3)> {
         let r = self.renderer.as_ref()?;
         let inv_vp = r.view_proj.inverse();
@@ -3130,12 +3187,17 @@ impl<G: GameApp> Engine<G> {
         else {
             return; // cancelled
         };
+        self.queue_import_model(path, [0.0; 3]);
+    }
+
+    fn queue_import_model(&mut self, path: std::path::PathBuf, at: [f32; 3]) {
         if self.import_job.is_some() {
             if let Some(ui) = self.ui_manager.as_mut() {
                 ui.push_toast("An import is already running");
             }
             return;
         }
+        self.import_spawn_at = at;
         let path_str = path.to_string_lossy().to_string();
         let worker_path = path_str.clone();
         let content_root = self.config.content_root.clone();
@@ -3165,6 +3227,39 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    fn queue_external_import(&mut self, files: Vec<std::path::PathBuf>, folder: std::path::PathBuf) {
+        if files.is_empty() || self.external_import_job.is_some() { return; }
+        if folder.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+            if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast("Import folder must be inside Content"); }
+            return;
+        }
+        let destination = self.config.content_root.join(folder);
+        match self.jobs.submit("File import", JobPriority::User, move |ctx| {
+            std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+            let mut imported = Vec::new();
+            for (index, source) in files.into_iter().enumerate() {
+                ctx.check_cancelled().map_err(|e| format!("{e:?}"))?;
+                let Some(name) = source.file_name() else { continue };
+                let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("asset");
+                let ext = std::path::Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("");
+                let mut target = destination.join(name);
+                let mut suffix = 1u32;
+                while target.exists() {
+                    let leaf = if ext.is_empty() { format!("{stem}_{suffix}") } else { format!("{stem}_{suffix}.{ext}") };
+                    target = destination.join(leaf);
+                    suffix += 1;
+                }
+                std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+                imported.push((source, target));
+                ctx.set_progress((index + 1) as f32 / imported.len().max(index + 1) as f32);
+            }
+            Ok(imported)
+        }) {
+            Ok(handle) => self.external_import_job = Some(handle),
+            Err(error) => warn!(?error, "file import queue is full"),
+        }
+    }
+
     /// Upload a worker-decoded glTF and spawn its renderable nodes.
     fn finish_import_model(
         &mut self,
@@ -3185,6 +3280,8 @@ impl<G: GameApp> Engine<G> {
         }
 
         let count = uploaded.len();
+        let offset = glam::Vec3::from_array(self.import_spawn_at);
+        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::with_capacity(count);
         for node in uploaded {
             let (scale, rotation, translation) = node.transform.to_scale_rotation_translation();
             let name = if node.entity_name.is_empty() {
@@ -3192,31 +3289,37 @@ impl<G: GameApp> Engine<G> {
             } else {
                 Name::new(&node.entity_name)
             };
-            let entity = self.world.spawn((
-                Transform {
-                    translation,
+            let snapshot = EntitySnapshot {
+                transform: Some(Transform {
+                    translation: translation + offset,
                     rotation,
                     scale,
-                },
-                name,
-                WorldTransform::identity(),
-                MeshComponent {
+                }),
+                name: Some(name),
+                wt: Some(WorldTransform::identity()),
+                mesh: Some(MeshComponent {
                     vertex_offset: node.vertex_offset,
                     index_offset: node.index_offset,
                     index_count: node.index_count,
-                },
-                MaterialComponent {
+                }),
+                mat: Some(MaterialComponent {
                     asset: material_assets
                         .get(node.material_index)
                         .copied()
                         .unwrap_or(somnium_asset::database::AssetId::NONE),
                     runtime_id: node.material_id,
-                },
-            ));
-            // Select the last node so the import is immediately visible in the
-            // inspector and the gizmo lands on it.
-            self.selected_entity = Some(entity);
+                }),
+                light: None, mesh_kind: None, is_particle_emitter: false,
+                terrain: None, voxel_terrain: None, foliage: None, water: None,
+                parent: None, children: None,
+            };
+            commands.push(Box::new(CreateEntityCmd::new(snapshot)));
         }
+        self.undo_stack.push(
+            Box::new(crate::editor_commands::CommandGroup::new("Import Model", commands)),
+            &mut self.world,
+            &mut self.selected_entity,
+        );
 
         info!("Imported {} ({} mesh nodes)", path_str, count);
         self.scene_dirty = true;
@@ -3894,6 +3997,58 @@ impl<G: GameApp> Engine<G> {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
         match ev {
+            EditorEvent::CompleteDrop(request) => {
+                use somnium_ui::DropRequest;
+                match request {
+                    DropRequest::AssignMaterial { asset, entities } => {
+                        self.handle_editor_event(EditorEvent::AssignMaterial { entities, asset });
+                    }
+                    DropRequest::SetAssetField { asset, entity, component, field } => {
+                        self.handle_editor_event(EditorEvent::SetComponentField {
+                            entity, component, field,
+                            value: somnium_ecs::reflect::ReflectValue::Asset(Some(
+                                somnium_ecs::reflect::AssetRef::from_raw(asset.raw()))),
+                            gesture: GestureId(u64::MAX - 1), live: false,
+                        });
+                    }
+                    DropRequest::Reparent { entities, parent } => {
+                        match crate::editor_commands::ReparentBatchCmd::new(&mut self.world, entities, parent) {
+                            Ok(command) => {
+                                self.undo_stack.push(Box::new(command), &mut self.world, &mut self.selected_entity);
+                                self.scene_dirty = true;
+                            }
+                            Err(reason) => if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast(&reason); },
+                        }
+                    }
+                    DropRequest::AttachScripts { assets, entity } => {
+                        let paths: Vec<_> = assets.into_iter().filter_map(|id| {
+                            self.asset_gate.published().and_then(|db| db.get(id)).map(|r| r.absolute_path.clone())
+                        }).collect();
+                        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::new();
+                        for path in paths {
+                            match self.scripts.import_script_file(&path) {
+                                Ok(asset) => commands.push(Box::new(crate::editor_commands::AttachScriptCmd::new(entity.index(), asset))),
+                                Err(diagnostics) => for message in diagnostics.messages { warn!(%message, "script drop rejected"); },
+                            }
+                        }
+                        if !commands.is_empty() {
+                            self.undo_stack.push(Box::new(crate::editor_commands::CommandGroup::new("Attach Scripts", commands)), &mut self.world, &mut self.selected_entity);
+                            self.scene_dirty = true;
+                        }
+                    }
+                    DropRequest::LoadScene { asset } => {
+                        if let Some(path) = self.asset_gate.published().and_then(|db| db.get(asset)).map(|r| r.absolute_path.to_string_lossy().into_owned()) {
+                            self.handle_editor_event(EditorEvent::LoadScene(path));
+                        }
+                    }
+                    DropRequest::SpawnModels { assets, at } => {
+                        if let Some(path) = assets.first().and_then(|id| self.asset_gate.published().and_then(|db| db.get(*id))).map(|r| r.absolute_path.clone()) {
+                            self.queue_import_model(path, at);
+                        }
+                    }
+                    DropRequest::ImportExternal { files, folder } => self.queue_external_import(files, folder),
+                }
+            }
             EditorEvent::SelectEntity(opt_idx) => {
                 self.selected_entity = opt_idx.and_then(|idx| self.world.find_entity_by_index(idx));
                 // A new selection means the old baselines describe values that
@@ -5360,4 +5515,34 @@ fn apply_gizmo_drag(
         }
     }
     result
+}
+
+/// Slab-test a ray against a local-space AABB, returning the nearest positive
+/// hit distance along `direction`. `direction` need not be normalised, so the
+/// result is expressed in the same parameterisation the caller passed in —
+/// which is what lets CONTROL-E's picker transform the ray into model space
+/// once instead of transforming every box into world space.
+fn ray_aabb_distance(
+    origin: glam::Vec3,
+    direction: glam::Vec3,
+    min: glam::Vec3,
+    max: glam::Vec3,
+) -> Option<f32> {
+    let mut near = f32::NEG_INFINITY;
+    let mut far = f32::INFINITY;
+    for axis in 0..3 {
+        let d = direction[axis];
+        let o = origin[axis];
+        if d.abs() < 1e-8 {
+            if o < min[axis] || o > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let t0 = (min[axis] - o) / d;
+        let t1 = (max[axis] - o) / d;
+        near = near.max(t0.min(t1));
+        far = far.min(t0.max(t1));
+    }
+    (far >= near.max(0.0)).then(|| near.max(0.0))
 }
