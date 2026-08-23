@@ -20,8 +20,8 @@ use somnium_ui::{EditorEvent, GestureId, TerrainInspectorState, UiManager};
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
 use crate::editor_commands::{
-    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, FieldUndoSnapshot,
-    SetFieldCmd, SetLightCmd, SetTransformCmd, TerrainEditCmd, TerrainRestoreOp,
+    AssignMaterialCmd, CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot,
+    FieldUndoSnapshot, SetFieldCmd, SetTransformCmd, TerrainEditCmd, TerrainRestoreOp,
     TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
@@ -30,8 +30,8 @@ use crate::jobs::{JobHandle, JobPriority, JobRegistry};
 use crate::time::TimeState;
 use crate::{
     CameraSettingsComponent, FoliageComponent, LightComponent, LightType, MaterialComponent,
-    MeshComponent, MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent,
-    Transform, WaterComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
+    MeshComponent, MeshKind, Name, Parent, PostProcessComponent, TerrainComponent, Transform,
+    WaterComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -366,19 +366,11 @@ struct FoliagePart {
     is_leaf: bool,
 }
 
-// Temporary exhaustiveness shell while the now-unreachable reflected colour
-// arms are deleted; only MaterialBase can enter this renderer-only function.
-#[allow(dead_code)]
-enum LegacyColorTarget {
-    Light,
-    WaterDeep,
-    WaterShallow,
-    WaterEdge,
-    WaterAbsorption,
-    WaterScattering,
-    ParticleStart,
-    ParticleEnd,
-    MaterialBase,
+#[derive(Clone)]
+struct MaterialDocument {
+    path: std::path::PathBuf,
+    asset: somnium_asset::material::MaterialAsset,
+    dirty: bool,
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
@@ -409,7 +401,33 @@ pub struct Engine<G: GameApp> {
         JobHandle<Option<somnium_asset::preview::PreparedPreview>>,
     >,
     preview_ready: std::collections::VecDeque<(std::path::PathBuf, Vec<u8>)>,
-    import_job: Option<JobHandle<(String, somnium_asset::LoadedScene)>>,
+    /// Loaded authored material documents, keyed by durable content identity.
+    material_documents:
+        std::collections::HashMap<somnium_asset::database::AssetId, MaterialDocument>,
+    /// Runtime pool slots reconstructed from material asset ids.
+    material_runtime: std::collections::HashMap<somnium_asset::database::AssetId, u32>,
+    material_textures: std::collections::HashMap<somnium_asset::database::AssetId, i32>,
+    material_texture_jobs: std::collections::HashMap<
+        somnium_asset::database::AssetId,
+        JobHandle<somnium_asset::LoadedTexture>,
+    >,
+    /// Entity edit sessions and their last observed reflected value. The actual
+    /// editable value is the `MaterialAsset` component temporarily attached to
+    /// the entity and therefore uses the normal generated Details undo path.
+    material_sessions: std::collections::HashMap<
+        somnium_ecs::Entity,
+        (
+            somnium_asset::database::AssetId,
+            somnium_asset::material::MaterialAsset,
+        ),
+    >,
+    import_job: Option<
+        JobHandle<(
+            String,
+            somnium_asset::LoadedScene,
+            Vec<somnium_asset::database::AssetId>,
+        )>,
+    >,
     selected_entity: Option<somnium_ecs::entity::Entity>,
     state: LifecycleState,
     /// Bounded command history for editor undo/redo (128-command capacity).
@@ -450,7 +468,6 @@ pub struct Engine<G: GameApp> {
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
 
-    scrub_light: Option<(u32, LightComponent)>,
     /// Phase 11.5M: receiver for captured tracing events forwarded to the output log.
     log_rx: Option<std::sync::mpsc::Receiver<crate::log_capture::LogEntry>>,
     /// Exact modifier snapshot for registry-backed global shortcuts.
@@ -558,6 +575,11 @@ impl<G: GameApp + 'static> Engine<G> {
             next_asset_scan: std::time::Instant::now(),
             preview_jobs: std::collections::HashMap::new(),
             preview_ready: std::collections::VecDeque::new(),
+            material_documents: std::collections::HashMap::new(),
+            material_runtime: std::collections::HashMap::new(),
+            material_textures: std::collections::HashMap::new(),
+            material_texture_jobs: std::collections::HashMap::new(),
+            material_sessions: std::collections::HashMap::new(),
             import_job: None,
             selected_entity: None,
             state: LifecycleState::Uninitialized,
@@ -575,7 +597,6 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_stroke_seed: 0,
             foliage_painting: false,
             terrain_colliders: std::collections::HashMap::new(),
-            scrub_light: None,
             log_rx: Some(log_rx),
             shortcut_modifiers: somnium_ui::message::Modifiers::default(),
             default_material_id: None,
@@ -613,6 +634,55 @@ impl<G: GameApp + 'static> Engine<G> {
 }
 
 impl<G: GameApp> Engine<G> {
+    fn load_material_document(&mut self, asset_id: somnium_asset::database::AssetId) -> bool {
+        if self.material_documents.contains_key(&asset_id) {
+            return true;
+        }
+        let record = self
+            .asset_gate
+            .published()
+            .and_then(|snapshot| snapshot.get(asset_id))
+            .cloned();
+        let Some(record) = record else {
+            return false;
+        };
+        match somnium_asset::material::load_material(&record.absolute_path) {
+            Ok(asset) => {
+                self.material_documents.insert(
+                    asset_id,
+                    MaterialDocument {
+                        path: record.absolute_path,
+                        asset,
+                        dirty: false,
+                    },
+                );
+                true
+            }
+            Err(error) => {
+                warn!(%error, "material asset could not be opened");
+                false
+            }
+        }
+    }
+
+    /// Reconstruct every authored material reference after scene load, without
+    /// requiring the entity to be selected first.
+    fn sync_authored_material_components(&mut self) {
+        let assets: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| self.world.get::<MaterialComponent>(entity))
+            .map(|material| material.asset)
+            .filter(|asset| *asset != somnium_asset::database::AssetId::NONE)
+            .collect();
+        for asset in assets {
+            if self.load_material_document(asset) {
+                self.queue_material_textures(asset);
+                self.ensure_material_runtime(asset);
+            }
+        }
+    }
+
     // ── Phase 16-C: driving scripts from the frame loop ──────────────────
 
     /// The clock a script sees. Fixed-step callbacks are handed
@@ -1903,6 +1973,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // attached script declared. Computed before the `ui` borrow
             // because it reads the world and the script host.
             let sel_scripts = self.script_inspector_state();
+            self.sync_material_sessions();
+            self.sync_authored_material_components();
+            self.ensure_material_session();
             let generated_panels = self
                 .selected_entity
                 .map(|entity| {
@@ -1911,7 +1984,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     let rules = somnium_ui::editor::editing_rules::standard_editing_rules(
                         &self.type_registry,
                     );
-                    self.type_registry
+                    let mut panels = self
+                        .type_registry
                         .schemas_on(&self.world, entity)
                         .into_iter()
                         .filter_map(|schema| {
@@ -1920,7 +1994,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                 schema, &values, &editors, &rules,
                             ))
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    // Asset contents are transient edit-session components,
+                    // deliberately absent from the scene registry. They still
+                    // use the exact same schema generator and widget tree.
+                    let editor_registry = crate::reflect_registry::editor_registry();
+                    if let Some(schema) = editor_registry.by_name("somnium.asset.Material")
+                        && let Some(values) = (schema.snapshot)(&self.world, entity)
+                    {
+                        let mut panel = somnium_ui::editor::inspector_gen::generate_component_panel(
+                            schema, &values, &editors, &rules,
+                        );
+                        panel.preview_path = self
+                            .world
+                            .get::<MaterialComponent>(entity)
+                            .and_then(|component| self.material_documents.get(&component.asset))
+                            .map(|document| document.path.clone());
+                        panels.push(panel);
+                    }
+                    panels
                 })
                 .unwrap_or_default();
             if let Some(ui) = &mut self.ui_manager {
@@ -1948,14 +2040,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_generated_details(self.selected_entity, generated_panels);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
-                let material = self.selected_entity.and_then(|entity| {
-                    let id = self.world.get::<MaterialComponent>(entity)?.id;
-                    self.renderer
-                        .as_ref()
-                        .and_then(|r| r.materials_pool.get(id))
-                        .map(|m| m.base_color)
-                });
-                ui.update_material_inspector(material);
                 ui.update_script_inspector(sel_scripts);
                 ui.set_scene_dirty(self.scene_dirty);
                 // Phase 26-Zeta-G. Must run after the update_* writes above:
@@ -2265,10 +2349,279 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 }
 
 impl<G: GameApp> Engine<G> {
+    /// Attach the selected material document as a transient ECS component so
+    /// generated Details and `SetFieldCmd` can edit it without a bespoke path.
+    fn ensure_material_session(&mut self) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        let Some(component) = self.world.get::<MaterialComponent>(entity).copied() else {
+            return;
+        };
+        if component.asset == somnium_asset::database::AssetId::NONE {
+            self.material_sessions.remove(&entity);
+            let _ = self
+                .world
+                .remove_component::<somnium_asset::material::MaterialAsset>(entity);
+            return;
+        }
+
+        if !self.load_material_document(component.asset) {
+            return;
+        }
+
+        let needs_session = self
+            .material_sessions
+            .get(&entity)
+            .is_none_or(|(asset, _)| *asset != component.asset)
+            || self
+                .world
+                .get::<somnium_asset::material::MaterialAsset>(entity)
+                .is_none();
+        if needs_session {
+            let asset = self.material_documents[&component.asset].asset.clone();
+            if let Some(existing) = self
+                .world
+                .get_mut::<somnium_asset::material::MaterialAsset>(entity)
+            {
+                *existing = asset.clone();
+            } else if let Err(error) = self.world.insert_component(entity, asset.clone()) {
+                warn!(%error, "could not attach material edit session");
+                return;
+            }
+            self.material_sessions
+                .insert(entity, (component.asset, asset));
+        }
+
+        self.queue_material_textures(component.asset);
+        self.ensure_material_runtime(component.asset);
+    }
+
+    fn queue_material_textures(&mut self, asset_id: somnium_asset::database::AssetId) {
+        let Some(document) = self.material_documents.get(&asset_id) else {
+            return;
+        };
+        let slots = [
+            document.asset.albedo_map,
+            document.asset.normal_map,
+            document.asset.metallic_roughness_map,
+            document.asset.occlusion_map,
+            document.asset.emissive_map,
+        ];
+        for texture_id in slots {
+            if texture_id == somnium_asset::database::AssetId::NONE
+                || self.material_textures.contains_key(&texture_id)
+                || self.material_texture_jobs.contains_key(&texture_id)
+            {
+                continue;
+            }
+            let record = self
+                .asset_gate
+                .published()
+                .and_then(|snapshot| snapshot.get(texture_id))
+                .cloned();
+            let Some(record) = record else {
+                continue;
+            };
+            let path = record.absolute_path;
+            match self
+                .jobs
+                .submit("Material texture", JobPriority::Visible, move |ctx| {
+                    ctx.check_cancelled()
+                        .map_err(|error| format!("{error:?}"))?;
+                    let texture = somnium_asset::material::load_material_texture(path)?;
+                    ctx.set_progress(1.0);
+                    Ok(texture)
+                }) {
+                Ok(job) => {
+                    self.material_texture_jobs.insert(texture_id, job);
+                }
+                Err(error) => warn!(?error, "material texture queue is full"),
+            }
+        }
+    }
+
+    fn refresh_material_gpu(&mut self, asset_id: somnium_asset::database::AssetId) {
+        let (Some(document), Some(runtime_id)) = (
+            self.material_documents.get(&asset_id),
+            self.material_runtime.get(&asset_id).copied(),
+        ) else {
+            return;
+        };
+        let gpu =
+            somnium_renderer::material::pool::GpuMaterial::from_asset(&document.asset, |texture| {
+                self.material_textures.get(&texture).copied().unwrap_or(-1)
+            });
+        if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+            renderer
+                .materials_pool
+                .set_material(&ctx.queue, runtime_id, gpu);
+            renderer.set_material_double_sided(runtime_id, document.asset.double_sided);
+            renderer.set_material_blend(
+                runtime_id,
+                document.asset.alpha_mode == somnium_asset::AlphaMode::Blend,
+            );
+        }
+    }
+
+    fn ensure_material_runtime(&mut self, asset_id: somnium_asset::database::AssetId) {
+        let Some(document) = self.material_documents.get(&asset_id) else {
+            return;
+        };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let Some(ctx) = self.render_ctx.as_ref() else {
+            return;
+        };
+        let runtime_id = if let Some(runtime_id) = self.material_runtime.get(&asset_id).copied() {
+            runtime_id
+        } else {
+            let gpu = somnium_renderer::material::pool::GpuMaterial::from_asset(
+                &document.asset,
+                |texture| self.material_textures.get(&texture).copied().unwrap_or(-1),
+            );
+            let runtime_id = renderer.materials_pool.add_material(&ctx.queue, gpu);
+            renderer.set_material_double_sided(runtime_id, document.asset.double_sided);
+            renderer.set_material_blend(
+                runtime_id,
+                document.asset.alpha_mode == somnium_asset::AlphaMode::Blend,
+            );
+            self.material_runtime.insert(asset_id, runtime_id);
+            runtime_id
+        };
+
+        let entities: Vec<_> = self.world.entities().collect();
+        for entity in entities {
+            if let Some(material) = self.world.get_mut::<MaterialComponent>(entity)
+                && material.asset == asset_id
+            {
+                material.runtime_id = runtime_id;
+            }
+        }
+    }
+
+    /// Detect reflected edits (including undo/redo), update the shared runtime
+    /// slot once, and mirror the same asset value into every open session.
+    fn sync_material_sessions(&mut self) {
+        let changes: Vec<_> = self
+            .material_sessions
+            .iter()
+            .filter_map(|(entity, (asset_id, observed))| {
+                let current = self
+                    .world
+                    .get::<somnium_asset::material::MaterialAsset>(*entity)?;
+                (current != observed).then(|| (*asset_id, current.clone()))
+            })
+            .collect();
+
+        for (asset_id, current) in changes {
+            let live_preview = somnium_asset::preview::render_material_sphere(&current);
+            let live_path = self
+                .material_documents
+                .get(&asset_id)
+                .map(|document| document.path.clone());
+            if let Some(document) = self.material_documents.get_mut(&asset_id) {
+                document.asset = current.clone();
+                document.dirty = true;
+            }
+            for (entity, (session_asset, observed)) in &mut self.material_sessions {
+                if *session_asset == asset_id {
+                    if let Some(open) = self
+                        .world
+                        .get_mut::<somnium_asset::material::MaterialAsset>(*entity)
+                    {
+                        *open = current.clone();
+                    }
+                    *observed = current.clone();
+                }
+            }
+            self.queue_material_textures(asset_id);
+            self.refresh_material_gpu(asset_id);
+            if let (Some(path), Some(ui)) = (live_path, self.ui_manager.as_mut()) {
+                ui.invalidate_thumbnail(&path);
+                let _ = ui.deliver_thumbnail(&path, &live_preview);
+            }
+        }
+    }
+
+    /// Persist dirty material documents and refresh both the embedded header
+    /// preview and live thumbnail cell. Scene save is the asset save boundary.
+    fn flush_material_assets(&mut self) {
+        self.sync_material_sessions();
+        let dirty: Vec<_> = self
+            .material_documents
+            .iter()
+            .filter(|(_, document)| document.dirty)
+            .map(|(id, document)| (*id, document.path.clone()))
+            .collect();
+        for (asset_id, path) in dirty {
+            let Some(document) = self.material_documents.get_mut(&asset_id) else {
+                continue;
+            };
+            let preview = somnium_asset::preview::render_material_sphere(&document.asset);
+            match somnium_asset::material::save_material(&path, &mut document.asset, &preview) {
+                Ok(()) => {
+                    document.dirty = false;
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.invalidate_thumbnail(&path);
+                        let _ = ui.deliver_thumbnail(&path, &preview);
+                    }
+                    self.next_asset_scan = std::time::Instant::now();
+                }
+                Err(error) => self.report_content_error(&path, &error),
+            }
+        }
+    }
+
     /// Poll immutable asset scans and worker previews without doing file IO in
     /// the frame loop. A periodic 350 ms scan is the portable watcher fallback;
     /// the two-sample gate debounces partial external writes.
     fn update_asset_pipeline(&mut self) {
+        let finished_material_textures: Vec<_> = self
+            .material_texture_jobs
+            .iter()
+            .filter_map(|(asset, job)| job.try_take().map(|result| (*asset, result)))
+            .collect();
+        for (texture_id, result) in finished_material_textures {
+            self.material_texture_jobs.remove(&texture_id);
+            match result {
+                Ok(texture) => {
+                    if let (Some(renderer), Some(ctx)) =
+                        (self.renderer.as_mut(), self.render_ctx.as_ref())
+                    {
+                        let slot = renderer.upload_material_texture(
+                            ctx,
+                            &texture.data,
+                            texture.width,
+                            texture.height,
+                        );
+                        self.material_textures.insert(texture_id, slot);
+                    }
+                    let affected: Vec<_> = self
+                        .material_documents
+                        .iter()
+                        .filter(|(_, document)| {
+                            let material = &document.asset;
+                            [
+                                material.albedo_map,
+                                material.normal_map,
+                                material.metallic_roughness_map,
+                                material.occlusion_map,
+                                material.emissive_map,
+                            ]
+                            .contains(&texture_id)
+                        })
+                        .map(|(asset, _)| *asset)
+                        .collect();
+                    for asset in affected {
+                        self.refresh_material_gpu(asset);
+                    }
+                }
+                Err(error) => warn!(?error, "material texture decode failed"),
+            }
+        }
+
         let completed_scan = self.asset_scan.as_ref().and_then(JobHandle::try_take);
         if let Some(result) = completed_scan {
             self.asset_scan = None;
@@ -2375,7 +2728,7 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_import {
             self.import_job = None;
             match result {
-                Ok((path, scene)) => self.finish_import_model(path, scene),
+                Ok((path, scene, materials)) => self.finish_import_model(path, scene, materials),
                 Err(error) => {
                     warn!(?error, "model import failed");
                     if let Some(ui) = self.ui_manager.as_mut() {
@@ -2785,6 +3138,7 @@ impl<G: GameApp> Engine<G> {
         }
         let path_str = path.to_string_lossy().to_string();
         let worker_path = path_str.clone();
+        let content_root = self.config.content_root.clone();
         match self
             .jobs
             .submit("glTF import", JobPriority::User, move |ctx| {
@@ -2792,8 +3146,14 @@ impl<G: GameApp> Engine<G> {
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
                 let scene = somnium_asset::load_gltf(&worker_path)?;
+                ctx.set_progress(0.7);
+                let materials = somnium_asset::material::materialize_gltf_assets(
+                    &scene,
+                    &worker_path,
+                    &content_root,
+                )?;
                 ctx.set_progress(1.0);
-                Ok((worker_path, scene))
+                Ok((worker_path, scene, materials))
             }) {
             Ok(handle) => {
                 self.import_job = Some(handle);
@@ -2806,7 +3166,12 @@ impl<G: GameApp> Engine<G> {
     }
 
     /// Upload a worker-decoded glTF and spawn its renderable nodes.
-    fn finish_import_model(&mut self, path_str: String, scene: somnium_asset::LoadedScene) {
+    fn finish_import_model(
+        &mut self,
+        path_str: String,
+        scene: somnium_asset::LoadedScene,
+        material_assets: Vec<somnium_asset::database::AssetId>,
+    ) {
         let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref())
         else {
             warn!("Cannot import before the renderer is ready");
@@ -2841,7 +3206,11 @@ impl<G: GameApp> Engine<G> {
                     index_count: node.index_count,
                 },
                 MaterialComponent {
-                    id: node.material_id,
+                    asset: material_assets
+                        .get(node.material_index)
+                        .copied()
+                        .unwrap_or(somnium_asset::database::AssetId::NONE),
+                    runtime_id: node.material_id,
                 },
             ));
             // Select the last node so the import is immediately visible in the
@@ -2851,6 +3220,7 @@ impl<G: GameApp> Engine<G> {
 
         info!("Imported {} ({} mesh nodes)", path_str, count);
         self.scene_dirty = true;
+        self.next_asset_scan = std::time::Instant::now();
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.push_toast("Import finished");
         }
@@ -3520,135 +3890,6 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    fn apply_material_base_color(&mut self, rgba: [f32; 4], live: bool, cancel: bool) {
-        let Some(entity) = self.selected_entity else {
-            return;
-        };
-        match LegacyColorTarget::MaterialBase {
-            LegacyColorTarget::Light => {
-                if cancel {
-                    if let Some((_, old)) = self.scrub_light.take() {
-                        if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
-                            *l = old;
-                        }
-                    }
-                    return;
-                }
-                if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
-                    let mut new_light = old_light;
-                    new_light.color = glam::Vec3::new(rgba[0], rgba[1], rgba[2]);
-                    new_light.color_temperature_k = 0.0;
-                    if live {
-                        if self.scrub_light.is_none() {
-                            self.scrub_light = Some((entity.index(), old_light));
-                        }
-                        if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
-                            *l = new_light;
-                        }
-                        if cancel {
-                            self.scrub_light = None;
-                        }
-                    } else {
-                        let base = self
-                            .scrub_light
-                            .take()
-                            .filter(|(idx, _)| *idx == entity.index())
-                            .map(|(_, l)| l)
-                            .unwrap_or(old_light);
-                        if new_light != base {
-                            if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
-                                *l = base;
-                            }
-                            self.undo_stack.push(
-                                Box::new(SetLightCmd::new(entity.index(), base, new_light)),
-                                &mut self.world,
-                                &mut self.selected_entity,
-                            );
-                            self.scene_dirty = true;
-                        }
-                    }
-                }
-            }
-            LegacyColorTarget::WaterDeep => {
-                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
-                    w.deep_color = rgba;
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::WaterShallow => {
-                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
-                    w.shallow_color = rgba;
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::WaterEdge => {
-                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
-                    w.edge_color = rgba;
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::WaterAbsorption => {
-                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
-                    let mag = somnium_ui::color::split_magnitude(w.absorption).1;
-                    w.absorption =
-                        somnium_ui::color::join_magnitude([rgba[0], rgba[1], rgba[2]], mag);
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::WaterScattering => {
-                if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
-                    let mag = somnium_ui::color::split_magnitude(w.scattering).1;
-                    w.scattering =
-                        somnium_ui::color::join_magnitude([rgba[0], rgba[1], rgba[2]], mag);
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::ParticleStart => {
-                if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
-                    p.color_start = rgba;
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::ParticleEnd => {
-                if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
-                    p.color_end = rgba;
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-            LegacyColorTarget::MaterialBase => {
-                if let Some(mat) = self.world.get::<MaterialComponent>(entity).copied() {
-                    if let (Some(renderer), Some(ctx)) =
-                        (self.renderer.as_mut(), self.render_ctx.as_ref())
-                    {
-                        if let Some(mut gpu) = renderer.materials_pool.get(mat.id) {
-                            gpu.base_color = rgba;
-                            renderer
-                                .materials_pool
-                                .set_material(&ctx.queue, mat.id, gpu);
-                        }
-                    }
-                }
-                if !live {
-                    self.scene_dirty = true;
-                }
-            }
-        }
-    }
-
     fn handle_editor_event(&mut self, ev: EditorEvent) {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
@@ -3822,7 +4063,10 @@ impl<G: GameApp> Engine<G> {
                                 index_offset: alloc.index_offset,
                                 index_count: alloc.index_count,
                             }),
-                            Some(MaterialComponent { id: mat_id }),
+                            Some(MaterialComponent {
+                                asset: somnium_asset::database::AssetId::NONE,
+                                runtime_id: mat_id,
+                            }),
                         )
                     } else {
                         (None, None)
@@ -4072,6 +4316,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::SaveScene => {
+                self.flush_material_assets();
                 let path = "scene.somnium";
                 // Phase 16-A: the schema-driven format (`version: 3`).
                 // It writes whatever the registry describes, which is how
@@ -4130,6 +4375,7 @@ impl<G: GameApp> Engine<G> {
                     self.world.despawn(e);
                 }
                 self.selected_entity = None;
+                self.material_sessions.clear();
                 if let Some(ui) = &mut self.ui_manager {
                     ui.reset_inspector_baseline();
                 }
@@ -4248,6 +4494,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(result) => {
                         info!("Loaded map {path} ({:?})", result.kind);
                         self.selected_entity = None;
+                        self.material_sessions.clear();
                         self.undo_stack = UndoStack::new(128);
                         self.scene_dirty = false;
                         self.terrain_edit_active = false;
@@ -4551,6 +4798,23 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::CreateContentMaterial { parent, name } => {
+                let Some(path) = self.content_target(&parent, &name, Some("sommat")) else {
+                    return;
+                };
+                match somnium_asset::material::create_material(&path) {
+                    Ok(_) => {
+                        info!("Created {}", path.display());
+                        self.next_asset_scan = std::time::Instant::now();
+                        self.after_content_change(&format!(
+                            "Created {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error),
+                }
+            }
+
             EditorEvent::RenameContentItem { path, name } => {
                 let from = std::path::PathBuf::from(path);
                 let leaf = name.trim();
@@ -4619,22 +4883,7 @@ impl<G: GameApp> Engine<G> {
                 field,
             } => {
                 let source = std::path::PathBuf::from(source);
-                let stem = source
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Asset");
-                let extension = source.extension().and_then(|s| s.to_str());
-                let mut suffix = 1_u32;
-                let target = loop {
-                    let mut candidate = source.with_file_name(format!("{stem}_copy{suffix}"));
-                    if let Some(extension) = extension {
-                        candidate.set_extension(extension);
-                    }
-                    if !candidate.exists() {
-                        break candidate;
-                    }
-                    suffix += 1;
-                };
+                let target = somnium_asset::material::unique_sibling(&source);
                 match std::fs::copy(&source, &target) {
                     Ok(_) => {
                         let relative = target
@@ -4658,6 +4907,16 @@ impl<G: GameApp> Engine<G> {
                     }
                     Err(error) => self.report_content_error(&source, &error.to_string()),
                 }
+            }
+
+            EditorEvent::AssignMaterial { entities, asset } => {
+                let command = AssignMaterialCmd::new(&self.world, entities, asset);
+                self.undo_stack.push(
+                    Box::new(command),
+                    &mut self.world,
+                    &mut self.selected_entity,
+                );
+                self.scene_dirty = true;
             }
 
             EditorEvent::ReloadScripts => {
@@ -4801,14 +5060,6 @@ impl<G: GameApp> Engine<G> {
                         self.scene_dirty = true;
                     }
                 }
-            }
-
-            EditorEvent::SetMaterialBaseColor { rgba, live } => {
-                self.apply_material_base_color(rgba, live, false);
-            }
-
-            EditorEvent::CancelMaterialBaseColor { rgba } => {
-                self.apply_material_base_color(rgba, true, true);
             }
 
             EditorEvent::CloseWindow => {

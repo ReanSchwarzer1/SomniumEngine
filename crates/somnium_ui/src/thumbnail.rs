@@ -223,6 +223,23 @@ impl ThumbnailCache {
         self.dirty = true;
     }
 
+    /// Forget one preview after an `OnPropertyChange`/`OnAssetSave`
+    /// invalidation. The next visible tile request regenerates it.
+    pub fn invalidate(&mut self, path: &Path) {
+        self.requested.remove(path);
+        self.visible_queue.retain(|queued| queued != path);
+        self.background_queue.retain(|queued| queued != path);
+        self.states.remove(path);
+        self.last_used.remove(path);
+        if let Some(slot) = self
+            .slot_owner
+            .iter_mut()
+            .find(|owner| owner.as_deref() == Some(path))
+        {
+            *slot = None;
+        }
+    }
+
     fn touch(&mut self, path: &Path) {
         self.clock = self.clock.wrapping_add(1);
         self.last_used.insert(path.to_path_buf(), self.clock);
@@ -326,5 +343,17 @@ mod tests {
         assert!(!cache.deliver(path, &[0; 4]));
         assert_eq!(cache.state(path), Some(ThumbState::Failed));
         assert_eq!(cache.ready_count(), 0);
+    }
+
+    #[test]
+    fn invalidation_requeues_an_on_change_preview() {
+        let mut cache = ThumbnailCache::new();
+        let path = Path::new("metal.sommat");
+        cache.request(path, true);
+        assert!(cache.deliver(path, &cell(7)));
+        cache.invalidate(path);
+        assert_eq!(cache.state(path), None);
+        cache.request(path, true);
+        assert_eq!(cache.take_requests(1)[0].path, path);
     }
 }

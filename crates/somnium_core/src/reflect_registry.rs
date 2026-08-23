@@ -422,6 +422,17 @@ pub fn component_registry() -> TypeRegistry {
     registry
 }
 
+/// Registry used by generic editor commands. Asset edit-session components
+/// participate in the same generated Details and undo paths, but are excluded
+/// from [`component_registry`] so scene serialization can never inline asset
+/// contents into an entity.
+#[must_use]
+pub fn editor_registry() -> TypeRegistry {
+    let mut registry = component_registry();
+    registry.register(somnium_asset::material::material_asset_schema());
+    registry
+}
+
 fn camera_settings_schema() -> ComponentSchema {
     component_schema! {
         CameraSettingsComponent as "somnium.CameraSettings", display "Camera", version 1,
@@ -654,10 +665,28 @@ fn mesh_schema() -> ComponentSchema {
 }
 
 fn material_schema() -> ComponentSchema {
-    component_schema! {
-        MaterialComponent as "somnium.Material", display "Material", version 1,
-        fields { id }
+    fn migrate_material(_fields: &mut ReflectObject, from: u32) -> Result<(), ReflectError> {
+        match from {
+            // Version 1 only stored a process-local renderer pool index. It
+            // cannot name authored content, so the honest migration is an
+            // unset asset whose runtime slot will be reconstructed.
+            1 => Ok(()),
+            found => Err(ReflectError::UnsupportedVersion {
+                component: StableId::new("somnium.Material"),
+                found,
+                current: 2,
+            }),
+        }
     }
+    let mut schema = component_schema! {
+        MaterialComponent as "somnium.Material", display "Material", version 2,
+        fields {
+            asset { asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL },
+            runtime_id { flags: FieldFlags::RUNTIME_ONLY },
+        }
+    };
+    schema.migrate = Some(migrate_material);
+    schema
 }
 
 fn parent_schema() -> ComponentSchema {

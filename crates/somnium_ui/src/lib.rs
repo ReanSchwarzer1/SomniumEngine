@@ -90,6 +90,8 @@ enum NamePrompt {
     NewFolder { parent: String },
     /// Create a script in this content-relative directory.
     NewScript { parent: String },
+    /// Create a material in this content-relative directory.
+    NewMaterial { parent: String },
 }
 
 /// What one generated widget in the Scripts section does.
@@ -118,7 +120,6 @@ enum ColorTarget {
         field: somnium_ecs::reflect::FieldId,
         vec4: bool,
     },
-    MaterialBase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,9 +203,6 @@ struct ToolHandles {
     foliage_layer: NodeHandle,
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
-
-    material_section: NodeHandle,
-    material_base: NodeHandle,
 
     script_section: NodeHandle,
     script_add: NodeHandle,
@@ -364,7 +362,7 @@ struct EditorLayout {
     log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
-    create_popup_items: Vec<(NodeHandle, CreateKind)>,
+    create_popup_items: Vec<(NodeHandle, &'static str)>,
     file_button: NodeHandle,
     file_popup: NodeHandle,
     menu_command_items: Vec<(NodeHandle, &'static str)>,
@@ -508,7 +506,7 @@ pub struct UiManager {
     create_button: NodeHandle,
     create_popup: NodeHandle,
     create_popup_open: bool,
-    create_popup_items: Vec<(NodeHandle, CreateKind)>,
+    create_popup_items: Vec<(NodeHandle, &'static str)>,
     /// Palette entry currently shown on the picker button, so a click can
     /// advance to the next one.
     foliage_kind_shown: u8,
@@ -1880,6 +1878,9 @@ impl UiManager {
         let event = match prompt {
             NamePrompt::NewFolder { parent } => EditorEvent::CreateContentFolder { parent, name },
             NamePrompt::NewScript { parent } => EditorEvent::CreateContentScript { parent, name },
+            NamePrompt::NewMaterial { parent } => {
+                EditorEvent::CreateContentMaterial { parent, name }
+            }
         };
         self.editor_events.push_back(event);
     }
@@ -2558,6 +2559,13 @@ impl UiManager {
                 "New script name",
                 "NewScript.luau",
             ),
+            A::ContentNewMaterial => self.open_name_prompt(
+                NamePrompt::NewMaterial {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New material name",
+                "NewMaterial.sommat",
+            ),
             A::ContentRename => {
                 if let Some(entry) = self.content_menu_target.clone() {
                     self.begin_inline_content_rename(entry);
@@ -2664,12 +2672,6 @@ impl UiManager {
                             });
                     }
                 }
-                ColorTarget::MaterialBase if commit => self
-                    .editor_events
-                    .push_back(EditorEvent::SetMaterialBaseColor { rgba, live: false }),
-                ColorTarget::MaterialBase => self
-                    .editor_events
-                    .push_back(EditorEvent::CancelMaterialBaseColor { rgba }),
             }
         }
         self.dismiss_color_ui();
@@ -2900,6 +2902,12 @@ impl UiManager {
     /// Record that a preview could not be produced, so it is not retried.
     pub fn fail_thumbnail(&mut self, path: &std::path::Path) {
         self.native_ui.draw_ctx.thumbnails.mark_failed(path);
+    }
+
+    /// Invalidate one thumbnail after its authored asset changed.
+    pub fn invalidate_thumbnail(&mut self, path: &std::path::Path) {
+        self.native_ui.draw_ctx.thumbnails.invalidate(path);
+        self.refresh_content_list();
     }
 
     /// Atomically replace the drawer's inventory with a worker-built snapshot.
@@ -3741,21 +3749,6 @@ impl UiManager {
 
     /// Show the stable authoring subset of a first-class water body.
 
-    pub fn update_material_inspector(&mut self, values: Option<[f32; 4]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(base) => {
-                self.native_ui.set_visibility(h.material_section, true);
-                self.native_ui.send(UiMessage::new(
-                    h.material_base,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(base),
-                ));
-            }
-            None => self.native_ui.set_visibility(h.material_section, false),
-        }
-    }
-
     /// Show or hide the Foliage section and refresh it (Phase 17C).
     ///
     /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
@@ -3854,9 +3847,6 @@ impl UiManager {
             (h.foliage_smin, FoliageBrushField::ScaleMin),
             (h.foliage_smax, FoliageBrushField::ScaleMax),
         ];
-        let color_map: [(NodeHandle, ColorTarget); 1] =
-            [(h.material_base, ColorTarget::MaterialBase)];
-
         for msg in msgs {
             if let Some(ColorSwatchMessage::Clicked(rgba)) = msg.data::<ColorSwatchMessage>() {
                 let generated_target =
@@ -3879,12 +3869,7 @@ impl UiManager {
                             }
                             _ => None,
                         });
-                if let Some(field) = generated_target.or_else(|| {
-                    color_map
-                        .iter()
-                        .find(|(h, _)| *h == msg.destination)
-                        .map(|(_, target)| *target)
-                }) {
+                if let Some(field) = generated_target {
                     self.color_target = Some(field);
                     self.color_gesture = Some(self.allocate_property_gesture());
                     self.color_open = true;
@@ -3931,12 +3916,6 @@ impl UiManager {
                                         component, field, value, gesture, true,
                                     );
                                 }
-                                ColorTarget::MaterialBase => self.editor_events.push_back(
-                                    EditorEvent::SetMaterialBaseColor {
-                                        rgba: *rgba,
-                                        live: true,
-                                    },
-                                ),
                             }
                         }
                         ColorPickerMessage::Changed(rgba) => {
@@ -3958,12 +3937,6 @@ impl UiManager {
                                         component, field, value, gesture, false,
                                     );
                                 }
-                                ColorTarget::MaterialBase => self.editor_events.push_back(
-                                    EditorEvent::SetMaterialBaseColor {
-                                        rgba: *rgba,
-                                        live: false,
-                                    },
-                                ),
                             }
                             self.dismiss_color_ui();
                         }
@@ -3986,9 +3959,6 @@ impl UiManager {
                                         component, field, value, gesture, false,
                                     );
                                 }
-                                ColorTarget::MaterialBase => self.editor_events.push_back(
-                                    EditorEvent::CancelMaterialBaseColor { rgba: *rgba },
-                                ),
                             }
                             self.dismiss_color_ui();
                         }
@@ -4458,20 +4428,12 @@ impl UiManager {
                     continue;
                 }
                 // Create popup item
-                if let Some(&(_, kind)) = self
+                if let Some(&(_, id)) = self
                     .create_popup_items
                     .iter()
                     .find(|(bh, _)| *bh == msg.destination)
                 {
-                    if let Some(command) = crate::commands::registry()
-                        .menu(crate::commands::Menu::Create)
-                        .into_iter()
-                        .find(|command| {
-                            command.action == crate::commands::CommandAction::CreateEntity(kind)
-                        })
-                    {
-                        self.run_command_id(command.id);
-                    }
+                    self.run_command_id(id);
                     self.create_popup_open = false;
                     self.native_ui.send(UiMessage::new(
                         self.create_popup,
@@ -5506,7 +5468,7 @@ mod zeta_layout_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        assert_eq!(layout.create_popup_items.len(), 13);
+        assert_eq!(layout.create_popup_items.len(), 14);
         for handle in [
             layout.save_button,
             layout.select_button,
@@ -5563,7 +5525,7 @@ mod must_not_break {
         // §14.4. The Create popup is built from `CreateKind`, so a new variant
         // that nobody added a row for shows up here.
         let (_, l) = layout(1920.0, 1080.0);
-        let kinds: Vec<CreateKind> = l.create_popup_items.iter().map(|(_, k)| *k).collect();
+        let ids: Vec<&str> = l.create_popup_items.iter().map(|(_, id)| *id).collect();
         for kind in [
             CreateKind::Cube,
             CreateKind::Sphere,
@@ -5576,8 +5538,16 @@ mod must_not_break {
             CreateKind::Terrain,
             CreateKind::VoxelTerrain,
         ] {
-            assert!(kinds.contains(&kind), "{kind:?} lost its Create row");
+            let command = crate::commands::registry()
+                .menu(crate::commands::Menu::Create)
+                .into_iter()
+                .find(|command| {
+                    command.action == crate::commands::CommandAction::CreateEntity(kind)
+                })
+                .unwrap();
+            assert!(ids.contains(&command.id), "{kind:?} lost its Create row");
         }
+        assert!(ids.contains(&"editor.asset.new_material"));
     }
 
     #[test]
@@ -5687,7 +5657,6 @@ mod must_not_break {
             handles.post_section,
             handles.terrain_section,
             handles.foliage_section,
-            handles.material_section,
         ] {
             ui.set_visibility(section, true);
         }
@@ -5699,7 +5668,6 @@ mod must_not_break {
             handles.terrain_aerial_dist,
             handles.foliage_kind_button,
             handles.foliage_density,
-            handles.material_base,
         ] {
             let bounds = bounds_of(&ui, handle);
             assert!(

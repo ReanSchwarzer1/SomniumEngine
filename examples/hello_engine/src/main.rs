@@ -919,7 +919,8 @@ impl GameApp for HelloGame {
                                     index_count: node.index_count,
                                 },
                                 MaterialComponent {
-                                    id: node.material_id,
+                                    asset: somnium_asset::database::AssetId::NONE,
+                                    runtime_id: node.material_id,
                                 },
                                 Name::new(&node.entity_name),
                                 WorldTransform::identity(),
@@ -1316,7 +1317,10 @@ impl GameApp for HelloGame {
                                     index_offset: n.index_offset,
                                     index_count: n.index_count,
                                 },
-                                MaterialComponent { id: n.material_id },
+                                MaterialComponent {
+                                    asset: somnium_asset::database::AssetId::NONE,
+                                    runtime_id: n.material_id,
+                                },
                             ));
                         }
                     }
@@ -1895,7 +1899,10 @@ impl GameApp for HelloGame {
                             index_offset: alloc.index_offset,
                             index_count: alloc.index_count,
                         },
-                        MaterialComponent { id: default_mat },
+                        MaterialComponent {
+                            asset: somnium_asset::database::AssetId::NONE,
+                            runtime_id: default_mat,
+                        },
                     ));
 
                     if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
@@ -1945,13 +1952,13 @@ impl GameApp for HelloGame {
                         casts_shadow: true,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,
-                            material.id as u16,
+                            material.runtime_id as u16,
                             entity.index(),
                         ),
                         vertex_offset: mesh.vertex_offset,
                         index_offset: mesh.index_offset,
                         index_count: mesh.index_count,
-                        material_id: material.id,
+                        material_id: material.runtime_id,
                         transform: wt.0,
                     });
                 }
@@ -2449,7 +2456,10 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
                 index_offset: alloc.index_offset,
                 index_count: alloc.index_count,
             },
-            MaterialComponent { id: material },
+            MaterialComponent {
+                asset: somnium_asset::database::AssetId::NONE,
+                runtime_id: material,
+            },
             Name::new("Scripted Rotator"),
             WorldTransform::identity(),
             MeshKind::Cube,
@@ -2554,7 +2564,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: mat_blue },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: mat_blue,
+        },
         Name::new("Floor"),
         WorldTransform::identity(),
         MeshKind::Cube,
@@ -2578,7 +2591,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: mat_red },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: mat_red,
+        },
         Name::new("Player"),
         WorldTransform::identity(),
         MeshKind::Cube,
@@ -2615,7 +2631,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: pbr_mat },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: pbr_mat,
+        },
         Name::new("MetalCube"),
         WorldTransform::identity(),
         MeshKind::Cube,

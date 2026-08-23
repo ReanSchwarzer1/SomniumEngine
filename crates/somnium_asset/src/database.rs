@@ -52,6 +52,57 @@ impl std::fmt::Display for AssetId {
     }
 }
 
+impl Serialize for AssetId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        u128::from_str_radix(&text, 16)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl somnium_ecs::reflect::ReflectField for AssetId {
+    fn field_type() -> somnium_ecs::reflect::FieldType {
+        somnium_ecs::reflect::FieldType::Asset
+    }
+
+    fn to_reflect(&self) -> somnium_ecs::reflect::ReflectValue {
+        somnium_ecs::reflect::ReflectValue::Asset(
+            (*self != Self::NONE).then(|| somnium_ecs::reflect::AssetRef::from_raw(self.raw())),
+        )
+    }
+
+    fn from_reflect(
+        value: &somnium_ecs::reflect::ReflectValue,
+        field: &'static str,
+    ) -> Result<Self, somnium_ecs::reflect::ReflectError> {
+        match value {
+            somnium_ecs::reflect::ReflectValue::Asset(Some(asset)) => {
+                Ok(Self::from_raw(asset.raw()))
+            }
+            somnium_ecs::reflect::ReflectValue::Asset(None)
+            | somnium_ecs::reflect::ReflectValue::Nil => Ok(Self::NONE),
+            other => Err(somnium_ecs::reflect::ReflectError::TypeMismatch {
+                field,
+                expected: "asset".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AssetKind {

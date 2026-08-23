@@ -896,6 +896,34 @@ mod tests {
     }
 
     #[test]
+    fn material_asset_reference_round_trips_but_runtime_pool_id_does_not() {
+        let registry = component_registry();
+        let asset =
+            somnium_asset::database::AssetId::from_relative_path("materials/Polished.sommat");
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Polished Cube"),
+            Transform::default(),
+            crate::MaterialComponent {
+                asset,
+                runtime_id: 913,
+            },
+        ));
+        let document = scene_to_json(&mut world, &registry);
+        let text = serde_json::to_string(&document).unwrap();
+        assert!(text.contains(&asset.to_string()));
+        assert!(!text.contains("runtime_id"));
+        assert!(!text.contains("913"));
+
+        let mut loaded = World::new();
+        scene_from_json(&mut loaded, &registry, &document).unwrap();
+        let entity = find(&loaded, "Polished Cube");
+        let material = loaded.get::<crate::MaterialComponent>(entity).unwrap();
+        assert_eq!(material.asset, asset);
+        assert_eq!(material.runtime_id, 0);
+    }
+
+    #[test]
     fn an_unknown_component_warns_and_the_rest_of_the_entity_loads() {
         let registry = component_registry();
         let mut world = World::new();

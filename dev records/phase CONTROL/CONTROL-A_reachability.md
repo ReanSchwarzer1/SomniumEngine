@@ -17,79 +17,79 @@ The environment inventory includes identifiers in executable code and documented
 
 | Variable | Source | Meaning | Type | Default | Editor reach | Evidence |
 |---|---|---|---|---|---:|---|
-| `SOMNIUM_AERIAL` | `crates/somnium_renderer/src/renderer.rs:783` | Aerial | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_AERIAL_HERO` | `crates/somnium_renderer/src/renderer.rs:784` | Aerial hero | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_AERIAL` | `crates/somnium_renderer/src/renderer.rs:786` | Aerial | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_AERIAL_HERO` | `crates/somnium_renderer/src/renderer.rs:787` | Aerial hero | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_AERIAL_SPLIT` | `crates/somnium_renderer/src/pass/classify.rs:245` | SOMNIUM_AERIAL_SPLIT exists for one specific job: pushing it past the far plane makes every terrain tile take the near (full) pipeline, which turns the binned path into an exact re… | text/selector | 150.0 | no | `—` |
-| `SOMNIUM_ANALYTIC_GRAD` | `crates/somnium_core/src/lib.rs:906` | Analytic grad | bool | on (unset/other) | no | `—` |
-| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1153` | Audit content path | path/text | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_AUDIT_LOG` | `crates/somnium_renderer/src/renderer.rs:3772` | Audit log | text/selector | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_AUDIT_SELECT_ENTITY` | `examples/hello_engine/src/main.rs:1364` | Audit select entity | text/selector | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1191` | Audit ui state | text/selector | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_AUDIT_WINDOW_SIZE` | `examples/hello_engine/src/main.rs:2659` | Audit window size | text/selector | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_AUDIT_YAW_JUMP_DEGREES` | `examples/hello_engine/src/main.rs:1658` | Audit yaw jump degrees | float | 1.0 | no | `—` |
-| `SOMNIUM_AUDIT_YAW_JUMP_FRAME` | `examples/hello_engine/src/main.rs:1653` | Audit yaw jump frame | integer | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_BLOOM` | `crates/somnium_core/src/lib.rs:832` | Bloom | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_ANALYTIC_GRAD` | `crates/somnium_core/src/lib.rs:908` | Analytic grad | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1151` | Audit content path | path/text | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_AUDIT_LOG` | `crates/somnium_renderer/src/renderer.rs:3839` | Audit log | text/selector | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_AUDIT_SELECT_ENTITY` | `examples/hello_engine/src/main.rs:1368` | Audit select entity | text/selector | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1189` | Audit ui state | text/selector | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_AUDIT_WINDOW_SIZE` | `examples/hello_engine/src/main.rs:2678` | Audit window size | text/selector | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_AUDIT_YAW_JUMP_DEGREES` | `examples/hello_engine/src/main.rs:1662` | Audit yaw jump degrees | float | 1.0 | no | `—` |
+| `SOMNIUM_AUDIT_YAW_JUMP_FRAME` | `examples/hello_engine/src/main.rs:1657` | Audit yaw jump frame | integer | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_BLOOM` | `crates/somnium_core/src/lib.rs:834` | Bloom | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_CAMERA_PITCH` | `examples/hello_engine/src/main.rs:408` | Camera pitch | float | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_CAMERA_POS` | `examples/hello_engine/src/main.rs:398` | Camera pos | text/selector | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_CAMERA_YAW` | `examples/hello_engine/src/main.rs:403` | Camera yaw | float | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_CAPTURE` | `crates/somnium_renderer/src/capture.rs:353` | Capture | path/text | unset | no | `—` |
-| `SOMNIUM_CAPTURE_AFTER_TAA` | `crates/somnium_renderer/src/renderer.rs:3079` | Capture after taa | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_CAPTURE_AFTER_WATER` | `crates/somnium_renderer/src/renderer.rs:3078` | Capture after water | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_CAPTURE_AFTER_TAA` | `crates/somnium_renderer/src/renderer.rs:3146` | Capture after taa | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_CAPTURE_AFTER_WATER` | `crates/somnium_renderer/src/renderer.rs:3145` | Capture after water | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_CAPTURE_COMPARE` | `crates/somnium_renderer/src/capture.rs:357` | Capture compare | path/text | unset | no | `—` |
 | `SOMNIUM_CAPTURE_DISPLAY_PNG` | `crates/somnium_renderer/src/capture.rs:355` | Capture display png | path/text | unset | no | `—` |
 | `SOMNIUM_CAPTURE_FRAME` | `crates/somnium_renderer/src/capture.rs:358` | Capture frame | integer | 0 | no | `—` |
 | `SOMNIUM_CAPTURE_PNG` | `crates/somnium_renderer/src/capture.rs:354` | Capture png | path/text | unset | no | `—` |
-| `SOMNIUM_CAPTURE_QUIT` | `examples/hello_engine/src/main.rs:1693` | Capture quit | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_CAPTURE_QUIT` | `examples/hello_engine/src/main.rs:1697` | Capture quit | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_CAPTURE_UI_PNG` | `crates/somnium_renderer/src/capture.rs:356` | Capture ui png | path/text | unset | no | `—` |
-| `SOMNIUM_CAS` | `crates/somnium_core/src/lib.rs:853` | Cas | bool | on (unset/other) | no | `—` |
-| `SOMNIUM_CASCADE_CULL` | `crates/somnium_renderer/src/renderer.rs:3989` | Cascade cull | bool | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_CAS` | `crates/somnium_core/src/lib.rs:855` | Cas | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_CASCADE_CULL` | `crates/somnium_renderer/src/renderer.rs:4056` | Cascade cull | bool | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_CENSUS` | `crates/somnium_renderer/src/pass/census.rs:245` | Census | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_CONTENT_ROOT` | `crates/somnium_core/src/config.rs:63` | Content root | text/selector | assets | no | `—` |
-| `SOMNIUM_CPU_FRUSTUM` | `crates/somnium_core/src/lib.rs:1158` | Cpu frustum | bool | on (unset/other) | no | `—` |
-| `SOMNIUM_CULL_STATS` | `crates/somnium_renderer/src/renderer.rs:746` | Cull stats | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_DYNRES` | `crates/somnium_core/src/lib.rs:1171` | Dynres | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_DYNRES_FLOOR` | `crates/somnium_core/src/lib.rs:1175` | Dynres floor | float | default.dynamic_floor | no | `—` |
-| `SOMNIUM_DYNRES_TARGET_MS` | `crates/somnium_core/src/lib.rs:1174` | Dynres target ms | float | default.dynamic_target_ms | no | `—` |
-| `SOMNIUM_FOLIAGE` | `examples/hello_engine/src/main.rs:1100` | SOMNIUM_FOLIAGE=1 scatters foliage without the editor (Phase 17E). Painting by hand was the only way to get a plant on screen, which meant the foliage shading work could not be *se… | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_FSR` | `crates/somnium_core/src/lib.rs:809` | Fsr | bool | on (unset/other) | no | `—` |
-| `SOMNIUM_GTAO` | `crates/somnium_core/src/lib.rs:844` | Gtao | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_CPU_FRUSTUM` | `crates/somnium_core/src/lib.rs:1160` | Cpu frustum | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_CULL_STATS` | `crates/somnium_renderer/src/renderer.rs:749` | Cull stats | bool | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_DYNRES` | `crates/somnium_core/src/lib.rs:1173` | Dynres | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_DYNRES_FLOOR` | `crates/somnium_core/src/lib.rs:1177` | Dynres floor | float | default.dynamic_floor | no | `—` |
+| `SOMNIUM_DYNRES_TARGET_MS` | `crates/somnium_core/src/lib.rs:1176` | Dynres target ms | float | default.dynamic_target_ms | no | `—` |
+| `SOMNIUM_FOLIAGE` | `examples/hello_engine/src/main.rs:1101` | SOMNIUM_FOLIAGE=1 scatters foliage without the editor (Phase 17E). Painting by hand was the only way to get a plant on screen, which meant the foliage shading work could not be *se… | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_FSR` | `crates/somnium_core/src/lib.rs:811` | Fsr | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_GTAO` | `crates/somnium_core/src/lib.rs:846` | Gtao | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_HEIGHTMAP` | `crates/somnium_renderer/src/terrain/mod.rs:764` | Heightmap | path/text | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_HEXTILE` | `crates/somnium_renderer/src/terrain/mod.rs:509` | Hextile | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_IMPORT` | `examples/hello_engine/src/main.rs:1297` | Import | path/text | unset | no | `—` |
+| `SOMNIUM_IMPORT` | `examples/hello_engine/src/main.rs:1298` | Import | path/text | unset | no | `—` |
 | `SOMNIUM_KIT_VIEW` | `examples/hello_engine/src/main.rs:388` | Kit view | text/selector | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_LIGHT_SHAFTS` | `crates/somnium_core/src/lib.rs:860` | Light shafts | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_LIGHT_SHAFTS` | `crates/somnium_core/src/lib.rs:862` | Light shafts | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_LOD_MORPH` | `crates/somnium_renderer/src/terrain/mod.rs:510` | Lod morph | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_MAP` | `examples/hello_engine/src/main.rs:353` | Map | path/text | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1207` | Maximize | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_MESH_SDF` | `crates/somnium_core/src/lib.rs:903` | Mesh sdf | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_MOTION_BLUR` | `crates/somnium_core/src/lib.rs:856` | Motion blur | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_NO_MESHLETS` | `crates/somnium_renderer/src/renderer.rs:753` | No meshlets | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_NO_OCCLUSION` | `crates/somnium_renderer/src/renderer.rs:748` | No occlusion | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_PATH_TRACER` | `crates/somnium_core/src/lib.rs:899` | Path tracer | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_PROBES` | `crates/somnium_core/src/lib.rs:904` | Probes | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1277` | Maximize | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_MESH_SDF` | `crates/somnium_core/src/lib.rs:905` | Mesh sdf | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_MOTION_BLUR` | `crates/somnium_core/src/lib.rs:858` | Motion blur | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_NO_MESHLETS` | `crates/somnium_renderer/src/renderer.rs:756` | No meshlets | bool | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_NO_OCCLUSION` | `crates/somnium_renderer/src/renderer.rs:751` | No occlusion | bool | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_PATH_TRACER` | `crates/somnium_core/src/lib.rs:901` | Path tracer | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_PROBES` | `crates/somnium_core/src/lib.rs:906` | Probes | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_PROFILE` | `crates/somnium_renderer/src/profiler.rs:459` | Profile | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_PROFILE_EVERY` | `crates/somnium_renderer/src/profiler.rs:491` | Profile every | integer | 120 | no | `—` |
-| `SOMNIUM_RESTIR` | `crates/somnium_core/src/lib.rs:885` | Restir | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_RESTIR_GI` | `crates/somnium_core/src/lib.rs:848` | Restir gi | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_RESTIR` | `crates/somnium_core/src/lib.rs:887` | Restir | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_RESTIR_GI` | `crates/somnium_core/src/lib.rs:850` | Restir gi | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_RT_DEBUG` | `crates/somnium_renderer/src/pass/raytrace.rs:461` | Rt debug | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_RT_REFLECT` | `crates/somnium_core/src/lib.rs:849` | Rt reflect | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_RT_REFLECT` | `crates/somnium_core/src/lib.rs:851` | Rt reflect | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_RT_REFRACT` | `crates/somnium_renderer/src/pass/water_reflection.rs:260` | Rt refract | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_RT_TERRAIN` | `crates/somnium_renderer/src/renderer.rs:2085` | Rt terrain | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_RT_TERRAIN` | `crates/somnium_renderer/src/renderer.rs:2152` | Rt terrain | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_SCRIPT_CACHE` | `crates/somnium_core/src/script_cook.rs:116` | Script cache | path/text | unset | no | `—` |
 | `SOMNIUM_SHADE_ABLATE` | `crates/somnium_renderer/src/pass/shading.rs:52` | Shade ablate | text/selector | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_SHADE_BINS` | `crates/somnium_renderer/src/pass/classify.rs:250` | Shade bins | bool | off (unset/other) | no | `—` |
-| `SOMNIUM_SHADOWTEST` | `examples/hello_engine/src/main.rs:959` | Shadowtest | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_SHADOW_DEBUG` | `crates/somnium_renderer/src/renderer.rs:2001` | Shadow debug | float | 0.0 | no | `—` |
-| `SOMNIUM_SHADOW_RADIUS` | `crates/somnium_renderer/src/renderer.rs:699` | Shadow radius | float | 0.01 | no | `—` |
+| `SOMNIUM_SHADOWTEST` | `examples/hello_engine/src/main.rs:960` | Shadowtest | bool | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_SHADOW_DEBUG` | `crates/somnium_renderer/src/renderer.rs:2068` | Shadow debug | float | 0.0 | no | `—` |
+| `SOMNIUM_SHADOW_RADIUS` | `crates/somnium_renderer/src/renderer.rs:702` | Shadow radius | float | 0.01 | no | `—` |
 | `SOMNIUM_SPD` | `crates/somnium_renderer/src/pass/hiz.rs:157` | Spd | bool | on (unset/other) | no | `—` |
-| `SOMNIUM_SPECULAR_GI` | `crates/somnium_core/src/lib.rs:897` | Specular gi | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_SPECULAR_GI` | `crates/somnium_core/src/lib.rs:899` | Specular gi | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_SUN_AZIMUTH` | `crates/somnium_core/src/map.rs:102` | Sun azimuth | float | 30.0 | no | `—` |
 | `SOMNIUM_SUN_ELEVATION` | `crates/somnium_core/src/map.rs:98` | Sun elevation | float | 35.0 | no | `—` |
 | `SOMNIUM_TAA` | `crates/somnium_renderer/src/pass/taa.rs:188` | Taa | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_TAA_DEBUG` | `crates/somnium_renderer/src/pass/taa.rs:193` | Taa debug | integer | 0 | no | `—` |
 | `SOMNIUM_TAA_DILATE_EPS` | `crates/somnium_renderer/src/pass/taa.rs:189` | Taa dilate eps | float | 4.0 | no | `—` |
 | `SOMNIUM_TAA_MATDBG` | `crates/somnium_renderer/src/pass/taa.rs:397` | Taa matdbg | bool | unset / source-defined fallback | no | `—` |
-| `SOMNIUM_TERRAIN` | `examples/hello_engine/src/main.rs:1044` | Terrain | text/selector | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_TERRAIN` | `examples/hello_engine/src/main.rs:1045` | Terrain | text/selector | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_TERRAIN_ALLOW_OVERBUDGET` | `crates/somnium_renderer/src/terrain/textures.rs:876` | Terrain allow overbudget | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_TERRAIN_CLIPMAP` | `crates/somnium_renderer/src/terrain/clipmap.rs:173` | Terrain clipmap | text/selector | off | no | `—` |
 | `SOMNIUM_TERRAIN_DETAIL_FADE` | `crates/somnium_renderer/src/terrain/mod.rs:523` | Terrain detail fade | bool | unset / source-defined fallback | no | `—` |
@@ -99,7 +99,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_TERRAIN_MACRO` | `crates/somnium_renderer/src/terrain/mod.rs:513` | Terrain macro | bool | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_TERRAIN_PARALLAX` | `crates/somnium_renderer/src/terrain/mod.rs:535` | Terrain parallax | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_TERRAIN_PROJECTION_SHARPNESS` | `crates/somnium_renderer/src/terrain/mod.rs:543` | Terrain projection sharpness | float | 8.0 | no | `—` |
-| `SOMNIUM_TERRAIN_RELIEF` | `examples/hello_engine/src/main.rs:1083` | Terrain relief | float | unset / source-defined fallback | no | `—` |
+| `SOMNIUM_TERRAIN_RELIEF` | `examples/hello_engine/src/main.rs:1084` | Terrain relief | float | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_TERRAIN_RES` | `crates/somnium_renderer/src/terrain/textures.rs:884` | Terrain res | integer | 2048 | no | `—` |
 | `SOMNIUM_TERRAIN_TRIPLANAR` | `crates/somnium_renderer/src/terrain/mod.rs:549` | Terrain triplanar | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_TERRAIN_WETNESS` | `crates/somnium_renderer/src/terrain/mod.rs:468` | Terrain wetness | float | 0.0 | no | `—` |
@@ -107,16 +107,16 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_TIME_COMPARE` | `crates/somnium_renderer/src/timing.rs:302` | Time compare | path/text | unset | no | `—` |
 | `SOMNIUM_TIME_FRAMES` | `crates/somnium_renderer/src/timing.rs:305` | Time frames | integer | DEFAULT_FRAMES | no | `—` |
 | `SOMNIUM_TIME_LABEL` | `crates/somnium_renderer/src/timing.rs:303` | Time label | path/text | unlabelled | no | `—` |
-| `SOMNIUM_TIME_QUIT` | `examples/hello_engine/src/main.rs:1703` | Time quit | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_TIME_QUIT` | `examples/hello_engine/src/main.rs:1707` | Time quit | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_TIME_VIEW` | `examples/hello_engine/src/main.rs:348` | Time view | path/text | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_TIME_WARMUP` | `crates/somnium_renderer/src/timing.rs:304` | Time warmup | integer | DEFAULT_WARMUP | no | `—` |
-| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:588` | Viewport res | integer | 0 | no | `—` |
-| `SOMNIUM_VOLUMETRICS` | `crates/somnium_core/src/lib.rs:847` | Volumetrics | bool | on (unset/other) | no | `—` |
+| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:609` | Viewport res | integer | 0 | no | `—` |
+| `SOMNIUM_VOLUMETRICS` | `crates/somnium_core/src/lib.rs:849` | Volumetrics | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_WATER_PITCH` | `examples/hello_engine/src/main.rs:812` | Water pitch | float | underwater | no | `—` |
 | `SOMNIUM_WATER_SPECTRUM` | `crates/somnium_renderer/src/pass/water_spectrum.rs:273` | Water spectrum | bool | on (unset/other) | no | `—` |
 | `SOMNIUM_WATER_VIEW` | `examples/hello_engine/src/main.rs:789` | Water view | text/selector | unset / source-defined fallback | no | `—` |
 | `SOMNIUM_WATER_YAW` | `examples/hello_engine/src/main.rs:808` | Water yaw | float | 35.0 | no | `—` |
-| `SOMNIUM_WORLD_CACHE` | `crates/somnium_core/src/lib.rs:810` | World cache | bool | off (unset/other) | no | `—` |
+| `SOMNIUM_WORLD_CACHE` | `crates/somnium_core/src/lib.rs:812` | World cache | bool | off (unset/other) | no | `—` |
 | `SOMNIUM_WRITE_DECLS` | `crates/somnium_core/src/script_decls.rs:46` | Write decls | text/selector | unset / source-defined fallback | no | `—` |
 
 ## Components
@@ -130,7 +130,7 @@ The environment inventory includes identifiers in executable code and documented
 | `Children` | `crates/somnium_core/src/lib.rs` | 2 | no | 0 | 0 | 0 | 0 | 0 |
 | `FoliageComponent` | `crates/somnium_core/src/lib.rs` | 14 | `somnium.Foliage` | 14 | 14 | 0 | 0 | 14 |
 | `LightComponent` | `crates/somnium_core/src/lib.rs` | 11 | `somnium.Light` | 11 | 11 | 0 | 0 | 11 |
-| `MaterialComponent` | `crates/somnium_core/src/lib.rs` | 1 | `somnium.Material` | 1 | 1 | 0 | 0 | 1 |
+| `MaterialComponent` | `crates/somnium_core/src/lib.rs` | 2 | `somnium.Material` | 2 | 1 | 0 | 0 | 1 |
 | `MeshComponent` | `crates/somnium_core/src/lib.rs` | 3 | `somnium.Mesh` | 3 | 0 | 0 | 0 | 0 |
 | `MeshKind` | `crates/somnium_core/src/lib.rs` | — | `somnium.MeshKind` | 1 | 1 | 0 | 0 | 1 |
 | `Name` | `crates/somnium_core/src/lib.rs` | 1 | `somnium.Name` | 1 | 1 | 0 | 0 | 1 |

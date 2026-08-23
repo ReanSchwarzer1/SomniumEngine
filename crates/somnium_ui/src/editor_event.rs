@@ -242,15 +242,6 @@ pub enum EditorEvent {
     ImportModel,
     /// Cancel a job advertised by the status bar.
     CancelJob(u64),
-    /// Live vs commit matches reflected property edits. `rgba` is linear.
-    SetMaterialBaseColor {
-        rgba: [f32; 4],
-        live: bool,
-    },
-    /// Restore the colour captured when the picker opened; no undo entry.
-    CancelMaterialBaseColor {
-        rgba: [f32; 4],
-    },
     ToggleWaterUnderwater,
     /// Title-bar close — same path as the native window X.
     CloseWindow,
@@ -325,6 +316,11 @@ pub enum EditorEvent {
         /// Leaf name, as typed. A missing `.luau` extension is added.
         name: String,
     },
+    /// Create an editable `.sommat` asset in `parent`.
+    CreateContentMaterial {
+        parent: String,
+        name: String,
+    },
     /// Rename a file or folder. `path` is absolute.
     RenameContentItem {
         /// What to rename.
@@ -348,6 +344,11 @@ pub enum EditorEvent {
         entity: Entity,
         component: StableId,
         field: FieldId,
+    },
+    /// Assign one material to a whole selection as one undo step.
+    AssignMaterial {
+        entities: Vec<Entity>,
+        asset: somnium_asset::database::AssetId,
     },
 }
 use somnium_ecs::Entity;

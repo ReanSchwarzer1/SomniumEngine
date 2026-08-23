@@ -257,6 +257,7 @@ pub enum CommandAction {
     ResetWorkspace,
     ContentNewFolder,
     ContentNewScript,
+    ContentNewMaterial,
     ContentRename,
     ContentShowInFolder,
     ContentRefresh,
@@ -340,6 +341,10 @@ const TOOLBAR: &[CommandSurface] = &[CommandSurface::Toolbar];
 const VIEW_TOOLBAR: &[CommandSurface] =
     &[CommandSurface::Menu(Menu::View), CommandSurface::Toolbar];
 const CONTENT: &[CommandSurface] = &[CommandSurface::ContentContext];
+const CREATE_CONTENT: &[CommandSurface] = &[
+    CommandSurface::Menu(Menu::Create),
+    CommandSurface::ContentContext,
+];
 const PALETTE_ONLY: &[CommandSurface] = &[];
 
 macro_rules! command {
@@ -838,6 +843,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.asset.new_material",
+            "New Material…",
+            "Create",
+            None,
+            "Create an editable Somnium material in the current content folder.",
+            A::ContentNewMaterial,
+            CREATE_CONTENT,
+            always
+        ),
+        command!(
             "editor.content.new_folder",
             "New Folder…",
             "Content",
@@ -1157,5 +1172,23 @@ mod tests {
         let decoded = CommandHistory::from_json(&history.to_json());
         assert_eq!(decoded, history);
         assert!(decoded.recency("editor.scene.new") > decoded.recency("editor.scene.save"));
+    }
+
+    #[test]
+    fn new_material_is_one_declaration_on_both_create_surfaces() {
+        let command = registry().get("editor.asset.new_material").unwrap();
+        assert_eq!(command.action, CommandAction::ContentNewMaterial);
+        assert!(
+            registry()
+                .menu(Menu::Create)
+                .iter()
+                .any(|item| item.id == command.id)
+        );
+        assert!(
+            registry()
+                .surface(CommandSurface::ContentContext)
+                .iter()
+                .any(|item| item.id == command.id)
+        );
     }
 }

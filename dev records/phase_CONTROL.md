@@ -10,12 +10,15 @@
 > from its systems, and it is the game that made ray-traced reflections
 > mainstream. This phase is a UI phase with a rendering half, in that order.
 >
-> **Status:** **IN PROGRESS — Track 0 and CONTROL-B/C complete 2026-08-23.** CONTROL-A's
+> **Status:** **IN PROGRESS — Track 0 and CONTROL-B/C/D complete 2026-08-23.** CONTROL-A's
 > regenerable audit, red gates, two-width surface captures, and terrain timing are in tree;
 > CONTROL-A1's input seam and CONTROL-A2's command registry are complete.
 > CONTROL-B's schema-generated production Details path covers all 160 editable
-> fields across 16 schemas; its legacy hand-wiring census is zero. **Next:
-> CONTROL-D.** Plan written 2026-08-17;
+> fields across 16 schemas; its legacy hand-wiring census is zero. CONTROL-D
+> ships native `.sommat` authoring, generated material Details, live shared
+> sphere previews, authored material references, worker texture resolution,
+> glTF sibling materialization, Make Unique and vector assignment. **Next:
+> CONTROL-E.** Plan written 2026-08-17;
 > **re-audited and expanded 2026-08-22** against the
 > tree at `209fd07`, after Phase 27 landed. Every count in §4 was re-measured
 > on that date; the 2026-08-17 figures are superseded and the differences are
@@ -2349,7 +2352,7 @@ row; a texture edited in an external tool updates its tile; the asset picker
 appears in Details wherever the schema says `Asset`; a cold second run costs
 nothing because the disk cache is warm.
 
-#### CONTROL-D — Material authoring
+#### CONTROL-D — Material authoring — **COMPLETE 2026-08-23**
 
 The headline, and cheap once B and C exist.
 
@@ -2380,6 +2383,21 @@ The headline, and cheap once B and C exist.
 **Reached:** every field of `GpuMaterial`, from one (base colour) to all of them.
 **Exit:** create a material, set roughness 0.2 and metallic 1.0, assign it to a
 cube by dragging, save, quit, reopen, and it is still a polished metal cube.
+
+**Implementation evidence (2026-08-23):** `somnium_asset::material::MaterialAsset`
+is the single serde/reflection/runtime-conversion representation. Its versioned
+header embeds the saved 64x64 PNG; its generated panel carries the same live
+thumbnail-atlas sphere used by the drawer. `MaterialComponent` schema v2 writes
+only the durable `AssetId`; the renderer pool slot is runtime-only and is rebuilt
+for every authored reference after load. Texture-slot decode runs through the
+bounded job registry, then main-thread upload refreshes the shared pool entry.
+glTF import materializes decoded/embedded textures and one non-overwriting
+`.sommat` sibling per source material on the import worker. The registry declares
+`editor.asset.new_material` once for both Create surfaces. Focused proofs cover
+all 16 fields/five texture masks, preview header round-trip and invalidation,
+polished GPU reconstruction (roughness 0.2/metallic 1), scene reference
+round-trip with no pool id, generic live-gesture undo/redo, vector assignment,
+Make Unique's non-deleting undo, and glTF sibling creation.
 
 #### CONTROL-E — Drag and drop (26-D2)
 

@@ -43,6 +43,9 @@ pub struct GeneratedPropertyRow {
 pub struct GeneratedComponentPanel {
     pub component: StableId,
     pub label: String,
+    /// Optional asset preview rendered above generated rows. This remains
+    /// generic: any schema-backed asset type can opt into the shared atlas.
+    pub preview_path: Option<std::path::PathBuf>,
     pub rows: Vec<GeneratedPropertyRow>,
 }
 
@@ -55,6 +58,7 @@ pub fn generate_component_panel(
     GeneratedComponentPanel {
         component: schema.stable_id,
         label: schema.display_name.to_owned(),
+        preview_path: None,
         rows: generate_property_rows(schema, values, editors, rules),
     }
 }
@@ -214,5 +218,34 @@ mod tests {
             read_only: false,
         };
         assert_eq!(search_rows(&[row], "metres").len(), 1);
+    }
+
+    #[test]
+    fn material_details_are_entirely_schema_generated() {
+        let schema = somnium_asset::material::material_asset_schema();
+        let mut world = somnium_ecs::World::new();
+        let entity = world.spawn((somnium_asset::material::MaterialAsset::default(),));
+        let values = (schema.snapshot)(&world, entity).unwrap();
+        let panel = generate_component_panel(
+            &schema,
+            &values,
+            &PropertyEditorRegistry::standard(),
+            &EditingRulesRegistry::default(),
+        );
+        assert_eq!(panel.rows.len(), 16);
+        assert!(
+            panel
+                .rows
+                .iter()
+                .all(|row| row.editor != PropertyEditorKind::Unsupported)
+        );
+        assert_eq!(
+            panel
+                .rows
+                .iter()
+                .filter(|row| row.ty == FieldType::Asset)
+                .count(),
+            5
+        );
     }
 }

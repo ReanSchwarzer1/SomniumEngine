@@ -5,6 +5,7 @@
 //! without ever seeing `gltf::` crate types directly.
 
 pub mod database;
+pub mod material;
 pub mod preview;
 
 use std::collections::HashMap;
@@ -40,7 +41,7 @@ pub struct LoadedTexture {
 /// The renderer routes `Blend` materials to a separate forward pass — the
 /// visibility buffer stores one triangle per pixel and structurally cannot
 /// represent see-through surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum AlphaMode {
     /// Alpha ignored; surface is fully opaque.
     #[default]
@@ -53,6 +54,8 @@ pub enum AlphaMode {
 
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
+    /// Source material name, used for editable `.sommat` sibling naming.
+    pub name: String,
     pub base_color: [f32; 4],
     pub roughness: f32,
     pub metallic: f32,
@@ -87,6 +90,8 @@ pub struct LoadedMaterial {
     /// a screen or a lit sign has to be given a real luminance rather than a
     /// number that happened to look right.
     pub emissive: [f32; 3],
+    /// Multiplier from `KHR_materials_emissive_strength`.
+    pub emissive_intensity: f32,
     /// Texture modulating `emissive`, if the material has one.
     pub emissive_map: Option<usize>,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
@@ -154,6 +159,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     for mat in document.materials() {
         let pbr = mat.pbr_metallic_roughness();
         scene.materials.push(LoadedMaterial {
+            name: mat.name().unwrap_or("Material").to_string(),
             base_color: pbr.base_color_factor(),
             roughness: pbr.roughness_factor(),
             metallic: pbr.metallic_factor(),
@@ -167,6 +173,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             // Set below, where the sidecar cutout mask identifies vegetation.
             foliage: false,
             emissive: mat.emissive_factor(),
+            emissive_intensity: mat.emissive_strength().unwrap_or(1.0),
             emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
             double_sided: mat.double_sided(),
             albedo_map: pbr
@@ -219,6 +226,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     // Ensure there is always at least a default material at index 0.
     if scene.materials.is_empty() {
         scene.materials.push(LoadedMaterial {
+            name: "Material".to_string(),
             base_color: [1.0, 1.0, 1.0, 1.0],
             roughness: 0.5,
             metallic: 0.0,
@@ -231,6 +239,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission: 0.0,
             foliage: false,
             emissive: [0.0; 3],
+            emissive_intensity: 1.0,
             emissive_map: None,
             double_sided: false,
         });

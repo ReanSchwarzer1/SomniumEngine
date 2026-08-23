@@ -51,6 +51,9 @@ pub struct UploadedNode {
     pub index_offset: u32,
     pub index_count: u32,
     pub material_id: u32,
+    /// Source material index, retained so the editor can attach the editable
+    /// `.sommat` sibling rather than authoring the runtime pool slot.
+    pub material_index: usize,
     pub transform: glam::Mat4,
 }
 
@@ -806,6 +809,69 @@ impl SomniumRenderer {
         index
     }
 
+    /// Upload worker-decoded RGBA8 pixels into the bindless pool. Material
+    /// asset jobs use this main-thread half after file IO and decode complete.
+    pub fn upload_material_texture(
+        &mut self,
+        ctx: &RenderContext,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> i32 {
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Material Asset Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let row_bytes = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = row_bytes.div_ceil(align) * align;
+        let upload = if padded_row == row_bytes {
+            rgba.to_vec()
+        } else {
+            let mut padded = vec![0_u8; padded_row as usize * height as usize];
+            for row in 0..height as usize {
+                let source = row * row_bytes as usize;
+                let target = row * padded_row as usize;
+                padded[target..target + row_bytes as usize]
+                    .copy_from_slice(&rgba[source..source + row_bytes as usize]);
+            }
+            padded
+        };
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &upload,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.add_texture(
+            ctx,
+            texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        ) as i32
+    }
+
     /// Upload a `LoadedScene` to the GPU pools and return one `UploadedNode` per
     /// renderable node (mesh_index is Some). The caller can then spawn ECS entities
     /// using the returned data.
@@ -1004,6 +1070,7 @@ impl SomniumRenderer {
                     index_offset: alloc.index_offset,
                     index_count: alloc.index_count,
                     material_id: mat_id,
+                    material_index: mat_idx,
                     transform: node.transform,
                 })
             })

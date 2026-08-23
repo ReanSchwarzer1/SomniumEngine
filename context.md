@@ -3,7 +3,7 @@
 > **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
 >
 > **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B/C complete 2026-08-23**.
+> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B/C/D complete 2026-08-23**.
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and
 > opt-in red completeness gates; CONTROL-A1 ships the modifier/input, gesture,
@@ -13,7 +13,13 @@
 > and a zero legacy hand-wiring census. CONTROL-C ships the immutable queried
 > asset database, bounded cancellable jobs, visible-first off-thread cached
 > previews, drawer workflows and the schema Asset picker. Its 60-PNG proof is
-> deterministic; no post-C live redline is claimed. **Next: CONTROL-D.**
+> deterministic; no post-C live redline is claimed. CONTROL-D ships the native
+> `.sommat` format and embedded preview header, generated material Details with
+> a live shared sphere, `MaterialComponent` authored `AssetId`/derived renderer
+> slot separation, job-decoded five-slot textures, registry-backed creation,
+> glTF material/embedded-texture siblings, vector assignment and Make Unique.
+> The polished-metal scene/material schema round-trip is covered at roughness
+> 0.2 and metallic 1.0. **Next: CONTROL-E.**
 > Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
 > layer, motion, elevation, the second theme and the first-impression surfaces.
 > Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.

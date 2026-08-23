@@ -1,12 +1,13 @@
 //! Worker-side asset preview preparation and disk cache.
 
 use crate::{
-    LoadedMesh, LoadedScene, Vertex,
     database::{AssetKind, AssetRecord},
     load_gltf,
+    material::{load_material, MaterialAsset},
+    LoadedMesh, LoadedScene, Vertex,
 };
 use glam::{Mat4, Vec3, Vec4};
-use image::{DynamicImage, ImageBuffer, Rgba, imageops::FilterType};
+use image::{imageops::FilterType, DynamicImage, ImageBuffer, Rgba};
 use std::{fs, path::Path};
 
 pub const PREVIEW_CELL: u32 = 64;
@@ -75,7 +76,7 @@ impl PreviewGeneratorRegistry {
                     name: "material",
                     kind: AssetKind::Material,
                     frequency: PreviewFrequency::OnPropertyChange,
-                    generate: |_| None,
+                    generate: |r| decode_material(&r.absolute_path),
                 },
                 PreviewGenerator {
                     name: "scene",
@@ -110,6 +111,57 @@ impl PreviewGeneratorRegistry {
             .filter(|generator| generator.kind == record.kind)
             .find_map(|generator| (generator.generate)(record))
     }
+}
+
+fn decode_material(path: &Path) -> Option<Vec<u8>> {
+    let material = load_material(path).ok()?;
+    if let Some(png) = material.preview_png() {
+        if let Ok(image) = image::load_from_memory_with_format(&png, image::ImageFormat::Png) {
+            return Some(fit_to_cell(image));
+        }
+    }
+    Some(render_material_sphere(&material))
+}
+
+/// Shared 64x64 material-studio sphere used by the drawer, save header, and
+/// Details preview. It is deterministic and CPU-only so worker preparation
+/// never touches the live renderer.
+#[must_use]
+pub fn render_material_sphere(material: &MaterialAsset) -> Vec<u8> {
+    let mut cell = vec![0_u8; (PREVIEW_CELL * PREVIEW_CELL * 4) as usize];
+    let base = Vec3::from(material.base_color.0);
+    let emission = Vec3::from(material.emissive.0) * material.emissive_intensity;
+    let light = Vec3::new(-0.45, 0.65, 0.62).normalize();
+    let view = Vec3::new(0.0, 0.0, 1.0);
+    for y in 0..PREVIEW_CELL {
+        for x in 0..PREVIEW_CELL {
+            let px = (x as f32 + 0.5) / PREVIEW_CELL as f32 * 2.0 - 1.0;
+            let py = 1.0 - (y as f32 + 0.5) / PREVIEW_CELL as f32 * 2.0;
+            let radius2 = px * px + py * py;
+            if radius2 > 0.82 {
+                continue;
+            }
+            let pz = (0.82 - radius2).sqrt();
+            let normal = Vec3::new(px, py, pz).normalize();
+            let diffuse = normal.dot(light).max(0.0);
+            let half = (light + view).normalize();
+            let gloss = (1.0 - material.roughness).clamp(0.0, 1.0);
+            let specular = normal.dot(half).max(0.0).powf(2.0 + gloss * 126.0);
+            let f0 = Vec3::splat(0.04).lerp(base, material.metallic.clamp(0.0, 1.0));
+            let diffuse_color = base * (1.0 - material.metallic.clamp(0.0, 1.0));
+            let color = diffuse_color * (0.08 + diffuse * 0.72)
+                + f0 * specular * (0.35 + gloss * 1.8)
+                + emission;
+            let mapped = color / (Vec3::ONE + color);
+            let srgb = mapped.powf(1.0 / 2.2) * 255.0;
+            let offset = ((y * PREVIEW_CELL + x) * 4) as usize;
+            cell[offset] = srgb.x.clamp(0.0, 255.0) as u8;
+            cell[offset + 1] = srgb.y.clamp(0.0, 255.0) as u8;
+            cell[offset + 2] = srgb.z.clamp(0.0, 255.0) as u8;
+            cell[offset + 3] = (material.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+    cell
 }
 
 /// Produce a 64x64 RGBA preview without touching UI or renderer state.

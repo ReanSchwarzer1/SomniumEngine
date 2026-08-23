@@ -75,8 +75,8 @@ pub use character::RigidBodyComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
-    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
-    ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
+    AssignMaterialCmd, CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand,
+    EntitySnapshot, ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
 };
 pub use error::EngineError;
 pub use event::{EngineEvent, InputState};
@@ -116,8 +116,10 @@ impl somnium_ecs::Component for MeshComponent {}
 /// ECS Component for a material.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MaterialComponent {
-    /// Index into the renderer's material pool.
-    pub id: u32,
+    /// Durable authored reference written to the scene.
+    pub asset: somnium_asset::database::AssetId,
+    /// Renderer pool slot reconstructed from `asset`; never serialized.
+    pub runtime_id: u32,
 }
 impl somnium_ecs::Component for MaterialComponent {}
 

@@ -10,7 +10,6 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::{
-    editor_event::CreateKind,
     message::NodeHandle,
     theme,
     types::{HorizontalAlignment, Thickness, VerticalAlignment},
@@ -174,7 +173,7 @@ pub(crate) fn build_create_popup(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, Vec<(NodeHandle, CreateKind)>) {
+) -> (NodeHandle, Vec<(NodeHandle, &'static str)>) {
     let popup_backdrop =
         PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let popup_h = ui.add_node(popup_backdrop, root);
@@ -201,9 +200,6 @@ pub(crate) fn build_create_popup(
     let commands = crate::commands::registry().menu(crate::commands::Menu::Create);
     let mut items = Vec::with_capacity(commands.len());
     for command in commands {
-        let crate::commands::CommandAction::CreateEntity(kind) = command.action else {
-            continue;
-        };
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -224,7 +220,7 @@ pub(crate) fn build_create_popup(
         .with_color(theme::TEXT_PRIMARY)
         .build();
         ui.add_node(lbl, btn_h);
-        items.push((btn_h, kind));
+        items.push((btn_h, command.id));
     }
 
     (popup_h, items)

@@ -19,6 +19,7 @@ use crate::{
         color_picker::ColorSwatchBuilder,
         combo_box::ComboBoxBuilder,
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
+        image::ImageBuilder,
         numeric_field::NumericFieldBuilder,
         popup::{PopupBuilder, PopupPlacement},
         property_row::PropertyRowBuilder,
@@ -158,11 +159,6 @@ pub(crate) fn build_inspector(
     let foliage_smax = number(ui, foliage_section, "Scale max", 0.01, "");
     ui.set_visibility(foliage_section, false);
 
-    let material_section = section(ui, parent, "Renderer Material");
-    let material_base = ColorSwatchBuilder::new(WidgetBuilder::new()).build();
-    let material_base = ui.add_node(material_base, material_section);
-    ui.set_visibility(material_section, false);
-
     let script_section = section(ui, parent, "Scripts");
     let (script_add, _) = button(ui, script_section, "New Script");
     let script_list =
@@ -207,8 +203,6 @@ pub(crate) fn build_inspector(
         foliage_layer,
         foliage_smin,
         foliage_smax,
-        material_section,
-        material_base,
         script_section,
         script_add,
         script_list,
@@ -249,6 +243,19 @@ pub(crate) fn build_generated_details(
                 .with_text(&panel.label)
                 .build();
         ui.add_node(heading, root);
+        if let Some(path) = panel.preview_path.clone() {
+            ui.draw_ctx.thumbnails.request(&path, true);
+            let preview = ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_width(96.0)
+                    .with_height(96.0)
+                    .with_margin(Thickness::uniform(8.0)),
+            )
+            .with_asset(path)
+            .with_size(96.0)
+            .build();
+            ui.add_node(preview, root);
+        }
         let mut last_group = None;
         for model in &panel.rows {
             if model.group != last_group {

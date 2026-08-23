@@ -15,6 +15,67 @@ use somnium_ecs::reflect::{
 use somnium_ecs::{Entity, World};
 use somnium_ui::GestureId;
 
+/// Assign one authored material asset to any number of entities as one
+/// reversible operation. Distinct previous assignments are retained.
+pub struct AssignMaterialCmd {
+    entities: Vec<Entity>,
+    asset: somnium_asset::database::AssetId,
+    before: Vec<(Entity, MaterialComponent)>,
+}
+
+impl AssignMaterialCmd {
+    #[must_use]
+    pub fn new(
+        world: &World,
+        entities: Vec<Entity>,
+        asset: somnium_asset::database::AssetId,
+    ) -> Self {
+        let before = entities
+            .iter()
+            .filter_map(|entity| {
+                world
+                    .get::<MaterialComponent>(*entity)
+                    .copied()
+                    .map(|m| (*entity, m))
+            })
+            .collect();
+        Self {
+            entities,
+            asset,
+            before,
+        }
+    }
+}
+
+impl EditorCommand for AssignMaterialCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        for entity in &self.entities {
+            if let Some(material) = world.get_mut::<MaterialComponent>(*entity) {
+                material.asset = self.asset;
+                material.runtime_id = 0;
+            }
+        }
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        for (entity, before) in &self.before {
+            if let Some(material) = world.get_mut::<MaterialComponent>(*entity) {
+                *material = *before;
+            }
+        }
+    }
+
+    fn description(&self) -> &str {
+        "Assign Material"
+    }
+
+    fn is_no_op(&self) -> bool {
+        self.before
+            .iter()
+            .all(|(_, material)| material.asset == self.asset)
+    }
+}
+
 // ─── EditorCommand trait ──────────────────────────────────────────────────
 
 /// A reversible editor operation.
@@ -143,7 +204,7 @@ impl FieldUndoSnapshot {
         field: FieldId,
         scope: ChangeScope,
     ) -> Option<Self> {
-        let registry = crate::reflect_registry::component_registry();
+        let registry = crate::reflect_registry::editor_registry();
         let schema = registry.by_stable_id(component)?;
         match scope {
             ChangeScope::Field => Some(Self::Field {
@@ -184,7 +245,7 @@ impl FieldUndoSnapshot {
     }
 
     fn restore(&self, world: &mut World) {
-        let registry = crate::reflect_registry::component_registry();
+        let registry = crate::reflect_registry::editor_registry();
         let mut restore_component = |entity, component, values: &ReflectObject| {
             if let Some(schema) = registry.by_stable_id(component) {
                 let _ = (schema.apply)(world, entity, values);
@@ -266,7 +327,7 @@ impl SetFieldCmd {
         gesture: GestureId,
         before: Option<FieldUndoSnapshot>,
     ) -> Result<Self, String> {
-        let registry = crate::reflect_registry::component_registry();
+        let registry = crate::reflect_registry::editor_registry();
         let schema = registry
             .by_stable_id(component)
             .ok_or_else(|| format!("unknown component {component}"))?;
@@ -309,7 +370,7 @@ impl SetFieldCmd {
         field: FieldId,
         mut value: ReflectValue,
     ) -> Result<(), String> {
-        let registry = crate::reflect_registry::component_registry();
+        let registry = crate::reflect_registry::editor_registry();
         let schema = registry
             .by_stable_id(component)
             .ok_or_else(|| format!("unknown component {component}"))?;
@@ -365,7 +426,7 @@ impl SetFieldCmd {
     }
 
     pub fn scope(component: StableId, field: FieldId) -> Option<ChangeScope> {
-        crate::reflect_registry::component_registry()
+        crate::reflect_registry::editor_registry()
             .by_stable_id(component)?
             .field(field)
             .map(|schema| schema.scope)
@@ -388,7 +449,7 @@ impl EditorCommand for SetFieldCmd {
     }
 
     fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
-        let registry = crate::reflect_registry::component_registry();
+        let registry = crate::reflect_registry::editor_registry();
         match &self.before {
             FieldUndoSnapshot::Field {
                 component,
@@ -1360,6 +1421,129 @@ fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {
 #[cfg(test)]
 mod landscape_tests {
     use super::*;
+
+    #[test]
+    fn vector_material_assignment_is_exactly_one_undo_step() {
+        let mut world = World::new();
+        let old_a = somnium_asset::database::AssetId::from_raw(11);
+        let old_b = somnium_asset::database::AssetId::from_raw(22);
+        let next = somnium_asset::database::AssetId::from_raw(33);
+        let a = world.spawn((MaterialComponent {
+            asset: old_a,
+            runtime_id: 7,
+        },));
+        let b = world.spawn((MaterialComponent {
+            asset: old_b,
+            runtime_id: 8,
+        },));
+        let mut selected = Some(a);
+        let mut undo = UndoStack::new(8);
+        undo.push(
+            Box::new(AssignMaterialCmd::new(&world, vec![a, b], next)),
+            &mut world,
+            &mut selected,
+        );
+        assert_eq!(world.get::<MaterialComponent>(a).unwrap().asset, next);
+        assert_eq!(world.get::<MaterialComponent>(b).unwrap().asset, next);
+        assert!(undo.undo(&mut world, &mut selected));
+        assert_eq!(world.get::<MaterialComponent>(a).unwrap().asset, old_a);
+        assert_eq!(world.get::<MaterialComponent>(b).unwrap().asset, old_b);
+        assert!(!undo.undo(&mut world, &mut selected));
+        assert!(undo.redo(&mut world, &mut selected));
+        assert_eq!(world.get::<MaterialComponent>(a).unwrap().asset, next);
+        assert_eq!(world.get::<MaterialComponent>(b).unwrap().asset, next);
+    }
+
+    #[test]
+    fn make_unique_undo_restores_assignment_without_deleting_the_copy() {
+        let folder = std::env::temp_dir().join("somnium-make-unique-control-d");
+        std::fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("Shared.sommat");
+        std::fs::write(&source, "shared").unwrap();
+        let copy = somnium_asset::material::unique_sibling(&source);
+        std::fs::copy(&source, &copy).unwrap();
+
+        let shared = somnium_asset::database::AssetId::from_relative_path("Shared.sommat");
+        let unique =
+            somnium_asset::database::AssetId::from_relative_path(copy.file_name().unwrap());
+        let mut world = World::new();
+        let entity = world.spawn((MaterialComponent {
+            asset: shared,
+            runtime_id: 4,
+        },));
+        let mut selected = Some(entity);
+        let mut undo = UndoStack::new(4);
+        undo.push(
+            Box::new(AssignMaterialCmd::new(&world, vec![entity], unique)),
+            &mut world,
+            &mut selected,
+        );
+        assert!(undo.undo(&mut world, &mut selected));
+        assert_eq!(
+            world.get::<MaterialComponent>(entity).unwrap().asset,
+            shared
+        );
+        assert!(copy.exists(), "undo must not delete authored content");
+        let _ = std::fs::remove_file(copy);
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_dir(folder);
+    }
+
+    #[test]
+    fn generated_material_field_uses_generic_live_gesture_undo() {
+        let mut world = World::new();
+        let entity = world.spawn((somnium_asset::material::MaterialAsset::default(),));
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry.by_name("somnium.asset.Material").unwrap();
+        let field = schema.field_by_name("roughness").unwrap().id;
+        let gesture = GestureId(77);
+        let baseline =
+            FieldUndoSnapshot::capture(&world, entity, schema.stable_id, field, ChangeScope::Field);
+        SetFieldCmd::apply_live(
+            &mut world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::F64(0.2),
+        )
+        .unwrap();
+        let command = SetFieldCmd::new(
+            &world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::F64(0.2),
+            gesture,
+            baseline,
+        )
+        .unwrap();
+        let mut undo = UndoStack::new(4);
+        let mut selected = Some(entity);
+        undo.push(Box::new(command), &mut world, &mut selected);
+        assert_eq!(
+            world
+                .get::<somnium_asset::material::MaterialAsset>(entity)
+                .unwrap()
+                .roughness,
+            0.2
+        );
+        assert!(undo.undo(&mut world, &mut selected));
+        assert_eq!(
+            world
+                .get::<somnium_asset::material::MaterialAsset>(entity)
+                .unwrap()
+                .roughness,
+            0.5
+        );
+        assert!(undo.redo(&mut world, &mut selected));
+        assert_eq!(
+            world
+                .get::<somnium_asset::material::MaterialAsset>(entity)
+                .unwrap()
+                .roughness,
+            0.2
+        );
+    }
 
     fn terrain_snapshot() -> EntitySnapshot {
         EntitySnapshot {
