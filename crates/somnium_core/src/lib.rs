@@ -47,6 +47,7 @@
 /// Core application lifecycle and event loop management.
 pub mod app;
 pub mod character;
+pub mod clipboard;
 pub mod config;
 pub mod context;
 pub mod editor_commands;
@@ -65,6 +66,7 @@ pub mod script_cook;
 pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
+pub mod selection;
 pub mod sun;
 pub mod time;
 
@@ -550,6 +552,25 @@ impl Default for FoliageComponent {
         }
     }
 }
+/// Per-entity editor state: hidden in the viewport, locked against selection.
+///
+/// A component rather than a side table, so it serialises with the scene, undoes
+/// through the ordinary reflected path, and survives a copy/paste — all three of
+/// which a `HashSet<Entity>` on the editor would have got wrong. Absent means
+/// "visible and unlocked", which is why the overwhelming majority of entities
+/// carry no such component at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditorFlags {
+    /// Not submitted for drawing. Purely an authoring state: play and the
+    /// runtime ignore it.
+    pub hidden: bool,
+    /// Cannot be picked, dragged or transformed in the viewport. The Outliner
+    /// still selects it, because otherwise a locked object becomes unreachable.
+    pub locked: bool,
+}
+
+impl somnium_ecs::Component for EditorFlags {}
+
 impl somnium_ecs::Component for FoliageComponent {}
 
 /// Marks an entity as a voxel-terrain world (Phase 14 / 13E follow-up).

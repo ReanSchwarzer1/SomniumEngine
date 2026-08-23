@@ -29,9 +29,10 @@ use crate::event::{EngineEvent, translate_window_event};
 use crate::jobs::{JobHandle, JobPriority, JobRegistry};
 use crate::time::TimeState;
 use crate::{
-    CameraSettingsComponent, FoliageComponent, LightComponent, LightType, MaterialComponent,
-    MeshComponent, MeshKind, Name, Parent, PostProcessComponent, TerrainComponent, Transform,
-    WaterComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
+    CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
+    MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
+    TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent, WorldTransform,
+    look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -430,18 +431,38 @@ pub struct Engine<G: GameApp> {
     >,
     import_spawn_at: [f32; 3],
     external_import_job: Option<JobHandle<Vec<(std::path::PathBuf, std::path::PathBuf)>>>,
-    selected_entity: Option<somnium_ecs::entity::Entity>,
+    /// CONTROL-F: an ordered selection with a primary. Single-selection
+    /// call sites read and write `selection.primary`; everything that means
+    /// "all of them" reads `selection.as_slice()`.
+    selection: crate::selection::Selection,
+    /// The Outliner's flattened row order, refreshed each frame. `Shift`-range
+    /// selection means "the rows between these two", so the range has to be
+    /// resolved against the order the user can actually see.
+    outliner_order: Vec<somnium_ecs::entity::Entity>,
+    /// The entity clipboard. Values, never handles — see `clipboard.rs`.
+    entity_clipboard: crate::clipboard::EntityClipboard,
+    /// Pending "frame this" request for the game-owned editor camera:
+    /// world-space centre and the radius that should fit the view.
+    camera_focus_request: Option<(glam::Vec3, f32)>,
     state: LifecycleState,
     /// Bounded command history for editor undo/redo (128-command capacity).
     undo_stack: UndoStack,
     /// Gesture baselines captured before the first live reflected write.
-    field_gestures: std::collections::HashMap<GestureId, FieldUndoSnapshot>,
+    ///
+    /// Keyed per `(gesture, entity)` since CONTROL-F: one drag of one slider
+    /// can now be editing twelve entities, and each needs its own baseline for
+    /// the single undo entry to restore all twelve.
+    field_gestures:
+        std::collections::HashMap<(GestureId, somnium_ecs::entity::Entity), FieldUndoSnapshot>,
     /// Current cursor position in physical pixels.
     cursor_pos: (f32, f32),
     /// Current window dimensions in physical pixels (updated on resize).
     viewport_size: (f32, f32),
     /// Active gizmo drag state (Some while LMB is held on a gizmo axis).
     gizmo_drag: Option<GizmoDragState>,
+    /// Viewport rubber-band, live only while the left button is down over
+    /// empty space with no gizmo axis under the pointer.
+    marquee: Option<crate::selection::Marquee>,
 
     /// State at the start of an inspector drag-scrub, so the whole gesture
     /// collapses into one undo entry instead of one per pixel of travel.
@@ -585,13 +606,17 @@ impl<G: GameApp + 'static> Engine<G> {
             import_job: None,
             import_spawn_at: [0.0; 3],
             external_import_job: None,
-            selected_entity: None,
+            selection: crate::selection::Selection::default(),
+            outliner_order: Vec::new(),
+            entity_clipboard: crate::clipboard::EntityClipboard::default(),
+            camera_focus_request: None,
             state: LifecycleState::Uninitialized,
             undo_stack: UndoStack::new(128),
             field_gestures: std::collections::HashMap::new(),
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
+            marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
             foliage_failed: [false; FOLIAGE_PALETTE.len()],
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
@@ -796,10 +821,132 @@ impl<G: GameApp> Engine<G> {
 
     // ── Phase 16-D: the editor's scripting actions ───────────────────────
 
+    /// Finish a rubber-band: everything whose origin projects inside it is
+    /// selected, and `command()` adds to the selection rather than replacing
+    /// it — the same modifier that adds a single row in the Outliner.
+    fn apply_marquee(&mut self, band: crate::selection::Marquee) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let view_proj = renderer.view_proj;
+        let viewport = self.viewport_size;
+        let caught: Vec<_> = self
+            .world
+            .entities()
+            .filter(|entity| {
+                let flags = self
+                    .world
+                    .get::<EditorFlags>(*entity)
+                    .copied()
+                    .unwrap_or_default();
+                !flags.locked && !flags.hidden
+            })
+            .filter_map(|entity| {
+                let position = self
+                    .world
+                    .get::<WorldTransform>(entity)
+                    .map(|world| world.0.to_scale_rotation_translation().2)
+                    .or_else(|| {
+                        self.world
+                            .get::<Transform>(entity)
+                            .map(|transform| transform.translation)
+                    })?;
+                let clip = view_proj * position.extend(1.0);
+                let ndc = glam::Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+                band.contains_ndc(ndc, clip.w, viewport).then_some(entity)
+            })
+            .collect();
+
+        let additive = self
+            .ui_manager
+            .as_ref()
+            .is_some_and(somnium_ui::UiManager::command_modifier_held);
+        if additive {
+            for entity in caught {
+                if !self.selection.contains(entity) {
+                    self.selection.toggle(entity);
+                }
+            }
+        } else if caught.is_empty() {
+            self.selection.clear();
+        } else {
+            self.selection.set_many(caught);
+        }
+        self.after_selection_change();
+    }
+
+    /// Frame the selection with the editor camera.
+    ///
+    /// The pivot is the centroid of the selected transforms, and the distance
+    /// comes from how far apart they are, so `F` on one object and `F` on
+    /// twelve both end up looking at the thing the user meant.
+    fn focus_camera_on_selection(&mut self) {
+        let points: Vec<glam::Vec3> = self
+            .selection
+            .as_slice()
+            .iter()
+            .filter_map(|entity| {
+                self.world
+                    .get::<WorldTransform>(*entity)
+                    .map(|world| world.0.to_scale_rotation_translation().2)
+                    .or_else(|| {
+                        self.world
+                            .get::<Transform>(*entity)
+                            .map(|transform| transform.translation)
+                    })
+            })
+            .collect();
+        let Some(first) = points.first().copied() else {
+            return;
+        };
+        let mut min = first;
+        let mut max = first;
+        for point in &points {
+            min = min.min(*point);
+            max = max.max(*point);
+        }
+        let centre = (min + max) * 0.5;
+        // A minimum radius keeps a single point from putting the camera inside
+        // the object it was asked to look at.
+        let radius = ((max - min).length() * 0.5).max(2.0);
+        // The editor camera belongs to the game layer, so this is a request
+        // rather than a write — the same shape `camera_speed_request` already
+        // uses. CONTROL-G builds bookmarks, orbit and view presets on this
+        // channel rather than opening a second one.
+        self.camera_focus_request = Some((centre, radius));
+    }
+
+    /// Everything that must follow a selection change, whatever caused it.
+    ///
+    /// Extracted in CONTROL-F because there are now four callers — plain
+    /// click, modifier click, marquee/paste and the legacy single-selection
+    /// event — and a gizmo left on a deselected entity is exactly the class of
+    /// bug that only shows up on the fourth one.
+    fn after_selection_change(&mut self) {
+        // A new selection means the old baselines describe values that are no
+        // longer on screen.
+        if let Some(ui) = &mut self.ui_manager {
+            ui.reset_inspector_baseline();
+        }
+        // Leaving the terrain entity exits terrain edit mode.
+        if self.terrain_edit_active && self.selected_terrain().is_none() {
+            self.terrain_edit_active = false;
+            self.terrain_stroke = None;
+        }
+        if let Some(entity) = self.selection.primary {
+            let translation = self.world.get::<Transform>(entity).map(|t| t.translation);
+            if let (Some(pos), Some(r)) = (translation, self.renderer.as_mut()) {
+                r.set_gizmo_world_pos(pos);
+            }
+        } else if let Some(r) = &mut self.renderer {
+            r.clear_gizmo();
+        }
+    }
+
     /// How many attachments the selection carries, if it carries a
     /// `ScriptSet` at all.
     fn selected_script_count(&self) -> Option<usize> {
-        let entity = self.selected_entity?;
+        let entity = self.selection.primary?;
         self.world
             .get::<somnium_script::attachment::ScriptSet>(entity)
             .map(somnium_script::attachment::ScriptSet::len)
@@ -813,12 +960,12 @@ impl<G: GameApp> Engine<G> {
         &mut self,
         build: impl FnOnce(u32) -> Box<dyn crate::editor_commands::EditorCommand>,
     ) {
-        let Some(entity) = self.selected_entity else {
+        let Some(entity) = self.selection.primary else {
             return;
         };
         let command = build(entity.index());
         self.undo_stack
-            .push(command, &mut self.world, &mut self.selected_entity);
+            .push(command, &mut self.world, &mut self.selection.primary);
         self.scene_dirty = true;
     }
 
@@ -826,7 +973,7 @@ impl<G: GameApp> Engine<G> {
     fn attach_script(&mut self, path: &std::path::Path) {
         match self.scripts.import_script_file(path) {
             Ok(asset) => {
-                if self.selected_entity.is_none() {
+                if self.selection.primary.is_none() {
                     if let Some(ui) = &mut self.ui_manager {
                         ui.push_toast("Select an entity first, then click the script");
                     }
@@ -940,7 +1087,7 @@ impl<G: GameApp> Engine<G> {
         value: somnium_script::value::ScriptValue,
         live: bool,
     ) {
-        let Some(entity) = self.selected_entity else {
+        let Some(entity) = self.selection.primary else {
             return;
         };
         if live {
@@ -974,7 +1121,7 @@ impl<G: GameApp> Engine<G> {
     /// this function names a property, and adding one to a `.luau` file
     /// changes nothing in Rust.
     fn script_inspector_state(&self) -> Option<somnium_ui::ScriptInspectorState> {
-        let entity = self.selected_entity?;
+        let entity = self.selection.primary?;
         let set = self
             .world
             .get::<somnium_script::attachment::ScriptSet>(entity)?;
@@ -1252,7 +1399,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.audio.as_mut().unwrap(),
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
-                &mut self.selected_entity,
+                &mut self.selection.primary,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
@@ -1309,7 +1456,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.audio.as_mut().unwrap(),
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
-                    &mut self.selected_entity,
+                    &mut self.selection.primary,
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
@@ -1341,7 +1488,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.audio.as_mut().unwrap(),
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
-                &mut self.selected_entity,
+                &mut self.selection.primary,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
@@ -1364,6 +1511,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Always track cursor position (needed for gizmo picking every frame).
         if let WindowEvent::CursorMoved { position, .. } = &event {
             self.cursor_pos = (position.x as f32, position.y as f32);
+            if let Some(band) = self.marquee.as_mut() {
+                band.current = self.cursor_pos;
+            }
         }
 
         // Track the exact modifier state for registry-backed shortcuts.  Extra
@@ -1602,13 +1752,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let drag = try_start_gizmo_drag(
                     self.renderer.as_ref(),
                     &self.world,
-                    &self.selected_entity,
+                    &self.selection.primary,
                     self.cursor_pos,
                     self.viewport_size,
                 );
                 if drag.is_some() {
                     self.gizmo_drag = drag;
                     gizmo_consumed = true;
+                } else {
+                    // No gizmo axis under the pointer, so a left press in the
+                    // viewport is the start of a marquee. It only becomes one
+                    // once it is dragged; a plain click still selects.
+                    self.marquee = Some(crate::selection::Marquee::new(self.cursor_pos));
                 }
             }
 
@@ -1618,6 +1773,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ..
             } = &event
             {
+                if let Some(band) = self.marquee.take()
+                    && band.is_dragged()
+                {
+                    self.apply_marquee(band);
+                    gizmo_consumed = true;
+                }
                 if let Some(drag) = self.gizmo_drag.take() {
                     if let Some(entity) = self.world.find_entity_by_index(drag.entity_index) {
                         let final_t = self
@@ -1675,7 +1836,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.audio.as_mut().unwrap(),
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
-                &mut self.selected_entity,
+                &mut self.selection.primary,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
@@ -1732,7 +1893,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.audio.as_mut().unwrap(),
                         self.render_ctx.as_ref(),
                         self.renderer.as_mut(),
-                        &mut self.selected_entity,
+                        &mut self.selection.primary,
                         self.ui_manager.as_mut().unwrap(),
                         crate::camera_speed_from_normalized(self.camera_speed_norm),
                         self.simulation_clock,
@@ -1799,12 +1960,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.audio.as_mut().unwrap(),
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
-                &mut self.selected_entity,
+                &mut self.selection.primary,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
                 &mut self.scripts,
             );
+            // Handed over on the update tick only: the game's camera moves in
+            // `on_update`, so delivering it anywhere else would leave the
+            // request sitting for a frame or be honoured twice.
+            ctx.camera_focus = self.camera_focus_request.take();
             self.game.on_update(&mut ctx);
         }
 
@@ -1883,15 +2048,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 depth: u8,
                 name_of: &std::collections::HashMap<u32, String>,
                 children: &std::collections::HashMap<u32, Vec<u32>>,
-                out: &mut Vec<(u32, String, u8, bool)>,
+                out: &mut Vec<somnium_ui::OutlinerRow>,
             ) {
                 let has = children.get(&id).map(|c| !c.is_empty()).unwrap_or(false);
-                out.push((
+                out.push(somnium_ui::OutlinerRow {
                     id,
-                    name_of.get(&id).cloned().unwrap_or_default(),
+                    name: name_of.get(&id).cloned().unwrap_or_default(),
                     depth,
-                    has,
-                ));
+                    has_children: has,
+                    hidden: false,
+                    locked: false,
+                    script_error: false,
+                    tags: Vec::new(),
+                });
                 if let Some(kids) = children.get(&id) {
                     for kid in kids {
                         walk(*kid, depth.saturating_add(1), name_of, children, out);
@@ -1908,12 +2077,43 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     walk(*id, 0, &name_of, &children, &mut tree);
                 }
             }
-            let selected_idx = self.selected_entity.map(|e| e.index());
+            // One reconciliation point per frame. Commands, undo, redo, game
+            // code and the drag routes all write `selection.primary` through
+            // the `&mut Option<Entity>` shim; this is where the ordered set is
+            // brought back into agreement with it and with the world, so no
+            // stale or orphaned handle can reach a multi-entity command.
+            // Row facts: the badges and the typed filters both read them, and
+            // they are gathered here rather than in `walk` because they need
+            // the world and `walk` is a pure tree flatten.
+            for row in &mut tree {
+                let Some(entity) = self.world.find_entity_by_index(row.id) else {
+                    continue;
+                };
+                if let Some(flags) = self.world.get::<EditorFlags>(entity) {
+                    row.hidden = flags.hidden;
+                    row.locked = flags.locked;
+                }
+                row.tags = entity_tags(&self.world, entity);
+            }
+            self.selection.retain_alive(&self.world);
+            self.selection.reconcile();
+            self.outliner_order = tree
+                .iter()
+                .filter_map(|row| self.world.find_entity_by_index(row.id))
+                .collect();
+            let selected_idx = self.selection.primary.map(|e| e.index());
+            let selected_ids: Vec<u32> = self
+                .selection
+                .as_slice()
+                .iter()
+                .map(|e| e.index())
+                .collect();
             let sel_t = self
-                .selected_entity
+                .selection
+                .primary
                 .and_then(|e| self.world.get::<Transform>(e).copied());
             // Phase 17C: terrain layer + foliage settings for the inspector.
-            let sel_terrain = self.selected_entity.and_then(|e| {
+            let sel_terrain = self.selection.primary.and_then(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
                 let r = self.renderer.as_ref()?;
                 let t = r.terrain(tc.terrain_id)?;
@@ -1954,7 +2154,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let erase_on = self.foliage_erase;
             let single_on = brush.single;
             let sel_foliage = self
-                .selected_entity
+                .selection
+                .primary
                 .and_then(|e| self.world.get::<FoliageComponent>(e).copied())
                 .map(|f| {
                     (
@@ -1981,7 +2182,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.sync_authored_material_components();
             self.ensure_material_session();
             let generated_panels = self
-                .selected_entity
+                .selection.primary
                 .map(|entity| {
                     let editors =
                         somnium_ui::editor::property_editors::PropertyEditorRegistry::standard();
@@ -1994,6 +2195,32 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .into_iter()
                         .filter_map(|schema| {
                             let values = (schema.snapshot)(&self.world, entity)?;
+                            // CONTROL-F: with more than one entity selected the
+                            // panel is the *intersection*. Building it here
+                            // rather than in the widget layer is the whole
+                            // point — Details receives the same model it always
+                            // did, with `mixed` set on the rows that disagree.
+                            if self.selection.len() > 1 {
+                                let others: Vec<_> = self
+                                    .selection
+                                    .as_slice()
+                                    .iter()
+                                    .filter(|other| **other != entity)
+                                    .map(|other| (schema.snapshot)(&self.world, *other))
+                                    .collect();
+                                if others.iter().any(Option::is_none) {
+                                    // A member without this component drops the
+                                    // whole section, not just its rows.
+                                    return None;
+                                }
+                                let others: Vec<_> =
+                                    others.into_iter().flatten().collect();
+                                return Some(
+                                    somnium_ui::editor::inspector_gen::generate_multi_component_panel(
+                                        schema, &values, &others, &editors, &rules,
+                                    ),
+                                );
+                            }
                             Some(somnium_ui::editor::inspector_gen::generate_component_panel(
                                 schema, &values, &editors, &rules,
                             ))
@@ -2024,6 +2251,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
                 ui.set_outliner_entity_handles(all_entities.iter().copied());
+                ui.set_outliner_selection(selected_ids);
+                ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
+                ui.set_marquee(
+                    self.marquee
+                        .filter(crate::selection::Marquee::is_dragged)
+                        .map(|band| band.rect()),
+                );
                 ui.set_viewport_drop_probe(drop_probe_entity, drop_probe_hit);
                 ui.set_fps(self.time.fps());
                 // Phase 26-Zeta: the status bar is an instrument panel, so it
@@ -2031,13 +2265,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.set_status_stats(tree.len(), self.time.fps());
                 ui.set_status_selection(
                     selected_idx
-                        .and_then(|idx| tree.iter().find(|(id, ..)| *id == idx))
-                        .map(|(_, name, ..)| name.as_str()),
+                        .and_then(|idx| tree.iter().find(|row| row.id == idx))
+                        .map(|row| row.name.as_str()),
                 );
                 if let Some(t) = sel_t {
                     let (rx, ry, rz) = t.rotation.to_euler(glam::EulerRot::XYZ);
                     ui.update_inspector(
-                        self.selected_entity,
+                        self.selection.primary,
                         Some(t.translation.to_array()),
                         Some([rx.to_degrees(), ry.to_degrees(), rz.to_degrees()]),
                         Some(t.scale.to_array()),
@@ -2045,7 +2279,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 } else {
                     ui.update_inspector(None, None, None, None);
                 }
-                ui.update_generated_details(self.selected_entity, generated_panels);
+                ui.update_generated_details(self.selection.primary, generated_panels);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
                 ui.update_script_inspector(sel_scripts);
@@ -2220,7 +2454,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.audio.as_mut().unwrap(),
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
-                &mut self.selected_entity,
+                &mut self.selection.primary,
                 self.ui_manager.as_mut().unwrap(),
                 crate::camera_speed_from_normalized(self.camera_speed_norm),
                 self.simulation_clock,
@@ -2306,7 +2540,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.audio.as_mut().unwrap(),
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
-                    &mut self.selected_entity,
+                    &mut self.selection.primary,
                     self.ui_manager.as_mut().unwrap(),
                     crate::camera_speed_from_normalized(self.camera_speed_norm),
                     self.simulation_clock,
@@ -2360,7 +2594,7 @@ impl<G: GameApp> Engine<G> {
     /// Attach the selected material document as a transient ECS component so
     /// generated Details and `SetFieldCmd` can edit it without a bespoke path.
     fn ensure_material_session(&mut self) {
-        let Some(entity) = self.selected_entity else {
+        let Some(entity) = self.selection.primary else {
             return;
         };
         let Some(component) = self.world.get::<MaterialComponent>(entity).copied() else {
@@ -2745,15 +2979,25 @@ impl<G: GameApp> Engine<G> {
                 }
             }
         }
-        let completed_external = self.external_import_job.as_ref().and_then(JobHandle::try_take);
+        let completed_external = self
+            .external_import_job
+            .as_ref()
+            .and_then(JobHandle::try_take);
         if let Some(result) = completed_external {
             self.external_import_job = None;
             match result {
                 Ok(files) => {
-                    let destinations = files.into_iter().map(|(_, destination)| destination).collect();
-                    self.undo_stack.push_silent(Box::new(crate::editor_commands::FileImportCmd::new(destinations)));
+                    let destinations = files
+                        .into_iter()
+                        .map(|(_, destination)| destination)
+                        .collect();
+                    self.undo_stack.push_silent(Box::new(
+                        crate::editor_commands::FileImportCmd::new(destinations),
+                    ));
                     self.next_asset_scan = std::time::Instant::now();
-                    if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast("Files imported"); }
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast("Files imported");
+                    }
                 }
                 Err(error) => warn!(?error, "external file import failed"),
             }
@@ -2790,7 +3034,7 @@ impl<G: GameApp> Engine<G> {
             self.audio.as_mut().unwrap(),
             self.render_ctx.as_ref(),
             self.renderer.as_mut(),
-            &mut self.selected_entity,
+            &mut self.selection.primary,
             self.ui_manager.as_mut().unwrap(),
             crate::camera_speed_from_normalized(self.camera_speed_norm),
             self.simulation_clock,
@@ -2833,13 +3077,13 @@ impl<G: GameApp> Engine<G> {
 
     /// The selected entity's terrain component, if it has one.
     fn selected_terrain(&self) -> Option<TerrainComponent> {
-        let entity = self.selected_entity?;
+        let entity = self.selection.primary?;
         self.world.get::<TerrainComponent>(entity).copied()
     }
 
     /// Model matrix of the selected terrain entity.
     fn selected_terrain_model(&self) -> Option<glam::Mat4> {
-        let entity = self.selected_entity?;
+        let entity = self.selection.primary?;
         self.world.get::<Transform>(entity).map(|t| t.to_matrix())
     }
 
@@ -2847,19 +3091,32 @@ impl<G: GameApp> Engine<G> {
     /// the current cursor position.
     fn viewport_terrain_drop_hit(&mut self) -> Option<[f32; 3]> {
         let (origin, direction) = self.cursor_ray()?;
-        let terrains: Vec<_> = self.world.entities().filter_map(|entity| {
-            let component = self.world.get::<TerrainComponent>(entity)?;
-            let model = self.world.get::<Transform>(entity).map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-            Some((component.terrain_id, model))
-        }).collect();
+        let terrains: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| {
+                let component = self.world.get::<TerrainComponent>(entity)?;
+                let model = self
+                    .world
+                    .get::<Transform>(entity)
+                    .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+                Some((component.terrain_id, model))
+            })
+            .collect();
         let renderer = self.renderer.as_mut()?;
         let mut nearest: Option<(f32, glam::Vec3)> = None;
         for (id, model) in terrains {
-            let Some(terrain) = renderer.terrain_mut(id) else { continue };
+            let Some(terrain) = renderer.terrain_mut(id) else {
+                continue;
+            };
             terrain.model = model;
-            let Some(hit) = terrain.raycast(origin, direction) else { continue };
+            let Some(hit) = terrain.raycast(origin, direction) else {
+                continue;
+            };
             let distance = origin.distance_squared(hit);
-            if nearest.is_none_or(|(best, _)| distance < best) { nearest = Some((distance, hit)); }
+            if nearest.is_none_or(|(best, _)| distance < best) {
+                nearest = Some((distance, hit));
+            }
         }
         nearest.map(|(_, hit)| hit.to_array())
     }
@@ -2867,18 +3124,45 @@ impl<G: GameApp> Engine<G> {
     fn viewport_entity_drop_pick(&self) -> Option<somnium_ecs::Entity> {
         let (origin, direction) = self.cursor_ray()?;
         let renderer = self.renderer.as_ref()?;
-        self.world.entities().filter_map(|entity| {
-            let mesh = self.world.get::<MeshComponent>(entity)?;
-            let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
-            let model = self.world.get::<WorldTransform>(entity).map(|w| w.0)
-                .or_else(|| self.world.get::<Transform>(entity).map(Transform::to_matrix))?;
-            let inverse = model.inverse();
-            let local_origin = inverse.transform_point3(origin);
-            let local_direction = inverse.transform_vector3(direction);
-            let t = ray_aabb_distance(local_origin, local_direction, glam::Vec3::from_array(min), glam::Vec3::from_array(max))?;
-            let world_hit = model.transform_point3(local_origin + local_direction * t);
-            Some((origin.distance_squared(world_hit), entity))
-        }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, entity)| entity)
+        self.world
+            .entities()
+            .filter_map(|entity| {
+                // Locked and hidden entities are deliberately unpickable: that is
+                // what the two flags are for, and a drop that landed on an
+                // invisible object would be the exact bug they prevent.
+                let flags = self
+                    .world
+                    .get::<EditorFlags>(entity)
+                    .copied()
+                    .unwrap_or_default();
+                if flags.locked || flags.hidden {
+                    return None;
+                }
+                let mesh = self.world.get::<MeshComponent>(entity)?;
+                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
+                let model = self
+                    .world
+                    .get::<WorldTransform>(entity)
+                    .map(|w| w.0)
+                    .or_else(|| {
+                        self.world
+                            .get::<Transform>(entity)
+                            .map(Transform::to_matrix)
+                    })?;
+                let inverse = model.inverse();
+                let local_origin = inverse.transform_point3(origin);
+                let local_direction = inverse.transform_vector3(direction);
+                let t = ray_aabb_distance(
+                    local_origin,
+                    local_direction,
+                    glam::Vec3::from_array(min),
+                    glam::Vec3::from_array(max),
+                )?;
+                let world_hit = model.transform_point3(local_origin + local_direction * t);
+                Some((origin.distance_squared(world_hit), entity))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, entity)| entity)
     }
 
     fn cursor_ray(&self) -> Option<(glam::Vec3, glam::Vec3)> {
@@ -3227,34 +3511,63 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    fn queue_external_import(&mut self, files: Vec<std::path::PathBuf>, folder: std::path::PathBuf) {
-        if files.is_empty() || self.external_import_job.is_some() { return; }
-        if folder.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
-            if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast("Import folder must be inside Content"); }
+    fn queue_external_import(
+        &mut self,
+        files: Vec<std::path::PathBuf>,
+        folder: std::path::PathBuf,
+    ) {
+        if files.is_empty() || self.external_import_job.is_some() {
+            return;
+        }
+        if folder.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.push_toast("Import folder must be inside Content");
+            }
             return;
         }
         let destination = self.config.content_root.join(folder);
-        match self.jobs.submit("File import", JobPriority::User, move |ctx| {
-            std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
-            let mut imported = Vec::new();
-            for (index, source) in files.into_iter().enumerate() {
-                ctx.check_cancelled().map_err(|e| format!("{e:?}"))?;
-                let Some(name) = source.file_name() else { continue };
-                let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("asset");
-                let ext = std::path::Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("");
-                let mut target = destination.join(name);
-                let mut suffix = 1u32;
-                while target.exists() {
-                    let leaf = if ext.is_empty() { format!("{stem}_{suffix}") } else { format!("{stem}_{suffix}.{ext}") };
-                    target = destination.join(leaf);
-                    suffix += 1;
+        match self
+            .jobs
+            .submit("File import", JobPriority::User, move |ctx| {
+                std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+                let mut imported = Vec::new();
+                for (index, source) in files.into_iter().enumerate() {
+                    ctx.check_cancelled().map_err(|e| format!("{e:?}"))?;
+                    let Some(name) = source.file_name() else {
+                        continue;
+                    };
+                    let stem = std::path::Path::new(name)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("asset");
+                    let ext = std::path::Path::new(name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let mut target = destination.join(name);
+                    let mut suffix = 1u32;
+                    while target.exists() {
+                        let leaf = if ext.is_empty() {
+                            format!("{stem}_{suffix}")
+                        } else {
+                            format!("{stem}_{suffix}.{ext}")
+                        };
+                        target = destination.join(leaf);
+                        suffix += 1;
+                    }
+                    std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+                    imported.push((source, target));
+                    ctx.set_progress((index + 1) as f32 / imported.len().max(index + 1) as f32);
                 }
-                std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
-                imported.push((source, target));
-                ctx.set_progress((index + 1) as f32 / imported.len().max(index + 1) as f32);
-            }
-            Ok(imported)
-        }) {
+                Ok(imported)
+            }) {
             Ok(handle) => self.external_import_job = Some(handle),
             Err(error) => warn!(?error, "file import queue is full"),
         }
@@ -3281,7 +3594,8 @@ impl<G: GameApp> Engine<G> {
 
         let count = uploaded.len();
         let offset = glam::Vec3::from_array(self.import_spawn_at);
-        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::with_capacity(count);
+        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> =
+            Vec::with_capacity(count);
         for node in uploaded {
             let (scale, rotation, translation) = node.transform.to_scale_rotation_translation();
             let name = if node.entity_name.is_empty() {
@@ -3309,16 +3623,25 @@ impl<G: GameApp> Engine<G> {
                         .unwrap_or(somnium_asset::database::AssetId::NONE),
                     runtime_id: node.material_id,
                 }),
-                light: None, mesh_kind: None, is_particle_emitter: false,
-                terrain: None, voxel_terrain: None, foliage: None, water: None,
-                parent: None, children: None,
+                light: None,
+                mesh_kind: None,
+                is_particle_emitter: false,
+                terrain: None,
+                voxel_terrain: None,
+                foliage: None,
+                water: None,
+                parent: None,
+                children: None,
             };
             commands.push(Box::new(CreateEntityCmd::new(snapshot)));
         }
         self.undo_stack.push(
-            Box::new(crate::editor_commands::CommandGroup::new("Import Model", commands)),
+            Box::new(crate::editor_commands::CommandGroup::new(
+                "Import Model",
+                commands,
+            )),
             &mut self.world,
-            &mut self.selected_entity,
+            &mut self.selection.primary,
         );
 
         info!("Imported {} ({} mesh nodes)", path_str, count);
@@ -3335,13 +3658,14 @@ impl<G: GameApp> Engine<G> {
     /// Legacy scenes with none or several are normalized to one before the
     /// selected settings are copied into the renderer.
     fn apply_post_process(&mut self) {
-        normalize_post_process_singleton(&mut self.world, &mut self.selected_entity);
+        normalize_post_process_singleton(&mut self.world, &mut self.selection.primary);
         // Prefer the selected Post Processing entity. This makes the details
         // panel authoritative even if an imported legacy scene accidentally
         // contains a duplicate; falling back to the first keeps old scenes
         // working when another entity is selected.
         let settings = self
-            .selected_entity
+            .selection
+            .primary
             .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
             .or_else(|| {
                 self.world
@@ -3940,7 +4264,7 @@ impl<G: GameApp> Engine<G> {
     fn submit_light_gizmos(&mut self) {
         use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
 
-        let selected_idx = self.selected_entity.map(|e| e.index());
+        let selected_idx = self.selection.primary.map(|e| e.index());
         let gizmos: Vec<LightGizmoDesc> = self
             .world
             .entities()
@@ -4003,72 +4327,258 @@ impl<G: GameApp> Engine<G> {
                     DropRequest::AssignMaterial { asset, entities } => {
                         self.handle_editor_event(EditorEvent::AssignMaterial { entities, asset });
                     }
-                    DropRequest::SetAssetField { asset, entity, component, field } => {
+                    DropRequest::SetAssetField {
+                        asset,
+                        entity,
+                        component,
+                        field,
+                    } => {
                         self.handle_editor_event(EditorEvent::SetComponentField {
-                            entity, component, field,
+                            entity,
+                            component,
+                            field,
                             value: somnium_ecs::reflect::ReflectValue::Asset(Some(
-                                somnium_ecs::reflect::AssetRef::from_raw(asset.raw()))),
-                            gesture: GestureId(u64::MAX - 1), live: false,
+                                somnium_ecs::reflect::AssetRef::from_raw(asset.raw()),
+                            )),
+                            gesture: GestureId(u64::MAX - 1),
+                            live: false,
                         });
                     }
                     DropRequest::Reparent { entities, parent } => {
-                        match crate::editor_commands::ReparentBatchCmd::new(&mut self.world, entities, parent) {
+                        match crate::editor_commands::ReparentBatchCmd::new(
+                            &mut self.world,
+                            entities,
+                            parent,
+                        ) {
                             Ok(command) => {
-                                self.undo_stack.push(Box::new(command), &mut self.world, &mut self.selected_entity);
+                                self.undo_stack.push(
+                                    Box::new(command),
+                                    &mut self.world,
+                                    &mut self.selection.primary,
+                                );
                                 self.scene_dirty = true;
                             }
-                            Err(reason) => if let Some(ui) = self.ui_manager.as_mut() { ui.push_toast(&reason); },
+                            Err(reason) => {
+                                if let Some(ui) = self.ui_manager.as_mut() {
+                                    ui.push_toast(&reason);
+                                }
+                            }
                         }
                     }
                     DropRequest::AttachScripts { assets, entity } => {
-                        let paths: Vec<_> = assets.into_iter().filter_map(|id| {
-                            self.asset_gate.published().and_then(|db| db.get(id)).map(|r| r.absolute_path.clone())
-                        }).collect();
-                        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::new();
+                        let paths: Vec<_> = assets
+                            .into_iter()
+                            .filter_map(|id| {
+                                self.asset_gate
+                                    .published()
+                                    .and_then(|db| db.get(id))
+                                    .map(|r| r.absolute_path.clone())
+                            })
+                            .collect();
+                        let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> =
+                            Vec::new();
                         for path in paths {
                             match self.scripts.import_script_file(&path) {
-                                Ok(asset) => commands.push(Box::new(crate::editor_commands::AttachScriptCmd::new(entity.index(), asset))),
-                                Err(diagnostics) => for message in diagnostics.messages { warn!(%message, "script drop rejected"); },
+                                Ok(asset) => commands.push(Box::new(
+                                    crate::editor_commands::AttachScriptCmd::new(
+                                        entity.index(),
+                                        asset,
+                                    ),
+                                )),
+                                Err(diagnostics) => {
+                                    for message in diagnostics.messages {
+                                        warn!(%message, "script drop rejected");
+                                    }
+                                }
                             }
                         }
                         if !commands.is_empty() {
-                            self.undo_stack.push(Box::new(crate::editor_commands::CommandGroup::new("Attach Scripts", commands)), &mut self.world, &mut self.selected_entity);
+                            self.undo_stack.push(
+                                Box::new(crate::editor_commands::CommandGroup::new(
+                                    "Attach Scripts",
+                                    commands,
+                                )),
+                                &mut self.world,
+                                &mut self.selection.primary,
+                            );
                             self.scene_dirty = true;
                         }
                     }
                     DropRequest::LoadScene { asset } => {
-                        if let Some(path) = self.asset_gate.published().and_then(|db| db.get(asset)).map(|r| r.absolute_path.to_string_lossy().into_owned()) {
+                        if let Some(path) = self
+                            .asset_gate
+                            .published()
+                            .and_then(|db| db.get(asset))
+                            .map(|r| r.absolute_path.to_string_lossy().into_owned())
+                        {
                             self.handle_editor_event(EditorEvent::LoadScene(path));
                         }
                     }
                     DropRequest::SpawnModels { assets, at } => {
-                        if let Some(path) = assets.first().and_then(|id| self.asset_gate.published().and_then(|db| db.get(*id))).map(|r| r.absolute_path.clone()) {
+                        if let Some(path) = assets
+                            .first()
+                            .and_then(|id| self.asset_gate.published().and_then(|db| db.get(*id)))
+                            .map(|r| r.absolute_path.clone())
+                        {
                             self.queue_import_model(path, at);
                         }
                     }
-                    DropRequest::ImportExternal { files, folder } => self.queue_external_import(files, folder),
+                    DropRequest::ImportExternal { files, folder } => {
+                        self.queue_external_import(files, folder)
+                    }
                 }
             }
-            EditorEvent::SelectEntity(opt_idx) => {
-                self.selected_entity = opt_idx.and_then(|idx| self.world.find_entity_by_index(idx));
-                // A new selection means the old baselines describe values that
-                // are no longer on screen.
-                if let Some(ui) = &mut self.ui_manager {
-                    ui.reset_inspector_baseline();
-                }
-                // Leaving the terrain entity exits terrain edit mode.
-                if self.terrain_edit_active && self.selected_terrain().is_none() {
-                    self.terrain_edit_active = false;
-                    self.terrain_stroke = None;
-                }
-                if let Some(entity) = self.selected_entity {
-                    let translation = self.world.get::<Transform>(entity).map(|t| t.translation);
-                    if let (Some(pos), Some(r)) = (translation, self.renderer.as_mut()) {
-                        r.set_gizmo_world_pos(pos);
+            EditorEvent::ModifySelection { id, mode } => {
+                let Some(entity) = self.world.find_entity_by_index(id) else {
+                    return;
+                };
+                match mode {
+                    somnium_ui::SelectionMode::Replace => {
+                        self.selection.set_single(Some(entity));
                     }
-                } else if let Some(r) = &mut self.renderer {
-                    r.clear_gizmo();
+                    somnium_ui::SelectionMode::Toggle => self.selection.toggle(entity),
+                    somnium_ui::SelectionMode::Range => {
+                        let order = std::mem::take(&mut self.outliner_order);
+                        self.selection.extend_range(&order, entity);
+                        self.outliner_order = order;
+                    }
                 }
+                self.after_selection_change();
+            }
+
+            EditorEvent::SelectEntities(ids) => {
+                let entities: Vec<_> = ids
+                    .into_iter()
+                    .filter_map(|idx| self.world.find_entity_by_index(idx))
+                    .collect();
+                if entities.is_empty() {
+                    self.selection.clear();
+                } else {
+                    self.selection.set_many(entities);
+                }
+                self.after_selection_change();
+            }
+
+            EditorEvent::CopySelected => {
+                if self.selection.is_empty() {
+                    return;
+                }
+                self.entity_clipboard =
+                    crate::clipboard::EntityClipboard::copy(&self.world, self.selection.as_slice());
+                let count = self.entity_clipboard.root_count();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(&format!("Copied {count}"));
+                }
+            }
+
+            EditorEvent::PasteClipboard => {
+                if self.entity_clipboard.is_empty() {
+                    return;
+                }
+                // Pasting with something selected pastes *into* it, which is
+                // what makes Copy/Paste usable for building a hierarchy rather
+                // than only for cloning one.
+                let parent = self.selection.primary;
+                use crate::editor_commands::EditorCommand as _;
+                let mut command =
+                    crate::clipboard::PasteEntitiesCmd::new(self.entity_clipboard.clone(), parent);
+                command.execute(&mut self.world, &mut self.selection.primary);
+                let roots = command.roots().to_vec();
+                self.undo_stack.push_silent(Box::new(command));
+                self.selection.set_many(roots);
+                self.after_selection_change();
+                self.scene_dirty = true;
+            }
+
+            EditorEvent::ToggleEntityFlag {
+                entity,
+                lock,
+                value,
+            } => {
+                let Some(entity) = self.world.find_entity_by_index(entity) else {
+                    return;
+                };
+                let current = self
+                    .world
+                    .get::<EditorFlags>(entity)
+                    .copied()
+                    .unwrap_or_default();
+                let mut next = current;
+                if lock {
+                    next.locked = value.unwrap_or(!current.locked);
+                } else {
+                    next.hidden = value.unwrap_or(!current.hidden);
+                }
+                if next == current {
+                    return;
+                }
+                self.undo_stack.push(
+                    Box::new(crate::editor_commands::SetEditorFlagsCmd::new(
+                        entity, current, next,
+                    )),
+                    &mut self.world,
+                    &mut self.selection.primary,
+                );
+                // A locked entity keeps its Outliner selection but loses the
+                // gizmo, so the viewport stops offering a transform it would
+                // refuse to perform.
+                self.after_selection_change();
+                self.scene_dirty = true;
+            }
+
+            EditorEvent::CancelMarquee => {
+                self.marquee = None;
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_marquee(None);
+                }
+            }
+
+            EditorEvent::SelectAll => {
+                let all: Vec<_> = self.world.entities().collect();
+                if all.is_empty() {
+                    self.selection.clear();
+                } else {
+                    self.selection.set_many(all);
+                }
+                self.after_selection_change();
+            }
+
+            EditorEvent::FocusSelection => self.focus_camera_on_selection(),
+
+            EditorEvent::RenameSelected => {}
+
+            EditorEvent::RenameEntity { entity, name } => {
+                let Some(entity) = self.world.find_entity_by_index(entity) else {
+                    return;
+                };
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                let before = self
+                    .world
+                    .get::<Name>(entity)
+                    .map(|name| name.as_str().to_owned())
+                    .unwrap_or_default();
+                if before == trimmed {
+                    return;
+                }
+                self.undo_stack.push(
+                    Box::new(crate::editor_commands::SetNameCmd::new(
+                        entity.index(),
+                        Name::new(&before),
+                        Name::new(trimmed),
+                    )),
+                    &mut self.world,
+                    &mut self.selection.primary,
+                );
+                self.scene_dirty = true;
+            }
+
+            EditorEvent::SelectEntity(opt_idx) => {
+                self.selection
+                    .set_single(opt_idx.and_then(|idx| self.world.find_entity_by_index(idx)));
+                self.after_selection_change();
             }
 
             EditorEvent::CreateEntity(CreateKind::VoxelTerrain) => {
@@ -4093,7 +4603,7 @@ impl<G: GameApp> Engine<G> {
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack
-                    .push(cmd, &mut self.world, &mut self.selected_entity);
+                    .push(cmd, &mut self.world, &mut self.selection.primary);
                 info!("Created voxel terrain entity");
             }
 
@@ -4111,7 +4621,7 @@ impl<G: GameApp> Engine<G> {
                         let [wx, wz] = desc.world_size();
                         let cmd = Box::new(CreateLandscapeCmd::new(built.terrain, built.water));
                         self.undo_stack
-                            .push(cmd, &mut self.world, &mut self.selected_entity);
+                            .push(cmd, &mut self.world, &mut self.selection.primary);
                         info!(
                             "Created landscape preset v{} ({}x{} chunks, {:.0}x{:.0} m)",
                             built.preset.version, desc.grid_size[0], desc.grid_size[1], wx, wz,
@@ -4266,15 +4776,15 @@ impl<G: GameApp> Engine<G> {
                 };
                 let cmd = Box::new(CreateEntityCmd::new(snapshot));
                 self.undo_stack
-                    .push(cmd, &mut self.world, &mut self.selected_entity);
+                    .push(cmd, &mut self.world, &mut self.selection.primary);
                 self.scene_dirty = true;
             }
 
             EditorEvent::DeleteSelected => {
-                if let Some(entity) = self.selected_entity {
+                if let Some(entity) = self.selection.primary {
                     let cmd = Box::new(DeleteEntityCmd::new(entity.index()));
                     self.undo_stack
-                        .push(cmd, &mut self.world, &mut self.selected_entity);
+                        .push(cmd, &mut self.world, &mut self.selection.primary);
                     if let Some(r) = &mut self.renderer {
                         r.clear_gizmo();
                     }
@@ -4283,12 +4793,12 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::Undo => {
                 self.undo_stack
-                    .undo(&mut self.world, &mut self.selected_entity);
+                    .undo(&mut self.world, &mut self.selection.primary);
             }
 
             EditorEvent::Redo => {
                 self.undo_stack
-                    .redo(&mut self.world, &mut self.selected_entity);
+                    .redo(&mut self.world, &mut self.selection.primary);
             }
 
             EditorEvent::ToggleShadingMode => {
@@ -4332,51 +4842,81 @@ impl<G: GameApp> Engine<G> {
                 live,
             } => {
                 if !self.world.is_alive(entity) {
-                    self.field_gestures.remove(&gesture);
+                    self.field_gestures.retain(|(g, _), _| *g != gesture);
                     return;
                 }
+                // CONTROL-F: an edit addressed at the primary is an edit on
+                // the whole selection. Details never learns this; it addresses
+                // the primary exactly as it always has, and the fan-out
+                // happens here, where the selection lives.
+                let targets: Vec<somnium_ecs::Entity> =
+                    if self.selection.len() > 1 && self.selection.primary == Some(entity) {
+                        self.selection
+                            .as_slice()
+                            .iter()
+                            .copied()
+                            .filter(|target| self.world.is_alive(*target))
+                            .collect()
+                    } else {
+                        vec![entity]
+                    };
+
                 if live {
-                    if !self.field_gestures.contains_key(&gesture) {
-                        let Some(scope) = SetFieldCmd::scope(component, field) else {
-                            warn!("reflected edit addressed an unknown field");
-                            return;
-                        };
-                        let Some(snapshot) = FieldUndoSnapshot::capture(
-                            &self.world,
-                            entity,
+                    let Some(scope) = SetFieldCmd::scope(component, field) else {
+                        warn!("reflected edit addressed an unknown field");
+                        return;
+                    };
+                    for target in &targets {
+                        let key = (gesture, *target);
+                        if !self.field_gestures.contains_key(&key) {
+                            let Some(snapshot) = FieldUndoSnapshot::capture(
+                                &self.world,
+                                *target,
+                                component,
+                                field,
+                                scope,
+                            ) else {
+                                warn!("could not capture reflected edit baseline");
+                                continue;
+                            };
+                            self.field_gestures.insert(key, snapshot);
+                        }
+                        if let Err(error) = SetFieldCmd::apply_live(
+                            &mut self.world,
+                            *target,
                             component,
                             field,
-                            scope,
-                        ) else {
-                            warn!("could not capture reflected edit baseline");
-                            return;
-                        };
-                        self.field_gestures.insert(gesture, snapshot);
-                    }
-                    if let Err(error) =
-                        SetFieldCmd::apply_live(&mut self.world, entity, component, field, value)
-                    {
-                        warn!(%error, "rejected reflected live edit");
-                        self.field_gestures.remove(&gesture);
+                            value.clone(),
+                        ) {
+                            warn!(%error, "rejected reflected live edit");
+                            self.field_gestures.remove(&key);
+                        }
                     }
                     return;
                 }
 
-                let baseline = self.field_gestures.remove(&gesture);
-                match SetFieldCmd::new(
+                let mut baselines: std::collections::HashMap<_, _> = targets
+                    .iter()
+                    .filter_map(|target| {
+                        self.field_gestures
+                            .remove(&(gesture, *target))
+                            .map(|snapshot| (*target, snapshot))
+                    })
+                    .collect();
+                match crate::editor_commands::SetFieldMultiCmd::new(
                     &self.world,
-                    entity,
+                    &targets,
                     component,
                     field,
                     value,
                     gesture,
-                    baseline,
+                    |target| baselines.remove(&target),
                 ) {
                     Ok(command) => {
                         self.undo_stack.push(
                             Box::new(command),
                             &mut self.world,
-                            &mut self.selected_entity,
+                            &mut self.selection.primary,
                         );
                         self.scene_dirty = true;
                     }
@@ -4396,7 +4936,7 @@ impl<G: GameApp> Engine<G> {
                     }
                     return;
                 }
-                let Some(entity) = self.selected_entity else {
+                let Some(entity) = self.selection.primary else {
                     return;
                 };
                 match field {
@@ -4529,7 +5069,7 @@ impl<G: GameApp> Engine<G> {
                 for e in all_entities {
                     self.world.despawn(e);
                 }
-                self.selected_entity = None;
+                self.selection.primary = None;
                 self.material_sessions.clear();
                 if let Some(ui) = &mut self.ui_manager {
                     ui.reset_inspector_baseline();
@@ -4575,7 +5115,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::DuplicateSelected => {
-                if let Some(entity) = self.selected_entity {
+                if let Some(entity) = self.selection.primary {
                     let transform = self
                         .world
                         .get::<Transform>(entity)
@@ -4629,7 +5169,7 @@ impl<G: GameApp> Engine<G> {
                     };
                     let cmd = Box::new(CreateEntityCmd::new(snapshot));
                     self.undo_stack
-                        .push(cmd, &mut self.world, &mut self.selected_entity);
+                        .push(cmd, &mut self.world, &mut self.selection.primary);
                     info!("Duplicated entity {}", entity.index());
                 }
             }
@@ -4648,7 +5188,7 @@ impl<G: GameApp> Engine<G> {
                 match crate::load_map(&mut self.world, renderer, render_ctx, &path) {
                     Ok(result) => {
                         info!("Loaded map {path} ({:?})", result.kind);
-                        self.selected_entity = None;
+                        self.selection.primary = None;
                         self.material_sessions.clear();
                         self.undo_stack = UndoStack::new(128);
                         self.scene_dirty = false;
@@ -5069,7 +5609,7 @@ impl<G: GameApp> Engine<G> {
                 self.undo_stack.push(
                     Box::new(command),
                     &mut self.world,
-                    &mut self.selected_entity,
+                    &mut self.selection.primary,
                 );
                 self.scene_dirty = true;
             }
@@ -5209,7 +5749,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleWaterUnderwater => {
-                if let Some(entity) = self.selected_entity {
+                if let Some(entity) = self.selection.primary {
                     if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
                         water.underwater_enabled = !water.underwater_enabled;
                         self.scene_dirty = true;
@@ -5235,7 +5775,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleFoliage => {
-                if let Some(entity) = self.selected_entity {
+                if let Some(entity) = self.selection.primary {
                     if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
                         f.enabled = !f.enabled;
                     }
@@ -5273,7 +5813,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::CycleTonemapper => {
-                let Some(entity) = self.selected_entity else {
+                let Some(entity) = self.selection.primary else {
                     return;
                 };
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
@@ -5282,7 +5822,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
             EditorEvent::SetTonemapper(idx) => {
-                let Some(entity) = self.selected_entity else {
+                let Some(entity) = self.selection.primary else {
                     return;
                 };
                 if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
@@ -5515,6 +6055,46 @@ fn apply_gizmo_drag(
         }
     }
     result
+}
+
+/// Component tags for one entity, used by the Outliner's `type:` filter.
+///
+/// Derived from the components actually present rather than from a name
+/// heuristic, which is the difference between `type:light` finding the lights
+/// and `type:light` finding everything called "Lamp".
+fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    if world.get::<LightComponent>(entity).is_some() {
+        tags.push("light");
+    }
+    if world.get::<MeshComponent>(entity).is_some() {
+        tags.push("mesh");
+    }
+    if world.get::<TerrainComponent>(entity).is_some() {
+        tags.push("terrain");
+    }
+    if world.get::<VoxelTerrainComponent>(entity).is_some() {
+        tags.push("voxel");
+    }
+    if world.get::<WaterComponent>(entity).is_some() {
+        tags.push("water");
+    }
+    if world.get::<FoliageComponent>(entity).is_some() {
+        tags.push("foliage");
+    }
+    if world.get::<crate::ParticleEmitter>(entity).is_some() {
+        tags.push("particles");
+    }
+    if world.get::<PostProcessComponent>(entity).is_some() {
+        tags.push("postfx");
+    }
+    if world
+        .get::<somnium_script::attachment::ScriptSet>(entity)
+        .is_some_and(|set| !set.is_empty())
+    {
+        tags.push("script");
+    }
+    tags
 }
 
 /// Slab-test a ray against a local-space AABB, returning the nearest positive

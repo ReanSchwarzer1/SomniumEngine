@@ -451,9 +451,18 @@ mod tests {
     #[test]
     fn drop_targets_separate_valid_from_invalid_by_hue_and_by_reason() {
         let t = theme::active();
-        assert_eq!(drop_target(crate::drag_drop::DropEffect::Move).border, t.semantic.accent.default.bytes());
-        assert_eq!(drop_target(crate::drag_drop::DropEffect::Forbidden).border, t.semantic.status.error.bytes());
-        assert_eq!(drop_target(crate::drag_drop::DropEffect::Move).border_thickness, 2.0);
+        assert_eq!(
+            drop_target(crate::drag_drop::DropEffect::Move).border,
+            t.semantic.accent.default.bytes()
+        );
+        assert_eq!(
+            drop_target(crate::drag_drop::DropEffect::Forbidden).border,
+            t.semantic.status.error.bytes()
+        );
+        assert_eq!(
+            drop_target(crate::drag_drop::DropEffect::Move).border_thickness,
+            2.0
+        );
     }
 
     #[test]

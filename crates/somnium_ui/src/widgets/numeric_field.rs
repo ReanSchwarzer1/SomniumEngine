@@ -58,6 +58,10 @@ pub struct NumericField {
     /// answer differs per section. Empty means unitless.
     pub unit: &'static str,
     editing_text: Option<String>,
+    /// The multi-selection did not agree on this value. Displays as an em
+    /// dash and is cleared by the first edit, so an untouched mixed field
+    /// cannot write the primary's value over the rest of the selection.
+    pub mixed: bool,
     pub px: f32,
     pub color: [u8; 4],
     pub font_id: u8,
@@ -137,9 +141,13 @@ fn scrub_value(start: f32, dx: f32, step: f32, modifiers: Modifiers) -> f32 {
 
 impl NumericField {
     fn display_text(&self) -> String {
-        self.editing_text
-            .clone()
-            .unwrap_or_else(|| format!("{:.3}", self.value))
+        if let Some(text) = &self.editing_text {
+            return text.clone();
+        }
+        if self.mixed {
+            return super::MIXED_PLACEHOLDER.to_string();
+        }
+        format!("{:.3}", self.value)
     }
 
     fn effective_range(&self) -> (f32, f32) {
@@ -343,6 +351,10 @@ impl Control for NumericField {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {
                 WidgetMessage::MouseDown { pos, .. } => {
+                    // Touching the control is the moment a mixed row acquires a
+                    // value: from here on it shows and writes the primary's,
+                    // which is what "written only when touched" means.
+                    self.mixed = false;
                     self.gesture_origin = Some(self.value);
                     let (slider, _field) = Self::split_rects(widget.screen_bounds());
                     if slider.contains(pos) {
@@ -413,6 +425,7 @@ impl Control for NumericField {
                 }
                 WidgetMessage::Focus => {
                     self.focused = true;
+                    self.mixed = false;
                     self.editing_text = Some(format!("{:.3}", self.value));
                     self.select_all = true;
                     widget.invalidate_layout();
@@ -510,6 +523,7 @@ impl Control for NumericField {
 
 pub struct NumericFieldBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     unit: &'static str,
     value: f32,
     px: f32,
@@ -520,6 +534,13 @@ pub struct NumericFieldBuilder {
 }
 
 impl NumericFieldBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     /// Unit shown after the value: `"m"`, `"°"`, `"×"`. Empty is unitless.
     pub fn with_unit(mut self, unit: &'static str) -> Self {
         self.unit = unit;
@@ -534,6 +555,7 @@ impl NumericFieldBuilder {
         // stops a row twitching under a scrub.
         let style = crate::typography::text_style(crate::typography::TextRole::MonoStrong);
         Self {
+            mixed: false,
             widget,
             unit: "",
             value: 0.0,
@@ -572,6 +594,7 @@ impl NumericFieldBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(NumericField {
+                mixed: self.mixed,
                 value: self.value,
                 unit: self.unit,
                 editing_text: None,
@@ -713,5 +736,61 @@ mod unit_tests {
             .count();
         assert_eq!(drawn, glyph_count(""), "the default must add nothing");
         assert!(drawn > 0, "the value itself must still render");
+    }
+}
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::*;
+
+    fn field(mixed: bool) -> NumericField {
+        NumericField {
+            value: 0.75,
+            unit: "",
+            editing_text: None,
+            mixed,
+            px: 12.0,
+            color: [255; 4],
+            font_id: 0,
+            focused: false,
+            select_all: false,
+            drag_step: 0.05,
+            drag_origin: None,
+            gesture_origin: None,
+            scrubbing: false,
+            slider_range: None,
+            slider_dragging: false,
+        }
+    }
+
+    /// A mixed row shows the em dash rather than the primary's value, which is
+    /// what stops the reader believing twelve entities agree when they do not.
+    #[test]
+    fn a_mixed_field_shows_the_placeholder_not_the_primary_value() {
+        assert_eq!(
+            field(true).display_text(),
+            crate::widgets::MIXED_PLACEHOLDER
+        );
+        assert_eq!(field(false).display_text(), "0.750");
+    }
+
+    /// Touching the control is what gives it a value. Until then it has none,
+    /// so an untouched mixed row cannot overwrite the rest of the selection.
+    #[test]
+    fn clearing_mixed_reveals_the_primary_value() {
+        let mut control = field(true);
+        control.mixed = false;
+        assert_eq!(control.display_text(), "0.750");
+    }
+
+    /// The builder is the only way Details sets it, so it has to carry.
+    #[test]
+    fn the_builder_carries_the_mixed_flag() {
+        assert!(
+            NumericFieldBuilder::new(WidgetBuilder::new())
+                .with_mixed(true)
+                .mixed
+        );
+        assert!(!NumericFieldBuilder::new(WidgetBuilder::new()).mixed);
     }
 }

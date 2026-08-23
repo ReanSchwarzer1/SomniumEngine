@@ -19,8 +19,8 @@ use somnium_ecs::reflect::{
 use somnium_ecs::{Entity, World};
 
 use crate::{
-    BuoyantVessel, CameraSettingsComponent, FoliageComponent, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
+    BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
     PostProcessComponent, TerrainComponent, Tonemapper, Transform, VoxelTerrainComponent,
     WaterComponent,
 };
@@ -404,6 +404,7 @@ pub fn component_registry() -> TypeRegistry {
 
     registry.register(buoyant_vessel_schema());
     registry.register(camera_settings_schema());
+    registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
     registry.register(material_schema());
@@ -591,6 +592,17 @@ fn water_schema() -> ComponentSchema {
 /// Version 1 never saved these, so painting foliage and saving lost it.
 /// Registering the component fixes that as a side effect of describing it
 /// — which is the point of having one registry.
+/// CONTROL-F: hide and lock, authored per entity.
+fn editor_flags_schema() -> ComponentSchema {
+    component_schema! {
+        EditorFlags as "somnium.EditorFlags", display "Editor", version 1,
+        fields {
+            hidden { doc: "Skip this entity when drawing. Authoring only." },
+            locked { doc: "Refuse viewport picking, dragging and gizmo transforms." },
+        }
+    }
+}
+
 fn foliage_schema() -> ComponentSchema {
     component_schema! {
         FoliageComponent as "somnium.Foliage", display "Foliage", version 1,
@@ -717,13 +729,14 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 16);
+        assert_eq!(registry.len(), 17);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
+                "somnium.EditorFlags",
                 "somnium.Foliage",
                 "somnium.Light",
                 "somnium.Material",

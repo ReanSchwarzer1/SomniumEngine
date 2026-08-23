@@ -1,7 +1,7 @@
 pub mod color;
 pub mod commands;
-pub mod draw;
 pub mod drag_drop;
+pub mod draw;
 pub mod editor;
 pub mod editor_event;
 pub mod font;
@@ -12,6 +12,7 @@ pub mod message;
 pub mod metaphor;
 pub mod motion;
 pub mod node;
+pub mod outliner_filter;
 pub mod pass;
 pub mod pool;
 pub mod primitive;
@@ -34,11 +35,11 @@ use crate::editor::{
     inspector::{build_generated_details, build_inspector},
     shell::build_editor_layout,
 };
-pub use editor_event::{
-    CreateKind, EditorEvent, FoliageBrushField, GestureId, ScriptAttachmentRow, ScriptFieldKind,
-    ScriptFieldRow, ScriptInspectorState, TerrainToolField,
-};
 pub use drag_drop::{DragPayload, DropAcceptance, DropEffect, DropRequest, DropTarget};
+pub use editor_event::{
+    CreateKind, EditorEvent, FoliageBrushField, GestureId, OutlinerRow, ScriptAttachmentRow,
+    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
+};
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
 
@@ -94,6 +95,10 @@ enum NamePrompt {
     NewScript { parent: String },
     /// Create a material in this content-relative directory.
     NewMaterial { parent: String },
+    /// Rename an entity. CONTROL-F's `F2`: the same modal the three creating
+    /// flows already share, because a rename is a name prompt and building a
+    /// second one would only give the two a chance to disagree.
+    RenameEntity { entity: u32 },
 }
 
 /// What one generated widget in the Scripts section does.
@@ -454,6 +459,8 @@ struct EditorLayout {
     unsaved_cancel: NodeHandle,
     content_menu_popup: NodeHandle,
     content_menu: NodeHandle,
+    outliner_menu_popup: NodeHandle,
+    outliner_menu: NodeHandle,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -560,7 +567,7 @@ pub struct UiManager {
     profiler_toggle_lbl: NodeHandle,
     profiler_names: Vec<NodeHandle>,
     profiler_values: Vec<NodeHandle>,
-    last_outliner_state: Option<(Vec<(u32, String)>, Option<u32>)>,
+    last_outliner_state: Option<(Vec<OutlinerRow>, Option<u32>)>,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
     /// Mode-scope command labels. Held so a future rule can address them; the
@@ -650,6 +657,8 @@ pub struct UiManager {
     unsaved_cancel: NodeHandle,
     content_menu_popup: NodeHandle,
     content_menu: NodeHandle,
+    outliner_menu_popup: NodeHandle,
+    outliner_menu: NodeHandle,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -687,6 +696,13 @@ pub struct UiManager {
     help_page: u8,
     content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
     outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
+    outliner_selection: Vec<u32>,
+    clipboard_filled: bool,
+    /// The value a badge-column drag is painting, so the run stays uniform.
+    badge_drag_value: Option<bool>,
+    /// Mirror of core's live rubber-band, so `Esc` can cancel it before the
+    /// overlay stack gets a look in.
+    marquee_active: bool,
     viewport_drop_probe: (Option<somnium_ecs::Entity>, Option<[f32; 3]>),
     external_drag_files: Vec<std::path::PathBuf>,
     outliner_filter: String,
@@ -1090,6 +1106,8 @@ impl UiManager {
             unsaved_cancel: layout.unsaved_cancel,
             content_menu_popup: layout.content_menu_popup,
             content_menu: layout.content_menu,
+            outliner_menu_popup: layout.outliner_menu_popup,
+            outliner_menu: layout.outliner_menu,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -1121,6 +1139,10 @@ impl UiManager {
             help_page: 0,
             content_entries: Vec::new(),
             outliner_entity_handles: HashMap::new(),
+            outliner_selection: Vec::new(),
+            clipboard_filled: false,
+            badge_drag_value: None,
+            marquee_active: false,
             viewport_drop_probe: (None, None),
             external_drag_files: Vec::new(),
             outliner_filter: String::new(),
@@ -1468,8 +1490,13 @@ impl UiManager {
             self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
         }
         if let WindowEvent::HoveredFile(path) = event {
-            if !self.external_drag_files.contains(path) { self.external_drag_files.push(path.clone()); }
-            self.native_ui.begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(self.external_drag_files.clone()));
+            if !self.external_drag_files.contains(path) {
+                self.external_drag_files.push(path.clone());
+            }
+            self.native_ui
+                .begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(
+                    self.external_drag_files.clone(),
+                ));
             self.refresh_drop_acceptance();
             return true;
         }
@@ -1479,8 +1506,13 @@ impl UiManager {
             return true;
         }
         if let WindowEvent::DroppedFile(path) = event {
-            if !self.external_drag_files.contains(path) { self.external_drag_files.push(path.clone()); }
-            self.native_ui.begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(self.external_drag_files.clone()));
+            if !self.external_drag_files.contains(path) {
+                self.external_drag_files.push(path.clone());
+            }
+            self.native_ui
+                .begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(
+                    self.external_drag_files.clone(),
+                ));
             self.refresh_drop_acceptance();
             self.complete_drop();
             self.external_drag_files.clear();
@@ -1502,6 +1534,9 @@ impl UiManager {
                 return true;
             }
             if self.open_content_menu(self.native_ui.cursor_pos) {
+                return true;
+            }
+            if self.open_outliner_menu(self.native_ui.cursor_pos) {
                 return true;
             }
         }
@@ -1545,6 +1580,15 @@ impl UiManager {
                         self.native_ui.set_modifiers(modifiers);
                     }
                     KeyCode::Escape if pressed => {
+                        // A viewport rubber-band is the outermost gesture and
+                        // is cancelled first, ahead of drags, control gestures
+                        // and every overlay — the same precedence CONTROL-A1
+                        // gave `Esc` and CONTROL-E kept.
+                        if self.marquee_active {
+                            self.marquee_active = false;
+                            self.editor_events.push_back(EditorEvent::CancelMarquee);
+                            return true;
+                        }
                         if self.native_ui.cancel_active_gesture() {
                             return true;
                         }
@@ -1661,7 +1705,15 @@ impl UiManager {
             self.refresh_drop_acceptance();
             return true;
         }
-        if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. }) {
+        if matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            }
+        ) {
+            self.badge_drag_value = None;
             self.complete_drop();
         }
         consumed
@@ -1669,57 +1721,111 @@ impl UiManager {
 
     fn arm_internal_drag(&mut self) {
         let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
-        if let Some(entry) = self.content_entries.iter().find_map(|(handle, entry)|
-            self.native_ui.is_under(hit, *handle).then_some(entry))
+        if let Some(entry) = self
+            .content_entries
+            .iter()
+            .find_map(|(handle, entry)| self.native_ui.is_under(hit, *handle).then_some(entry))
         {
             let mut ids: Vec<_> = if self.content_selection.contains(&entry.path) {
-                self.content_entries.iter().filter(|(_, e)| self.content_selection.contains(&e.path)).filter_map(|(_, e)| e.asset_id).collect()
-            } else { entry.asset_id.into_iter().collect() };
-            ids.sort_by_key(|id| id.raw()); ids.dedup();
-            if !ids.is_empty() { self.native_ui.arm_drag(crate::drag_drop::DragPayload::Assets(ids)); }
+                self.content_entries
+                    .iter()
+                    .filter(|(_, e)| self.content_selection.contains(&e.path))
+                    .filter_map(|(_, e)| e.asset_id)
+                    .collect()
+            } else {
+                entry.asset_id.into_iter().collect()
+            };
+            ids.sort_by_key(|id| id.raw());
+            ids.dedup();
+            if !ids.is_empty() {
+                self.native_ui
+                    .arm_drag(crate::drag_drop::DragPayload::Assets(ids));
+            }
             return;
         }
         if self.native_ui.is_under(hit, self.outliner_tree) {
             let bounds = self.native_ui.screen_bounds(self.outliner_tree);
-            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT)
+                .floor() as usize;
             if let Some((_, id)) = self.outliner_rows.get(row)
                 && let Some(entity) = self.outliner_entity_handles.get(id).copied()
-            { self.native_ui.arm_drag(crate::drag_drop::DragPayload::Entities(vec![entity])); }
+            {
+                // Dragging a row that is part of the selection drags the whole
+                // selection; dragging an unselected row drags just that row,
+                // which is the convention every file manager shares.
+                let entities = if self.outliner_selection.contains(id) {
+                    self.outliner_selection
+                        .iter()
+                        .filter_map(|id| self.outliner_entity_handles.get(id).copied())
+                        .collect()
+                } else {
+                    vec![entity]
+                };
+                self.native_ui
+                    .arm_drag(crate::drag_drop::DragPayload::Entities(entities));
+            }
         }
     }
 
     fn refresh_drop_acceptance(&mut self) {
-        let Some(payload) = self.native_ui.drag_payload().cloned() else { return };
+        let Some(payload) = self.native_ui.drag_payload().cloned() else {
+            return;
+        };
         let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
         // Resolution order is the ancestor walk in practice: the innermost
         // registered surface under the pointer wins, and each branch reports
         // the exact rectangle it will highlight so the adorner cannot claim a
         // target the release would not use.
-        let resolved = if self.native_ui.is_under(hit, self.viewport_handle) || hit == self.viewport_handle {
+        let resolved = if self.native_ui.is_under(hit, self.viewport_handle)
+            || hit == self.viewport_handle
+        {
             Some((
-                crate::drag_drop::DropTarget::Viewport { entity: self.viewport_drop_probe.0, terrain_hit: self.viewport_drop_probe.1 },
+                crate::drag_drop::DropTarget::Viewport {
+                    entity: self.viewport_drop_probe.0,
+                    terrain_hit: self.viewport_drop_probe.1,
+                },
                 self.native_ui.screen_bounds(self.viewport_handle),
             ))
-        } else if let Some((row, binding)) = self.generated_rows.iter().find(|(row, binding)|
-            self.native_ui.is_under(hit, **row) && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_)))
-        {
-            self.generated_entity.map(|entity| (
-                crate::drag_drop::DropTarget::AssetField { entity, component: binding.component, field: binding.field, kind_mask: binding.asset_kind_mask },
-                self.native_ui.screen_bounds(*row),
-            ))
+        } else if let Some((row, binding)) = self.generated_rows.iter().find(|(row, binding)| {
+            self.native_ui.is_under(hit, **row)
+                && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_))
+        }) {
+            self.generated_entity.map(|entity| {
+                (
+                    crate::drag_drop::DropTarget::AssetField {
+                        entity,
+                        component: binding.component,
+                        field: binding.field,
+                        kind_mask: binding.asset_kind_mask,
+                    },
+                    self.native_ui.screen_bounds(*row),
+                )
+            })
         } else if self.native_ui.is_under(hit, self.outliner_tree) {
             let bounds = self.native_ui.screen_bounds(self.outliner_tree);
-            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
-            let entity = self.outliner_rows.get(row).and_then(|(_, id)| self.outliner_entity_handles.get(id)).copied();
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT)
+                .floor() as usize;
+            let entity = self
+                .outliner_rows
+                .get(row)
+                .and_then(|(_, id)| self.outliner_entity_handles.get(id))
+                .copied();
             let highlight = if entity.is_some() {
-                types::Rect::new(bounds.x, bounds.y + row as f32 * crate::theme::TREE_ROW_HEIGHT, bounds.w, crate::theme::TREE_ROW_HEIGHT)
+                types::Rect::new(
+                    bounds.x,
+                    bounds.y + row as f32 * crate::theme::TREE_ROW_HEIGHT,
+                    bounds.w,
+                    crate::theme::TREE_ROW_HEIGHT,
+                )
             } else {
                 bounds
             };
             Some((crate::drag_drop::DropTarget::Outliner(entity), highlight))
         } else if self.native_ui.is_under(hit, self.content_drawer) {
             Some((
-                crate::drag_drop::DropTarget::DrawerFolder(std::path::PathBuf::from(&self.content_path)),
+                crate::drag_drop::DropTarget::DrawerFolder(std::path::PathBuf::from(
+                    &self.content_path,
+                )),
                 self.native_ui.screen_bounds(self.content_drawer),
             ))
         } else {
@@ -1731,31 +1837,97 @@ impl UiManager {
             return;
         };
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
-        let acceptance = match crate::drag_drop::semantic_request(&self.asset_db, &payload, &candidate) {
-            Ok(_) => candidate,
-            Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
-        };
+        let acceptance =
+            match crate::drag_drop::semantic_request(&self.asset_db, &payload, &candidate) {
+                Ok(_) => candidate,
+                Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
+            };
         self.native_ui.set_drop_highlight(Some(highlight));
         self.native_ui.set_drop_acceptance(Some(acceptance));
     }
 
     fn complete_drop(&mut self) {
         self.native_ui.set_drop_highlight(None);
-        let Some(drop) = self.native_ui.take_completed_drop() else { return };
+        let Some(drop) = self.native_ui.take_completed_drop() else {
+            return;
+        };
         match crate::drag_drop::semantic_request(&self.asset_db, &drop.payload, &drop.acceptance) {
             Ok(request @ crate::drag_drop::DropRequest::LoadScene { .. }) => {
                 self.prompt_unsaved_action(EditorEvent::CompleteDrop(request));
             }
-            Ok(request) => self.editor_events.push_back(EditorEvent::CompleteDrop(request)),
+            Ok(request) => self
+                .editor_events
+                .push_back(EditorEvent::CompleteDrop(request)),
             Err(reason) => self.push_toast(&reason),
         }
     }
 
-    pub fn set_outliner_entity_handles(&mut self, entities: impl IntoIterator<Item = somnium_ecs::Entity>) {
-        self.outliner_entity_handles = entities.into_iter().map(|entity| (entity.index(), entity)).collect();
+    /// Translate the live modifier state into a selection combinator. Reading
+    /// it here rather than inside `TreeView` keeps the widget ignorant of what
+    /// a selection *is*, which is the same reason Details never learns about
+    /// multi-selection.
+    fn selection_mode(&self) -> SelectionMode {
+        let modifiers = self.native_ui.modifiers();
+        if modifiers.shift {
+            SelectionMode::Range
+        } else if modifiers.command() {
+            SelectionMode::Toggle
+        } else {
+            SelectionMode::Replace
+        }
     }
 
-    pub fn set_viewport_drop_probe(&mut self, entity: Option<somnium_ecs::Entity>, terrain_hit: Option<[f32; 3]>) {
+    /// Publish the whole selection to the Outliner. The primary still arrives
+    /// through `update_outliner_tree`; this is the rest of the set, and it is
+    /// sent every frame because it is cheap and because a stale multi-select
+    /// highlight is worse than a redundant message.
+    pub fn set_outliner_selection(&mut self, ids: Vec<u32>) {
+        if self.outliner_selection == ids {
+            return;
+        }
+        self.outliner_selection = ids.clone();
+        self.native_ui.send(UiMessage::new(
+            self.outliner_tree,
+            MessageDirection::ToWidget,
+            crate::widgets::tree_view::TreeViewMessage::SetSelectedSet(ids),
+        ));
+    }
+
+    /// Publish the live viewport rubber-band, in logical pixels, for painting.
+    pub fn set_marquee(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        self.marquee_active = rect.is_some();
+        self.native_ui
+            .set_marquee(rect.map(|(x, y, w, h)| types::Rect::new(x, y, w, h)));
+    }
+
+    /// Whether the platform's primary shortcut modifier is held. Core reads
+    /// it for the additive marquee; the UI already owns the modifier state.
+    #[must_use]
+    pub fn command_modifier_held(&self) -> bool {
+        self.native_ui.modifiers().command()
+    }
+
+    /// Everything currently selected, in selection order.
+    #[must_use]
+    pub fn outliner_selection(&self) -> &[u32] {
+        &self.outliner_selection
+    }
+
+    pub fn set_outliner_entity_handles(
+        &mut self,
+        entities: impl IntoIterator<Item = somnium_ecs::Entity>,
+    ) {
+        self.outliner_entity_handles = entities
+            .into_iter()
+            .map(|entity| (entity.index(), entity))
+            .collect();
+    }
+
+    pub fn set_viewport_drop_probe(
+        &mut self,
+        entity: Option<somnium_ecs::Entity>,
+        terrain_hit: Option<[f32; 3]>,
+    ) {
         self.viewport_drop_probe = (entity, terrain_hit);
     }
 
@@ -1879,6 +2051,77 @@ impl UiManager {
     /// right-click, with no undo and no confirmation, is not a mistake
     /// anyone recovers from; the OS file browser is one menu item away
     /// and has a recycle bin.
+    /// The Outliner's right-click menu, built from the registry.
+    ///
+    /// Right-clicking a row that is *not* in the selection selects it first,
+    /// which is what every file manager does and what stops "Delete" from
+    /// meaning something other than the row under the cursor.
+    fn open_outliner_menu(&mut self, pos: Vec2) -> bool {
+        let hit = self.native_ui.hit_test(pos);
+        if !self.native_ui.is_under(hit, self.outliner_tree) {
+            return false;
+        }
+        let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+        let row = ((pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
+        if let Some((_, id)) = self.outliner_rows.get(row).copied()
+            && !self.outliner_selection.contains(&id)
+        {
+            self.editor_events.push_back(EditorEvent::ModifySelection {
+                id,
+                mode: SelectionMode::Replace,
+            });
+        }
+
+        let ctx = self.command_context();
+        let items: Vec<MenuItem> = crate::commands::registry()
+            .surface(crate::commands::CommandSurface::OutlinerContext)
+            .into_iter()
+            .map(|command| MenuItem {
+                id: command.id.to_string(),
+                label: command.menu_label(),
+                enabled: command.enabled(&ctx).is_enabled(),
+            })
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+
+        let height = items.len() as f32 * theme::ROW_HEIGHT + 4.0;
+        let (window_w, window_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let mut placement = pos;
+        if placement.y + height > window_h {
+            placement.y = (pos.y - height).max(0.0);
+        }
+        const ASSUMED_WIDTH: f32 = 180.0;
+        if placement.x + ASSUMED_WIDTH > window_w {
+            placement.x = (window_w - ASSUMED_WIDTH).max(0.0);
+        }
+
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        self.native_ui
+            .set_desired_position(self.outliner_menu, placement);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui
+            .invalidate_ancestors(self.outliner_menu_popup);
+        true
+    }
+
+    fn close_outliner_menu(&mut self) {
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
     fn open_content_menu(&mut self, pos: Vec2) -> bool {
         if !self.drawer_open {
             return false;
@@ -1997,6 +2240,24 @@ impl UiManager {
     /// A blank name is treated as a cancel rather than an error: it is
     /// what someone who changed their mind does, and a modal that refuses
     /// to close is worse than one that quietly gives up.
+    /// Start an in-place rename of the primary selection.
+    fn begin_outliner_rename(&mut self) {
+        let Some((_, Some(entity))) = self
+            .last_outliner_state
+            .as_ref()
+            .map(|(rows, selected)| (rows, *selected))
+        else {
+            return;
+        };
+        let current = self
+            .last_outliner_state
+            .as_ref()
+            .and_then(|(rows, _)| rows.iter().find(|row| row.id == entity))
+            .map(|row| row.name.clone())
+            .unwrap_or_default();
+        self.open_name_prompt(NamePrompt::RenameEntity { entity }, "Rename", &current);
+    }
+
     fn confirm_name_prompt(&mut self) {
         let Some(prompt) = self.name_prompt.take() else {
             return;
@@ -2012,6 +2273,7 @@ impl UiManager {
             NamePrompt::NewMaterial { parent } => {
                 EditorEvent::CreateContentMaterial { parent, name }
             }
+            NamePrompt::RenameEntity { entity } => EditorEvent::RenameEntity { entity, name },
         };
         self.editor_events.push_back(event);
     }
@@ -2611,7 +2873,14 @@ impl UiManager {
             can_undo: true,
             can_redo: true,
             has_content_target: self.content_menu_target.is_some(),
+            has_clipboard: self.clipboard_filled,
         }
+    }
+
+    /// Core owns the entity clipboard; this is the enablement mirror, pushed
+    /// every frame so `Paste` greys out honestly instead of always offering.
+    pub fn set_clipboard_filled(&mut self, filled: bool) {
+        self.clipboard_filled = filled;
     }
 
     fn run_command_id(&mut self, id: &str) -> bool {
@@ -2652,6 +2921,11 @@ impl UiManager {
             A::Redo => self.editor_events.push_back(EditorEvent::Redo),
             A::DeleteSelected => self.editor_events.push_back(EditorEvent::DeleteSelected),
             A::DuplicateSelected => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
+            A::PasteClipboard => self.editor_events.push_back(EditorEvent::PasteClipboard),
+            A::SelectAll => self.editor_events.push_back(EditorEvent::SelectAll),
+            A::FocusSelection => self.editor_events.push_back(EditorEvent::FocusSelection),
+            A::RenameSelected => self.begin_outliner_rename(),
             A::Play => self.editor_events.push_back(EditorEvent::PlaySimulation),
             A::Pause => self.editor_events.push_back(EditorEvent::PauseSimulation),
             A::Stop => self.editor_events.push_back(EditorEvent::StopSimulation),
@@ -3369,24 +3643,25 @@ impl UiManager {
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
     pub fn update_outliner(&mut self, entities: &[(u32, String)], selected: Option<u32>) {
-        let rows: Vec<(u32, String, u8, bool)> = entities
+        let rows: Vec<OutlinerRow> = entities
             .iter()
-            .map(|(id, name)| (*id, name.clone(), 0, false))
+            .map(|(id, name)| OutlinerRow {
+                id: *id,
+                name: name.clone(),
+                depth: 0,
+                has_children: false,
+                hidden: false,
+                locked: false,
+                script_error: false,
+                tags: Vec::new(),
+            })
             .collect();
         self.update_outliner_tree(&rows, selected);
     }
 
-    /// Hierarchical outliner (Phase 26-E). Each row is (id, name, depth, has_children).
-    pub fn update_outliner_tree(
-        &mut self,
-        entities: &[(u32, String, u8, bool)],
-        selected: Option<u32>,
-    ) {
-        let flat: Vec<(u32, String)> = entities
-            .iter()
-            .map(|(id, name, _, _)| (*id, name.clone()))
-            .collect();
-        let new_state = (flat, selected);
+    /// Hierarchical outliner (Phase 26-E), one [`OutlinerRow`] per visible row.
+    pub fn update_outliner_tree(&mut self, entities: &[OutlinerRow], selected: Option<u32>) {
+        let new_state = (entities.to_vec(), selected);
         if let Some(ref old_state) = self.last_outliner_state {
             if *old_state == new_state {
                 return;
@@ -3394,23 +3669,23 @@ impl UiManager {
         }
         self.last_outliner_state = Some(new_state);
 
-        let filter = self.outliner_filter.to_ascii_lowercase();
+        let filter = crate::outliner_filter::OutlinerFilter::parse(&self.outliner_filter);
         let mut items = Vec::new();
-        for &(id, ref name, depth, has_children) in entities {
-            if !filter.is_empty() && !name.to_ascii_lowercase().contains(&filter) {
+        for row in entities {
+            if !filter.matches(row) {
                 continue;
             }
-            let expanded = self.outliner_expanded.contains(&id) || !has_children;
-            if has_children && !self.outliner_expanded.contains(&id) && depth > 0 {
-                // collapsed children are omitted by the caller
-            }
+            let expanded = self.outliner_expanded.contains(&row.id) || !row.has_children;
             items.push(TreeItem {
-                id,
-                label: name.clone(),
-                depth,
-                icon: crate::metaphor::icon_for_entity_name(name),
-                has_children,
-                expanded: expanded || self.outliner_expanded.contains(&id),
+                id: row.id,
+                label: row.name.clone(),
+                depth: row.depth,
+                icon: crate::metaphor::icon_for_entity_name(&row.name),
+                has_children: row.has_children,
+                expanded: expanded || self.outliner_expanded.contains(&row.id),
+                hidden: row.hidden,
+                locked: row.locked,
+                script_error: row.script_error,
             });
         }
         // Phase 27-G: an empty scene says so rather than showing a blank panel.
@@ -3425,7 +3700,7 @@ impl UiManager {
         // the widget tree.
         self.palette_entities = entities
             .iter()
-            .map(|(id, name, _, _)| (*id, name.clone()))
+            .map(|row| (row.id, row.name.clone()))
             .collect();
         self.native_ui
             .send(TreeViewMessage::set_items(self.outliner_tree, items));
@@ -4270,6 +4545,11 @@ impl UiManager {
                     self.activate_content_menu(id);
                     continue;
                 }
+                if msg.destination == self.outliner_menu {
+                    self.close_outliner_menu();
+                    self.run_command_id(id);
+                    continue;
+                }
             }
             if let Some(text) = msg.data::<TextBoxMessage>() {
                 if msg.destination == self.name_input {
@@ -4344,8 +4624,10 @@ impl UiManager {
                     .iter()
                     .find(|(bh, _)| *bh == msg.destination)
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(eidx)));
+                    self.editor_events.push_back(EditorEvent::ModifySelection {
+                        id: eidx,
+                        mode: self.selection_mode(),
+                    });
                     continue;
                 }
                 if let Some(layer) = self
@@ -4813,8 +5095,31 @@ impl UiManager {
                 continue;
             } else if let Some(TreeViewMessage::Select(id)) = msg.data::<TreeViewMessage>() {
                 if msg.destination == self.outliner_tree {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(*id)));
+                    self.editor_events.push_back(EditorEvent::ModifySelection {
+                        id: *id,
+                        mode: self.selection_mode(),
+                    });
+                }
+            } else if let Some(TreeViewMessage::ToggleBadge { id, lock }) =
+                msg.data::<TreeViewMessage>()
+            {
+                if msg.destination == self.outliner_tree {
+                    // A drag down the column sets every row it crosses to the
+                    // value the first click produced, rather than toggling each
+                    // one — otherwise dragging over an already-hidden row would
+                    // un-hide it and the gesture would read as noise.
+                    let value = self.badge_drag_value.get_or_insert_with(|| {
+                        self.last_outliner_state
+                            .as_ref()
+                            .and_then(|(rows, _)| rows.iter().find(|row| row.id == *id))
+                            .map(|row| !if *lock { row.locked } else { row.hidden })
+                            .unwrap_or(true)
+                    });
+                    self.editor_events.push_back(EditorEvent::ToggleEntityFlag {
+                        entity: *id,
+                        lock: *lock,
+                        value: Some(*value),
+                    });
                 }
             } else if let Some(TreeViewMessage::ToggleExpand(id)) = msg.data::<TreeViewMessage>() {
                 if self.outliner_expanded.contains(id) {

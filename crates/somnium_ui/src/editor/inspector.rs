@@ -276,7 +276,7 @@ pub(crate) fn build_generated_details(
                     .with_background(theme::TRANSPARENT),
             )
             .with_label(&model.label)
-            .with_modified(model.modified)
+            .with_modified(model.modified && !model.mixed)
             .with_read_only(model.read_only)
             .build();
             let row_handle = ui.add_node(row, root);
@@ -299,6 +299,7 @@ pub(crate) fn build_generated_details(
                     let handle = ui.add_node(
                         CheckBoxBuilder::new(widget)
                             .with_checked(checked)
+                            .with_mixed(model.mixed)
                             .with_label("")
                             .with_font_id(font_id)
                             .build(),
@@ -314,6 +315,7 @@ pub(crate) fn build_generated_details(
                     };
                     let mut builder = NumericFieldBuilder::new(widget)
                         .with_value(value)
+                        .with_mixed(model.mixed)
                         .with_drag_step(model.step.unwrap_or(0.05) as f32)
                         .with_unit(model.unit.unwrap_or(""));
                     if let (Some(min), Some(max)) =
@@ -332,6 +334,7 @@ pub(crate) fn build_generated_details(
                     let handle = ui.add_node(
                         TextBoxBuilder::new(widget)
                             .with_text(text)
+                            .with_mixed(model.mixed)
                             .with_font_id(font_id)
                             .build(),
                         row_handle,
@@ -361,6 +364,7 @@ pub(crate) fn build_generated_details(
                         let handle = ui.add_node(
                             NumericFieldBuilder::new(WidgetBuilder::new().with_width(58.0))
                                 .with_value(value)
+                                .with_mixed(model.mixed)
                                 .with_drag_step(model.step.unwrap_or(0.05) as f32)
                                 .with_unit(if model.editor == PropertyEditorKind::Euler {
                                     "°"
@@ -404,6 +408,7 @@ pub(crate) fn build_generated_details(
                         ComboBoxBuilder::new(widget)
                             .with_items(names.iter().copied())
                             .with_selected(selected)
+                            .with_mixed(model.mixed)
                             .with_font_id(font_id)
                             .build(),
                         row_handle,

@@ -70,18 +70,35 @@ impl DropAcceptance {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DropRequest {
-    SpawnModels { assets: Vec<AssetId>, at: [f32; 3] },
-    AssignMaterial { asset: AssetId, entities: Vec<Entity> },
-    AttachScripts { assets: Vec<AssetId>, entity: Entity },
+    SpawnModels {
+        assets: Vec<AssetId>,
+        at: [f32; 3],
+    },
+    AssignMaterial {
+        asset: AssetId,
+        entities: Vec<Entity>,
+    },
+    AttachScripts {
+        assets: Vec<AssetId>,
+        entity: Entity,
+    },
     SetAssetField {
         asset: AssetId,
         entity: Entity,
         component: StableId,
         field: FieldId,
     },
-    LoadScene { asset: AssetId },
-    Reparent { entities: Vec<Entity>, parent: Option<Entity> },
-    ImportExternal { files: Vec<PathBuf>, folder: PathBuf },
+    LoadScene {
+        asset: AssetId,
+    },
+    Reparent {
+        entities: Vec<Entity>,
+        parent: Option<Entity>,
+    },
+    ImportExternal {
+        files: Vec<PathBuf>,
+        folder: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,8 +110,14 @@ pub struct CompletedDrop {
 #[derive(Debug, Clone, PartialEq)]
 enum State {
     Idle,
-    Armed { origin: Vec2, payload: DragPayload },
-    Dragging { payload: DragPayload, acceptance: Option<DropAcceptance> },
+    Armed {
+        origin: Vec2,
+        payload: DragPayload,
+    },
+    Dragging {
+        payload: DragPayload,
+        acceptance: Option<DropAcceptance>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,7 +126,9 @@ pub struct DragDropState {
 }
 
 impl Default for DragDropState {
-    fn default() -> Self { Self { state: State::Idle } }
+    fn default() -> Self {
+        Self { state: State::Idle }
+    }
 }
 
 impl DragDropState {
@@ -112,27 +137,44 @@ impl DragDropState {
     }
 
     pub fn begin_external(&mut self, payload: DragPayload) {
-        self.state = State::Dragging { payload, acceptance: None };
+        self.state = State::Dragging {
+            payload,
+            acceptance: None,
+        };
     }
 
     /// Returns true only on the frame the 4 logical-pixel threshold is crossed.
     pub fn pointer_moved(&mut self, position: Vec2) -> bool {
-        let State::Armed { origin, payload } = &self.state else { return false };
-        if position.distance(*origin) < DRAG_THRESHOLD { return false; }
+        let State::Armed { origin, payload } = &self.state else {
+            return false;
+        };
+        if position.distance(*origin) < DRAG_THRESHOLD {
+            return false;
+        }
         let payload = payload.clone();
-        self.state = State::Dragging { payload, acceptance: None };
+        self.state = State::Dragging {
+            payload,
+            acceptance: None,
+        };
         true
     }
 
     pub fn set_acceptance(&mut self, acceptance: Option<DropAcceptance>) {
-        if let State::Dragging { acceptance: current, .. } = &mut self.state {
+        if let State::Dragging {
+            acceptance: current,
+            ..
+        } = &mut self.state
+        {
             *current = acceptance;
         }
     }
 
     #[must_use]
     pub fn acceptance(&self) -> Option<&DropAcceptance> {
-        match &self.state { State::Dragging { acceptance, .. } => acceptance.as_ref(), _ => None }
+        match &self.state {
+            State::Dragging { acceptance, .. } => acceptance.as_ref(),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -144,7 +186,9 @@ impl DragDropState {
     }
 
     #[must_use]
-    pub fn is_dragging(&self) -> bool { matches!(self.state, State::Dragging { .. }) }
+    pub fn is_dragging(&self) -> bool {
+        matches!(self.state, State::Dragging { .. })
+    }
 
     pub fn cancel(&mut self) -> bool {
         let active = !matches!(self.state, State::Idle);
@@ -155,9 +199,13 @@ impl DragDropState {
     pub fn release(&mut self) -> Option<CompletedDrop> {
         let state = std::mem::replace(&mut self.state, State::Idle);
         match state {
-            State::Dragging { payload, acceptance: Some(acceptance) } if acceptance.can_drop() => {
-                Some(CompletedDrop { payload, acceptance })
-            }
+            State::Dragging {
+                payload,
+                acceptance: Some(acceptance),
+            } if acceptance.can_drop() => Some(CompletedDrop {
+                payload,
+                acceptance,
+            }),
             _ => None,
         }
     }
@@ -171,7 +219,9 @@ pub fn resolve_ancestor<T: Copy + Eq>(
     mut accepts: impl FnMut(T) -> bool,
 ) -> Option<T> {
     while hit != none {
-        if accepts(hit) { return Some(hit); }
+        if accepts(hit) {
+            return Some(hit);
+        }
         hit = parent(hit);
     }
     None
@@ -186,39 +236,110 @@ pub fn semantic_request(
 ) -> Result<DropRequest, String> {
     let accepted_assets = || -> Vec<AssetId> {
         match payload {
-            DragPayload::Assets(items) => acceptance.accepted.iter().filter_map(|i| items.get(*i).copied()).collect(),
+            DragPayload::Assets(items) => acceptance
+                .accepted
+                .iter()
+                .filter_map(|i| items.get(*i).copied())
+                .collect(),
             _ => Vec::new(),
         }
     };
     match (payload, &acceptance.target) {
-        (DragPayload::ExternalFiles(files), DropTarget::DrawerFolder(folder)) => Ok(DropRequest::ImportExternal {
-            files: acceptance.accepted.iter().filter_map(|i| files.get(*i).cloned()).collect(), folder: folder.clone(),
-        }),
-        (DragPayload::Entities(entities), DropTarget::Outliner(parent)) => Ok(DropRequest::Reparent {
-            entities: acceptance.accepted.iter().filter_map(|i| entities.get(*i).copied()).collect(), parent: *parent,
-        }),
-        (DragPayload::Assets(_), DropTarget::AssetField { entity, component, field, kind_mask }) => {
-            let asset = accepted_assets().into_iter().next().ok_or("No accepted texture")?;
-            if db.get(asset).is_none_or(|r| r.kind.bit() & *kind_mask == 0) { return Err("This asset kind is not accepted by the field".into()); }
-            Ok(DropRequest::SetAssetField { asset, entity: *entity, component: *component, field: *field })
+        (DragPayload::ExternalFiles(files), DropTarget::DrawerFolder(folder)) => {
+            Ok(DropRequest::ImportExternal {
+                files: acceptance
+                    .accepted
+                    .iter()
+                    .filter_map(|i| files.get(*i).cloned())
+                    .collect(),
+                folder: folder.clone(),
+            })
+        }
+        (DragPayload::Entities(entities), DropTarget::Outliner(parent)) => {
+            Ok(DropRequest::Reparent {
+                entities: acceptance
+                    .accepted
+                    .iter()
+                    .filter_map(|i| entities.get(*i).copied())
+                    .collect(),
+                parent: *parent,
+            })
+        }
+        (
+            DragPayload::Assets(_),
+            DropTarget::AssetField {
+                entity,
+                component,
+                field,
+                kind_mask,
+            },
+        ) => {
+            let asset = accepted_assets()
+                .into_iter()
+                .next()
+                .ok_or("No accepted texture")?;
+            if db.get(asset).is_none_or(|r| r.kind.bit() & *kind_mask == 0) {
+                return Err("This asset kind is not accepted by the field".into());
+            }
+            Ok(DropRequest::SetAssetField {
+                asset,
+                entity: *entity,
+                component: *component,
+                field: *field,
+            })
         }
         (DragPayload::Assets(_), DropTarget::Outliner(Some(entity))) => {
             let assets = accepted_assets();
-            let Some(first) = assets.first().copied() else { return Err("No accepted asset".into()); };
+            let Some(first) = assets.first().copied() else {
+                return Err("No accepted asset".into());
+            };
             match db.get(first).map(|r| r.kind) {
-                Some(somnium_asset::database::AssetKind::Material) => Ok(DropRequest::AssignMaterial { asset: first, entities: vec![*entity] }),
-                Some(somnium_asset::database::AssetKind::Script) => Ok(DropRequest::AttachScripts { assets, entity: *entity }),
+                Some(somnium_asset::database::AssetKind::Material) => {
+                    Ok(DropRequest::AssignMaterial {
+                        asset: first,
+                        entities: vec![*entity],
+                    })
+                }
+                Some(somnium_asset::database::AssetKind::Script) => {
+                    Ok(DropRequest::AttachScripts {
+                        assets,
+                        entity: *entity,
+                    })
+                }
                 _ => Err("This asset cannot be dropped on an entity".into()),
             }
         }
-        (DragPayload::Assets(_), DropTarget::Viewport { entity, terrain_hit }) => {
+        (
+            DragPayload::Assets(_),
+            DropTarget::Viewport {
+                entity,
+                terrain_hit,
+            },
+        ) => {
             let assets = accepted_assets();
-            let Some(first) = assets.first().copied() else { return Err("No accepted asset".into()); };
+            let Some(first) = assets.first().copied() else {
+                return Err("No accepted asset".into());
+            };
             match db.get(first).map(|r| r.kind) {
-                Some(somnium_asset::database::AssetKind::Mesh) => Ok(DropRequest::SpawnModels { assets, at: terrain_hit.ok_or("Point at terrain to place this model")? }),
-                Some(somnium_asset::database::AssetKind::Material) => Ok(DropRequest::AssignMaterial { asset: first, entities: vec![entity.ok_or("Point at an entity to assign material")?] }),
-                Some(somnium_asset::database::AssetKind::Script) => Ok(DropRequest::AttachScripts { assets, entity: entity.ok_or("Point at an entity to attach script")? }),
-                Some(somnium_asset::database::AssetKind::Scene) => Ok(DropRequest::LoadScene { asset: first }),
+                Some(somnium_asset::database::AssetKind::Mesh) => Ok(DropRequest::SpawnModels {
+                    assets,
+                    at: terrain_hit.ok_or("Point at terrain to place this model")?,
+                }),
+                Some(somnium_asset::database::AssetKind::Material) => {
+                    Ok(DropRequest::AssignMaterial {
+                        asset: first,
+                        entities: vec![entity.ok_or("Point at an entity to assign material")?],
+                    })
+                }
+                Some(somnium_asset::database::AssetKind::Script) => {
+                    Ok(DropRequest::AttachScripts {
+                        assets,
+                        entity: entity.ok_or("Point at an entity to attach script")?,
+                    })
+                }
+                Some(somnium_asset::database::AssetKind::Scene) => {
+                    Ok(DropRequest::LoadScene { asset: first })
+                }
                 _ => Err("This asset cannot be dropped in the viewport".into()),
             }
         }
@@ -232,79 +353,139 @@ pub fn acceptance_for(
     payload: &DragPayload,
     target: DropTarget,
 ) -> DropAcceptance {
-    let total = match payload { DragPayload::Assets(v) => v.len(), DragPayload::Entities(v) => v.len(), DragPayload::ExternalFiles(v) => v.len() };
+    let total = match payload {
+        DragPayload::Assets(v) => v.len(),
+        DragPayload::Entities(v) => v.len(),
+        DragPayload::ExternalFiles(v) => v.len(),
+    };
     let (accepted, effect) = match payload {
-        DragPayload::ExternalFiles(_) if matches!(target, DropTarget::DrawerFolder(_)) => ((0..total).collect(), DropEffect::Copy),
+        DragPayload::ExternalFiles(_) if matches!(target, DropTarget::DrawerFolder(_)) => {
+            ((0..total).collect(), DropEffect::Copy)
+        }
         DragPayload::Entities(items) if matches!(target, DropTarget::Outliner(_)) => {
-            let parent = match target { DropTarget::Outliner(p) => p, _ => None };
-            ((0..items.len()).filter(|i| Some(items[*i]) != parent).collect(), DropEffect::Move)
+            let parent = match target {
+                DropTarget::Outliner(p) => p,
+                _ => None,
+            };
+            (
+                (0..items.len())
+                    .filter(|i| Some(items[*i]) != parent)
+                    .collect(),
+                DropEffect::Move,
+            )
         }
         DragPayload::Assets(items) => {
             let compatible = |kind: somnium_asset::database::AssetKind| match target {
                 DropTarget::AssetField { kind_mask, .. } => kind.bit() & kind_mask != 0,
-                DropTarget::Outliner(Some(_)) => matches!(kind, somnium_asset::database::AssetKind::Material | somnium_asset::database::AssetKind::Script),
-                DropTarget::Viewport { entity, terrain_hit } => match kind {
+                DropTarget::Outliner(Some(_)) => matches!(
+                    kind,
+                    somnium_asset::database::AssetKind::Material
+                        | somnium_asset::database::AssetKind::Script
+                ),
+                DropTarget::Viewport {
+                    entity,
+                    terrain_hit,
+                } => match kind {
                     somnium_asset::database::AssetKind::Mesh => terrain_hit.is_some(),
-                    somnium_asset::database::AssetKind::Material | somnium_asset::database::AssetKind::Script => entity.is_some(),
+                    somnium_asset::database::AssetKind::Material
+                    | somnium_asset::database::AssetKind::Script => entity.is_some(),
                     somnium_asset::database::AssetKind::Scene => true,
                     _ => false,
                 },
                 _ => false,
             };
-            let first_kind = items.iter().filter_map(|id| db.get(*id).map(|r| r.kind)).find(|k| compatible(*k));
-            let accepted = first_kind.map_or_else(Vec::new, |first| items.iter().enumerate().filter_map(|(i, id)| {
-                let kind = db.get(*id)?.kind;
-                (compatible(kind) && kind == first && !(kind == somnium_asset::database::AssetKind::Material && i > 0)).then_some(i)
-            }).collect());
-            let effect = match first_kind { Some(somnium_asset::database::AssetKind::Mesh) => DropEffect::Copy, _ => DropEffect::Link };
+            let first_kind = items
+                .iter()
+                .filter_map(|id| db.get(*id).map(|r| r.kind))
+                .find(|k| compatible(*k));
+            let accepted = first_kind.map_or_else(Vec::new, |first| {
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, id)| {
+                        let kind = db.get(*id)?.kind;
+                        (compatible(kind)
+                            && kind == first
+                            && !(kind == somnium_asset::database::AssetKind::Material && i > 0))
+                            .then_some(i)
+                    })
+                    .collect()
+            });
+            let effect = match first_kind {
+                Some(somnium_asset::database::AssetKind::Mesh) => DropEffect::Copy,
+                _ => DropEffect::Link,
+            };
             (accepted, effect)
         }
         _ => (Vec::new(), DropEffect::Forbidden),
     };
-    if accepted.is_empty() { return DropAcceptance::rejected(target, "Payload is not accepted here"); }
-    let reason = (accepted.len() != total).then(|| format!("{} of {} · {effect:?}", accepted.len(), total));
-    DropAcceptance { accepted, effect, reason, target }
+    if accepted.is_empty() {
+        return DropAcceptance::rejected(target, "Payload is not accepted here");
+    }
+    let reason =
+        (accepted.len() != total).then(|| format!("{} of {} · {effect:?}", accepted.len(), total));
+    DropAcceptance {
+        accepted,
+        effect,
+        reason,
+        target,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn payload() -> DragPayload { DragPayload::ExternalFiles(vec![PathBuf::from("a.png")]) }
+    fn payload() -> DragPayload {
+        DragPayload::ExternalFiles(vec![PathBuf::from("a.png")])
+    }
     fn accepted() -> DropAcceptance {
-        DropAcceptance { accepted: vec![0], effect: DropEffect::Copy, reason: None,
-            target: DropTarget::DrawerFolder(PathBuf::from("textures")) }
+        DropAcceptance {
+            accepted: vec![0],
+            effect: DropEffect::Copy,
+            reason: None,
+            target: DropTarget::DrawerFolder(PathBuf::from("textures")),
+        }
     }
 
     #[test]
     fn threshold_is_four_logical_pixels() {
-        let mut d = DragDropState::default(); d.arm(Vec2::ZERO, payload());
+        let mut d = DragDropState::default();
+        d.arm(Vec2::ZERO, payload());
         assert!(!d.pointer_moved(Vec2::new(3.99, 0.0)));
         assert!(d.pointer_moved(Vec2::new(4.0, 0.0)));
     }
 
     #[test]
     fn escape_cancel_prevents_completion() {
-        let mut d = DragDropState::default(); d.arm(Vec2::ZERO, payload());
-        d.pointer_moved(Vec2::new(5.0, 0.0)); d.set_acceptance(Some(accepted()));
-        assert!(d.cancel()); assert!(d.release().is_none());
+        let mut d = DragDropState::default();
+        d.arm(Vec2::ZERO, payload());
+        d.pointer_moved(Vec2::new(5.0, 0.0));
+        d.set_acceptance(Some(accepted()));
+        assert!(d.cancel());
+        assert!(d.release().is_none());
     }
 
     #[test]
     fn rejected_or_unarmed_release_never_completes() {
         let mut d = DragDropState::default();
         assert!(d.release().is_none());
-        d.arm(Vec2::ZERO, payload()); d.pointer_moved(Vec2::new(5.0, 0.0));
+        d.arm(Vec2::ZERO, payload());
+        d.pointer_moved(Vec2::new(5.0, 0.0));
         d.set_acceptance(Some(DropAcceptance::rejected(
-            DropTarget::DrawerFolder(PathBuf::new()), "unsupported")));
+            DropTarget::DrawerFolder(PathBuf::new()),
+            "unsupported",
+        )));
         assert!(d.release().is_none());
     }
 
     #[test]
     fn partial_acceptance_preserves_reason_and_completes_once() {
-        let mut d = DragDropState::default(); d.arm(Vec2::ZERO, payload());
+        let mut d = DragDropState::default();
+        d.arm(Vec2::ZERO, payload());
         d.pointer_moved(Vec2::new(5.0, 0.0));
-        let mut a = accepted(); a.reason = Some("1 unsupported item".into());
+        let mut a = accepted();
+        a.reason = Some("1 unsupported item".into());
         d.set_acceptance(Some(a.clone()));
         assert_eq!(d.release().unwrap().acceptance, a);
         assert!(d.release().is_none());
@@ -355,7 +536,10 @@ mod tests {
         assert_eq!(
             drop(
                 DragPayload::Assets(vec![id("ship.glb"), id("hull.glb")]),
-                DropTarget::Viewport { entity: None, terrain_hit: Some([1.0, 2.0, 3.0]) },
+                DropTarget::Viewport {
+                    entity: None,
+                    terrain_hit: Some([1.0, 2.0, 3.0])
+                },
             ),
             Ok(DropRequest::SpawnModels {
                 assets: vec![id("ship.glb"), id("hull.glb")],
@@ -369,7 +553,10 @@ mod tests {
                 DragPayload::Assets(vec![id("polished.sommat")]),
                 DropTarget::Outliner(Some(entity)),
             ),
-            Ok(DropRequest::AssignMaterial { asset: id("polished.sommat"), entities: vec![entity] })
+            Ok(DropRequest::AssignMaterial {
+                asset: id("polished.sommat"),
+                entities: vec![entity]
+            })
         );
 
         // .luau onto a viewport entity. The hovered entity is the target, not
@@ -378,9 +565,15 @@ mod tests {
         assert_eq!(
             drop(
                 DragPayload::Assets(vec![id("spin.luau")]),
-                DropTarget::Viewport { entity: Some(entity), terrain_hit: None },
+                DropTarget::Viewport {
+                    entity: Some(entity),
+                    terrain_hit: None
+                },
             ),
-            Ok(DropRequest::AttachScripts { assets: vec![id("spin.luau")], entity })
+            Ok(DropRequest::AttachScripts {
+                assets: vec![id("spin.luau")],
+                entity
+            })
         );
 
         // A texture onto a material texture slot in Details.
@@ -406,16 +599,27 @@ mod tests {
         assert_eq!(
             drop(
                 DragPayload::Assets(vec![id("level.somnium")]),
-                DropTarget::Viewport { entity: None, terrain_hit: None },
+                DropTarget::Viewport {
+                    entity: None,
+                    terrain_hit: None
+                },
             ),
-            Ok(DropRequest::LoadScene { asset: id("level.somnium") })
+            Ok(DropRequest::LoadScene {
+                asset: id("level.somnium")
+            })
         );
 
         // Outliner row onto Outliner row.
         let child = world.spawn((Marker,));
         assert_eq!(
-            drop(DragPayload::Entities(vec![child]), DropTarget::Outliner(Some(entity))),
-            Ok(DropRequest::Reparent { entities: vec![child], parent: Some(entity) })
+            drop(
+                DragPayload::Entities(vec![child]),
+                DropTarget::Outliner(Some(entity))
+            ),
+            Ok(DropRequest::Reparent {
+                entities: vec![child],
+                parent: Some(entity)
+            })
         );
 
         // OS file onto a drawer folder.
@@ -438,7 +642,10 @@ mod tests {
     fn mesh_without_a_terrain_hit_is_rejected_with_a_reason() {
         let (root, db) = route_fixture();
         let payload = DragPayload::Assets(vec![id("ship.glb")]);
-        let target = DropTarget::Viewport { entity: None, terrain_hit: None };
+        let target = DropTarget::Viewport {
+            entity: None,
+            terrain_hit: None,
+        };
         let acceptance = acceptance_for(&db, &payload, target);
         assert_eq!(acceptance.effect, DropEffect::Forbidden);
         assert!(!acceptance.can_drop());
@@ -461,7 +668,10 @@ mod tests {
         let acceptance = acceptance_for(
             &db,
             &payload,
-            DropTarget::Viewport { entity: None, terrain_hit: Some([0.0; 3]) },
+            DropTarget::Viewport {
+                entity: None,
+                terrain_hit: Some([0.0; 3]),
+            },
         );
         assert_eq!(acceptance.accepted, vec![0, 1]);
         assert_eq!(acceptance.effect, DropEffect::Copy);

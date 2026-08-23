@@ -129,6 +129,47 @@ pub struct ScriptInspectorState {
 }
 
 /// High-level editor commands produced by the native UI layer.
+/// How a click combines with what is already selected.
+///
+/// Named rather than passed as two booleans because the three cases are
+/// mutually exclusive and the two-boolean form makes `command()+Shift`
+/// look like a fourth state that nothing implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// A plain click. Replaces the selection.
+    Replace,
+    /// `command()`-click. Adds or removes one entity.
+    Toggle,
+    /// `Shift`-click. Selects the inclusive range from the anchor.
+    Range,
+}
+
+/// One Outliner row, as core sees it.
+///
+/// Replaced the four-tuple in CONTROL-F. Typed filters, badges and the
+/// script-error dot all need facts the tuple had nowhere to put, and adding a
+/// fifth and sixth positional field would have made the call site unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlinerRow {
+    /// Entity index.
+    pub id: u32,
+    /// Display name.
+    pub name: String,
+    /// Depth in the hierarchy, for indentation.
+    pub depth: u8,
+    /// Whether this row has children to expand.
+    pub has_children: bool,
+    /// `EditorFlags::hidden`.
+    pub hidden: bool,
+    /// `EditorFlags::locked`.
+    pub locked: bool,
+    /// Any attached script failed to compile.
+    pub script_error: bool,
+    /// Lowercase component tags — `light`, `mesh`, `terrain`, `script`, … —
+    /// which is what makes `type:light` a filter rather than a name search.
+    pub tags: Vec<&'static str>,
+}
+
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
@@ -136,9 +177,42 @@ pub enum EditorEvent {
     /// exactly one command/undo record.
     CompleteDrop(crate::drag_drop::DropRequest),
     SelectEntity(Option<u32>),
+    /// A modifier-aware Outliner or viewport click. The core owns the row
+    /// order, so it — not the widget — resolves what a `Shift` range means.
+    ModifySelection {
+        id: u32,
+        mode: SelectionMode,
+    },
+    /// Replace the whole selection at once: marquee, paste, "select children".
+    SelectEntities(Vec<u32>),
     CreateEntity(CreateKind),
     DeleteSelected,
     DuplicateSelected,
+    /// Copy the selection and everything beneath it into the entity clipboard.
+    CopySelected,
+    /// Paste the entity clipboard under the primary selection.
+    PasteClipboard,
+    /// Select every entity in the scene.
+    SelectAll,
+    /// `Esc` during a viewport rubber-band: drop it, change nothing.
+    CancelMarquee,
+    /// Toggle one Outliner badge. `lock` picks the column; `value` is `None`
+    /// for a plain toggle and `Some` for a drag that is setting a whole run.
+    ToggleEntityFlag {
+        entity: u32,
+        lock: bool,
+        value: Option<bool>,
+    },
+    /// Frame the selection with the editor camera.
+    FocusSelection,
+    /// Begin an in-place rename of the primary selection.
+    RenameSelected,
+    /// Commit a rename. `entity` is an entity index, as everywhere else in
+    /// this enum.
+    RenameEntity {
+        entity: u32,
+        name: String,
+    },
     Undo,
     Redo,
     ToggleShadingMode,

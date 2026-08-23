@@ -33,6 +33,8 @@ pub enum ComboBoxMessage {
 pub struct ComboBox {
     pub items: Vec<String>,
     pub selected: usize,
+    /// See [`super::MIXED_PLACEHOLDER`]. Cleared on the first choice.
+    pub mixed: bool,
     pub open: bool,
     pub font_id: u8,
     pub px: f32,
@@ -72,11 +74,14 @@ impl Control for ComboBox {
         paint.border = t.semantic.border.default.bytes();
         paint.border_thickness = t.geometry.stroke_hairline;
         ctx.push_paint(header, &paint);
-        let label = self
-            .items
-            .get(self.selected)
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let label = if self.mixed {
+            super::MIXED_PLACEHOLDER
+        } else {
+            self.items
+                .get(self.selected)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        };
         ctx.push_text(
             label,
             Vec2::new(b.x + 6.0, b.y + 4.0),
@@ -150,6 +155,7 @@ impl Control for ComboBox {
             return;
         }
         if let Some(WidgetMessage::MouseDown { .. }) = msg.data::<WidgetMessage>() {
+            self.mixed = false;
             if self.open {
                 self.open = false;
                 if self.popup.is_some() {
@@ -198,6 +204,7 @@ impl Control for ComboBox {
 
 pub struct ComboBoxBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     items: Vec<String>,
     selected: usize,
     font_id: u8,
@@ -205,8 +212,16 @@ pub struct ComboBoxBuilder {
 }
 
 impl ComboBoxBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
+            mixed: false,
             widget,
             items: Vec::new(),
             selected: 0,
@@ -230,6 +245,7 @@ impl ComboBoxBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(ComboBox {
+                mixed: self.mixed,
                 items: self.items,
                 selected: self.selected,
                 open: false,
@@ -465,6 +481,7 @@ mod tests {
     #[test]
     fn selection_stays_in_range() {
         let cb = ComboBox {
+            mixed: false,
             items: vec!["AgX".into(), "ACES".into(), "Reinhard".into()],
             selected: 0,
             open: false,

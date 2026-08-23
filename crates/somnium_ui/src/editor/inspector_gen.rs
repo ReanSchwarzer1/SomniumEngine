@@ -35,6 +35,13 @@ pub struct GeneratedPropertyRow {
     pub default: ReflectValue,
     pub modified: bool,
     pub read_only: bool,
+    /// The selection does not agree on this field's value.
+    ///
+    /// Unity's convention, and the reason it is a flag rather than a sentinel
+    /// value: the row must be able to show that it *has* no single value while
+    /// still knowing what the primary's value is, so an untouched mixed row is
+    /// never written back.
+    pub mixed: bool,
 }
 
 /// One reflected component section in Details. Core snapshots the world and
@@ -61,6 +68,51 @@ pub fn generate_component_panel(
         preview_path: None,
         rows: generate_property_rows(schema, values, editors, rules),
     }
+}
+
+/// The synthetic multi-selection target, built Godot's way: the intersection
+/// of the selection's schemas, matched on `StableId`, `FieldId` **and**
+/// `FieldType`. `FieldType::accepts` is the type half, and it is the enum arm
+/// that earns the strictness — two `I64`s are indistinguishable until you ask
+/// which variant list they index, so a value outside the declared set drops
+/// the row rather than merging into one that would write an invalid variant.
+///
+/// Details learns nothing from this. It receives the same
+/// [`GeneratedComponentPanel`] it always receives; only `mixed` is new, and a
+/// single selection simply never sets it.
+pub fn generate_multi_component_panel(
+    schema: &ComponentSchema,
+    primary: &ReflectObject,
+    others: &[ReflectObject],
+    editors: &PropertyEditorRegistry,
+    rules: &EditingRulesRegistry,
+) -> GeneratedComponentPanel {
+    let mut panel = generate_component_panel(schema, primary, editors, rules);
+    panel.rows.retain_mut(|row| {
+        let field = match schema.field(row.field) {
+            Some(field) => field,
+            None => return false,
+        };
+        for other in others {
+            match other.get(&row.field) {
+                // A member that lacks the field, or types the field
+                // differently, drops the row out of the intersection entirely
+                // rather than being silently overwritten.
+                None => return false,
+                Some(value) if !field.ty.accepts(value) => return false,
+                Some(value) => row.mixed |= *value != row.value,
+            }
+        }
+        true
+    });
+    // A mixed row has no single value, so the modified dot — which means
+    // "differs from the default" — cannot honestly be lit.
+    for row in &mut panel.rows {
+        if row.mixed {
+            row.modified = false;
+        }
+    }
+    panel
 }
 
 pub fn generate_property_rows(
@@ -107,6 +159,7 @@ pub fn generate_property_rows(
                 default: field.default.clone(),
                 value,
                 read_only,
+                mixed: false,
             })
         })
         .collect();
@@ -193,6 +246,84 @@ mod tests {
         );
     }
 
+    /// The intersection marks disagreements and leaves agreement alone.
+    #[test]
+    fn a_multi_panel_marks_only_the_rows_that_disagree() {
+        let schema = somnium_asset::material::material_asset_schema();
+        let mut world = somnium_ecs::World::new();
+        let a = world.spawn((somnium_asset::material::MaterialAsset::default(),));
+        let b = world.spawn((somnium_asset::material::MaterialAsset {
+            roughness: 0.2,
+            ..somnium_asset::material::MaterialAsset::default()
+        },));
+        let primary = (schema.snapshot)(&world, a).unwrap();
+        let other = (schema.snapshot)(&world, b).unwrap();
+
+        let panel = generate_multi_component_panel(
+            &schema,
+            &primary,
+            std::slice::from_ref(&other),
+            &PropertyEditorRegistry::standard(),
+            &EditingRulesRegistry::default(),
+        );
+        let roughness = panel
+            .rows
+            .iter()
+            .find(|row| row.name == "roughness")
+            .expect("roughness is an editable material field");
+        assert!(roughness.mixed, "differing values must read as mixed");
+        assert!(
+            !roughness.modified,
+            "a mixed row has no single value, so it cannot claim to differ from the default"
+        );
+        assert!(
+            panel
+                .rows
+                .iter()
+                .any(|row| row.name == "metallic" && !row.mixed),
+            "agreeing rows stay ordinary"
+        );
+    }
+
+    /// One selected entity is the degenerate case and must produce exactly the
+    /// single-selection panel, mixed flags included.
+    #[test]
+    fn a_multi_panel_of_one_is_the_single_selection_panel() {
+        let schema = somnium_asset::material::material_asset_schema();
+        let mut world = somnium_ecs::World::new();
+        let entity = world.spawn((somnium_asset::material::MaterialAsset::default(),));
+        let values = (schema.snapshot)(&world, entity).unwrap();
+        let editors = PropertyEditorRegistry::standard();
+        let rules = EditingRulesRegistry::default();
+
+        assert_eq!(
+            generate_multi_component_panel(&schema, &values, &[], &editors, &rules),
+            generate_component_panel(&schema, &values, &editors, &rules)
+        );
+    }
+
+    /// A member missing the field drops the row out of the intersection
+    /// rather than letting the primary's value stand in for it.
+    #[test]
+    fn a_member_missing_the_field_drops_the_row() {
+        let schema = somnium_asset::material::material_asset_schema();
+        let mut world = somnium_ecs::World::new();
+        let entity = world.spawn((somnium_asset::material::MaterialAsset::default(),));
+        let primary = (schema.snapshot)(&world, entity).unwrap();
+        let mut partial = primary.clone();
+        let dropped = *primary.keys().next().unwrap();
+        partial.remove(&dropped);
+
+        let panel = generate_multi_component_panel(
+            &schema,
+            &primary,
+            std::slice::from_ref(&partial),
+            &PropertyEditorRegistry::standard(),
+            &EditingRulesRegistry::default(),
+        );
+        assert!(panel.rows.iter().all(|row| row.field != dropped));
+    }
+
     #[test]
     fn search_includes_schema_documentation() {
         let row = GeneratedPropertyRow {
@@ -216,6 +347,7 @@ mod tests {
             default: ReflectValue::F64(0.0),
             modified: true,
             read_only: false,
+            mixed: false,
         };
         assert_eq!(search_rows(&[row], "metres").len(), 1);
     }

@@ -82,6 +82,9 @@ pub struct UserInterface {
     /// Kept beside the acceptance so the highlight, the cursor and the adorner
     /// text cannot disagree about what is under the pointer.
     drop_highlight: Option<Rect>,
+    /// Viewport rubber-band, painted with the tree so it sits above the
+    /// viewport image but below every panel.
+    marquee: Option<Rect>,
     modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
@@ -116,6 +119,7 @@ impl UserInterface {
             active_gesture: None,
             drag_drop: crate::drag_drop::DragDropState::default(),
             drop_highlight: None,
+            marquee: None,
             modal_focus: None,
             viewport_handle: NodeHandle::NONE,
         }
@@ -134,10 +138,17 @@ impl UserInterface {
     }
 
     #[must_use]
-    pub fn is_dragging(&self) -> bool { self.drag_drop.is_dragging() }
+    pub fn is_dragging(&self) -> bool {
+        self.drag_drop.is_dragging()
+    }
 
     pub fn set_drop_acceptance(&mut self, value: Option<crate::drag_drop::DropAcceptance>) {
         self.drag_drop.set_acceptance(value);
+    }
+
+    /// The live viewport rubber-band, or `None` when there is not one.
+    pub fn set_marquee(&mut self, rect: Option<Rect>) {
+        self.marquee = rect;
     }
 
     /// Bounds the resolved drop target occupies on screen, or `None` when the
@@ -151,14 +162,19 @@ impl UserInterface {
         self.drop_highlight
     }
 
-    pub fn drag_payload(&self) -> Option<&crate::drag_drop::DragPayload> { self.drag_drop.payload() }
+    pub fn drag_payload(&self) -> Option<&crate::drag_drop::DragPayload> {
+        self.drag_drop.payload()
+    }
 
     pub fn take_completed_drop(&mut self) -> Option<crate::drag_drop::CompletedDrop> {
         self.drag_drop.release()
     }
 
     pub fn parent(&self, handle: NodeHandle) -> NodeHandle {
-        self.nodes.try_borrow(to_ih(handle)).map(|n| n.widget.parent).unwrap_or(NodeHandle::NONE)
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.parent)
+            .unwrap_or(NodeHandle::NONE)
     }
 
     /// Screen-space bounds of a node after layout.
@@ -522,7 +538,9 @@ impl UserInterface {
         if self.drag_drop.is_dragging() {
             return match self.drag_drop.acceptance().map(|a| a.effect) {
                 Some(crate::drag_drop::DropEffect::Move) => crate::node::CursorKind::Move,
-                Some(crate::drag_drop::DropEffect::Copy | crate::drag_drop::DropEffect::Link) => crate::node::CursorKind::Copy,
+                Some(crate::drag_drop::DropEffect::Copy | crate::drag_drop::DropEffect::Link) => {
+                    crate::node::CursorKind::Copy
+                }
                 _ => crate::node::CursorKind::NoDrop,
             };
         }
@@ -880,7 +898,19 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
+        self.draw_marquee();
         self.draw_drag_overlay();
+    }
+
+    /// The selection rubber-band: an accent hairline over a faint wash, using
+    /// the same recipe a valid drop target uses, because they mean the same
+    /// thing — "this is what the release will act on".
+    fn draw_marquee(&mut self) {
+        let Some(rect) = self.marquee else {
+            return;
+        };
+        let paint = crate::style::drop_target(crate::drag_drop::DropEffect::Move);
+        self.draw_ctx.push_paint(rect, &paint);
     }
 
     /// The drag ghost and the drop-target adorner, painted after the whole
@@ -1667,6 +1697,9 @@ mod input_contract_tests {
         );
         let items: Vec<TreeItem> = (0..30)
             .map(|id| TreeItem {
+                hidden: false,
+                locked: false,
+                script_error: false,
                 id,
                 label: format!("Row {id}"),
                 depth: 0,
@@ -1972,6 +2005,9 @@ mod input_contract_tests {
         ui.perform_layout();
 
         let item = |id: u32, label: &str| TreeItem {
+            hidden: false,
+            locked: false,
+            script_error: false,
             id,
             label: label.into(),
             depth: 0,
@@ -2117,14 +2153,20 @@ mod drag_overlay_tests {
             device_id: winit::event::DeviceId::dummy(),
             position: winit::dpi::PhysicalPosition::new(80.0, 80.0),
         };
-        assert!(ui.process_os_event(&moved), "motion must not reach the game");
+        assert!(
+            ui.process_os_event(&moved),
+            "motion must not reach the game"
+        );
 
         let release = WindowEvent::MouseInput {
             device_id: winit::event::DeviceId::dummy(),
             state: ElementState::Released,
             button: winit::event::MouseButton::Left,
         };
-        assert!(ui.process_os_event(&release), "release must not reach the game");
+        assert!(
+            ui.process_os_event(&release),
+            "release must not reach the game"
+        );
         assert!(ui.take_completed_drop().is_some());
     }
 
@@ -2144,7 +2186,10 @@ mod drag_overlay_tests {
     #[test]
     fn the_adorner_says_what_the_release_will_do() {
         let mut ui = dragging(DropEffect::Copy);
-        ui.set_drop_acceptance(Some(acceptance(DropEffect::Copy, Some("1 of 2 \u{b7} Copy"))));
+        ui.set_drop_acceptance(Some(acceptance(
+            DropEffect::Copy,
+            Some("1 of 2 \u{b7} Copy"),
+        )));
         assert_eq!(ui.drag_ghost_label(), "1 of 2 \u{b7} Copy");
 
         ui.set_drop_acceptance(Some(DropAcceptance::rejected(

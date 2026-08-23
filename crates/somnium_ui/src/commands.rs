@@ -206,6 +206,8 @@ pub struct EditorCtx {
     pub can_redo: bool,
     /// A Content Drawer item is the context-menu subject.
     pub has_content_target: bool,
+    /// The entity clipboard holds something to paste.
+    pub has_clipboard: bool,
 }
 
 /// Application menu that owns a command row.
@@ -225,6 +227,9 @@ pub enum CommandSurface {
     Menu(Menu),
     Toolbar,
     ContentContext,
+    /// The Outliner's right-click menu. CONTROL-F: built from the registry
+    /// like every other surface, so a command added once appears here too.
+    OutlinerContext,
 }
 
 /// Stable execution meaning of a command.
@@ -237,6 +242,11 @@ pub enum CommandAction {
     Redo,
     DeleteSelected,
     DuplicateSelected,
+    CopySelected,
+    PasteClipboard,
+    SelectAll,
+    FocusSelection,
+    RenameSelected,
     Play,
     Pause,
     Stop,
@@ -323,6 +333,14 @@ fn redo(ctx: &EditorCtx) -> Enablement {
         Enablement::Disabled("Nothing to redo")
     }
 }
+fn clipboard(ctx: &EditorCtx) -> Enablement {
+    if ctx.has_clipboard {
+        Enablement::Enabled
+    } else {
+        Enablement::Disabled("Copy something first")
+    }
+}
+
 fn content_target(ctx: &EditorCtx) -> Enablement {
     if ctx.has_content_target {
         Enablement::Enabled
@@ -341,6 +359,14 @@ const TOOLBAR: &[CommandSurface] = &[CommandSurface::Toolbar];
 const VIEW_TOOLBAR: &[CommandSurface] =
     &[CommandSurface::Menu(Menu::View), CommandSurface::Toolbar];
 const CONTENT: &[CommandSurface] = &[CommandSurface::ContentContext];
+const EDIT_OUTLINER: &[CommandSurface] = &[
+    CommandSurface::Menu(Menu::Edit),
+    CommandSurface::OutlinerContext,
+];
+const VIEW_OUTLINER: &[CommandSurface] = &[
+    CommandSurface::Menu(Menu::View),
+    CommandSurface::OutlinerContext,
+];
 const CREATE_CONTENT: &[CommandSurface] = &[
     CommandSurface::Menu(Menu::Create),
     CommandSurface::ContentContext,
@@ -429,7 +455,7 @@ fn declarations() -> Vec<Command> {
             Some(Chord::press(CommandKey::Delete)),
             "Delete the selected entity.",
             A::DeleteSelected,
-            EDIT,
+            EDIT_OUTLINER,
             selection
         ),
         command!(
@@ -439,7 +465,57 @@ fn declarations() -> Vec<Command> {
             ctrl('D'),
             "Duplicate the selected entity.",
             A::DuplicateSelected,
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.edit.copy",
+            "Copy",
+            "Edit",
+            ctrl('C'),
+            "Copy the selected entities and everything beneath them.",
+            A::CopySelected,
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.edit.paste",
+            "Paste",
+            "Edit",
+            ctrl('V'),
+            "Paste the clipboard under the selection.",
+            A::PasteClipboard,
+            EDIT_OUTLINER,
+            clipboard
+        ),
+        command!(
+            "editor.edit.select_all",
+            "Select All",
+            "Edit",
+            ctrl('A'),
+            "Select every entity in the scene.",
+            A::SelectAll,
             EDIT,
+            always
+        ),
+        command!(
+            "editor.edit.rename",
+            "Rename",
+            "Edit",
+            Some(Chord::press(CommandKey::Function(2))),
+            "Rename the selected entity in place.",
+            A::RenameSelected,
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.view.focus_selection",
+            "Focus Selection",
+            "View",
+            Some(Chord::press(CommandKey::Letter('F'))),
+            "Move the editor camera to frame the selection.",
+            A::FocusSelection,
+            VIEW_OUTLINER,
             selection
         ),
         command!(
@@ -1093,6 +1169,47 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// CONTROL-F: the Outliner's menu is registry-derived, so adding a
+    /// command declares it there too. The test names the seven the phase asks
+    /// for so a rename cannot silently drop one.
+    #[test]
+    fn the_outliner_context_menu_is_built_from_the_registry() {
+        let ids: Vec<_> = registry()
+            .surface(CommandSurface::OutlinerContext)
+            .into_iter()
+            .map(|command| command.id)
+            .collect();
+        for wanted in [
+            "editor.edit.copy",
+            "editor.edit.paste",
+            "editor.edit.delete",
+            "editor.edit.duplicate",
+            "editor.edit.rename",
+            "editor.view.focus_selection",
+        ] {
+            assert!(
+                ids.contains(&wanted),
+                "{wanted} must reach the Outliner menu"
+            );
+        }
+    }
+
+    /// Paste is disabled until something is copied, and says why.
+    #[test]
+    fn paste_states_its_own_precondition() {
+        let command = *registry().get("editor.edit.paste").unwrap();
+        let empty = EditorCtx::default();
+        assert_eq!(
+            command.enabled(&empty),
+            Enablement::Disabled("Copy something first")
+        );
+        let filled = EditorCtx {
+            has_clipboard: true,
+            ..EditorCtx::default()
+        };
+        assert!(command.enabled(&filled).is_enabled());
+    }
 
     #[test]
     fn ids_bindings_help_and_palette_coverage_are_complete() {

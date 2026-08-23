@@ -1200,6 +1200,23 @@ pub(crate) fn build_editor_layout(
     .build();
     let content_menu = ui.add_node(content_menu_node, content_menu_popup);
 
+    // CONTROL-F: the Outliner's own right-click menu. A second popup rather
+    // than a shared one, because the two can never be open at once but a
+    // shared node would make that an assumption instead of a fact.
+    let outliner_menu_popup_node =
+        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
+    let outliner_menu_popup = ui.add_node(outliner_menu_popup_node, root);
+    let outliner_menu_node = ContextMenuBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_desired_position(Vec2::ZERO),
+    )
+    .with_items(Vec::new())
+    .with_font_id(font_id)
+    .build();
+    let outliner_menu = ui.add_node(outliner_menu_node, outliner_menu_popup);
+
     let palette_popup_node = PopupBuilder::new(
         WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
     )
@@ -1456,6 +1473,8 @@ pub(crate) fn build_editor_layout(
         unsaved_discard,
         unsaved_cancel,
         content_menu_popup,
+        outliner_menu_popup,
+        outliner_menu,
         content_menu,
         name_popup,
         name_title,

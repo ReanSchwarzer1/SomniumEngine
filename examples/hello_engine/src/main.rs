@@ -22,10 +22,11 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet, Engine,
-    EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent,
-    LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
-    SimulationState, Transform, WorldTransform, camera_view_from_world, propagate_transforms,
+    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
+    EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState,
+    KeyCode, LightComponent, LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent,
+    MeshKind, Name, Parent, SimulationState, Transform, WorldTransform, camera_view_from_world,
+    propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -1593,6 +1594,25 @@ impl GameApp for HelloGame {
     fn on_update(&mut self, ctx: &mut EngineContext) {
         let dt = ctx.dt();
 
+        // CONTROL-F: the editor asked to frame something. The camera lives
+        // here, so the engine hands over a centre and a radius and this is
+        // where it becomes a pose — keeping the current viewing direction so
+        // `F` reframes rather than reorienting.
+        if let Some((centre, radius)) = ctx.take_camera_focus() {
+            let direction = (self.camera.position - centre).normalize_or_zero();
+            let direction = if direction == Vec3::ZERO {
+                Vec3::new(0.0, 0.4, 1.0).normalize()
+            } else {
+                direction
+            };
+            self.camera.position = centre + direction * (radius * 3.0);
+            let look = (centre - self.camera.position).normalize_or_zero();
+            if look != Vec3::ZERO {
+                self.camera.yaw = look.z.atan2(look.x).to_degrees();
+                self.camera.pitch = look.y.clamp(-1.0, 1.0).asin().to_degrees();
+            }
+        }
+
         // Stop rolls the shared simulation clock back to zero. Restore the
         // demonstrator vessel at that point, while ordinary editor preview
         // continues to advance water and rigid-body simulation.
@@ -1942,7 +1962,18 @@ impl GameApp for HelloGame {
                 let mat_col = archetype
                     .column_index(ComponentId::of::<MaterialComponent>())
                     .unwrap();
+                // CONTROL-F: hidden entities are skipped here rather than in
+                // the renderer, because "hidden" is an authoring state and the
+                // renderer has no business knowing about the Outliner. Most
+                // archetypes carry no flags column at all, so this costs one
+                // lookup per archetype, not per entity.
+                let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
                 for row in 0..archetype.len() {
+                    if let Some(col) = flags_col
+                        && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
+                    {
+                        continue;
+                    }
                     let wt = unsafe { archetype.column(wt_col).get::<WorldTransform>(row) };
                     let mesh = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
                     let material =

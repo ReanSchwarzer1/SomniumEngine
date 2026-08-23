@@ -116,6 +116,15 @@ pub struct EngineContext<'a> {
     /// context is rebuilt per callback and cannot own the state.
     pub camera_speed_request: Option<f32>,
 
+    /// A pending "frame this" request: the world-space centre the editor
+    /// camera should look at and the radius that should fit in view.
+    ///
+    /// The editor camera lives in the game layer, so CONTROL-F's `F` — and
+    /// CONTROL-G's bookmarks, orbit pivot and view presets after it — arrive
+    /// as a request the game honours rather than as a write behind its back.
+    /// Read it with [`Self::take_camera_focus`], which clears it.
+    pub camera_focus: Option<(glam::Vec3, f32)>,
+
     /// The UI manager for sending messages to the HTML frontend.
     pub ui: &'a mut UiManager,
 
@@ -138,6 +147,11 @@ pub struct EngineContext<'a> {
 }
 
 impl<'a> EngineContext<'a> {
+    /// Consume any pending focus request. Returns `(centre, radius)` once.
+    pub fn take_camera_focus(&mut self) -> Option<(glam::Vec3, f32)> {
+        self.camera_focus.take()
+    }
+
     /// Request a new editor camera speed, as a normalized `0..=1` slider
     /// position. Applied by the engine once the callback returns, which also
     /// refreshes the viewport toolbar so the slider tracks the change.
@@ -175,6 +189,7 @@ impl<'a> EngineContext<'a> {
             camera_speed,
             simulation,
             camera_speed_request: None,
+            camera_focus: None,
             ui,
             scripts,
             should_exit: false,

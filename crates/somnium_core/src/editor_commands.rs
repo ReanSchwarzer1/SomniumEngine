@@ -76,6 +76,99 @@ impl EditorCommand for AssignMaterialCmd {
     }
 }
 
+/// One reflected property edit fanned out across a multi-selection.
+///
+/// Godot's `multi_node_edit` and Unity both promise the same thing and it is
+/// the promise that matters: setting roughness on twelve entities is *one*
+/// history entry, so the undo that follows is one keystroke rather than
+/// twelve. The per-entity commands are ordinary [`SetFieldCmd`]s, which is why
+/// scoped undo, validation and coalescing all keep working unchanged.
+pub struct SetFieldMultiCmd {
+    commands: Vec<SetFieldCmd>,
+    description: String,
+    gesture: GestureId,
+}
+
+impl SetFieldMultiCmd {
+    /// Build the fan-out. Entities that lack the component, or that would
+    /// reject the value, are skipped rather than failing the whole edit — the
+    /// intersection already guaranteed the row exists on every member, so a
+    /// skip here means the world changed under the gesture.
+    pub fn new(
+        world: &World,
+        entities: &[Entity],
+        component: StableId,
+        field: FieldId,
+        value: ReflectValue,
+        gesture: GestureId,
+        mut baseline: impl FnMut(Entity) -> Option<FieldUndoSnapshot>,
+    ) -> Result<Self, String> {
+        let mut commands = Vec::new();
+        for entity in entities {
+            match SetFieldCmd::new(
+                world,
+                *entity,
+                component,
+                field,
+                value.clone(),
+                gesture,
+                baseline(*entity),
+            ) {
+                Ok(command) => commands.push(command),
+                Err(error) if commands.is_empty() && entities.len() == 1 => return Err(error),
+                Err(_) => {}
+            }
+        }
+        let first = commands
+            .first()
+            .ok_or("no selected entity accepted the edit")?;
+        Ok(Self {
+            description: first.description().to_owned(),
+            gesture,
+            commands,
+        })
+    }
+
+    #[must_use]
+    pub fn gesture(&self) -> GestureId {
+        self.gesture
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+}
+
+impl EditorCommand for SetFieldMultiCmd {
+    fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        for command in &mut self.commands {
+            command.execute(world, selected);
+        }
+    }
+
+    fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
+        for command in self.commands.iter_mut().rev() {
+            command.undo(world, selected);
+        }
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// One entity still holding its baseline is enough to make the gesture
+    /// real, so the whole fan-out only vanishes when nothing changed anywhere.
+    fn is_no_op(&self) -> bool {
+        self.commands.iter().all(EditorCommand::is_no_op)
+    }
+}
+
 // ─── EditorCommand trait ──────────────────────────────────────────────────
 
 /// A reversible editor operation.
@@ -590,9 +683,74 @@ impl EntitySnapshot {
                 world.spawn((transform, name, wt, mesh, mat, mk))
             }
             (Some(mesh), Some(mat), None, None) => world.spawn((transform, name, wt, mesh, mat)),
+            // A mesh without a material is a real authored state — imported
+            // geometry before a material is assigned, and every primitive the
+            // Create menu makes. Before CONTROL-F these fell through to the
+            // catch-all and silently lost their geometry on delete-then-undo,
+            // and on paste.
+            (Some(mesh), None, Some(light), Some(mk)) => {
+                world.spawn((transform, name, wt, mesh, light, mk))
+            }
+            (Some(mesh), None, Some(light), None) => {
+                world.spawn((transform, name, wt, mesh, light))
+            }
+            (Some(mesh), None, None, Some(mk)) => world.spawn((transform, name, wt, mesh, mk)),
+            (Some(mesh), None, None, None) => world.spawn((transform, name, wt, mesh)),
             (None, _, Some(light), _) => world.spawn((transform, name, wt, light)),
             _ => world.spawn((transform, name, wt)),
         }
+    }
+}
+
+/// Reversible hide/lock toggle.
+///
+/// Inserts [`crate::EditorFlags`] on demand, because the overwhelming majority
+/// of entities never carry it and a default-valued component on every entity
+/// would cost an archetype split for nothing.
+pub struct SetEditorFlagsCmd {
+    entity: Entity,
+    before: crate::EditorFlags,
+    after: crate::EditorFlags,
+}
+
+impl SetEditorFlagsCmd {
+    /// Build the toggle from the current and desired flag state.
+    pub fn new(entity: Entity, before: crate::EditorFlags, after: crate::EditorFlags) -> Self {
+        Self {
+            entity,
+            before,
+            after,
+        }
+    }
+
+    fn write(&self, world: &mut World, value: crate::EditorFlags) {
+        if let Some(flags) = world.get_mut::<crate::EditorFlags>(self.entity) {
+            *flags = value;
+        } else {
+            let _ = world.insert_component(self.entity, value);
+        }
+    }
+}
+
+impl EditorCommand for SetEditorFlagsCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.write(world, self.after);
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.write(world, self.before);
+    }
+
+    fn description(&self) -> &str {
+        if self.before.locked != self.after.locked {
+            "Lock"
+        } else {
+            "Hide"
+        }
+    }
+
+    fn is_no_op(&self) -> bool {
+        self.before == self.after
     }
 }
 
@@ -919,19 +1077,30 @@ pub struct CommandGroup {
 
 impl CommandGroup {
     pub fn new(description: &'static str, commands: Vec<Box<dyn EditorCommand>>) -> Self {
-        Self { description, commands }
+        Self {
+            description,
+            commands,
+        }
     }
 }
 
 impl EditorCommand for CommandGroup {
     fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
-        for command in &mut self.commands { command.execute(world, selected); }
+        for command in &mut self.commands {
+            command.execute(world, selected);
+        }
     }
     fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
-        for command in self.commands.iter_mut().rev() { command.undo(world, selected); }
+        for command in self.commands.iter_mut().rev() {
+            command.undo(world, selected);
+        }
     }
-    fn description(&self) -> &str { self.description }
-    fn is_no_op(&self) -> bool { self.commands.is_empty() || self.commands.iter().all(|c| c.is_no_op()) }
+    fn description(&self) -> &str {
+        self.description
+    }
+    fn is_no_op(&self) -> bool {
+        self.commands.is_empty() || self.commands.iter().all(|c| c.is_no_op())
+    }
 }
 
 /// Recoverable content import. Worker-created destination files are already
@@ -943,10 +1112,14 @@ pub struct FileImportCmd {
 
 impl FileImportCmd {
     pub fn new(destinations: Vec<std::path::PathBuf>) -> Self {
-        let files = destinations.into_iter().enumerate().map(|(index, live)| {
-            let recovery = live.with_extension(format!("somnium-undo-{index}"));
-            (live, recovery)
-        }).collect();
+        let files = destinations
+            .into_iter()
+            .enumerate()
+            .map(|(index, live)| {
+                let recovery = live.with_extension(format!("somnium-undo-{index}"));
+                (live, recovery)
+            })
+            .collect();
         Self { files }
     }
 }
@@ -954,15 +1127,21 @@ impl FileImportCmd {
 impl EditorCommand for FileImportCmd {
     fn execute(&mut self, _world: &mut World, _selected: &mut Option<Entity>) {
         for (live, recovery) in &self.files {
-            if recovery.exists() && !live.exists() { let _ = std::fs::rename(recovery, live); }
+            if recovery.exists() && !live.exists() {
+                let _ = std::fs::rename(recovery, live);
+            }
         }
     }
     fn undo(&mut self, _world: &mut World, _selected: &mut Option<Entity>) {
         for (live, recovery) in &self.files {
-            if live.exists() && !recovery.exists() { let _ = std::fs::rename(live, recovery); }
+            if live.exists() && !recovery.exists() {
+                let _ = std::fs::rename(live, recovery);
+            }
         }
     }
-    fn description(&self) -> &str { "Import Files" }
+    fn description(&self) -> &str {
+        "Import Files"
+    }
 }
 
 /// Durable, validated multi-entity hierarchy move.
@@ -973,37 +1152,69 @@ pub struct ReparentBatchCmd {
 }
 
 impl ReparentBatchCmd {
-    pub fn new(world: &mut World, children: Vec<Entity>, new_parent: Option<Entity>) -> Result<Self, String> {
-        if children.is_empty() { return Err("No entities were dragged".into()); }
+    pub fn new(
+        world: &mut World,
+        children: Vec<Entity>,
+        new_parent: Option<Entity>,
+    ) -> Result<Self, String> {
+        if children.is_empty() {
+            return Err("No entities were dragged".into());
+        }
         if let Some(parent) = new_parent {
-            if children.contains(&parent) { return Err("An entity cannot be parented to itself".into()); }
+            if children.contains(&parent) {
+                return Err("An entity cannot be parented to itself".into());
+            }
             for child in &children {
                 let mut cursor = Some(parent);
                 while let Some(entity) = cursor {
-                    if entity == *child { return Err("An entity cannot be parented to its descendant".into()); }
-                    cursor = world.get::<Parent>(entity).and_then(|p| world.is_alive(p.entity).then_some(p.entity));
+                    if entity == *child {
+                        return Err("An entity cannot be parented to its descendant".into());
+                    }
+                    cursor = world
+                        .get::<Parent>(entity)
+                        .and_then(|p| world.is_alive(p.entity).then_some(p.entity));
                 }
             }
         }
-        let new_parent_id = match new_parent { Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?), None => None };
+        let new_parent_id = match new_parent {
+            Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?),
+            None => None,
+        };
         let mut ids = Vec::with_capacity(children.len());
         let mut old = Vec::with_capacity(children.len());
         let mut changed = false;
         for child in children {
-            ids.push(world.ensure_persistent_id(child).map_err(|e| e.to_string())?);
-            let old_entity = world.get::<Parent>(child).and_then(|p| world.is_alive(p.entity).then_some(p.entity));
-            let old_id = match old_entity { Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?), None => None };
+            ids.push(
+                world
+                    .ensure_persistent_id(child)
+                    .map_err(|e| e.to_string())?,
+            );
+            let old_entity = world
+                .get::<Parent>(child)
+                .and_then(|p| world.is_alive(p.entity).then_some(p.entity));
+            let old_id = match old_entity {
+                Some(e) => Some(world.ensure_persistent_id(e).map_err(|e| e.to_string())?),
+                None => None,
+            };
             changed |= old_id != new_parent_id;
             old.push(old_id);
         }
-        if !changed { return Err("The hierarchy would not change".into()); }
-        Ok(Self { children: ids, old_parents: old, new_parent: new_parent_id })
+        if !changed {
+            return Err("The hierarchy would not change".into());
+        }
+        Ok(Self {
+            children: ids,
+            old_parents: old,
+            new_parent: new_parent_id,
+        })
     }
 
     fn apply(&self, world: &mut World, parents: impl Iterator<Item = Option<PersistentId>>) {
         let pairs: Vec<_> = self.children.iter().copied().zip(parents).collect();
         for (child_id, parent_id) in pairs {
-            let Some(child) = world.entity_by_persistent_id(child_id) else { continue };
+            let Some(child) = world.entity_by_persistent_id(child_id) else {
+                continue;
+            };
             let parent = parent_id.and_then(|id| world.entity_by_persistent_id(id));
             do_reparent_entity(world, child, parent);
         }
@@ -1012,12 +1223,17 @@ impl ReparentBatchCmd {
 
 impl EditorCommand for ReparentBatchCmd {
     fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
-        self.apply(world, std::iter::repeat(self.new_parent).take(self.children.len()));
+        self.apply(
+            world,
+            std::iter::repeat(self.new_parent).take(self.children.len()),
+        );
     }
     fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
         self.apply(world, self.old_parents.iter().copied());
     }
-    fn description(&self) -> &str { "Reparent Entities" }
+    fn description(&self) -> &str {
+        "Reparent Entities"
+    }
 }
 
 /// Reversible hierarchy reparent.
@@ -1650,6 +1866,163 @@ mod landscape_tests {
         assert!(live.exists(), "redo restores the same collision-safe name");
         assert_eq!(std::fs::read(&live).unwrap(), b"png");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CONTROL-F's exit clause, literally: select twelve entities, set their
+    /// roughness once, undo once.
+    #[test]
+    fn twelve_entities_edited_once_undo_once() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..12)
+            .map(|_| {
+                world.spawn((
+                    Transform::default(),
+                    Name::new("box"),
+                    WorldTransform::identity(),
+                ))
+            })
+            .collect();
+
+        let component = StableId::new("somnium.Transform");
+        let field = crate::reflect_registry::component_registry()
+            .by_stable_id(component)
+            .expect("Transform is registered")
+            .fields
+            .iter()
+            .find(|field| field.name == "scale")
+            .expect("Transform has a scale")
+            .id;
+
+        let mut selected = Some(entities[0]);
+        let mut undo = UndoStack::new(8);
+        // A sentinel beneath the edit, so "one undo" is checked against
+        // something rather than against an empty stack.
+        undo.push(
+            Box::new(SetNameCmd::new(
+                entities[0].index(),
+                Name::new("box"),
+                Name::new("sentinel"),
+            )),
+            &mut world,
+            &mut selected,
+        );
+
+        let command = SetFieldMultiCmd::new(
+            &world,
+            &entities,
+            component,
+            field,
+            ReflectValue::Vec3([2.0, 2.0, 2.0]),
+            GestureId(11),
+            |_| None,
+        )
+        .expect("the fan-out must build");
+        assert_eq!(command.len(), 12);
+        undo.push(Box::new(command), &mut world, &mut selected);
+        for entity in &entities {
+            assert_eq!(world.get::<Transform>(*entity).unwrap().scale.x, 2.0);
+        }
+
+        assert!(undo.undo(&mut world, &mut selected));
+        for entity in &entities {
+            assert_eq!(
+                world.get::<Transform>(*entity).unwrap().scale.x,
+                1.0,
+                "one undo must restore every entity"
+            );
+        }
+        assert_eq!(
+            world.get::<Name>(entities[0]).unwrap().as_str(),
+            "sentinel",
+            "the entry beneath the multi-edit must survive"
+        );
+        assert!(undo.redo(&mut world, &mut selected));
+        assert_eq!(world.get::<Transform>(entities[11]).unwrap().scale.x, 2.0);
+    }
+
+    /// Every entity keeps its own baseline, so a fan-out over entities that
+    /// started at different values restores all of them, not one shared value.
+    #[test]
+    fn the_fan_out_restores_each_entity_to_its_own_baseline() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..3)
+            .map(|index| {
+                world.spawn((
+                    Transform::from_translation(glam::Vec3::splat(index as f32)),
+                    Name::new("box"),
+                    WorldTransform::identity(),
+                ))
+            })
+            .collect();
+        let component = StableId::new("somnium.Transform");
+        let field = crate::reflect_registry::component_registry()
+            .by_stable_id(component)
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.name == "translation")
+            .unwrap()
+            .id;
+
+        let mut selected = None;
+        let mut undo = UndoStack::new(4);
+        let command = SetFieldMultiCmd::new(
+            &world,
+            &entities,
+            component,
+            field,
+            ReflectValue::Vec3([9.0, 9.0, 9.0]),
+            GestureId(3),
+            |_| None,
+        )
+        .unwrap();
+        undo.push(Box::new(command), &mut world, &mut selected);
+        assert!(undo.undo(&mut world, &mut selected));
+        for (index, entity) in entities.iter().enumerate() {
+            assert_eq!(
+                world.get::<Transform>(*entity).unwrap().translation.x,
+                index as f32
+            );
+        }
+    }
+
+    /// A fan-out where nothing actually changed does not enter history.
+    #[test]
+    fn a_fan_out_that_changes_nothing_is_a_no_op() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..3)
+            .map(|_| {
+                world.spawn((
+                    Transform::default(),
+                    Name::new("box"),
+                    WorldTransform::identity(),
+                ))
+            })
+            .collect();
+        let component = StableId::new("somnium.Transform");
+        let field = crate::reflect_registry::component_registry()
+            .by_stable_id(component)
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.name == "scale")
+            .unwrap()
+            .id;
+
+        let mut selected = None;
+        let mut undo = UndoStack::new(4);
+        let command = SetFieldMultiCmd::new(
+            &world,
+            &entities,
+            component,
+            field,
+            ReflectValue::Vec3([1.0, 1.0, 1.0]),
+            GestureId(4),
+            |_| None,
+        )
+        .unwrap();
+        undo.push(Box::new(command), &mut world, &mut selected);
+        assert!(!undo.can_undo(), "an unchanged edit must not enter history");
     }
 
     #[test]

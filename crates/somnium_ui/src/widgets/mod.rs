@@ -1,3 +1,10 @@
+/// What an editor shows when the selection does not agree on a value.
+///
+/// One constant rather than a literal per widget, because the em dash is a
+/// contract: an untouched control displaying it has *no* value to write back,
+/// and every widget that can show it must clear it on the first real edit.
+pub const MIXED_PLACEHOLDER: &str = "\u{2014}";
+
 pub mod border;
 pub mod button;
 pub mod canvas;

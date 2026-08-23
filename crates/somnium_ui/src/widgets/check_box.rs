@@ -19,6 +19,9 @@ pub enum CheckBoxMessage {
 
 pub struct CheckBox {
     pub checked: bool,
+    /// Tri-state: the selection disagrees. Painted as a dash rather than a
+    /// tick, and cleared the moment the box is clicked.
+    pub mixed: bool,
     pub label: String,
     pub font_id: u8,
     pub px: f32,
@@ -47,7 +50,17 @@ impl Control for CheckBox {
         let paint = crate::style::input(crate::style::VisualState::rest());
         ctx.push_paint(box_r, &paint);
         let _ = t;
-        if self.checked {
+        if self.mixed {
+            // Tri-state. A dash across the box, not a tick and not empty:
+            // either of those would claim a value the selection does not have.
+            let bar = Rect::new(
+                box_r.x + 3.0,
+                box_r.y + box_r.h * 0.5 - 1.0,
+                box_r.w - 6.0,
+                2.0,
+            );
+            ctx.push_rect_filled(bar, theme::active().semantic.text.secondary.bytes());
+        } else if self.checked {
             let (uv, tex) = IconId::Check.draw_quad(box_r);
             ctx.push_textured_rect(
                 box_r,
@@ -81,6 +94,7 @@ impl Control for CheckBox {
             return;
         }
         if let Some(WidgetMessage::MouseDown { .. }) = msg.data::<WidgetMessage>() {
+            self.mixed = false;
             self.checked = !self.checked;
             emit.push(UiMessage::new(
                 widget.handle,
@@ -94,6 +108,7 @@ impl Control for CheckBox {
 
 pub struct CheckBoxBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     checked: bool,
     label: String,
     font_id: u8,
@@ -101,8 +116,16 @@ pub struct CheckBoxBuilder {
 }
 
 impl CheckBoxBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
+            mixed: false,
             widget,
             checked: false,
             label: String::new(),
@@ -130,6 +153,7 @@ impl CheckBoxBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(CheckBox {
+                mixed: self.mixed,
                 checked: self.checked,
                 label: self.label,
                 font_id: self.font_id,
@@ -152,6 +176,7 @@ mod tests {
     #[test]
     fn toggle_starts_unchecked() {
         let cb = CheckBox {
+            mixed: false,
             checked: false,
             label: "Hex".into(),
             font_id: 0,
