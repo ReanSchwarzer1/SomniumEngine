@@ -79,6 +79,92 @@
 >   asserted without verifying.
 >   **Start at CONTROL-A** (the reachability audit); do not write a widget
 >   first, do not restart at 26-A, and do not repaint anything Phase 27 painted.
+> - **Phase MORROWIND — NetImmerse (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_MORROWIND.md` — written 2026-08-23 against `7c0b66f`.
+>   **The engine-half phase**, and the one that **retires §17.6's numbering**
+>   (see §1.3 there: Phase 26 shipped as the editor's IA and Phase 27 as its
+>   paint layer, so the numbers 26/27 are spent and 30–38 are absorbed into
+>   eight codenamed tracks). Premise, measured: Somnium is **113,892 lines over
+>   eleven crates and 85.1% of it is three of them** — renderer 50,206, UI
+>   27,530, core 19,220. Against that, `somnium_audio` is **93 lines** with
+>   `bus.rs`/`listener.rs`/`error.rs` as one-line stubs and `AudioEngine::play`
+>   silently discarding its volume argument; `material/hlms.rs` is a **29-line
+>   stub** under a doc comment describing Ogre's HLMS, so 48 WGSL files /
+>   12,079 lines have **no permutation system and no hot reload**;
+>   `renderer/jobs.rs` is **75 lines** of one rayon helper, so there is **no job
+>   system** with priorities, deadlines or cancellation; and the UI `Primitive`
+>   is **axis-aligned-rect-only with three fixed textures**, so a game cannot
+>   draw a rotated bar, a bezier wire, or its own sprite *at all*.
+>   Zero occurrences of `bone`, `armature`, `navmesh`, `pathfind`, `gamepad`,
+>   `action_map`, `localiz` or `state_machine`.
+>   **Eight tracks / 36 sub-phases:** BALMORA (census, jobs, shaders), VIVEC
+>   (the runtime UI), CONSTRUCTION SET (docking, one graph surface, one
+>   timeline, virtualisation, play-in-editor), HLAALU (prefabs, splines,
+>   rule-driven scattering), SILT STRIDER (cook, residency, world partition,
+>   HLOD/impostors/floating origin), DWEMER (skinning into the visibility
+>   buffer, blend trees, IK), SIXTH HOUSE (navmesh, behaviour trees), RED
+>   MOUNTAIN (virtual shadow maps, GPU particles, a GI tier below ray query,
+>   OIT/SMAA, virtual texturing), ALMSIVI (input actions, save games, audio,
+>   localisation).
+>   **Order is decided (2026-08-23): CONTROL runs first and completes in full —
+>   Tracks 2 and 3 included — then MORROWIND.** Recorded in both documents
+>   (`phase_CONTROL.md` §9.1 and this phase's preamble), which closes CONTROL's
+>   "reasonable stopping point after J" as an exit: **CONTROL-K's curve and
+>   gradient editors are a hard dependency of MORROWIND-H, -L and -AG** and sit
+>   past that point. Six of eight tracks consume CONTROL's seams, and §6.7 is
+>   the explicit non-overlap
+>   table (**this phase builds no curve editor, no gradient editor, no
+>   preferences window, no time of day, no clouds, no weather** — all of those
+>   are CONTROL). MORROWIND-A reconciles §7's seams against what CONTROL
+>   actually shipped, since they were written against CONTROL's plan.
+>   **§6.8 is a second reconnaissance pass over the ~25 repositories in
+>   `example_repo` nobody had opened** — note that several nest one level
+>   (`ogre-next-master/ogre-next-master/`, `fyrox/Fyrox-master/`,
+>   `bevy/bevy-main/`, …), which is why the first pass under-reported the tree.
+>   Seven findings changed the plan: **Stride's `Stride.Graphics.Regression`
+>   golden-image testing** (Somnium has 945 tests and **zero image assertions** —
+>   now GHOSTFENCE's first row), Panda3D's **pipeline cycling** (recorded as the
+>   design for multi-threaded recording, §14.8, deliberately not adopted),
+>   **Babylon's six node editors on one substrate** (a stronger §6.2, and it adds
+>   node-geometry and node-particle graphs), **Babylon's `guiEditor` + Fyrox's
+>   `ui_scene`** (which forced a 35th sub-phase, **MORROWIND-M2 — the GUI layout
+>   editor**, because a UI framework with no layout editor is half-shipped),
+>   `bevy_terrain/big_space.rs` vs `terra/softdouble.glsl` (the floating-origin
+>   decision, two Rust references that disagree), `terra/rshader`'s
+>   dynamic/static shader split (MORROWIND-C, already working in Rust), and
+>   **Luanti's `staticobject`** (entities serialise into their cell on unload —
+>   the streaming question the plan had left implicit). Ren'Py's `rollback.py`
+>   informs play-in-editor state restore; Defold's four standalone cookers and
+>   `liveupdate` inform the cook.
+>   **§6.9 is a third pass — Korge, s&box, and the web research that had failed.
+>   It changed a frozen constraint: wgpu 30.0.0 released 2026-07-01** and adds
+>   `EXPERIMENTAL_MESH_SHADER` (fully supported on Vulkan — and Somnium's
+>   visibility buffer is *already* meshlet-based), `MULTI_DRAW_INDIRECT_COUNT`,
+>   `ACCELERATION_STRUCTURE_BINDING_ARRAY`, WGSL `enable` extensions, and two
+>   breaking changes (`push_constant` → **`immediate`** across 48 shaders;
+>   subgroup sizes move from `Limits` to `AdapterInfo`). **MORROWIND-A2 is the
+>   bump, taken alone**, and it probes every flag on real hardware because a
+>   changelog is not a measurement. Ray tracing stays `EXPERIMENTAL_RAY_QUERY`
+>   only — naga has ray *queries*, not RT pipelines — which confirms Somnium's
+>   existing choice. Also from the web pass, each a lead to confirm rather than
+>   a fact: `oxidized_navigation`/`polyanya`/`landmass` for navmesh (**caveat:
+>   `oxidized_navigation` wants `parry3d` colliders and Somnium uses Jolt**),
+>   `cosmic-text` now shaping via `harfrust` (so Phase 27's deferred
+>   `cosmic-text` question has moved), `vk-video` decoding straight into a
+>   `wgpu::Texture`, and **Godot 4.5 shipping AccessKit screen-reader support**,
+>   which makes MORROWIND-I precedented rather than speculative. Korge's
+>   `korge-ipc` (a memory-mapped shared framebuffer plus an event socket, six
+>   files) gives MORROWIND-N a third design — out-of-process play — beside
+>   snapshotting and mutation logging. s&box's `Sandbox.Hotload/`
+>   (`InstanceUpgrader.cs`, `UpdateReferences.cs`) is why **§14.11 now warns that
+>   shader and asset hot reload are easy only because their live state is a
+>   handle table**, and code reload is a different, much harder feature.
+>   §9.3 names the honest cut if the whole thing cannot be run: **eleven
+>   sub-phases** (Track 0, then D+E+G, U+V, Q+R, AE+AG), which closes seven of
+>   the nine rows in §5.1's capability table. §16 records source confidence and
+>   states plainly that **the web-research pass did not complete**, so the
+>   document contains no third-party version claims and every wgpu-dependent
+>   sub-phase opens with a capability probe instead. **Start at MORROWIND-A.**
 > - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
 >   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
 >   for every number. **Shipped:** the profiler clock + `.somtime` timing harness
