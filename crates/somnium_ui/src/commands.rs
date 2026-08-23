@@ -285,6 +285,10 @@ pub enum CommandAction {
     RecallBookmark(u8),
     /// Orbit the camera around the selection rather than around itself.
     ToggleOrbitSelection,
+    /// CONTROL-L: jump the day cycle's clock to a named hour. The payload is
+    /// the hour itself rather than an index into a table, so a rearranged
+    /// preset list cannot silently change what a persisted keybinding does.
+    SetTimeOfDay(&'static str),
 }
 
 /// One editor command declaration.
@@ -442,6 +446,40 @@ fn view_mode_commands() -> Vec<Command> {
         });
     }
     commands
+}
+
+/// CONTROL-L's named times: `(id, label, hour)`.
+///
+/// One table, in the registry, because the label a user reads and the hour the
+/// sun moves to must be one declaration. `somnium_core::time_of_day`
+/// re-exports it and looks hours up by id, so a preset added here is a preset
+/// the driver understands with no second edit.
+pub const TIME_PRESETS: [(&str, &str, f32); 6] = [
+    ("dawn", "Dawn", 5.5),
+    ("sunrise", "Sunrise", 7.0),
+    ("noon", "Noon", 12.0),
+    ("golden_hour", "Golden Hour", 19.0),
+    ("dusk", "Dusk", 20.5),
+    ("night", "Night", 1.0),
+];
+
+/// The command family built from [`TIME_PRESETS`].
+fn time_of_day_commands() -> Vec<Command> {
+    TIME_PRESETS
+        .iter()
+        .map(|(id, label, hour)| Command {
+            id: leak_id("editor.time.", id),
+            label: Box::leak(format!("Time: {label}").into_boxed_str()),
+            category: "Environment",
+            default_binding: None,
+            help: Box::leak(
+                format!("Set the scene's day cycle to {label} ({hour:.2} h).").into_boxed_str(),
+            ),
+            action: CommandAction::SetTimeOfDay(id),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        })
+        .collect()
 }
 
 /// Ids are `&'static str` throughout the registry, and the registry is built
@@ -1054,6 +1092,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.create.environment",
+            "Create Environment",
+            "Create",
+            None,
+            "Create the scene's day cycle, sky and weather.",
+            A::CreateEntity(C::Environment),
+            CREATE,
+            always
+        ),
+        command!(
             "editor.asset.new_material",
             "New Material…",
             "Create",
@@ -1185,6 +1233,7 @@ pub fn registry() -> &'static CommandRegistry {
         let mut commands = declarations();
         commands.extend(view_mode_commands());
         commands.extend(camera_commands());
+        commands.extend(time_of_day_commands());
         CommandRegistry::new(commands)
     })
 }

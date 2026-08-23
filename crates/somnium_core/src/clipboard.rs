@@ -129,7 +129,7 @@ impl PasteEntitiesCmd {
     }
 
     fn spawn_node(&mut self, world: &mut World, node: &ClipNode, parent: Option<Entity>) -> Entity {
-        let entity = node.snapshot.respawn(world);
+        let entity = node.snapshot.clone().respawn(world);
         self.spawned.push(entity);
         if let Some(scripts) = &node.scripts {
             let _ = world.insert_component(entity, scripts.clone());

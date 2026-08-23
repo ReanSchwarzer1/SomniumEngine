@@ -14,6 +14,11 @@ pub enum CreateKind {
     Particle,
     Terrain,
     VoxelTerrain,
+    /// CONTROL-L/M/N. One entity carrying the scene's day cycle, sky and
+    /// weather. One row rather than three because they are one authored
+    /// object: coverage drives precipitation drives wetness, and splitting
+    /// them across three entities would make that chain a wiring exercise.
+    Environment,
 }
 
 impl CreateKind {
@@ -32,6 +37,7 @@ impl CreateKind {
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
+            Self::Environment => "Environment",
         }
     }
 }
@@ -298,6 +304,17 @@ pub enum EditorEvent {
         field: FieldId,
         value: ReflectValue,
         gesture: GestureId,
+        live: bool,
+    },
+    /// CONTROL-L: scrub the day cycle's clock from the viewport context bar.
+    ///
+    /// Addressed by *hour* rather than by `(entity, component, field)` because
+    /// the context bar has no selection to address through — the day cycle is a
+    /// scene singleton and the core is the only thing that knows which entity
+    /// carries it. The core still routes this through the one generic field
+    /// write, so it undoes exactly like a Details edit of the same field.
+    SetTimeOfDayHour {
+        hour: f32,
         live: bool,
     },
     /// `live` marks an in-progress drag-scrub: apply it to the scene, but do

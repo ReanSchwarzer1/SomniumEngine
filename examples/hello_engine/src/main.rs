@@ -827,7 +827,7 @@ impl HelloGame {
                     render_ctx,
                     ctx.world,
                     ctx.physics,
-                    result.preset,
+                    result.preset.clone(),
                     water_component,
                 );
             }

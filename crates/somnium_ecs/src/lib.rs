@@ -82,6 +82,8 @@
 
 pub mod archetype;
 pub mod component;
+/// Phase CONTROL-K: authored curves, colour gradients and slider response.
+pub mod curve;
 pub mod entity;
 pub mod persistent;
 pub mod reflect;
@@ -91,6 +93,7 @@ pub mod world;
 
 pub use archetype::{Archetype, ArchetypeId};
 pub use component::{Component, ComponentId, ComponentInfo, ComponentSet};
+pub use curve::{Curve, CurveKey, Gradient, GradientStop, Interpolation, SliderCurve};
 pub use entity::{Entity, EntityAllocator};
 pub use persistent::PersistentId;
 pub use reflect::{

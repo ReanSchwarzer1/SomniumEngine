@@ -91,6 +91,11 @@ pub struct NumericField {
     scrubbing: bool,
     /// Optional slider range. `None` infers a range from `drag_step`.
     slider_range: Option<(f32, f32)>,
+    /// CONTROL-K: how the track's travel maps to the value. A property of the
+    /// quantity, declared in the field's schema, not a choice this widget
+    /// makes — light intensity in lux and fog density per metre are both
+    /// unusable on a linear track.
+    slider_curve: somnium_ecs::curve::SliderCurve,
     slider_dragging: bool,
 }
 
@@ -171,10 +176,15 @@ impl NumericField {
         )
     }
 
-    fn value_from_slider(slider: Rect, x: f32, lo: f32, hi: f32) -> f32 {
+    fn value_from_slider(&self, slider: Rect, x: f32, lo: f32, hi: f32) -> f32 {
         let usable = (slider.w - HANDLE_W).max(1.0);
         let t = ((x - slider.x - HANDLE_W * 0.5) / usable).clamp(0.0, 1.0);
-        lo + t * (hi - lo)
+        self.slider_curve.to_value(t, lo, hi)
+    }
+
+    /// Where the handle sits for the current value, in `0..=1`.
+    fn slider_travel(&self, lo: f32, hi: f32) -> f32 {
+        self.slider_curve.to_travel(self.value, lo, hi)
     }
 }
 
@@ -240,11 +250,7 @@ impl Control for NumericField {
         let b = widget.screen_bounds();
         let (slider, field) = Self::split_rects(b);
         let (lo, hi) = self.effective_range();
-        let t = if hi > lo {
-            ((self.value - lo) / (hi - lo)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let t = if hi > lo { self.slider_travel(lo, hi) } else { 0.0 };
 
         // Phase 27-G: this embedded scrub slider was missed by the 27-D widget
         // sweep and still drew flat bars. It now matches the standalone
@@ -363,7 +369,7 @@ impl Control for NumericField {
                         self.select_all = false;
                         self.editing_text = None;
                         let (lo, hi) = self.effective_range();
-                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        let v = self.value_from_slider(slider, pos.x, lo, hi);
                         if v != self.value {
                             self.value = v;
                             emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -378,7 +384,7 @@ impl Control for NumericField {
                     if self.slider_dragging {
                         let (slider, _) = Self::split_rects(widget.screen_bounds());
                         let (lo, hi) = self.effective_range();
-                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        let v = self.value_from_slider(slider, pos.x, lo, hi);
                         if v != self.value {
                             self.value = v;
                             emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -531,6 +537,7 @@ pub struct NumericFieldBuilder {
     font_id: u8,
     drag_step: f32,
     slider_range: Option<(f32, f32)>,
+    slider_curve: somnium_ecs::curve::SliderCurve,
 }
 
 impl NumericFieldBuilder {
@@ -564,6 +571,7 @@ impl NumericFieldBuilder {
             font_id: style.font_id(),
             drag_step: 0.05,
             slider_range: None,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
         }
     }
 
@@ -582,6 +590,12 @@ impl NumericFieldBuilder {
     /// Value change per pixel of horizontal drag-scrub.
     pub fn with_drag_step(mut self, step: f32) -> Self {
         self.drag_step = step;
+        self
+    }
+
+    /// Declare the track's response curve. Defaults to linear.
+    pub fn with_slider_curve(mut self, curve: somnium_ecs::curve::SliderCurve) -> Self {
+        self.slider_curve = curve;
         self
     }
 
@@ -608,6 +622,7 @@ impl NumericFieldBuilder {
                 gesture_origin: None,
                 scrubbing: false,
                 slider_range: self.slider_range,
+                slider_curve: self.slider_curve,
                 slider_dragging: false,
             }),
         )
@@ -618,11 +633,49 @@ impl NumericFieldBuilder {
 mod tests {
     use super::*;
 
+    /// A bare field with builder defaults, for the mapping tests. The widget
+    /// tree is not involved: `value_from_slider` and `slider_travel` are pure
+    /// functions of the field's own state.
+    fn plain_field() -> NumericField {
+        NumericField {
+            value: 0.0,
+            unit: "",
+            editing_text: None,
+            mixed: false,
+            px: 12.0,
+            color: [255; 4],
+            font_id: 0,
+            focused: false,
+            select_all: false,
+            drag_step: 0.05,
+            drag_origin: None,
+            gesture_origin: None,
+            scrubbing: false,
+            slider_range: None,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
+            slider_dragging: false,
+        }
+    }
+
     #[test]
     fn slider_maps_left_edge_to_min_and_right_edge_to_max() {
         let r = Rect::new(0.0, 0.0, 108.0, 18.0);
-        assert!((NumericField::value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
-        assert!((NumericField::value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+        let f = plain_field();
+        assert!((f.value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
+        assert!((f.value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+    }
+
+    /// CONTROL-K. The same track, read exponentially: half the travel reaches
+    /// the geometric mean, which is what makes a lux slider usable at all.
+    #[test]
+    fn an_exponential_track_is_geometric_in_its_travel() {
+        let r = Rect::new(0.0, 0.0, 108.0, 18.0);
+        let mut f = plain_field();
+        f.slider_curve = somnium_ecs::curve::SliderCurve::Exponential;
+        let mid = f.value_from_slider(r, 4.0 + 100.0 * 0.5, 1.0, 10_000.0);
+        assert!((mid - 100.0).abs() < 1.0, "midpoint was {mid}");
+        f.value = mid;
+        assert!((f.slider_travel(1.0, 10_000.0) - 0.5).abs() < 1e-3);
     }
 
     #[test]
@@ -755,6 +808,7 @@ mod mixed_tests {
             focused: false,
             select_all: false,
             drag_step: 0.05,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
             drag_origin: None,
             gesture_origin: None,
             scrubbing: false,

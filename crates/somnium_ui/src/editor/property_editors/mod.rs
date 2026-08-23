@@ -58,6 +58,10 @@ pub enum PropertyEditorKind {
     AssetPicker,
     ComboBox,
     Collection,
+    /// CONTROL-K: keyframed curve.
+    Curve,
+    /// CONTROL-K: colour ramp.
+    Gradient,
     Unsupported,
 }
 
@@ -110,6 +114,8 @@ impl PropertyEditorRegistry {
         add!(Asset, AssetPicker);
         add!(Enum(_), ComboBox);
         add!(Array(_), Collection);
+        add!(Curve, Curve);
+        add!(Gradient, Gradient);
         // Visible fallback is deliberately last: a newly added FieldType can
         // never disappear from Details merely because no custom editor exists.
         registry.editors.push(Box::new(StandardEditor {
@@ -153,6 +159,8 @@ mod tests {
             FieldType::Asset,
             FieldType::Enum(&["A"]),
             FieldType::Array(Box::new(FieldType::Color)),
+            FieldType::Curve,
+            FieldType::Gradient,
         ];
         for ty in variants {
             assert_ne!(

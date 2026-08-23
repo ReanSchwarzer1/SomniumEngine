@@ -25,6 +25,14 @@ use glam::Vec2;
 pub enum SliderMessage {
     /// Emitted while dragging and on click-to-set. Value is in `0..=1`.
     Value(f32),
+    /// Emitted once when a drag ends, so a consumer that needs one undo entry
+    /// per gesture can tell the difference between "still moving" and "done".
+    ///
+    /// Added by CONTROL-L: the context bar's time scrub is the first slider
+    /// whose every intermediate value is applied but only whose final value
+    /// should be recorded. `Value` keeps its old meaning exactly, so existing
+    /// consumers are unaffected.
+    Committed(f32),
     /// Sent to the widget to update its position without emitting.
     SetValue(f32),
 }
@@ -168,6 +176,13 @@ impl Control for Slider {
                 }
             }
             WidgetMessage::MouseUp { .. } => {
+                if self.dragging {
+                    emit.push(UiMessage::new(
+                        widget.handle,
+                        MessageDirection::FromWidget,
+                        SliderMessage::Committed(self.value),
+                    ));
+                }
                 self.dragging = false;
                 msg.handled = true;
             }

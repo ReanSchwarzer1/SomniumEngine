@@ -144,6 +144,14 @@ pub enum ReflectValue {
     Asset(Option<AssetRef>),
     /// Homogeneous list.
     Array(Vec<ReflectValue>),
+    /// An authored one-dimensional curve — CONTROL-K.
+    ///
+    /// A first-class value rather than an array of numbers so the editor,
+    /// the serializer and the undo stack all agree on what a keyframe is
+    /// without any of them having to reconstruct one from floats.
+    Curve(crate::curve::Curve),
+    /// An authored colour ramp — CONTROL-K.
+    Gradient(crate::curve::Gradient),
     /// Nested record, keyed by field id. Used where a schema is known.
     Object(ReflectObject),
     /// Nested record keyed by name.
@@ -176,6 +184,8 @@ impl ReflectValue {
             Self::Entity(_) => "entity",
             Self::Asset(_) => "asset",
             Self::Array(_) => "array",
+            Self::Curve(_) => "curve",
+            Self::Gradient(_) => "gradient",
             Self::Object(_) => "object",
             Self::Map(_) => "map",
         }
@@ -197,6 +207,8 @@ impl ReflectValue {
             Self::Vec3(v) => all(v),
             Self::Vec4(v) | Self::Quat(v) => all(v),
             Self::Array(items) => items.iter().all(Self::is_finite),
+            Self::Curve(curve) => curve.is_finite(),
+            Self::Gradient(gradient) => gradient.is_finite(),
             Self::Object(fields) => fields.values().all(Self::is_finite),
             Self::Map(entries) => entries.values().all(Self::is_finite),
             _ => true,
@@ -238,6 +250,10 @@ pub enum FieldType {
     Enum(&'static [&'static str]),
     /// A homogeneous [`ReflectValue::Array`].
     Array(Box<FieldType>),
+    /// An authored [`ReflectValue::Curve`] — CONTROL-K.
+    Curve,
+    /// An authored [`ReflectValue::Gradient`] — CONTROL-K.
+    Gradient,
 }
 
 impl FieldType {
@@ -266,6 +282,9 @@ impl FieldType {
             }
             (Self::Array(inner), ReflectValue::Array(items)) => {
                 items.iter().all(|item| inner.accepts(item))
+            }
+            (Self::Curve, ReflectValue::Curve(_)) | (Self::Gradient, ReflectValue::Gradient(_)) => {
+                true
             }
             _ => false,
         }
@@ -316,6 +335,8 @@ impl FieldType {
             Self::Asset => "Asset".into(),
             Self::Enum(_) => "enum".into(),
             Self::Array(inner) => format!("{{{}}}", inner.name()),
+            Self::Curve => "Curve".into(),
+            Self::Gradient => "Gradient".into(),
         }
     }
 }
@@ -409,6 +430,9 @@ pub struct FieldSchema {
     pub advanced: bool,
     /// Visible but never writable from the editor.
     pub read_only: bool,
+    /// How a slider maps travel to value — CONTROL-K, NeoAxis's convenient
+    /// distribution. A property of the quantity, not of the widget.
+    pub slider: crate::curve::SliderCurve,
     /// Undo snapshot width required by this field.
     pub scope: ChangeScope,
     /// Engine-neutral asset-kind constraint. Each bit is assigned by the asset
@@ -1062,6 +1086,40 @@ impl ReflectField for Option<AssetRef> {
     }
 }
 
+impl ReflectField for crate::curve::Curve {
+    fn field_type() -> FieldType {
+        FieldType::Curve
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Curve(self.clone())
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Curve(curve) => Ok(curve.clone()),
+            // An absent track is an empty curve, not a load failure: a scene
+            // written before a component grew its curve must still open.
+            ReflectValue::Nil => Ok(Self::empty()),
+            other => Err(mismatch(field, &FieldType::Curve, other)),
+        }
+    }
+}
+
+impl ReflectField for crate::curve::Gradient {
+    fn field_type() -> FieldType {
+        FieldType::Gradient
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Gradient(self.clone())
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Gradient(gradient) => Ok(gradient.clone()),
+            ReflectValue::Nil => Ok(Self::empty()),
+            other => Err(mismatch(field, &FieldType::Gradient, other)),
+        }
+    }
+}
+
 impl<T: ReflectField> ReflectField for Vec<T> {
     fn field_type() -> FieldType {
         FieldType::Array(Box::new(T::field_type()))
@@ -1120,67 +1178,71 @@ macro_rules! component_schema {
     // `@opt` calls below can never be mistaken for a schema declaration.
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         min, $v:expr) => { $min = Some(f64::from($v)); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         max, $v:expr) => { $max = Some(f64::from($v)); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         advanced, $v:expr) => { $advanced = $v; };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         read_only, $v:expr) => { $read_only = $v; };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         scope, $v:expr) => { $scope = $v; };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        slider, $v:expr) => { $slider = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         asset_kind_mask, $v:expr) => { $asset_kind_mask = $v; };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         flags, $v:expr) => { $flags = $v; };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         step, $v:expr) => { $step = Some(f64::from($v)); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         soft_min, $v:expr) => { $soft_min = Some(f64::from($v)); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         soft_max, $v:expr) => { $soft_max = Some(f64::from($v)); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         precision, $v:expr) => { $precision = Some($v); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         unit, $v:expr) => { $unit = Some($v); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         doc, $v:expr) => { $doc = Some($v); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         display_name, $v:expr) => { $display_name = Some($v); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         group, $v:expr) => { $group = Some($v); };
     (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
         $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
-        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $asset_kind_mask:ident, $flags:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
         order, $v:expr) => { $order = Some($v); };
 
     (
@@ -1221,12 +1283,14 @@ macro_rules! component_schema {
                 #[allow(unused_mut, unused_assignments)] let mut advanced = false;
                 #[allow(unused_mut, unused_assignments)] let mut read_only = false;
                 #[allow(unused_mut, unused_assignments)] let mut scope = ChangeScope::Field;
+                #[allow(unused_mut, unused_assignments)]
+                let mut slider = $crate::curve::SliderCurve::Linear;
                 #[allow(unused_mut, unused_assignments)] let mut asset_kind_mask = u64::MAX;
                 #[allow(unused_mut, unused_assignments)]
                 let mut flags: FieldFlags = FieldFlags::DEFAULT;
                 $( $( $crate::component_schema!(@opt min, max, step, soft_min, soft_max,
                     precision, unit, doc, display_name, group, order, advanced, read_only,
-                    scope, asset_kind_mask, flags, $opt, $optval); )* )?
+                    scope, slider, asset_kind_mask, flags, $opt, $optval); )* )?
                 fields.push(FieldSchema {
                     name: stringify!($field),
                     id: FieldId(u16::try_from(fields.len()).expect("too many fields")),
@@ -1245,6 +1309,7 @@ macro_rules! component_schema {
                     order,
                     advanced,
                     read_only,
+                    slider,
                     scope,
                     asset_kind_mask,
                     flags,

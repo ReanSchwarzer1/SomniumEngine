@@ -638,7 +638,7 @@ impl EditorCommand for SetFieldCmd {
 ///
 /// Used by [`DeleteEntityCmd`] to restore an entity on undo, and by
 /// [`CreateEntityCmd`] to re-spawn a deleted creation on redo.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct EntitySnapshot {
     pub transform: Option<Transform>,
     pub name: Option<Name>,
@@ -648,6 +648,11 @@ pub struct EntitySnapshot {
     pub wt: Option<WorldTransform>,
     pub mesh_kind: Option<MeshKind>,
     pub is_particle_emitter: bool,
+    /// CONTROL-L/M/N. True when this entity carries the scene's environment —
+    /// the day cycle, and (from CONTROL-M/N) the sky and weather beside it.
+    /// A flag rather than three `Option`s because they are created, deleted
+    /// and restored together as one authored object.
+    pub environment: bool,
     pub terrain: Option<TerrainComponent>,
     pub voxel_terrain: Option<VoxelTerrainComponent>,
     pub foliage: Option<crate::FoliageComponent>,
@@ -668,9 +673,12 @@ impl EntitySnapshot {
             wt: world.get::<WorldTransform>(entity).copied(),
             mesh_kind: world.get::<MeshKind>(entity).copied(),
             is_particle_emitter: world.get::<crate::ParticleEmitter>(entity).is_some(),
+            environment: world
+                .get::<crate::time_of_day::TimeOfDayComponent>(entity)
+                .is_some(),
             terrain: world.get::<TerrainComponent>(entity).copied(),
             voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
-            foliage: world.get::<crate::FoliageComponent>(entity).copied(),
+            foliage: world.get::<crate::FoliageComponent>(entity).cloned(),
             water: world.get::<WaterComponent>(entity).copied(),
             parent: world.get::<Parent>(entity).copied(),
             children: world.get::<Children>(entity).copied(),
@@ -687,6 +695,15 @@ impl EntitySnapshot {
 
         if self.is_particle_emitter {
             return world.spawn((transform, name, wt, crate::ParticleEmitter::default()));
+        }
+
+        if self.environment {
+            return world.spawn((
+                transform,
+                name,
+                wt,
+                crate::time_of_day::TimeOfDayComponent::default(),
+            ));
         }
 
         if let Some(water) = self.water {
@@ -967,8 +984,8 @@ impl CreateLandscapeCmd {
 
 impl EditorCommand for CreateLandscapeCmd {
     fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
-        let terrain = self.terrain.respawn(world);
-        let mut water_snapshot = self.water;
+        let terrain = self.terrain.clone().respawn(world);
+        let mut water_snapshot = self.water.clone();
         water_snapshot.parent = Some(Parent { entity: terrain });
         let water = water_snapshot.respawn(world);
         if let Some(children) = world.get_mut::<Children>(terrain) {
@@ -1006,7 +1023,7 @@ impl CreateEntityCmd {
 
 impl EditorCommand for CreateEntityCmd {
     fn execute(&mut self, world: &mut World, selected: &mut Option<Entity>) {
-        let entity = self.snapshot.respawn(world);
+        let entity = self.snapshot.clone().respawn(world);
         if let Some(parent) = self.snapshot.parent.map(|parent| parent.entity) {
             if let Some(children) = world.get_mut::<Children>(parent) {
                 children.push(entity);
@@ -1095,18 +1112,19 @@ impl EditorCommand for DeleteEntityCmd {
     }
 
     fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) {
-        if let Some(snap) = self.snapshot {
+        if let Some(snap) = self.snapshot.clone() {
+            let restored_parent = snap.parent.map(|parent| parent.entity);
             let mut parent_snapshot = snap;
             if !self.child_snapshots.is_empty() {
                 parent_snapshot.children = Some(Children::empty());
             }
             let entity = parent_snapshot.respawn(world);
-            if let Some(parent) = snap.parent.map(|parent| parent.entity) {
+            if let Some(parent) = restored_parent {
                 if let Some(children) = world.get_mut::<Children>(parent) {
                     children.push(entity);
                 }
             }
-            for mut child_snapshot in self.child_snapshots.iter().copied() {
+            for mut child_snapshot in self.child_snapshots.iter().cloned() {
                 child_snapshot.parent = Some(Parent { entity });
                 let child = child_snapshot.respawn(world);
                 if let Some(children) = world.get_mut::<Children>(entity) {
@@ -2350,6 +2368,7 @@ mod landscape_tests {
             mesh: None,
             mat: None,
             wt: Some(WorldTransform::identity()),
+            environment: false,
             mesh_kind: None,
             is_particle_emitter: false,
             terrain: Some(TerrainComponent {
@@ -2378,6 +2397,7 @@ mod landscape_tests {
             mesh: None,
             mat: None,
             wt: Some(WorldTransform::identity()),
+            environment: false,
             mesh_kind: None,
             is_particle_emitter: false,
             terrain: None,

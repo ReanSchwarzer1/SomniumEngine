@@ -24,6 +24,11 @@ pub struct Grading {
     pub grain: f32,
     /// Seconds, so grain animates instead of sitting still.
     pub time: f32,
+    /// CONTROL-K. 32 uniform samples of the authored tone-response curve over
+    /// `0..=1`, or `None` for the unauthored case. Sampled by the caller
+    /// rather than passed as a `Curve` so this crate stays free of the
+    /// reflection vocabulary — a renderer should not know what a keyframe is.
+    pub response: Option<[f32; 32]>,
 }
 
 impl Default for Grading {
@@ -38,9 +43,13 @@ impl Default for Grading {
             gamma: 1.0,
             grain: 0.0,
             time: 0.0,
+            response: None,
         }
     }
 }
+
+/// Floats in the post-process uniform: 16 scalars then 32 response samples.
+const POST_PARAM_FLOATS: usize = 48;
 
 /// Post-processing pass: HDR texture → tone-mapped swapchain output.
 pub struct PostProcessPass {
@@ -143,7 +152,8 @@ impl PostProcessPass {
             // Must match `PostParams` in postprocess.wgsl exactly: three floats
             // then four u32s carried as raw bits. `copy_from_slice` below
             // requires the lengths to agree.
-            let data: [f32; 16] = [
+            let mut data = [0.0_f32; POST_PARAM_FLOATS];
+            data[..16].copy_from_slice(&[
                 1.0 / (1.2 * 32768.0), // exposure at EV100 15
                 1.0,                   // vignette strength
                 0.0,                   // chromatic aberration
@@ -159,11 +169,11 @@ impl PostProcessPass {
                 1.0, // gain, lift, gamma
                 0.0, // grain
                 0.0, // time
-                0.0,
-            ];
+                0.0, // response curve disabled
+            ]);
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("PostProcess Params"),
-                size: 64,
+                size: (POST_PARAM_FLOATS * 4) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: true,
             });
@@ -398,7 +408,8 @@ impl PostProcessPass {
         // Three floats then four u32s. bytemuck cannot cast a mixed array, so
         // the integers ride in float slots as raw bits and WGSL reads them back
         // as u32 — same four bytes either way.
-        let data: [f32; 16] = [
+        let mut data = [0.0_f32; POST_PARAM_FLOATS];
+        data[..16].copy_from_slice(&[
             exposure,
             vignette_strength,
             ca_strength,
@@ -414,8 +425,11 @@ impl PostProcessPass {
             grading.gamma,
             grading.grain,
             grading.time,
-            0.0,
-        ];
+            f32::from(u8::from(grading.response.is_some())),
+        ]);
+        if let Some(response) = grading.response {
+            data[16..].copy_from_slice(&response);
+        }
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 

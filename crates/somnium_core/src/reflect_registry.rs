@@ -293,6 +293,7 @@ fn name_schema() -> ComponentSchema {
             order: None,
             advanced: false,
             read_only: false,
+            slider: somnium_ecs::curve::SliderCurve::Linear,
             scope: ChangeScope::Field,
             asset_kind_mask: u64::MAX,
             flags: FieldFlags::DEFAULT,
@@ -375,6 +376,7 @@ fn mesh_kind_schema() -> ComponentSchema {
             order: None,
             advanced: false,
             read_only: false,
+            slider: somnium_ecs::curve::SliderCurve::Linear,
             scope: ChangeScope::Field,
             asset_kind_mask: u64::MAX,
             flags: FieldFlags::DEFAULT,
@@ -416,6 +418,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(post_process_schema());
     crate::character::register(&mut registry);
     registry.register(terrain_schema());
+    registry.register(time_of_day_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
     registry.register(water_schema());
@@ -459,8 +462,7 @@ fn particle_emitter_schema() -> ComponentSchema {
             spread_angle { min: 0.0, max: 3.1415927, step: 0.01, precision: 2, group: "Emission", unit: "rad" },
             size_start { min: 0.0, step: 0.01, group: "Particle", unit: "m" },
             size_end { min: 0.0, step: 0.01, group: "Particle", unit: "m" },
-            color_start { group: "Appearance" },
-            color_end { group: "Appearance" },
+            color_over_life { group: "Appearance", display_name: "Colour over Life" },
             gravity { step: 0.1, group: "Forces", unit: "m/s²" },
         }
     }
@@ -497,6 +499,8 @@ fn post_process_schema() -> ComponentSchema {
             saturation { min: 0.0, step: 0.01, group: "Color Grading" }, gain { min: 0.0, step: 0.01, group: "Color Grading" },
             lift { step: 0.01, group: "Color Grading" }, gamma { min: 0.0, step: 0.01, group: "Color Grading" },
             grain { min: 0.0, step: 0.01, group: "Lens" },
+            response_curve { group: "Color Grading", display_name: "Response Curve",
+                min: 0.0, max: 1.0, soft_min: 0.0, soft_max: 1.0 },
             bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },
             gtao_enabled { group: "Ambient Occlusion" }, dof_enabled { group: "Depth of Field" },
             dof_focus_distance { min: 0.0, step: 0.1, unit: "m", group: "Depth of Field" },
@@ -655,6 +659,8 @@ fn foliage_schema() -> ComponentSchema {
             scale_max { min: 0.0 },
             radius { min: 0.0 },
             cull_distance { min: 0.0 },
+            lod_falloff { group: "Level of Detail", display_name: "LOD Falloff",
+                min: 0.0, max: 1.5, soft_min: 0.0, soft_max: 1.0 },
             foliage_shadow_distance { min: 0.0 },
             lod_distance { min: 0.0 },
             impostor_distance { min: 0.0 },
@@ -664,6 +670,35 @@ fn foliage_schema() -> ComponentSchema {
 }
 
 /// Voxel world handle. Like foliage, previously unsaved.
+/// CONTROL-L. Five scalars and five CONTROL-K tracks; the whole day cycle is
+/// a schema block, which is the claim the phase document opens with.
+///
+/// The five track fields declare `soft_min`/`soft_max` of 0..24 because for a
+/// curve those are the *time* domain, while `min`/`max` stay the value range.
+/// That split is Seam 1's, and this is the first schema to need both halves.
+fn time_of_day_schema() -> ComponentSchema {
+    component_schema! {
+        crate::time_of_day::TimeOfDayComponent as "somnium.TimeOfDay", display "Time of Day", version 1,
+        fields {
+            enabled { group: "Clock" },
+            hour { min: 0.0, max: 24.0, step: 0.05, precision: 2, unit: "h", group: "Clock" },
+            day_of_year { min: 1, max: 366, group: "Clock", display_name: "Day of Year" },
+            latitude { min: -90.0, max: 90.0, step: 0.5, precision: 2, unit: "\u{b0}", group: "Location" },
+            longitude { min: -180.0, max: 180.0, step: 0.5, precision: 2, unit: "\u{b0}", group: "Location" },
+            timescale { min: 0.0, soft_max: 60.0, step: 0.1, precision: 2, unit: "h/s", group: "Clock" },
+            sun_color { group: "Tracks", display_name: "Sun Colour" },
+            sun_intensity { group: "Tracks", min: 0.0, max: 130000.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Sun Intensity" },
+            fog_density { group: "Tracks", min: 0.0, max: 0.02,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Fog Density" },
+            exposure_compensation { group: "Tracks", min: -8.0, max: 8.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Exposure Compensation" },
+            cloud_coverage { group: "Tracks", min: 0.0, max: 1.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Cloud Coverage" },
+        }
+    }
+}
+
 fn voxel_terrain_schema() -> ComponentSchema {
     component_schema! {
         VoxelTerrainComponent as "somnium.VoxelTerrain", display "Voxel Terrain", version 1,
@@ -767,7 +802,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 17);
+        assert_eq!(registry.len(), 18);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -786,6 +821,7 @@ mod tests {
                 "somnium.PostProcess",
                 "somnium.RigidBody",
                 "somnium.Terrain",
+                "somnium.TimeOfDay",
                 "somnium.Transform",
                 "somnium.VoxelTerrain",
                 "somnium.Water",

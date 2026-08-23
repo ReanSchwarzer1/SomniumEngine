@@ -555,6 +555,10 @@ pub struct Engine<G: GameApp> {
     simulation_accumulator: f32,
     /// True after a mutating editor action until Save or New.
     scene_dirty: bool,
+    /// CONTROL-L: this frame's day-cycle result, or `None` when no cycle is
+    /// enabled. Recomputed every frame and never persisted — it is a cache of
+    /// one evaluation, not state.
+    day_state: Option<crate::time_of_day::DayState>,
     /// Title-bar close requested a shutdown.
     ui_wants_exit: bool,
     /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
@@ -699,6 +703,7 @@ impl<G: GameApp + 'static> Engine<G> {
             play_session_active: false,
             simulation_accumulator: 0.0,
             scene_dirty: false,
+            day_state: None,
             ui_wants_exit: false,
             pending_map_load: None,
             scripts: crate::script_host::ScriptHost::default(),
@@ -2793,7 +2798,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_foliage = self
                 .selection
                 .primary
-                .and_then(|e| self.world.get::<FoliageComponent>(e).copied())
+                .and_then(|e| self.world.get::<FoliageComponent>(e).cloned())
                 .map(|f| {
                     (
                         [
@@ -3223,7 +3228,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.submit_light_gizmos();
         }
 
-        // ── Post-processing settings (Phase 15A1) ────────────────────────────
+        // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
+        self.apply_time_of_day(dt);
+        self.publish_time_of_day();
         self.apply_post_process();
         self.apply_camera_settings();
 
@@ -4365,6 +4372,7 @@ impl<G: GameApp> Engine<G> {
                 light: None,
                 mesh_kind: None,
                 is_particle_emitter: false,
+                environment: false,
                 terrain: None,
                 voxel_terrain: None,
                 foliage: None,
@@ -4391,6 +4399,113 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// CONTROL-L: run the day cycle, once per frame, before anything reads a
+    /// light or a post-process value.
+    ///
+    /// Order matters and is the reason this is its own method called from
+    /// exactly one place: the sun's rotation must be final before
+    /// `submit_light_gizmos` draws it and before the game layer reads it into
+    /// the light buffer, and the fog/exposure overrides must be recorded
+    /// before `apply_post_process` pushes the authored values they replace.
+    fn apply_time_of_day(&mut self, dt: f32) {
+        self.day_state = None;
+        let Some(entity) = self
+            .world
+            .entities()
+            .find(|e| self.world.get::<crate::time_of_day::TimeOfDayComponent>(*e).is_some())
+        else {
+            return;
+        };
+        // The clock only runs during a play session. An editor that advanced
+        // time while nobody was playing would make every scene dirty on its
+        // own and make a capture unrepeatable.
+        if self.play_session_active {
+            if let Some(tod) = self
+                .world
+                .get_mut::<crate::time_of_day::TimeOfDayComponent>(entity)
+            {
+                tod.advance(dt);
+            }
+        }
+        let Some(tod) = self
+            .world
+            .get::<crate::time_of_day::TimeOfDayComponent>(entity)
+            .cloned()
+        else {
+            return;
+        };
+        if !tod.enabled {
+            return;
+        }
+        let mut state = tod.evaluate();
+
+        // Seam 4: the environment variable is an override of a real system now,
+        // not the only way to place the sun. It still wins, because every
+        // recorded repro in `dev records/` sets it.
+        let env_elevation = std::env::var("SOMNIUM_SUN_ELEVATION")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        let env_azimuth = std::env::var("SOMNIUM_SUN_AZIMUTH")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        if env_elevation.is_some() || env_azimuth.is_some() {
+            state.elevation_deg = env_elevation.unwrap_or(state.elevation_deg);
+            state.azimuth_deg = env_azimuth.unwrap_or(state.azimuth_deg);
+            state.rotation =
+                crate::time_of_day::sun_rotation(state.azimuth_deg, state.elevation_deg);
+        }
+
+        // The sun is the first directional light. Not a named entity: a scene
+        // that renamed "SunLight" would silently stop having a day cycle, and
+        // a name is not a type.
+        let sun = self.world.entities().find(|e| {
+            self.world
+                .get::<LightComponent>(*e)
+                .is_some_and(|light| light.light_type == LightType::Directional)
+        });
+        if let Some(sun) = sun {
+            if let Some(transform) = self.world.get_mut::<Transform>(sun) {
+                transform.rotation = state.rotation;
+            }
+            if let Some(light) = self.world.get_mut::<LightComponent>(sun) {
+                light.color = state.color;
+                // A colour temperature would fight the authored tint ramp, and
+                // the ramp is the more specific statement, so the driver wins
+                // by clearing the temperature it would otherwise be overridden
+                // by. Documented in the component, not discovered here.
+                light.color_temperature_k = 0.0;
+                if state.intensity.is_finite() {
+                    light.intensity = state.intensity;
+                }
+            }
+        }
+        // Deliberately **not** setting `scene_dirty`: every value written above
+        // is derived from fields that are themselves saved, so reopening the
+        // scene reproduces them exactly. A day cycle that made a scene dirty by
+        // existing would make "unsaved changes" meaningless.
+        self.day_state = Some(state);
+    }
+
+    /// CONTROL-L: publish the clock to the viewport context bar.
+    ///
+    /// Separate from [`Self::apply_time_of_day`] because the bar must show the
+    /// hour whether or not the cycle is *enabled* — a disabled cycle is still
+    /// a cycle you are about to scrub — while the driver must do nothing at
+    /// all when it is off.
+    fn publish_time_of_day(&mut self) {
+        let hour = self
+            .world
+            .entities()
+            .find_map(|e| {
+                self.world
+                    .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                    .map(|tod| tod.hour.rem_euclid(24.0))
+            });
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.update_time_of_day(hour);
+        }
+    }
+
     /// Push the scene's post-processing settings to the renderer (Phase 15A1).
     ///
     /// Driven by the first entity carrying a `PostProcessComponent`. With no
@@ -4405,11 +4520,11 @@ impl<G: GameApp> Engine<G> {
         let settings = self
             .selection
             .primary
-            .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
+            .and_then(|e| self.world.get::<PostProcessComponent>(e).cloned())
             .or_else(|| {
                 self.world
                     .entities()
-                    .find_map(|e| self.world.get::<PostProcessComponent>(e).copied())
+                    .find_map(|e| self.world.get::<PostProcessComponent>(e).cloned())
             });
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
             // Phase 24A: exposure is now derived from EV100 rather than being a
@@ -4422,7 +4537,10 @@ impl<G: GameApp> Engine<G> {
             // eye adjusts at a rate that depends on frame rate.
             r.frame_delta_time = self.time.delta_time().as_secs_f32();
             r.tonemapper = pp.tonemapper.as_index();
-            r.exposure_compensation = pp.exposure_compensation;
+            r.exposure_compensation = self
+                .day_state
+                .and_then(|state| state.exposure_compensation)
+                .unwrap_or(pp.exposure_compensation);
             r.shading_mode = u32::from(pp.cel_shading)
                 | if pp.pcss_enabled { 2 } else { 0 }
                 | if pp.contact_shadows_enabled { 4 } else { 0 }
@@ -4470,7 +4588,10 @@ impl<G: GameApp> Engine<G> {
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled && !path_active;
-            r.volumetric_pass.fog.density = pp.fog_density;
+            r.volumetric_pass.fog.density = self
+                .day_state
+                .and_then(|state| state.fog_density)
+                .unwrap_or(pp.fog_density);
             r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
             r.volumetric_pass.fog.shafts = pp.light_shafts;
@@ -4517,6 +4638,16 @@ impl<G: GameApp> Engine<G> {
                 gamma: pp.gamma,
                 grain: pp.grain,
                 time: self.time.elapsed().as_secs_f32(),
+                // CONTROL-K: the authored curve is sampled here, once per
+                // frame, and the renderer never sees a keyframe. This is the
+                // whole "no refresh button" story: editing the curve changes
+                // the table on the very next frame because the table is
+                // rebuilt on every frame regardless.
+                response: (!pp.response_curve.is_empty()).then(|| {
+                    let mut table = [0.0_f32; 32];
+                    pp.response_curve.sample_into(0.0, 1.0, &mut table);
+                    table
+                }),
             };
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
@@ -4646,7 +4777,7 @@ impl<G: GameApp> Engine<G> {
             .renderer
             .as_ref()
             .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32, f32, f32, f32)> = self
+        let terrains: Vec<(u32, glam::Mat4, f32, f32, f32, f32, somnium_ecs::curve::Curve)> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -4666,6 +4797,7 @@ impl<G: GameApp> Engine<G> {
                     fc.foliage_shadow_distance,
                     fc.lod_distance,
                     fc.impostor_distance,
+                    fc.lod_falloff.clone(),
                 ))
             })
             .collect();
@@ -4674,8 +4806,15 @@ impl<G: GameApp> Engine<G> {
             r.profiler.cpu_begin("Foliage");
         }
 
-        for (terrain_id, model, cull_distance, shadow_distance, lod_distance, impostor_distance) in
-            terrains
+        for (
+            terrain_id,
+            model,
+            cull_distance,
+            shadow_distance,
+            lod_distance,
+            impostor_distance,
+            lod_falloff,
+        ) in terrains
         {
             // Which palette entries this terrain actually uses, so nothing is
             // loaded for a kind that has never been painted.
@@ -4720,8 +4859,22 @@ impl<G: GameApp> Engine<G> {
                 };
                 // Terrain-local placement composed with the terrain's own
                 // transform, so moving the terrain carries its foliage.
+                // CONTROL-K: the authored falloff curve, evaluated against
+                // normalised horizontal distance. An empty curve is the
+                // pre-CONTROL-K behaviour exactly — no multiply at all, not a
+                // multiply by one, so an unauthored foliage component cannot
+                // change even by a rounding error.
+                let horizontal_sq = d.x * d.x + d.z * d.z;
+                let scale = if lod_falloff.is_empty() || cull_distance <= 0.0 {
+                    inst.scale
+                } else {
+                    inst.scale * lod_falloff.evaluate(horizontal_sq.sqrt() / cull_distance)
+                };
+                if scale <= 0.0 {
+                    continue;
+                }
                 let placement = glam::Mat4::from_scale_rotation_translation(
-                    glam::Vec3::splat(inst.scale),
+                    glam::Vec3::splat(scale),
                     glam::Quat::from_rotation_y(inst.yaw),
                     inst.position,
                 );
@@ -5610,6 +5763,7 @@ impl<G: GameApp> Engine<G> {
                     mesh: None,
                     mat: None,
                     wt: Some(WorldTransform::identity()),
+                    environment: false,
                     mesh_kind: None,
                     is_particle_emitter: false,
                     terrain: None,
@@ -5623,6 +5777,28 @@ impl<G: GameApp> Engine<G> {
                 self.undo_stack
                     .push(cmd, &mut self.world, &mut self.selection.primary);
                 info!("Created voxel terrain entity");
+            }
+
+            EditorEvent::CreateEntity(CreateKind::Environment) => {
+                if self.world.entities().any(|e| {
+                    self.world
+                        .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                        .is_some()
+                }) {
+                    warn!("this scene already has an Environment");
+                    return;
+                }
+                let snapshot = EntitySnapshot {
+                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    name: Some(Name::new("Environment")),
+                    wt: Some(WorldTransform::identity()),
+                    environment: true,
+                    ..EntitySnapshot::default()
+                };
+                let cmd = Box::new(CreateEntityCmd::new(snapshot));
+                self.undo_stack
+                    .push(cmd, &mut self.world, &mut self.selection.primary);
+                info!("Created environment entity");
             }
 
             EditorEvent::CreateEntity(CreateKind::Terrain) => {
@@ -5783,6 +5959,7 @@ impl<G: GameApp> Engine<G> {
                     mesh,
                     mat,
                     wt: Some(world),
+                    environment: false,
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
@@ -5940,6 +6117,42 @@ impl<G: GameApp> Engine<G> {
                     }
                     Err(error) => warn!(%error, "rejected reflected property edit"),
                 }
+            }
+
+            // CONTROL-L. The context bar and the preset commands both land
+            // here. Routed through the one generic field write rather than
+            // poking the component, so a scrub from the context bar and a drag
+            // in Details produce the same undo entry with the same label.
+            EditorEvent::SetTimeOfDayHour { hour, live } => {
+                let Some(entity) = self.world.entities().find(|e| {
+                    self.world
+                        .get::<crate::time_of_day::TimeOfDayComponent>(*e)
+                        .is_some()
+                }) else {
+                    warn!("no Time of Day component in the scene");
+                    return;
+                };
+                let Some(field) = crate::reflect_registry::component_registry()
+                    .by_name("somnium.TimeOfDay")
+                    .and_then(|schema| schema.fields.iter().find(|f| f.name == "hour"))
+                    .map(|f| f.id)
+                else {
+                    return;
+                };
+                // One id for the whole scrub, so the drag coalesces into a
+                // single undo entry exactly as a Details drag does. `u64::MAX - 2`
+                // joins the two sentinels already above; the day scrub is a
+                // singleton gesture and cannot overlap another of its own kind.
+                self.handle_editor_event(EditorEvent::SetComponentField {
+                    entity,
+                    component: somnium_ecs::reflect::StableId::new("somnium.TimeOfDay"),
+                    field,
+                    value: somnium_ecs::reflect::ReflectValue::F64(f64::from(
+                        hour.rem_euclid(24.0),
+                    )),
+                    gesture: GestureId(u64::MAX - 2),
+                    live,
+                });
             }
 
             EditorEvent::SetTerrainToolValue {
@@ -6183,6 +6396,7 @@ impl<G: GameApp> Engine<G> {
                         mesh,
                         mat,
                         wt: Some(WorldTransform::identity()),
+                        environment: false,
                         mesh_kind,
                         is_particle_emitter,
                         // Terrains are not duplicated — two entities sharing

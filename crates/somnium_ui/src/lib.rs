@@ -58,6 +58,8 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
+        curve_editor::CurveEditorMessage,
+        gradient_editor::GradientEditorMessage,
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
         context_menu::{ContextMenuMessage, MenuItem},
@@ -128,6 +130,14 @@ enum ColorTarget {
         component: somnium_ecs::reflect::StableId,
         field: somnium_ecs::reflect::FieldId,
         vec4: bool,
+    },
+    /// CONTROL-K. One stop of an authored gradient. The picker path is shared
+    /// with every other swatch; only the write-back differs, because the value
+    /// that travels is the whole gradient with one stop replaced.
+    GradientStop {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        index: usize,
     },
 }
 
@@ -448,6 +458,10 @@ struct EditorLayout {
     gizmo_space_label: NodeHandle,
     select_only_toggle: NodeHandle,
     snap_overflow: NodeHandle,
+    /// CONTROL-L: the day-cycle scrub cluster, hidden when the scene has none.
+    time_cluster: NodeHandle,
+    time_label: NodeHandle,
+    time_slider: NodeHandle,
     /// Mode-scope command labels. Collapse to icon-only under 1400 px.
     mode_labels: [NodeHandle; 4],
     inner_h: NodeHandle,
@@ -733,6 +747,12 @@ pub struct UiManager {
     gizmo_space_label: NodeHandle,
     select_only_toggle: NodeHandle,
     snap_overflow: NodeHandle,
+    time_cluster: NodeHandle,
+    time_label: NodeHandle,
+    time_slider: NodeHandle,
+    /// CONTROL-L: the hour the context bar last displayed, so the label is
+    /// rewritten only when it changes rather than sixty times a second.
+    time_shown: Option<f32>,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -1041,6 +1061,86 @@ impl UiManager {
             });
     }
 
+    /// The gesture id a widget's edit belongs to.
+    ///
+    /// A live edit reuses (or opens) one id for the whole drag; a commit
+    /// consumes it, so the coalescing window closes exactly when the gesture
+    /// does. Extracted in CONTROL-K because three widgets now need it.
+    fn gesture_for(&mut self, handle: NodeHandle, live: bool) -> GestureId {
+        if live {
+            if let Some(gesture) = self.generated_gestures.get(&handle).copied() {
+                return gesture;
+            }
+            let gesture = self.allocate_property_gesture();
+            self.generated_gestures.insert(handle, gesture);
+            return gesture;
+        }
+        self.generated_gestures
+            .remove(&handle)
+            .unwrap_or_else(|| self.allocate_property_gesture())
+    }
+
+    /// Write a colour the picker produced back to whatever it was opened for.
+    ///
+    /// One place rather than three identical `match`es, and the reason it is
+    /// worth extracting: CONTROL-K added a fourth destination shape, and three
+    /// copies is where the fourth one gets missed.
+    fn write_color_target(
+        &mut self,
+        target: ColorTarget,
+        rgba: [f32; 4],
+        gesture: GestureId,
+        live: bool,
+    ) {
+        match target {
+            ColorTarget::Reflected {
+                component,
+                field,
+                vec4,
+            } => {
+                let value = if vec4 {
+                    somnium_ecs::reflect::ReflectValue::Vec4(rgba)
+                } else {
+                    somnium_ecs::reflect::ReflectValue::Vec3([rgba[0], rgba[1], rgba[2]])
+                };
+                self.queue_generated_address(component, field, value, gesture, live);
+            }
+            ColorTarget::GradientStop {
+                component,
+                field,
+                index,
+            } => {
+                // The value that travels is the whole gradient. A stop is not
+                // separately addressable by `(StableId, FieldId)`, and
+                // inventing a sub-field address for it would be a second
+                // property vocabulary — exactly what Seam 1 forbids.
+                let Some(binding) = self
+                    .generated_bindings
+                    .values()
+                    .find(|b| b.component == component && b.field == field)
+                    .cloned()
+                else {
+                    return;
+                };
+                let somnium_ecs::reflect::ReflectValue::Gradient(gradient) = &binding.value else {
+                    return;
+                };
+                let mut gradient = gradient.clone();
+                let Some(stop) = gradient.stop_mut(index) else {
+                    return;
+                };
+                stop.color = rgba;
+                self.queue_generated_address(
+                    component,
+                    field,
+                    somnium_ecs::reflect::ReflectValue::Gradient(gradient),
+                    gesture,
+                    live,
+                );
+            }
+        }
+    }
+
     fn numeric_reflect_value(
         binding: &GeneratedBinding,
         edited: f32,
@@ -1254,6 +1354,10 @@ impl UiManager {
             gizmo_space_label: layout.gizmo_space_label,
             select_only_toggle: layout.select_only_toggle,
             snap_overflow: layout.snap_overflow,
+            time_cluster: layout.time_cluster,
+            time_label: layout.time_label,
+            time_slider: layout.time_slider,
+            time_shown: None,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -3760,6 +3864,19 @@ impl UiManager {
             A::ToggleOrbitSelection => self
                 .editor_events
                 .push_back(EditorEvent::ToggleOrbitSelection),
+            // CONTROL-L. The hour comes from the registry's own table, so a
+            // preset row and the hour it means cannot disagree.
+            A::SetTimeOfDay(id) => {
+                if let Some((_, _, hour)) = crate::commands::TIME_PRESETS
+                    .iter()
+                    .find(|(preset, _, _)| *preset == id)
+                {
+                    self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                        hour: *hour,
+                        live: false,
+                    });
+                }
+            }
             A::OpenPreferences => self.toggle_preferences(),
             A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
             A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
@@ -3900,30 +4017,7 @@ impl UiManager {
             } else {
                 self.color_original
             };
-            match target {
-                ColorTarget::Reflected {
-                    component,
-                    field,
-                    vec4,
-                } => {
-                    let value = if vec4 {
-                        somnium_ecs::reflect::ReflectValue::Vec4(rgba)
-                    } else {
-                        somnium_ecs::reflect::ReflectValue::Vec3([rgba[0], rgba[1], rgba[2]])
-                    };
-                    if let Some(entity) = self.selected_entity {
-                        self.editor_events
-                            .push_back(EditorEvent::SetComponentField {
-                                entity,
-                                component,
-                                field,
-                                value,
-                                gesture,
-                                live: false,
-                            });
-                    }
-                }
-            }
+            self.write_color_target(target, rgba, gesture, false);
         }
         self.dismiss_color_ui();
     }
@@ -4423,6 +4517,41 @@ impl UiManager {
 
     // ── Live UI updates ───────────────────────────────────────────────────────
 
+    /// CONTROL-L: publish the scene's clock to the viewport context bar.
+    ///
+    /// `None` means the scene has no day cycle, and the whole cluster
+    /// disappears — a control that cannot do anything is worse than no control,
+    /// which is craft defect C8's rule applied to presence rather than to
+    /// enablement.
+    pub fn update_time_of_day(&mut self, hour: Option<f32>) {
+        let visible = hour.is_some();
+        self.native_ui.set_visibility(self.time_cluster, visible);
+        let Some(hour) = hour else {
+            self.time_shown = None;
+            return;
+        };
+        // A tenth of a minute: below that the label reads the same and the
+        // handle moves less than a pixel, so rewriting either is pure churn.
+        if self
+            .time_shown
+            .is_some_and(|shown| (shown - hour).abs() < 0.002)
+        {
+            return;
+        }
+        self.time_shown = Some(hour);
+        self.native_ui
+            .send(SliderMessage::set_value(self.time_slider, hour / 24.0));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (h, m) = (hour.floor() as u32, ((hour.fract()) * 60.0).round() as u32);
+        let text = if m >= 60 {
+            format!("{:02}:00", (h + 1) % 24)
+        } else {
+            format!("{h:02}:{m:02}")
+        };
+        self.native_ui
+            .send(TextMessage::set_text(self.time_label, text));
+    }
+
     /// Update the camera-speed slider and its readout (Phase 20B).
     ///
     /// `normalized` is the slider position in `0..=1`; `speed` is the resulting
@@ -4846,6 +4975,13 @@ impl UiManager {
                         *handle,
                         value[lane as usize],
                     ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Curve(curve), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(CurveEditorMessage::set_value(*handle, curve.clone())),
+                (somnium_ecs::reflect::ReflectValue::Gradient(gradient), GeneratedEdit::Whole) => {
+                    self.native_ui
+                        .send(GradientEditorMessage::set_value(*handle, gradient.clone()));
                 }
                 (somnium_ecs::reflect::ReflectValue::Quat(value), GeneratedEdit::Euler(lane)) => {
                     let e = glam::Quat::from_array(*value).to_euler(glam::EulerRot::XYZ);
@@ -5442,71 +5578,20 @@ impl UiManager {
                 continue;
             }
             if let Some(cmsg) = msg.data::<ColorPickerMessage>() {
-                if let (Some(field), Some(gesture)) = (self.color_target, self.color_gesture) {
+                if let (Some(target), Some(gesture)) = (self.color_target, self.color_gesture) {
                     match cmsg {
                         ColorPickerMessage::Changing(rgba) => {
                             self.color_live = *rgba;
-                            match field {
-                                ColorTarget::Reflected {
-                                    component,
-                                    field,
-                                    vec4,
-                                } => {
-                                    let value = if vec4 {
-                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
-                                    } else {
-                                        somnium_ecs::reflect::ReflectValue::Vec3([
-                                            rgba[0], rgba[1], rgba[2],
-                                        ])
-                                    };
-                                    self.queue_generated_address(
-                                        component, field, value, gesture, true,
-                                    );
-                                }
-                            }
+                            self.write_color_target(target, *rgba, gesture, true);
                         }
                         ColorPickerMessage::Changed(rgba) => {
                             self.color_live = *rgba;
-                            match field {
-                                ColorTarget::Reflected {
-                                    component,
-                                    field,
-                                    vec4,
-                                } => {
-                                    let value = if vec4 {
-                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
-                                    } else {
-                                        somnium_ecs::reflect::ReflectValue::Vec3([
-                                            rgba[0], rgba[1], rgba[2],
-                                        ])
-                                    };
-                                    self.queue_generated_address(
-                                        component, field, value, gesture, false,
-                                    );
-                                }
-                            }
+                            self.write_color_target(target, *rgba, gesture, false);
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::Cancelled(rgba) => {
                             self.color_original = *rgba;
-                            match field {
-                                ColorTarget::Reflected {
-                                    component,
-                                    field,
-                                    vec4,
-                                } => {
-                                    let value = if vec4 {
-                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
-                                    } else {
-                                        somnium_ecs::reflect::ReflectValue::Vec3([
-                                            rgba[0], rgba[1], rgba[2],
-                                        ])
-                                    };
-                                    self.queue_generated_address(
-                                        component, field, value, gesture, false,
-                                    );
-                                }
-                            }
+                            self.write_color_target(target, *rgba, gesture, false);
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::SetColor(_) => {}
@@ -6334,11 +6419,32 @@ impl UiManager {
                 }
             }
 
-            // — Camera speed slider (Phase 20B) ————————
-            if let Some(SliderMessage::Value(v)) = msg.data::<SliderMessage>() {
+            // — Camera speed slider (Phase 20B), day scrub (CONTROL-L) ————
+            if let Some(smsg) = msg.data::<SliderMessage>() {
                 if msg.destination == self.camera_speed_slider {
-                    self.editor_events
-                        .push_back(EditorEvent::SetCameraSpeed(*v));
+                    if let SliderMessage::Value(v) = smsg {
+                        self.editor_events
+                            .push_back(EditorEvent::SetCameraSpeed(*v));
+                    }
+                } else if msg.destination == self.time_slider {
+                    // `Value` while dragging, `Committed` once at the end:
+                    // every intermediate hour is applied so the light moves
+                    // under the cursor, and exactly one undo entry is recorded.
+                    match smsg {
+                        SliderMessage::Value(v) => {
+                            self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                                hour: v * 24.0,
+                                live: true,
+                            });
+                        }
+                        SliderMessage::Committed(v) => {
+                            self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                                hour: v * 24.0,
+                                live: false,
+                            });
+                        }
+                        SliderMessage::SetValue(_) => {}
+                    }
                 }
             }
 
@@ -6429,6 +6535,74 @@ impl UiManager {
                 }
             }
 
+            // — CONTROL-K: curve and gradient edits ————————
+            //
+            // Both follow the drag-scrub convention exactly as `NumericField`
+            // does above: a live gesture reuses one `GestureId` so the whole
+            // drag coalesces into a single undo entry, and the commit consumes
+            // it. Nothing here knows what a keyframe is; the value that
+            // travels is the whole `ReflectValue::Curve`.
+            if let Some(CurveEditorMessage::Value { curve, live }) = msg.data::<CurveEditorMessage>()
+            {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.gesture_for(msg.destination, *live);
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Curve(curve.clone()),
+                        gesture,
+                        *live,
+                    );
+                }
+                continue;
+            }
+            if let Some(gmsg) = msg.data::<GradientEditorMessage>() {
+                match gmsg {
+                    GradientEditorMessage::Value { gradient, live } => {
+                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        {
+                            let gesture = self.gesture_for(msg.destination, *live);
+                            self.queue_generated_binding(
+                                &binding,
+                                somnium_ecs::reflect::ReflectValue::Gradient(gradient.clone()),
+                                gesture,
+                                *live,
+                            );
+                        }
+                    }
+                    GradientEditorMessage::StopActivated { index, color } => {
+                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        {
+                            self.color_target = Some(ColorTarget::GradientStop {
+                                component: binding.component,
+                                field: binding.field,
+                                index: *index,
+                            });
+                            self.color_gesture = Some(self.allocate_property_gesture());
+                            self.color_open = true;
+                            self.color_original = *color;
+                            self.color_live = *color;
+                            self.native_ui.send(UiMessage::new(
+                                self.color_picker,
+                                MessageDirection::ToWidget,
+                                ColorPickerMessage::SetColor(*color),
+                            ));
+                            self.native_ui.send(UiMessage::new(
+                                self.color_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::SetAnchor(msg.destination),
+                            ));
+                            self.native_ui.send(UiMessage::new(
+                                self.color_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::Open,
+                            ));
+                            self.native_ui.invalidate_ancestors(self.color_popup);
+                        }
+                    }
+                    GradientEditorMessage::SetValue(_) => {}
+                }
+                continue;
+            }
             if let Some(CheckBoxMessage::Check(value)) = msg.data::<CheckBoxMessage>() {
                 if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
                     let gesture = self.allocate_property_gesture();
@@ -7065,7 +7239,7 @@ mod zeta_layout_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        assert_eq!(layout.create_popup_items.len(), 14);
+        assert_eq!(layout.create_popup_items.len(), 15);
         for handle in [
             layout.save_button,
             layout.select_button,

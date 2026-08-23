@@ -79,6 +79,8 @@ pub mod selection;
 pub mod settings;
 pub mod sun;
 pub mod time;
+/// Phase CONTROL-L: the day cycle.
+pub mod time_of_day;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
@@ -482,7 +484,7 @@ impl somnium_ecs::Component for TerrainComponent {}
 /// which would flood the outliner and the undo stack — the same reason voxel
 /// chunks stay out of the world. They are submitted as draw commands instead,
 /// which also means they inherit the Phase 15 culling pipeline for free.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FoliageComponent {
     /// Off by default: an empty terrain is the neutral thing to create, and
     /// scattering is a deliberate act.
@@ -513,6 +515,14 @@ pub struct FoliageComponent {
     /// the indirect arguments entirely, which the GPU cull cannot do since the
     /// draw has to exist before it can be rejected.
     pub cull_distance: f32,
+    /// CONTROL-K: instance scale as a function of normalised distance from the
+    /// camera, where `0` is the camera and `1` is [`Self::cull_distance`].
+    ///
+    /// Empty — the default — means no falloff at all, which is exactly the
+    /// behaviour before this field existed. A curve ending at zero shrinks
+    /// ground cover out instead of popping it, which is the whole reason
+    /// `cull_distance` is a hard edge worth softening.
+    pub lod_falloff: somnium_ecs::curve::Curve,
     /// Phase 24AE: painted instances beyond this distance from the camera are
     /// still drawn, but stop casting shadows.
     ///
@@ -552,6 +562,7 @@ impl Default for FoliageComponent {
             scale_max: 1.5,
             radius: 45.0,
             cull_distance: 120.0,
+            lod_falloff: somnium_ecs::curve::Curve::empty(),
             // A third of the draw distance. Grass shadows stop reading as
             // individual blades within a few metres and as texture within a
             // few tens; past that they are noise that costs four cascades.
@@ -709,7 +720,13 @@ pub fn normalized_from_camera_speed(speed: f32) -> f32 {
 ///
 /// The engine pushes these to the renderer each frame; if no such entity
 /// exists, the renderer's own defaults (everything off) apply.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// No longer `Copy`: CONTROL-K's [`response_curve`] is a heap-backed
+/// [`Curve`](somnium_ecs::curve::Curve). The two call sites that copied this
+/// component now clone it, once per frame, which is a `Vec` of at most a few
+/// keys — measurably nothing against a pass that reads it into a uniform.
+///
+/// [`response_curve`]: PostProcessComponent::response_curve
+#[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessComponent {
     /// Manual exposure value at ISO 100 (Phase 24A).
     ///
@@ -753,6 +770,14 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
+    /// CONTROL-K: authored tone response, applied per channel after the fixed
+    /// grade. An empty curve — the default — leaves grading exactly as Phase
+    /// 24Y left it, so this field costs nothing until somebody uses it.
+    ///
+    /// The domain and the range are both `0..=1`: the input is the graded LDR
+    /// channel and the output is what replaces it. An identity ramp is a
+    /// no-op, which is what makes "reset" and "off" the same gesture.
+    pub response_curve: somnium_ecs::curve::Curve,
     /// Bloom (Phase 24T).
     pub bloom_enabled: bool,
     /// Strength of the bloom contribution; zero disables its visible effect.
@@ -917,6 +942,7 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            response_curve: somnium_ecs::curve::Curve::empty(),
             // Deterministic audit switch; the editor checkbox remains the
             // runtime source of truth after startup.
             bloom_enabled: std::env::var("SOMNIUM_BLOOM").as_deref() != Ok("0"),
@@ -1507,10 +1533,14 @@ pub struct ParticleEmitter {
     pub size_start: f32,
     /// Particle size at end of life.
     pub size_end: f32,
-    /// Linear RGBA color at birth.
-    pub color_start: [f32; 4],
-    /// Linear RGBA color at end of life.
-    pub color_end: [f32; 4],
+    /// CONTROL-K: linear RGBA over the particle's life, `0` at birth and `1`
+    /// at death.
+    ///
+    /// Replaces the `color_start`/`color_end` pair, which could express a
+    /// straight line between two colours and nothing else — no flash, no
+    /// fade-in-then-out, no hold. A two-stop ramp reproduces the old pair
+    /// exactly, so the default is that pair.
+    pub color_over_life: somnium_ecs::curve::Gradient,
     /// Downward gravity acceleration (m/s²).
     pub gravity: f32,
 
@@ -1531,8 +1561,10 @@ impl Default for ParticleEmitter {
             spread_angle: 0.8,
             size_start: 1.0,
             size_end: 0.2,
-            color_start: [1.0, 0.4, 0.1, 1.0],
-            color_end: [0.2, 0.0, 0.0, 0.0],
+            color_over_life: somnium_ecs::curve::Gradient::ramp(
+                [1.0, 0.4, 0.1, 1.0],
+                [0.2, 0.0, 0.0, 0.0],
+            ),
             gravity: 1.0,
             particles: Vec::new(),
             spawn_accum: 0.0,
@@ -1613,18 +1645,16 @@ pub fn simulate_particles(
         // ── 3. Emit GPU instances ─────────────────────────────────────────────
         let size_start = emitter.size_start;
         let size_end = emitter.size_end;
-        let color_start = emitter.color_start;
-        let color_end = emitter.color_end;
+        // CONTROL-K: the ramp is sampled per particle rather than baked into a
+        // table, because an emitter's particle count is the small number here
+        // and a table would need invalidating whenever the ramp was edited —
+        // which is every frame of a drag.
+        let ramp = &emitter.color_over_life;
 
         for p in &emitter.particles {
             let frac = (p.age / p.lifetime).clamp(0.0, 1.0);
             let size = size_start + (size_end - size_start) * frac;
-            let color = [
-                color_start[0] + (color_end[0] - color_start[0]) * frac,
-                color_start[1] + (color_end[1] - color_start[1]) * frac,
-                color_start[2] + (color_end[2] - color_start[2]) * frac,
-                color_start[3] + (color_end[3] - color_start[3]) * frac,
-            ];
+            let color = ramp.evaluate(frac);
             gpu_particles.push(GpuParticle {
                 position: p.position.to_array(),
                 size,

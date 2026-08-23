@@ -13,6 +13,8 @@ pub mod color_picker;
 pub mod combo_box;
 pub mod command_palette;
 pub mod context_menu;
+pub mod curve_editor;
+pub mod gradient_editor;
 pub mod grid;
 pub mod image;
 pub mod menu;
@@ -44,6 +46,8 @@ pub use command_palette::{
     CommandPalette, CommandPaletteBuilder, CommandPaletteMessage, PaletteItem,
 };
 pub use context_menu::{ContextMenu, ContextMenuBuilder, ContextMenuMessage, MenuItem};
+pub use curve_editor::{CurveEditor, CurveEditorBuilder, CurveEditorMessage};
+pub use gradient_editor::{GradientEditor, GradientEditorBuilder, GradientEditorMessage};
 pub use grid::{Grid, GridBuilder, GridDimension, GridMessage, SizeMode};
 pub use image::{IconBuilder, Image, ImageBuilder};
 pub use numeric_field::{NumericField, NumericFieldBuilder, NumericFieldMessage};

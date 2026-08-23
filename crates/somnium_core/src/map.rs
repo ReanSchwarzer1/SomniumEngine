@@ -123,7 +123,22 @@ fn spawn_sun_post_camera(world: &mut World, preset: &DefaultLandscapePreset) {
         Transform::from_translation(glam::Vec3::ZERO),
         Name::new("Post Processing"),
         WorldTransform::identity(),
-        preset.post_process,
+        preset.post_process.clone(),
+    ));
+    // CONTROL-L: every map gets a day cycle, disabled, at the hour the
+    // env-var defaults already put the sun at. Disabled because a map opening
+    // with its sun somewhere other than where it has always been would be the
+    // retuning §3 forbids; enabling it in Details is one click, and the hour
+    // is already right when you do.
+    world.spawn((
+        Transform::from_translation(glam::Vec3::ZERO),
+        Name::new("Environment"),
+        WorldTransform::identity(),
+        crate::time_of_day::TimeOfDayComponent {
+            enabled: false,
+            hour: 14.0,
+            ..crate::time_of_day::TimeOfDayComponent::default()
+        },
     ));
     world.spawn((
         Transform {

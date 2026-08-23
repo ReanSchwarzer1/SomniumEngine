@@ -127,6 +127,39 @@ pub fn to_lua(lua: &Lua, value: &ScriptValue) -> mlua::Result<Value> {
             }
             Value::Table(table)
         }
+        // CONTROL-K. A curve and a gradient widen into ordinary Luau arrays
+        // of key tables, which is everything a script needs in order to read
+        // one. They deliberately do **not** narrow back: `from_lua` produces
+        // an `Array` by shape, and `FieldType::Curve::accepts` rejects it with
+        // a named type mismatch rather than silently reinterpreting a list of
+        // tables as authored keyframes. Authoring a curve is the editor's job.
+        ScriptValue::Curve(curve) => {
+            let table = lua.create_table_with_capacity(curve.len(), 0)?;
+            for (i, key) in curve.keys().iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("t", key.t)?;
+                entry.set("v", key.v)?;
+                entry.set("inTangent", key.in_tangent)?;
+                entry.set("outTangent", key.out_tangent)?;
+                entry.set("interpolation", key.interpolation.as_str())?;
+                table.set(i + 1, entry)?;
+            }
+            Value::Table(table)
+        }
+        ScriptValue::Gradient(gradient) => {
+            let table = lua.create_table_with_capacity(gradient.len(), 0)?;
+            for (i, stop) in gradient.stops().iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("t", stop.t)?;
+                entry.set(
+                    "color",
+                    Value::Vector(Vector::new(stop.color[0], stop.color[1], stop.color[2])),
+                )?;
+                entry.set("alpha", stop.color[3])?;
+                table.set(i + 1, entry)?;
+            }
+            Value::Table(table)
+        }
         ScriptValue::Object(fields) => {
             let table = lua.create_table()?;
             for (id, value) in fields {

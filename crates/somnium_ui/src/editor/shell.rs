@@ -717,6 +717,42 @@ pub(crate) fn build_editor_layout(
         22.0,
     );
 
+    // ── CONTROL-L: the day-cycle scrub ──────────────────────────────────────
+    //
+    // On the context bar for exactly the reason the snap cluster is: time of
+    // day is something you change *while* looking at the light. Hidden
+    // entirely when the scene has no Environment, so a scene without a day
+    // cycle does not carry a dead control across the top of its viewport.
+    let time_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let time_cluster = ui.add_node(time_cluster, vp_stack_h);
+    let time_label = ui.add_node(
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 10.0,
+            top: 6.0,
+            right: 6.0,
+            bottom: 0.0,
+        }))
+        .with_role(TextRole::Label)
+        .with_text("12:00")
+        .build(),
+        time_cluster,
+    );
+    let time_slider = ui.add_node(
+        crate::widgets::slider::SliderBuilder::new(
+            WidgetBuilder::new()
+                .with_width(120.0)
+                .with_margin(Thickness::axes(0.0, 7.0))
+                .with_tooltip("Scrub the scene's day cycle. One undo step per drag."),
+        )
+        .with_value(0.5)
+        .build(),
+        time_cluster,
+    );
+    ui.set_visibility(time_cluster, false);
+
     // The overflow chevron, shown only when the cluster is hidden.
     let (snap_overflow, _) = labeled_icon_button(
         ui,
@@ -1628,6 +1664,9 @@ pub(crate) fn build_editor_layout(
         gizmo_space_label,
         select_only_toggle,
         snap_overflow,
+        time_cluster,
+        time_label,
+        time_slider,
         inner_h,
         content_split_h,
         right_split_h,

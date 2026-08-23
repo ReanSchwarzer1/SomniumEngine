@@ -9,7 +9,7 @@ use crate::{
 /// way that should not silently alter existing scenes.
 pub const DEFAULT_LANDSCAPE_VERSION: u32 = 4;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 /// Versioned authoring values shared by startup and the editor factory.
 pub struct DefaultLandscapePreset {
     /// Recipe version persisted by the scene contract.
@@ -111,7 +111,7 @@ pub fn create_default_landscape(
     renderer.ensure_water_body(render_ctx, water.descriptor())?;
     let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
     let (terrain, water_snapshot) = landscape_snapshots(
-        preset,
+        &preset,
         terrain_id,
         water,
         MeshComponent {
@@ -145,7 +145,7 @@ pub fn create_island_landscape(
     renderer.ensure_water_body(render_ctx, water.descriptor())?;
     let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
     let (terrain, water_snapshot) = landscape_snapshots(
-        preset,
+        &preset,
         terrain_id,
         water,
         MeshComponent {
@@ -162,7 +162,7 @@ pub fn create_island_landscape(
 }
 
 fn landscape_snapshots(
-    preset: DefaultLandscapePreset,
+    preset: &DefaultLandscapePreset,
     terrain_id: u32,
     water: WaterComponent,
     mesh: MeshComponent,
@@ -174,6 +174,7 @@ fn landscape_snapshots(
         mesh: None,
         mat: None,
         wt: Some(WorldTransform::identity()),
+        environment: false,
         mesh_kind: None,
         is_particle_emitter: false,
         terrain: Some(TerrainComponent {
@@ -197,6 +198,7 @@ fn landscape_snapshots(
         mesh: Some(mesh),
         mat: None,
         wt: Some(WorldTransform::identity()),
+        environment: false,
         // Retained only for old scene compatibility; rendering is selected by
         // WaterComponent and the allocation is a finite wet-cell mesh.
         mesh_kind: Some(MeshKind::Plane),
@@ -246,8 +248,8 @@ mod tests {
             index_offset: 20,
             index_count: 30,
         };
-        let startup = landscape_snapshots(preset, 4, component, mesh);
-        let menu = landscape_snapshots(DefaultLandscapePreset::current(), 4, component, mesh);
+        let startup = landscape_snapshots(&preset, 4, component, mesh);
+        let menu = landscape_snapshots(&DefaultLandscapePreset::current(), 4, component, mesh);
         assert_eq!(
             startup.0.name.unwrap().as_str(),
             menu.0.name.unwrap().as_str()

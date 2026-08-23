@@ -152,6 +152,14 @@ fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
                     .collect::<Vec<_>>()
             )
         }
+        // CONTROL-K. A curve and a gradient go out as a tagged flat float
+        // array — `[t, v, in, out, interp]` and `[t, r, g, b, a]` quintuples.
+        // Flat rather than an array of objects because a forty-key track
+        // should not cost forty JSON objects in every scene that mentions it,
+        // and the tag is what lets the reader reject a differently-shaped
+        // array outright instead of half-decoding it.
+        ReflectValue::Curve(curve) => json!({ "$curve": curve.to_flat() }),
+        ReflectValue::Gradient(gradient) => json!({ "$gradient": gradient.to_flat() }),
         ReflectValue::Object(fields) => {
             let mut map = serde_json::Map::new();
             for (id, value) in fields {
@@ -231,7 +239,40 @@ fn value_from_json(
                 .collect::<Option<Vec<_>>>()
                 .map(ReflectValue::Array)
         }
+        FieldType::Curve => {
+            // A null curve is an empty curve, which is what a field added
+            // after a scene was written reads as.
+            if json.is_null() {
+                return Some(ReflectValue::Curve(somnium_ecs::curve::Curve::empty()));
+            }
+            let flat = flat_floats(json.get("$curve")?)?;
+            Some(ReflectValue::Curve(somnium_ecs::curve::Curve::from_flat(
+                &flat,
+            )))
+        }
+        FieldType::Gradient => {
+            if json.is_null() {
+                return Some(ReflectValue::Gradient(
+                    somnium_ecs::curve::Gradient::empty(),
+                ));
+            }
+            let flat = flat_floats(json.get("$gradient")?)?;
+            Some(ReflectValue::Gradient(
+                somnium_ecs::curve::Gradient::from_flat(&flat),
+            ))
+        }
     }
+}
+
+/// Read a JSON array of numbers as `f32`s, rejecting anything else.
+fn flat_floats(json: &serde_json::Value) -> Option<Vec<f32>> {
+    json.as_array()?
+        .iter()
+        .map(|v| {
+            #[allow(clippy::cast_possible_truncation)]
+            v.as_f64().map(|v| v as f32)
+        })
+        .collect()
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -923,6 +964,80 @@ mod tests {
             .unwrap_or_else(|| panic!("no entity named {name}"))
     }
 
+    /// CONTROL-K's exit criterion, in one test: an authored curve and an
+    /// authored ramp survive the file, keys, tangents, interpolation modes and
+    /// all. A curve that round-trips as "two linear keys" would look right in
+    /// a screenshot and be wrong in every scene reloaded after this.
+    #[test]
+    fn curves_and_gradients_survive_a_save() {
+        use somnium_ecs::curve::{Curve, CurveKey, Gradient, GradientStop, Interpolation};
+
+        let registry = component_registry();
+        let mut world = World::new();
+
+        let response = Curve::from_keys(vec![
+            CurveKey {
+                out_tangent: 2.5,
+                interpolation: Interpolation::Smooth,
+                ..CurveKey::new(0.0, 0.0)
+            },
+            CurveKey {
+                interpolation: Interpolation::Step,
+                ..CurveKey::new(0.35, 0.4)
+            },
+            CurveKey::new(1.0, 1.0),
+        ]);
+        let post = crate::PostProcessComponent {
+            response_curve: response.clone(),
+            ..crate::PostProcessComponent::default()
+        };
+        let ramp = Gradient::from_stops(vec![
+            GradientStop::new(0.0, [1.0, 0.4, 0.1, 1.0]),
+            GradientStop::new(0.6, [0.9, 0.9, 0.2, 0.7]),
+            GradientStop::new(1.0, [0.2, 0.0, 0.0, 0.0]),
+        ]);
+        let emitter = crate::ParticleEmitter {
+            color_over_life: ramp.clone(),
+            ..crate::ParticleEmitter::default()
+        };
+
+        world.spawn((Name::new("Look"), Transform::default(), post));
+        world.spawn((Name::new("Sparks"), Transform::default(), emitter));
+
+        let (loaded, report) = round_trip(&mut world, &registry);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            loaded
+                .get::<crate::PostProcessComponent>(find(&loaded, "Look"))
+                .unwrap()
+                .response_curve,
+            response
+        );
+        assert_eq!(
+            loaded
+                .get::<crate::ParticleEmitter>(find(&loaded, "Sparks"))
+                .unwrap()
+                .color_over_life,
+            ramp
+        );
+    }
+
+    /// A field that did not exist when the file was written must load as an
+    /// empty curve rather than failing the entity.
+    #[test]
+    fn an_absent_curve_field_loads_as_an_empty_curve() {
+        use somnium_ecs::reflect::{FieldType, ReflectValue};
+        let resolve = |_: PersistentId| None;
+        assert_eq!(
+            value_from_json(&resolve, &FieldType::Curve, &serde_json::Value::Null),
+            Some(ReflectValue::Curve(somnium_ecs::curve::Curve::empty()))
+        );
+        assert_eq!(
+            value_from_json(&resolve, &FieldType::Gradient, &serde_json::Value::Null),
+            Some(ReflectValue::Gradient(somnium_ecs::curve::Gradient::empty()))
+        );
+    }
+
     #[test]
     fn components_round_trip_through_the_registry() {
         let registry = component_registry();
@@ -1354,7 +1469,7 @@ mod tests {
         foliage.density = 7.25;
         foliage.seed = 4242;
         foliage.max_instances = 31_000;
-        world.spawn((Name::new("Ground"), Transform::default(), foliage));
+        world.spawn((Name::new("Ground"), Transform::default(), foliage.clone()));
 
         let (loaded, report) = round_trip(&mut world, &registry);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);

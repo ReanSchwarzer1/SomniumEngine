@@ -19,6 +19,8 @@ use crate::{
         color_picker::ColorSwatchBuilder,
         combo_box::ComboBoxBuilder,
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
+        curve_editor::CurveEditorBuilder,
+        gradient_editor::GradientEditorBuilder,
         image::ImageBuilder,
         numeric_field::NumericFieldBuilder,
         popup::{PopupBuilder, PopupPlacement},
@@ -317,6 +319,7 @@ pub(crate) fn build_generated_details(
                         .with_value(value)
                         .with_mixed(model.mixed)
                         .with_drag_step(model.step.unwrap_or(0.05) as f32)
+                        .with_slider_curve(model.slider)
                         .with_unit(model.unit.unwrap_or(""));
                     if let (Some(min), Some(max)) =
                         (model.soft_min.or(model.min), model.soft_max.or(model.max))
@@ -514,6 +517,47 @@ pub(crate) fn build_generated_details(
                         },
                     );
                     asset_choices.insert(handle, choices);
+                    bindings.insert(handle, base);
+                }
+                // CONTROL-K. A curve row is taller than an ordinary one, so
+                // it lays out inside the row rather than beside the label; the
+                // `PropertyRow` still owns the label, the modified dot and the
+                // revert affordance, so a curve reverts like any other field.
+                PropertyEditorKind::Curve => {
+                    let curve = match &model.value {
+                        somnium_ecs::reflect::ReflectValue::Curve(curve) => curve.clone(),
+                        _ => somnium_ecs::curve::Curve::empty(),
+                    };
+                    #[allow(clippy::cast_possible_truncation)]
+                    let handle = ui.add_node(
+                        CurveEditorBuilder::new(widget)
+                            .with_curve(curve)
+                            .with_domain(
+                                model.soft_min.unwrap_or(0.0) as f32,
+                                model.soft_max.unwrap_or(1.0) as f32,
+                            )
+                            .with_range(
+                                model.min.unwrap_or(0.0) as f32,
+                                model.max.unwrap_or(1.0) as f32,
+                            )
+                            .with_font_id(font_id)
+                            .build(),
+                        row_handle,
+                    );
+                    bindings.insert(handle, base);
+                }
+                PropertyEditorKind::Gradient => {
+                    let gradient = match &model.value {
+                        somnium_ecs::reflect::ReflectValue::Gradient(gradient) => gradient.clone(),
+                        _ => somnium_ecs::curve::Gradient::empty(),
+                    };
+                    let handle = ui.add_node(
+                        GradientEditorBuilder::new(widget)
+                            .with_gradient(gradient)
+                            .with_font_id(font_id)
+                            .build(),
+                        row_handle,
+                    );
                     bindings.insert(handle, base);
                 }
                 PropertyEditorKind::EntityPicker
