@@ -285,6 +285,104 @@ def editor_reachability() -> dict[str, str]:
     return {f"SOMNIUM_{screaming_variant(variant)}": f"PostFxToggle::{variant}" for variant in variants}
 
 
+def _load_env_routes():
+    """Import the route table whether run as a module or as a script.
+
+    The generator is invoked both ways — `python tools/reachability/generate.py`
+    in a shell and `python -m unittest tools.reachability...` in CI — so it
+    cannot rely on a package context existing.
+    """
+    try:
+        from . import env_routes  # type: ignore[import-not-found]
+    except ImportError:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "env_routes", Path(__file__).with_name("env_routes.py")
+        )
+        env_routes = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(env_routes)
+    return env_routes
+
+
+def declared_command_ids() -> set[str]:
+    """Every `id` string in the CONTROL-A2 registry declarations."""
+    path = ROOT / "crates/somnium_ui/src/commands.rs"
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8")
+    return set(re.findall(r'"(editor\.[a-z0-9_.]+)"', text))
+
+
+def declared_setting_overrides() -> set[str]:
+    """`Component.field` addresses named by `ENV_OVERRIDES` in settings.rs."""
+    path = ROOT / "crates/somnium_core/src/settings.rs"
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8")
+    start = text.find("pub const ENV_OVERRIDES")
+    if start < 0:
+        return set()
+    body = text[start : text.find("];", start)]
+    triples = re.findall(r'"([^"]+)",\s*"([^"]+)",\s*"(SOMNIUM_[A-Z0-9_]+)"', body)
+    return {f"{component}.{field}" for component, field, _ in triples}
+
+
+def schema_field_addresses() -> set[str]:
+    """`StableId.field` for every editable reflected field."""
+    return {
+        f"{schema.stable_id}.{field}"
+        for schema in schema_blocks()
+        for field in schema.editable_fields
+    }
+
+
+def env_route_problems() -> list[str]:
+    """CONTROL-H's gate: every variable classified, every target real.
+
+    Returned as messages rather than a bool because "which one" is the whole
+    value of the check — a count tells nobody what to fix.
+    """
+    env_routes = _load_env_routes()
+
+    found = set(source_occurrences())
+    declared = dict(env_routes.ENV_ROUTES)
+    problems: list[str] = []
+    for name in sorted(found - set(declared)):
+        problems.append(f"{name} has no declared route (add it to env_routes.py)")
+    for name in sorted(set(declared) - found):
+        problems.append(f"{name} is declared but no longer appears in the sources")
+
+    schema_fields = schema_field_addresses()
+    settings_overrides = declared_setting_overrides()
+    command_ids = declared_command_ids()
+    for name, (route, target) in sorted(declared.items()):
+        if name not in found:
+            continue
+        if route == "schema" and target not in schema_fields:
+            problems.append(f"{name} claims schema field {target}, which is not editable")
+        elif route == "setting" and target not in settings_overrides:
+            problems.append(f"{name} claims setting {target}, absent from ENV_OVERRIDES")
+        elif route == "command" and target not in command_ids:
+            problems.append(f"{name} claims command {target}, which is not registered")
+        elif route not in ("schema", "setting", "command", "harness"):
+            problems.append(f"{name} has unknown route kind {route!r}")
+    return problems
+
+
+def env_route_summary() -> dict[str, int]:
+    """How many variables take each route, for the report's summary line."""
+    env_routes = _load_env_routes()
+
+    found = set(source_occurrences())
+    counts = {"schema": 0, "setting": 0, "command": 0, "harness": 0}
+    for name, (route, _) in env_routes.ENV_ROUTES.items():
+        if name in found and route in counts:
+            counts[route] += 1
+    return counts
+
+
 def schema_blocks() -> list[Schema]:
     schemas: list[Schema] = []
     for path in (ROOT / "crates/somnium_core/src").rglob("*.rs"):
@@ -494,33 +592,60 @@ def generate_reachability() -> str:
         "## Summary",
         "",
         f"- Distinct `SOMNIUM_*` identifiers in executable/example Rust sources: **{len(occurrences)}**.",
-        f"- Knobs with a mechanically matched legacy editor route: **{sum(1 for name in occurrences if name in reachable)}**.",
+        f"- Knobs with an unexplained route: **{len(env_route_problems())}** (CONTROL-H's exit condition is zero).",
         f"- Reflected component schemas: **{len(schemas)}**; editable fields: **{sum(len(s.editable_fields) for s in schemas)}**.",
         f"- Editable schema fields credited to the generated inspector path: **{len(generated)}**.",
         f"- Current Details hand-wiring census: **{census['total']}** identifiers.",
         "",
         "The environment inventory includes identifiers in executable code and documented command examples. "
         "Meaning, type, and default are conservative source inferences; ambiguous fallbacks say so. "
-        "Editor reach is intentionally stricter: a knob is `yes` only when its suffix mechanically matches "
-        "a live `PostFxToggle` variant. This reproduces the legacy 18-route definition without a hand-written allow-list.",
+        "The `Route` column is CONTROL-H's classification, checked against the live schemas, settings overrides "
+        "and command registry rather than inferred from the name.",
         "",
         "## Environment knobs",
         "",
-        "| Variable | Source | Meaning | Type | Default | Editor reach | Evidence |",
-        "|---|---|---|---|---|---:|---|",
+        "| Variable | Source | Meaning | Type | Default | Route | Reached by |",
+        "|---|---|---|---|---|---|---|",
     ]
+    _env_routes = _load_env_routes()
     for name in sorted(occurrences):
         items = occurrences[name]
         primary = primary_occurrence(items)
         comment = nearest_comment(primary)
         if name not in comment:
             comment = name.removeprefix("SOMNIUM_").replace("_", " ").capitalize()
-        evidence = reachable.get(name, "—")
+        route, target = _env_routes.ENV_ROUTES.get(name, ("unclassified", "—"))
+        rendered = markdown_escape(target) if route == "harness" else f"`{target}`"
         lines.append(
             f"| `{name}` | `{relative(primary.path)}:{primary.line}` | {markdown_escape(comment)} | "
             f"{infer_type(name, items)} | {markdown_escape(infer_default(name, items))} | "
-            f"{'yes' if evidence != '—' else 'no'} | `{evidence}` |"
+            f"{route} | {rendered} |"
         )
+
+    routes = env_route_summary()
+    problems = env_route_problems()
+    lines += [
+        "",
+        "## CONTROL-H environment reachability",
+        "",
+        "Every variable is classified in `tools/reachability/env_routes.py`, and the gate below fails on any that is not. "
+        "`schema` reaches the generated Details panel; `setting` is a Seam-4 setting whose control is disabled and names the variable; "
+        "`command` is a registered editor command; `harness` is deliberately process-only, with a stated reason.",
+        "",
+        "| Route | Count |",
+        "|---|---:|",
+        f"| Reflected component field | **{routes['schema']}** |",
+        f"| Seam 4 setting | **{routes['setting']}** |",
+        f"| Registered command | **{routes['command']}** |",
+        f"| Harness-only, with a reason | **{routes['harness']}** |",
+        f"| **Unexplained** | **{len(problems)}** |",
+        "",
+    ]
+    if problems:
+        lines.append("Unresolved:")
+        lines.append("")
+        lines += [f"- {problem}" for problem in problems]
+        lines.append("")
 
     lines += [
         "",

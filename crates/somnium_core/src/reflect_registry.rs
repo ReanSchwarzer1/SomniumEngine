@@ -431,6 +431,8 @@ pub fn component_registry() -> TypeRegistry {
 pub fn editor_registry() -> TypeRegistry {
     let mut registry = component_registry();
     registry.register(somnium_asset::material::material_asset_schema());
+    registry.register(editor_settings_schema());
+    registry.register(project_settings_schema());
     registry
 }
 
@@ -593,6 +595,42 @@ fn water_schema() -> ComponentSchema {
 /// Registering the component fixes that as a side effect of describing it
 /// — which is the point of having one registry.
 /// CONTROL-F: hide and lock, authored per entity.
+/// CONTROL-H, Seam 4: editor preferences are properties of a non-entity
+/// object, so they get an ordinary schema and reach Details for free.
+/// Deliberately **not** in [`component_registry`] — settings must never
+/// serialise into a scene.
+pub fn editor_settings_schema() -> ComponentSchema {
+    component_schema! {
+        crate::settings::EditorSettings as "somnium.EditorSettings", display "Editor", version 1,
+        fields {
+            snap_translate_m { min: 0.0, soft_max: 10.0, step: 0.05, unit: "m", group: "Snapping" },
+            snap_rotate_deg { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Snapping" },
+            snap_scale { min: 0.0, soft_max: 10.0, step: 0.05, group: "Snapping" },
+            snap_to_surface { group: "Snapping" },
+            gizmo_local_space { group: "Gizmo" },
+            gizmo_pivot_centre { group: "Gizmo" },
+            select_only { group: "Gizmo" },
+            tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface" },
+            show_statistics { group: "Interface" },
+        }
+    }
+}
+
+/// Project settings: facts about the content, committed with it.
+pub fn project_settings_schema() -> ComponentSchema {
+    component_schema! {
+        crate::settings::ProjectSettings as "somnium.ProjectSettings", display "Project", version 1,
+        fields {
+            startup_scene { group: "Startup" },
+            content_root { group: "Startup" },
+            autosave_interval_s { min: 0.0, soft_max: 3600.0, step: 30.0, unit: "s", group: "Saving" },
+            thumbnail_budget_ms { min: 0.0, soft_max: 16.0, step: 0.25, unit: "ms", group: "Content" },
+            external_editor { group: "Tools" },
+            default_float_step { min: 0.0, soft_max: 1.0, step: 0.001, precision: 4, group: "Interface" },
+        }
+    }
+}
+
 fn editor_flags_schema() -> ComponentSchema {
     component_schema! {
         EditorFlags as "somnium.EditorFlags", display "Editor", version 1,

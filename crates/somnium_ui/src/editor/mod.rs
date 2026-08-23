@@ -9,5 +9,6 @@ pub(crate) mod help;
 pub(crate) mod inspector;
 pub mod inspector_gen;
 pub(crate) mod parts;
+pub(crate) mod preferences;
 pub mod property_editors;
 pub(crate) mod shell;

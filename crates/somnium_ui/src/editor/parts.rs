@@ -81,7 +81,7 @@ pub(crate) fn command_popup_items(
     root: NodeHandle,
     font_id: u8,
     menu: crate::commands::Menu,
-) -> (NodeHandle, Vec<(NodeHandle, &'static str)>) {
+) -> (NodeHandle, NodeHandle, Vec<(NodeHandle, &'static str)>) {
     let commands = crate::commands::registry().menu(menu);
     let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let popup_h = ui.add_node(popup, root);
@@ -118,7 +118,7 @@ pub(crate) fn command_popup_items(
         ui.add_node(lbl, bh);
         handles.push((bh, command.id));
     }
-    (popup_h, handles)
+    (popup_h, stack_h, handles)
 }
 
 /// A hairline between two groups inside one command scope.
@@ -351,4 +351,40 @@ pub(crate) fn build_empty_state(
     ui.add_node(action, column_h);
 
     column_h
+}
+
+/// One extra menu row that is not a registry command.
+///
+/// The recent-scenes tail is the only caller, and it is deliberately narrow:
+/// everything else in a menu comes from CONTROL-A2's registry, and a general
+/// "add an arbitrary row" helper would be an invitation to bypass it.
+pub(crate) fn menu_entry(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    font_id: u8,
+    label: &str,
+    tooltip: &str,
+    enabled: bool,
+) -> NodeHandle {
+    let button = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(22.0)
+            .with_enabled(enabled)
+            .with_tooltip(tooltip)
+            .with_background(theme::TRANSPARENT),
+    )
+    .build();
+    let button = ui.add_node(button, parent);
+    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
+        .with_text(label)
+        .with_font_size(12.0)
+        .with_font_id(font_id)
+        .with_color(if enabled {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_DISABLED
+        })
+        .build();
+    ui.add_node(text, button);
+    button
 }

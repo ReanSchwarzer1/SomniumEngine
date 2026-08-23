@@ -373,6 +373,7 @@ struct EditorLayout {
     create_popup_items: Vec<(NodeHandle, &'static str)>,
     file_button: NodeHandle,
     file_popup: NodeHandle,
+    file_menu_stack: NodeHandle,
     menu_command_items: Vec<(NodeHandle, &'static str)>,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
@@ -461,6 +462,7 @@ struct EditorLayout {
     content_menu: NodeHandle,
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
+    preferences: crate::editor::preferences::PreferencesHandles,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -523,6 +525,7 @@ pub struct UiManager {
     // File menu (Phase 19B): Import
     file_button: NodeHandle,
     file_popup: NodeHandle,
+    file_menu_stack: NodeHandle,
     file_popup_open: bool,
     open_combo_popup: NodeHandle,
     /// Application menu handles mapped back to stable registry ids.
@@ -659,6 +662,7 @@ pub struct UiManager {
     content_menu: NodeHandle,
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
+    preferences: crate::editor::preferences::PreferencesHandles,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -698,6 +702,35 @@ pub struct UiManager {
     outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
     outliner_selection: Vec<u32>,
     clipboard_filled: bool,
+    /// User keybinding overrides. Dispatch reads this, not the declarations.
+    keybindings: crate::commands::KeyBindings,
+    /// The command whose binding is being captured, if the Preferences window
+    /// is waiting for a keystroke.
+    rebinding: Option<&'static str>,
+    preferences_open: bool,
+    /// Which Preferences tab is showing.
+    preferences_bindings_tab: bool,
+    preferences_query: String,
+    preferences_modified_only: bool,
+    /// Generated settings rows, mounted in the Preferences window. A separate
+    /// map from Details' because the two panels are alive at the same time and
+    /// address different objects.
+    settings_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    settings_rows: HashMap<NodeHandle, GeneratedBinding>,
+    settings_root: NodeHandle,
+    settings_signature: Vec<(
+        somnium_ecs::reflect::StableId,
+        somnium_ecs::reflect::FieldId,
+        GeneratedEdit,
+    )>,
+    settings_panels: Vec<crate::editor::inspector_gen::GeneratedComponentPanel>,
+    /// `(command id, capture button, reset button)` for the keyboard tab.
+    binding_rows: Vec<(&'static str, NodeHandle, NodeHandle)>,
+    recent_scenes: Vec<(String, bool)>,
+    /// `(button, path)` for the File menu's recent tail. The separator carries
+    /// an empty path and is never clickable.
+    recent_menu_items: Vec<(NodeHandle, String)>,
+    tooltip_delay_ms: f32,
     /// The value a badge-column drag is painting, so the run stays uniform.
     badge_drag_value: Option<bool>,
     /// Mirror of core's live rubber-band, so `Esc` can cancel it before the
@@ -1006,6 +1039,7 @@ impl UiManager {
             foliage_kind_shown: 0,
             file_button: layout.file_button,
             file_popup: layout.file_popup,
+            file_menu_stack: layout.file_menu_stack,
             file_popup_open: false,
             open_combo_popup: NodeHandle::NONE,
             menu_command_items: layout.menu_command_items,
@@ -1108,6 +1142,7 @@ impl UiManager {
             content_menu: layout.content_menu,
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
+            preferences: layout.preferences,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -1141,6 +1176,21 @@ impl UiManager {
             outliner_entity_handles: HashMap::new(),
             outliner_selection: Vec::new(),
             clipboard_filled: false,
+            keybindings: crate::commands::KeyBindings::load(),
+            rebinding: None,
+            preferences_open: false,
+            preferences_bindings_tab: false,
+            preferences_query: String::new(),
+            preferences_modified_only: false,
+            settings_bindings: HashMap::new(),
+            settings_rows: HashMap::new(),
+            settings_root: NodeHandle::NONE,
+            settings_signature: Vec::new(),
+            settings_panels: Vec::new(),
+            binding_rows: Vec::new(),
+            recent_scenes: Vec::new(),
+            recent_menu_items: Vec::new(),
+            tooltip_delay_ms: 500.0,
             badge_drag_value: None,
             marquee_active: false,
             viewport_drop_probe: (None, None),
@@ -1551,10 +1601,17 @@ impl UiManager {
                         self.native_ui.modifiers().alt,
                         false,
                     ) {
-                        if let Some(command) = crate::commands::registry().binding(chord).copied() {
-                            if self.run_command_id(command.id) {
-                                return true;
-                            }
+                        // CONTROL-H: a rebinding editor is only real if the
+                        // override is what dispatch consults. The registry's
+                        // declared chord is the fallback, not the authority.
+                        if self.rebinding.is_some() {
+                            self.capture_rebind(chord);
+                            return true;
+                        }
+                        if let Some(id) = self.keybindings.command_for(chord)
+                            && self.run_command_id(id)
+                        {
+                            return true;
                         }
                     }
                 }
@@ -1584,6 +1641,9 @@ impl UiManager {
                         // is cancelled first, ahead of drags, control gestures
                         // and every overlay — the same precedence CONTROL-A1
                         // gave `Esc` and CONTROL-E kept.
+                        if self.rebinding.take().is_some() {
+                            return true;
+                        }
                         if self.marquee_active {
                             self.marquee_active = false;
                             self.editor_events.push_back(EditorEvent::CancelMarquee);
@@ -2485,6 +2545,12 @@ impl UiManager {
     /// Returns whether anything was closed, so the caller can let the key fall
     /// through to the viewport when the editor has nothing to dismiss.
     fn close_top_overlay(&mut self) -> bool {
+        // Preferences is modal and sits above the name prompt, because it can
+        // open one (the project picker) but never the other way round.
+        if self.preferences_open {
+            self.toggle_preferences();
+            return true;
+        }
         // Modal name prompts share the same focus trap as the unsaved prompt.
         if self.name_prompt.is_some() {
             self.close_name_prompt();
@@ -2862,6 +2928,340 @@ impl UiManager {
         ));
     }
 
+    /// Open or close the Preferences window.
+    pub fn toggle_preferences(&mut self) {
+        self.preferences_open = !self.preferences_open;
+        self.rebinding = None;
+        self.native_ui.send(UiMessage::new(
+            self.preferences.overlay,
+            MessageDirection::ToWidget,
+            if self.preferences_open {
+                PopupMessage::Open
+            } else {
+                PopupMessage::Close
+            },
+        ));
+        if self.preferences_open {
+            self.enter_modal_focus(self.preferences.overlay, self.preferences.search);
+            self.rebuild_binding_rows();
+        } else {
+            self.exit_modal_focus(self.preferences.overlay);
+        }
+        self.native_ui
+            .invalidate_ancestors(self.preferences.overlay);
+    }
+
+    /// Whether the Preferences window is showing.
+    #[must_use]
+    pub fn preferences_open(&self) -> bool {
+        self.preferences_open
+    }
+
+    /// The settings panels core should publish, filtered by the search box.
+    ///
+    /// Filtering here rather than in core keeps the query where the box is,
+    /// and reuses the generated search that already covers label, field name
+    /// and doc comment — Unity's generated keyword index, not a maintained one.
+    pub fn update_settings_panels(
+        &mut self,
+        panels: Vec<crate::editor::inspector_gen::GeneratedComponentPanel>,
+        overridden: &[(
+            somnium_ecs::reflect::StableId,
+            somnium_ecs::reflect::FieldId,
+            String,
+        )],
+    ) {
+        let filtered: Vec<_> = panels
+            .into_iter()
+            .map(|mut panel| {
+                if !self.preferences_query.trim().is_empty() {
+                    let kept: Vec<_> = crate::editor::inspector_gen::search_rows(
+                        &panel.rows,
+                        &self.preferences_query,
+                    )
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                    panel.rows = kept;
+                }
+                if self.preferences_modified_only {
+                    panel.rows.retain(|row| row.modified);
+                }
+                // An overridden setting is shown, disabled, with the variable
+                // named — craft defect C8. Hiding it would be worse: the value
+                // on screen would then be unexplained.
+                for row in &mut panel.rows {
+                    if overridden.iter().any(|(component, field, _)| {
+                        *component == row.component && *field == row.field
+                    }) {
+                        row.read_only = true;
+                    }
+                }
+                panel
+            })
+            .filter(|panel| !panel.rows.is_empty())
+            .collect();
+
+        let signature: Vec<_> = filtered
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .map(|row| (row.component, row.field, GeneratedEdit::Whole))
+            .collect();
+        if signature != self.settings_signature {
+            if self.settings_root.is_some() {
+                self.native_ui.remove_node(self.settings_root);
+            }
+            self.settings_bindings.clear();
+            self.settings_rows.clear();
+            let (root, bindings, rows, _, _, _) = build_generated_details(
+                &mut self.native_ui,
+                self.preferences.settings_body,
+                self.font_id,
+                &filtered,
+                &self.asset_db,
+            );
+            self.settings_root = root;
+            self.settings_bindings = bindings;
+            self.settings_rows = rows;
+            self.settings_signature = signature;
+            self.native_ui
+                .invalidate_ancestors(self.preferences.settings_body);
+        }
+        self.settings_panels = filtered;
+    }
+
+    /// Rebuild the keyboard tab from the live bindings.
+    fn rebuild_binding_rows(&mut self) {
+        for (_, capture, _) in std::mem::take(&mut self.binding_rows) {
+            let row = self.native_ui.parent(capture);
+            if row.is_some() {
+                self.native_ui.remove_node(row);
+            }
+        }
+        let query = self.preferences_query.to_ascii_lowercase();
+        let rows = self.keybindings.rows();
+        for row in rows {
+            let Some(command) = crate::commands::registry().get(row.command).copied() else {
+                continue;
+            };
+            if !query.is_empty()
+                && !command.label.to_ascii_lowercase().contains(&query)
+                && !command.id.contains(&query)
+            {
+                continue;
+            }
+            if self.preferences_modified_only && !row.customised {
+                continue;
+            }
+            let chord = row
+                .chord
+                .map_or_else(|| "—".to_string(), |chord| chord.to_string());
+            let (capture, reset) = crate::editor::preferences::build_binding_row(
+                &mut self.native_ui,
+                self.preferences.bindings_body,
+                self.font_id,
+                command.label,
+                &chord,
+                row.conflicted,
+                row.customised,
+            );
+            self.binding_rows.push((row.command, capture, reset));
+        }
+        self.native_ui
+            .invalidate_ancestors(self.preferences.bindings_body);
+    }
+
+    /// A keystroke arrived while a binding row was waiting for one.
+    ///
+    /// A conflict is reported and the rebind still applies: the person just
+    /// asked for it, and silently refusing would leave them pressing a key
+    /// that does nothing with no explanation. What is *not* done is unbinding
+    /// the other command behind their back — the conflict stays visible in the
+    /// list until they resolve it.
+    fn capture_rebind(&mut self, chord: crate::commands::Chord) {
+        let Some(id) = self.rebinding.take() else {
+            return;
+        };
+        let conflicts = self.keybindings.conflicts_for(chord, id);
+        self.keybindings.bind(id, Some(chord));
+        self.keybindings.save();
+        if let Some(other) = conflicts
+            .first()
+            .and_then(|other| crate::commands::registry().get(other).map(|c| c.label))
+        {
+            self.push_toast(&format!("{chord} also runs {other}"));
+        }
+        self.rebuild_binding_rows();
+    }
+
+    /// Recently opened scenes, newest first, each with whether it still
+    /// exists. A missing entry is greyed rather than dropped — craft defect
+    /// C11: silently forgetting looks the same as never having opened it.
+    pub fn set_recent_scenes(&mut self, scenes: Vec<(String, bool)>) {
+        if self.recent_scenes == scenes {
+            return;
+        }
+        self.recent_scenes = scenes;
+        self.rebuild_file_menu();
+    }
+
+    /// Rebuild the recent-scenes tail of the File menu.
+    ///
+    /// The registry half of the menu is built once and never changes; this
+    /// appends and re-appends only the recent entries, so a command added to
+    /// `Menu::File` still arrives without touching this code.
+    fn rebuild_file_menu(&mut self) {
+        for (handle, _) in std::mem::take(&mut self.recent_menu_items) {
+            self.native_ui.remove_node(handle);
+        }
+        if self.recent_scenes.is_empty() {
+            return;
+        }
+        let separator =
+            crate::editor::parts::scope_separator(&mut self.native_ui, self.file_menu_stack);
+        self.recent_menu_items.push((separator, String::new()));
+        let recents = self.recent_scenes.clone();
+        for (path, exists) in recents {
+            let label = std::path::Path::new(&path)
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+            let handle = crate::editor::parts::menu_entry(
+                &mut self.native_ui,
+                self.file_menu_stack,
+                self.font_id,
+                &label,
+                &path,
+                exists,
+            );
+            self.recent_menu_items.push((handle, path));
+        }
+        self.native_ui.invalidate_ancestors(self.file_menu_stack);
+    }
+
+    /// How long the pointer rests before a tooltip appears.
+    pub fn set_tooltip_delay_ms(&mut self, ms: f32) {
+        self.tooltip_delay_ms = ms.max(0.0);
+    }
+
+    /// The chord in force for a command, for menus and tooltips.
+    #[must_use]
+    pub fn chord_for(&self, id: &str) -> Option<crate::commands::Chord> {
+        let default = crate::commands::registry()
+            .get(id)
+            .and_then(|command| command.default_binding);
+        self.keybindings.chord_for(id, default)
+    }
+
+    /// Everything the Preferences window does with a message.
+    ///
+    /// One function rather than four arms scattered through the main loop,
+    /// because every one of them is answered the same way — publish a
+    /// `SetSetting` and let core decide whether the environment has taken the
+    /// field away — and because the window is either open or it is not.
+    fn handle_preferences_message(&mut self, msg: &UiMessage) -> bool {
+        if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            if msg.destination == self.preferences.close {
+                self.toggle_preferences();
+                return true;
+            }
+            if msg.destination == self.preferences.tab_settings
+                || msg.destination == self.preferences.tab_bindings
+            {
+                self.preferences_bindings_tab = msg.destination == self.preferences.tab_bindings;
+                self.native_ui.set_visibility(
+                    self.preferences.settings_body,
+                    !self.preferences_bindings_tab,
+                );
+                self.native_ui.set_visibility(
+                    self.preferences.bindings_body,
+                    self.preferences_bindings_tab,
+                );
+                self.rebuild_binding_rows();
+                return true;
+            }
+            if msg.destination == self.preferences.reset_all {
+                self.keybindings.reset_all();
+                self.keybindings.save();
+                self.editor_events.push_back(EditorEvent::ResetAllSettings);
+                self.rebuild_binding_rows();
+                return true;
+            }
+            if let Some((id, _, _)) = self
+                .binding_rows
+                .iter()
+                .find(|(_, capture, _)| *capture == msg.destination)
+            {
+                self.rebinding = Some(id);
+                self.push_toast("Press a shortcut, or Esc to cancel");
+                return true;
+            }
+            if let Some((id, _, _)) = self
+                .binding_rows
+                .iter()
+                .find(|(_, _, reset)| *reset == msg.destination)
+                .map(|entry| (entry.0, entry.1, entry.2))
+            {
+                self.keybindings.reset(id);
+                self.keybindings.save();
+                self.rebuild_binding_rows();
+                return true;
+            }
+        }
+        if msg.destination == self.preferences.search
+            && let Some(SearchBoxMessage::Query(query)) = msg.data::<SearchBoxMessage>()
+        {
+            self.preferences_query = query.clone();
+            self.settings_signature.clear();
+            if self.preferences_bindings_tab {
+                self.rebuild_binding_rows();
+            }
+            return true;
+        }
+        if msg.destination == self.preferences.modified_only
+            && let Some(CheckBoxMessage::Check(value)) = msg.data::<CheckBoxMessage>()
+        {
+            self.preferences_modified_only = *value;
+            self.settings_signature.clear();
+            if self.preferences_bindings_tab {
+                self.rebuild_binding_rows();
+            }
+            return true;
+        }
+
+        // A settings row edited. The value shape follows the widget, exactly
+        // as it does for entity properties; the difference is only where the
+        // write lands.
+        let Some(binding) = self.settings_bindings.get(&msg.destination).cloned() else {
+            return false;
+        };
+        let value = if let Some(NumericFieldMessage::ValueChanged(v)) =
+            msg.data::<NumericFieldMessage>()
+        {
+            Self::numeric_reflect_value(&binding, *v)
+        } else if let Some(CheckBoxMessage::Check(v)) = msg.data::<CheckBoxMessage>() {
+            Some(somnium_ecs::reflect::ReflectValue::Bool(*v))
+        } else if let Some(TextBoxMessage::TextCommit(v)) = msg.data::<TextBoxMessage>() {
+            Some(somnium_ecs::reflect::ReflectValue::Str(v.clone()))
+        } else if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>()
+        {
+            Some(somnium_ecs::reflect::ReflectValue::I64(*index as i64))
+        } else {
+            None
+        };
+        let Some(value) = value else {
+            // A live scrub inside the Preferences window is deliberately
+            // ignored: settings are written straight to disk, and a drag would
+            // otherwise write the file once per pixel.
+            return msg.data::<NumericFieldMessage>().is_some();
+        };
+        self.editor_events.push_back(EditorEvent::SetSetting {
+            component: binding.component,
+            field: binding.field,
+            value,
+        });
+        true
+    }
+
     fn command_context(&self) -> crate::commands::EditorCtx {
         crate::commands::EditorCtx {
             has_selection: self
@@ -2921,6 +3321,8 @@ impl UiManager {
             A::Redo => self.editor_events.push_back(EditorEvent::Redo),
             A::DeleteSelected => self.editor_events.push_back(EditorEvent::DeleteSelected),
             A::DuplicateSelected => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            A::OpenPreferences => self.toggle_preferences(),
+            A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
             A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
             A::PasteClipboard => self.editor_events.push_back(EditorEvent::PasteClipboard),
             A::SelectAll => self.editor_events.push_back(EditorEvent::SelectAll),
@@ -3179,7 +3581,9 @@ impl UiManager {
         }
         let now = std::time::Instant::now();
         match self.tooltip_since {
-            Some((_, since)) if now.duration_since(since).as_millis() >= 400 => {
+            Some((_, since))
+                if now.duration_since(since).as_millis() >= self.tooltip_delay_ms as u128 =>
+            {
                 self.native_ui
                     .send(TextMessage::set_text(self.tooltip, text));
                 self.native_ui
@@ -4259,6 +4663,20 @@ impl UiManager {
             (h.foliage_smax, FoliageBrushField::ScaleMax),
         ];
         for msg in msgs {
+            if self.handle_preferences_message(&msg) {
+                continue;
+            }
+            if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+                && let Some((_, path)) = self
+                    .recent_menu_items
+                    .iter()
+                    .find(|(handle, path)| *handle == msg.destination && !path.is_empty())
+                    .cloned()
+            {
+                self.close_all_menus();
+                self.prompt_unsaved_action(EditorEvent::LoadScene(path));
+                continue;
+            }
             if let Some(ColorSwatchMessage::Clicked(rgba)) = msg.data::<ColorSwatchMessage>() {
                 let generated_target =
                     self.generated_bindings

@@ -1152,21 +1152,22 @@ pub(crate) fn build_editor_layout(
 
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
-    let (file_popup, file_items) =
+    let (file_popup, file_menu_stack, file_items) =
         command_popup_items(ui, root, font_id, crate::commands::Menu::File);
-    let (edit_popup, edit_items) =
+    let (edit_popup, _edit_menu_stack, edit_items) =
         command_popup_items(ui, root, font_id, crate::commands::Menu::Edit);
-    let (view_popup, view_items) =
+    let (view_popup, _view_menu_stack, view_items) =
         command_popup_items(ui, root, font_id, crate::commands::Menu::View);
     // Window menu is now the workspace switcher (Zeta-F). "Reset workspace"
     // last, after a separator's worth of distance, because it is the
     // destructive one.
-    let (window_popup, window_items) =
+    let (window_popup, _window_menu_stack, window_items) =
         command_popup_items(ui, root, font_id, crate::commands::Menu::Window);
-    let (help_menu_popup, help_items) =
+    let (help_menu_popup, _help_menu_stack, help_items) =
         command_popup_items(ui, root, font_id, crate::commands::Menu::Help);
 
     let (help_overlay, help_body, help_toc, help_close) = build_help_overlay(ui, root, font_id);
+    let preferences = super::preferences::build_preferences_window(ui, root, font_id);
 
     let tooltip_node = TooltipBuilder::new(
         WidgetBuilder::new()
@@ -1389,6 +1390,7 @@ pub(crate) fn build_editor_layout(
         create_popup_items,
         file_button,
         file_popup,
+        file_menu_stack,
         menu_command_items,
         camera_speed_slider,
         camera_speed_label,
@@ -1435,6 +1437,7 @@ pub(crate) fn build_editor_layout(
         help_button,
         help_overlay,
         help_body,
+        preferences,
         tooltip,
         edit_button,
         view_button,

@@ -439,6 +439,11 @@ pub struct Engine<G: GameApp> {
     /// selection means "the rows between these two", so the range has to be
     /// resolved against the order the user can actually see.
     outliner_order: Vec<somnium_ecs::entity::Entity>,
+    /// Seam 4: preferences, project settings, and which of them the
+    /// environment has taken out of the author's hands.
+    settings: crate::settings::SettingsStore,
+    /// Most-recently-opened scenes, newest first.
+    recent_scenes: Vec<std::path::PathBuf>,
     /// The entity clipboard. Values, never handles — see `clipboard.rs`.
     entity_clipboard: crate::clipboard::EntityClipboard,
     /// Pending "frame this" request for the game-owned editor camera:
@@ -580,6 +585,20 @@ impl<G: GameApp + 'static> Engine<G> {
         let event_loop = EventLoop::new().map_err(|e| EngineError::EventLoop(e.to_string()))?;
 
         let initial_vp = (config.window_size.0 as f32, config.window_size.1 as f32);
+        // Seam 4 resolves before the engine exists, because the content root
+        // it produces is what the asset scan and the window title read.
+        let settings_store = crate::settings::SettingsStore::load(
+            crate::settings::default_global_path(),
+            config_project_path(&config),
+        );
+        let resolved_root = std::path::PathBuf::from(&settings_store.project().content_root);
+        if resolved_root.as_os_str().is_empty() {
+            // An empty root would silently point the drawer at the working
+            // directory; the declared default is the honest fallback.
+            config.content_root = std::path::PathBuf::from("assets");
+        } else {
+            config.content_root = resolved_root;
+        }
         let mut engine = Self {
             game: Box::new(game),
             time: TimeState::new(config.target_fps),
@@ -608,6 +627,8 @@ impl<G: GameApp + 'static> Engine<G> {
             external_import_job: None,
             selection: crate::selection::Selection::default(),
             outliner_order: Vec::new(),
+            settings: settings_store,
+            recent_scenes: crate::settings::load_recent_scenes(),
             entity_clipboard: crate::clipboard::EntityClipboard::default(),
             camera_focus_request: None,
             state: LifecycleState::Uninitialized,
@@ -873,6 +894,65 @@ impl<G: GameApp> Engine<G> {
             self.selection.set_many(caught);
         }
         self.after_selection_change();
+    }
+
+    /// The generated Preferences panels and the overrides in force.
+    fn settings_panels(
+        &self,
+    ) -> (
+        Vec<somnium_ui::editor::inspector_gen::GeneratedComponentPanel>,
+        Vec<(
+            somnium_ecs::reflect::StableId,
+            somnium_ecs::reflect::FieldId,
+            String,
+        )>,
+    ) {
+        let editors = somnium_ui::editor::property_editors::PropertyEditorRegistry::standard();
+        let rules = somnium_ui::editor::editing_rules::EditingRulesRegistry::default();
+        let (world, entity) = self.settings.world();
+        let panels = crate::settings::SettingsStore::schemas()
+            .into_iter()
+            .filter_map(|schema| {
+                let values = (schema.snapshot)(world, entity)?;
+                Some(somnium_ui::editor::inspector_gen::generate_component_panel(
+                    &schema, &values, &editors, &rules,
+                ))
+            })
+            .collect();
+        let overrides = self
+            .settings
+            .overrides()
+            .into_iter()
+            .map(|(component, field, name)| (component, field, format!("overridden by {name}")))
+            .collect();
+        (panels, overrides)
+    }
+
+    /// Record a scene in the recent list, newest first, without duplicates.
+    fn remember_recent_scene(&mut self, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        self.recent_scenes.retain(|existing| existing != &path);
+        self.recent_scenes.insert(0, path);
+        self.recent_scenes
+            .truncate(crate::settings::RECENT_SCENE_LIMIT);
+        crate::settings::save_recent_scenes(&self.recent_scenes);
+    }
+
+    /// Push the resolved settings into the systems that consume them.
+    ///
+    /// Called after every write, so the effect of a preference is immediate
+    /// rather than waiting for a restart. Snapping, the gizmo pivot and the
+    /// select-only mode all read the store directly each frame; what needs
+    /// pushing is the state that lives somewhere else.
+    fn apply_settings(&mut self) {
+        let root = std::path::PathBuf::from(&self.settings.project().content_root);
+        if root != self.config.content_root {
+            self.config.content_root = root;
+            self.next_asset_scan = std::time::Instant::now();
+        }
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.set_tooltip_delay_ms(self.settings.editor().tooltip_delay_ms);
+        }
     }
 
     /// Frame the selection with the editor camera.
@@ -2246,6 +2326,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     panels
                 })
                 .unwrap_or_default();
+            // Settings are properties, so their panel is generated by exactly
+            // the same call the entity inspector uses — against the settings
+            // store's private world instead of the scene's.
+            let (settings_panels, settings_overrides) = self.settings_panels();
             let drop_probe_entity = self.viewport_entity_drop_pick();
             let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
@@ -2253,6 +2337,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.set_outliner_entity_handles(all_entities.iter().copied());
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
+                if ui.preferences_open() {
+                    ui.update_settings_panels(settings_panels, &settings_overrides);
+                }
+                ui.set_recent_scenes(
+                    self.recent_scenes
+                        .iter()
+                        .map(|path| (path.to_string_lossy().into_owned(), path.exists()))
+                        .collect(),
+                );
                 ui.set_marquee(
                     self.marquee
                         .filter(crate::selection::Marquee::is_dragged)
@@ -4526,6 +4619,59 @@ impl<G: GameApp> Engine<G> {
                 self.scene_dirty = true;
             }
 
+            EditorEvent::SetSetting {
+                component,
+                field,
+                value,
+            } => {
+                if let Err(reason) = self.settings.set(component, field, value)
+                    && let Some(ui) = self.ui_manager.as_mut()
+                {
+                    // The "overridden by ..." reason reaches the person, rather than
+                    // the control appearing to accept a value it discarded.
+                    ui.push_toast(&reason);
+                }
+                self.apply_settings();
+            }
+
+            EditorEvent::ResetAllSettings => {
+                for schema in crate::settings::SettingsStore::schemas() {
+                    for field in &schema.fields {
+                        let _ = self.settings.revert(schema.stable_id, field.id);
+                    }
+                }
+                self.apply_settings();
+            }
+
+            EditorEvent::OpenProjectPicker => {
+                // 27-G's picker, unblocked: that phase deferred it because it
+                // needed an `EditorEvent` addition it had forbidden itself.
+                let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Open Project")
+                    .pick_folder()
+                else {
+                    return;
+                };
+                let (component, field) =
+                    crate::settings::field_address("somnium.ProjectSettings", "content_root");
+                let value =
+                    somnium_ecs::reflect::ReflectValue::Str(folder.to_string_lossy().into_owned());
+                match self.settings.set(component, field, value) {
+                    Ok(()) => {
+                        self.config.content_root = folder;
+                        self.next_asset_scan = std::time::Instant::now();
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.push_toast("Project opened");
+                        }
+                    }
+                    Err(reason) => {
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.push_toast(&reason);
+                        }
+                    }
+                }
+            }
+
             EditorEvent::CancelMarquee => {
                 self.marquee = None;
                 if let Some(ui) = self.ui_manager.as_mut() {
@@ -5026,6 +5172,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(()) => {
                         info!("Scene saved to {}", path);
                         self.scene_dirty = false;
+                        self.remember_recent_scene(std::path::Path::new(path));
                         if let Some(ui) = &mut self.ui_manager {
                             ui.push_toast("Scene saved");
                             // Saving is what "modified" was measured against.
@@ -5188,6 +5335,8 @@ impl<G: GameApp> Engine<G> {
                 match crate::load_map(&mut self.world, renderer, render_ctx, &path) {
                     Ok(result) => {
                         info!("Loaded map {path} ({:?})", result.kind);
+                        let opened = std::path::PathBuf::from(&path);
+                        self.remember_recent_scene(&opened);
                         self.selection.primary = None;
                         self.material_sessions.clear();
                         self.undo_stack = UndoStack::new(128);
@@ -5869,6 +6018,17 @@ fn camera_spawn_basis(
 }
 
 /// Unproject a screen position to a world-space point (at mid-depth).
+/// Where a project's committed settings live, given its content root.
+///
+/// The file sits beside the content directory rather than inside it, so it is
+/// not itself an asset and never shows up in the Content Drawer.
+fn config_project_path(config: &EngineConfig) -> std::path::PathBuf {
+    config.content_root.parent().map_or_else(
+        || std::path::PathBuf::from("project.toml"),
+        |parent| parent.join("project.toml"),
+    )
+}
+
 fn ndc_to_world(cx: f32, cy: f32, vw: f32, vh: f32, inv_vp: &glam::Mat4) -> glam::Vec3 {
     let ndc_x = 2.0 * cx / vw - 1.0;
     let ndc_y = 1.0 - 2.0 * cy / vh;

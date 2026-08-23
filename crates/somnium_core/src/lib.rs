@@ -67,6 +67,7 @@ pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
 pub mod selection;
+pub mod settings;
 pub mod sun;
 pub mod time;
 

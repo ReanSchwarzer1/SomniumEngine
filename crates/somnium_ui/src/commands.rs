@@ -14,7 +14,7 @@ use std::{
 use winit::keyboard::KeyCode;
 
 /// A platform-neutral key used by an editor shortcut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandKey {
     /// A letter key.
     Letter(char),
@@ -38,7 +38,7 @@ impl fmt::Display for CommandKey {
 }
 
 /// One key plus its required modifiers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Chord {
     /// Primary key.
     pub key: CommandKey,
@@ -271,6 +271,8 @@ pub enum CommandAction {
     ContentRename,
     ContentShowInFolder,
     ContentRefresh,
+    OpenPreferences,
+    OpenProjectPicker,
 }
 
 /// One editor command declaration.
@@ -517,6 +519,26 @@ fn declarations() -> Vec<Command> {
             A::FocusSelection,
             VIEW_OUTLINER,
             selection
+        ),
+        command!(
+            "editor.window.preferences",
+            "Preferences",
+            "Window",
+            Some(Chord::press(CommandKey::Letter(',')).ctrl()),
+            "Open editor preferences, project settings and the keyboard map.",
+            A::OpenPreferences,
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.file.open_project",
+            "Open Project...",
+            "File",
+            None,
+            "Choose a different project folder to work in.",
+            A::OpenProjectPicker,
+            FILE,
+            always
         ),
         command!(
             "editor.simulation.play",
@@ -1092,6 +1114,159 @@ impl CommandHistory {
     }
 }
 
+/// User overrides of the registry's default chords.
+///
+/// A separate, sparse store rather than a mutable registry: the declarations
+/// stay `const`, "reset to default" is a *removal* rather than a remembered
+/// second value, and a build that renames a command simply stops matching a
+/// stale override instead of resurrecting a binding for something that no
+/// longer exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyBindings {
+    /// `command id -> chord`. An id absent here uses its declared default; an
+    /// id present with `None` has been deliberately unbound.
+    #[serde(default)]
+    overrides: BTreeMap<String, Option<Chord>>,
+}
+
+/// One command's binding, with everything the editor needs to draw the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingRow {
+    /// The command this row binds.
+    pub command: &'static str,
+    /// The chord in force, or `None` when unbound.
+    pub chord: Option<Chord>,
+    /// Whether it differs from the declaration.
+    pub customised: bool,
+    /// Whether another command holds the same chord.
+    pub conflicted: bool,
+}
+
+impl KeyBindings {
+    /// The chord in force for `id`.
+    #[must_use]
+    pub fn chord_for(&self, id: &str, default: Option<Chord>) -> Option<Chord> {
+        match self.overrides.get(id) {
+            Some(chord) => *chord,
+            None => default,
+        }
+    }
+
+    /// Whether `id` has been changed from its declaration.
+    #[must_use]
+    pub fn is_customised(&self, id: &str) -> bool {
+        self.overrides.contains_key(id)
+    }
+
+    /// Bind `id` to `chord`, or to nothing.
+    ///
+    /// Deliberately does **not** unbind whatever else holds the chord. A
+    /// conflict is reported, not silently resolved: quietly stealing a binding
+    /// is how a person loses a shortcut they never touched.
+    pub fn bind(&mut self, id: &str, chord: Option<Chord>) {
+        self.overrides.insert(id.to_string(), chord);
+    }
+
+    /// Drop the override so the declared default applies again.
+    pub fn reset(&mut self, id: &str) {
+        self.overrides.remove(id);
+    }
+
+    /// Drop every override.
+    pub fn reset_all(&mut self) {
+        self.overrides.clear();
+    }
+
+    /// The command a chord currently runs, honouring overrides. This is the
+    /// dispatch path, so an override takes effect the moment it is set.
+    #[must_use]
+    pub fn command_for(&self, chord: Chord) -> Option<&'static str> {
+        registry()
+            .commands()
+            .iter()
+            .find(|command| self.chord_for(command.id, command.default_binding) == Some(chord))
+            .map(|command| command.id)
+    }
+
+    /// Every command with a binding, in registry order, with conflicts marked.
+    #[must_use]
+    pub fn rows(&self) -> Vec<BindingRow> {
+        let resolved: Vec<_> = registry()
+            .commands()
+            .iter()
+            .map(|command| {
+                (
+                    command.id,
+                    self.chord_for(command.id, command.default_binding),
+                )
+            })
+            .collect();
+        resolved
+            .iter()
+            .map(|(id, chord)| BindingRow {
+                command: id,
+                chord: *chord,
+                customised: self.is_customised(id),
+                conflicted: chord.is_some_and(|chord| {
+                    resolved
+                        .iter()
+                        .filter(|(_, other)| *other == Some(chord))
+                        .count()
+                        > 1
+                }),
+            })
+            .collect()
+    }
+
+    /// Every command that would answer to `chord`. One entry is normal; two or
+    /// more is the conflict the editor reports before accepting a rebind.
+    #[must_use]
+    pub fn conflicts_for(&self, chord: Chord, ignoring: &str) -> Vec<&'static str> {
+        registry()
+            .commands()
+            .iter()
+            .filter(|command| command.id != ignoring)
+            .filter(|command| self.chord_for(command.id, command.default_binding) == Some(chord))
+            .map(|command| command.id)
+            .collect()
+    }
+
+    /// Decode; malformed state safely starts fresh.
+    #[must_use]
+    pub fn from_json(json: &str) -> Self {
+        serde_json::from_str(json).unwrap_or_default()
+    }
+
+    /// Encode for persistence.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Load from the per-user config directory.
+    #[must_use]
+    pub fn load() -> Self {
+        std::fs::read_to_string(bindings_path())
+            .map_or_else(|_| Self::default(), |json| Self::from_json(&json))
+    }
+
+    /// Persist. Failure is intentionally non-fatal.
+    pub fn save(&self) {
+        let path = bindings_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, self.to_json());
+    }
+}
+
+fn bindings_path() -> PathBuf {
+    let mut dir = history_path();
+    dir.pop();
+    dir.push("keybindings.json");
+    dir
+}
+
 fn history_path() -> PathBuf {
     let mut dir = std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -1169,6 +1344,93 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// An override is what dispatch consults; the declaration is the fallback.
+    #[test]
+    fn a_rebind_takes_effect_and_reset_puts_the_default_back() {
+        let save = *registry().get("editor.scene.save").unwrap();
+        let default = save.default_binding.expect("Save ships with a chord");
+        let rebound = Chord::press(CommandKey::Letter('J')).ctrl().shift();
+
+        let mut bindings = KeyBindings::default();
+        assert_eq!(bindings.command_for(default), Some(save.id));
+
+        bindings.bind(save.id, Some(rebound));
+        assert_eq!(bindings.command_for(rebound), Some(save.id));
+        assert_ne!(
+            bindings.command_for(default),
+            Some(save.id),
+            "the old chord must stop running the rebound command"
+        );
+        assert!(bindings.is_customised(save.id));
+
+        bindings.reset(save.id);
+        assert_eq!(bindings.command_for(default), Some(save.id));
+        assert!(!bindings.is_customised(save.id));
+    }
+
+    /// A conflict is reported, not silently resolved. Quietly unbinding the
+    /// other command is how a person loses a shortcut they never touched.
+    #[test]
+    fn a_conflicting_rebind_is_reported_and_both_rows_are_marked() {
+        let undo = *registry().get("editor.edit.undo").unwrap();
+        let save = *registry().get("editor.scene.save").unwrap();
+        let chord = undo.default_binding.expect("Undo ships with a chord");
+
+        let mut bindings = KeyBindings::default();
+        assert!(bindings.conflicts_for(chord, save.id).contains(&undo.id));
+        bindings.bind(save.id, Some(chord));
+
+        let rows = bindings.rows();
+        let conflicted: Vec<_> = rows
+            .iter()
+            .filter(|row| row.conflicted)
+            .map(|row| row.command)
+            .collect();
+        assert!(conflicted.contains(&undo.id));
+        assert!(conflicted.contains(&save.id));
+        assert!(
+            bindings.command_for(chord).is_some(),
+            "one of them still answers; neither was silently unbound"
+        );
+    }
+
+    /// Unbinding is a distinct state from "never customised", so a deliberate
+    /// unbind survives a restart instead of reverting on the next launch.
+    #[test]
+    fn an_explicit_unbind_is_not_the_same_as_a_reset() {
+        let save = *registry().get("editor.scene.save").unwrap();
+        let mut bindings = KeyBindings::default();
+        bindings.bind(save.id, None);
+        assert!(bindings.is_customised(save.id));
+        assert_eq!(bindings.chord_for(save.id, save.default_binding), None);
+
+        let reloaded = KeyBindings::from_json(&bindings.to_json());
+        assert_eq!(reloaded, bindings, "the unbind survives a round trip");
+
+        bindings.reset(save.id);
+        assert_eq!(
+            bindings.chord_for(save.id, save.default_binding),
+            save.default_binding
+        );
+    }
+
+    /// A stale override for a command this build no longer declares must not
+    /// resurrect anything.
+    #[test]
+    fn an_override_for_an_unknown_command_is_inert() {
+        let mut bindings = KeyBindings::default();
+        let chord = Chord::press(CommandKey::Letter('Q')).ctrl().alt();
+        bindings.bind("editor.deleted.command", Some(chord));
+        assert_eq!(bindings.command_for(chord), None);
+        assert!(bindings.rows().iter().all(|row| row.chord != Some(chord)));
+    }
+
+    /// Malformed state starts fresh rather than refusing to launch.
+    #[test]
+    fn a_corrupt_bindings_file_starts_fresh() {
+        assert_eq!(KeyBindings::from_json("{ not json"), KeyBindings::default());
+    }
 
     /// CONTROL-F: the Outliner's menu is registry-derived, so adding a
     /// command declares it there too. The test names the seven the phase asks

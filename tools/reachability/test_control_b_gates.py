@@ -1,11 +1,21 @@
-"""Opt-in red gates established by CONTROL-A and closed by CONTROL-B."""
+"""Opt-in reachability gates.
+
+CONTROL-A established them red; CONTROL-B closed the two inspector gates and
+CONTROL-H added the third — that every `SOMNIUM_*` variable has a declared,
+verified route out of the shell and into the editor.
+"""
 
 from __future__ import annotations
 
 import os
 import unittest
 
-from .generate import missing_editable_fields, missing_property_editors, schema_blocks
+from .generate import (
+    env_route_problems,
+    missing_editable_fields,
+    missing_property_editors,
+    schema_blocks,
+)
 
 
 class AuditParserTests(unittest.TestCase):
@@ -32,6 +42,16 @@ class ControlBCompletenessGates(unittest.TestCase):
 
     def test_every_field_type_has_a_registered_property_editor(self) -> None:
         self.assertEqual([], missing_property_editors())
+
+    def test_every_environment_variable_has_a_verified_route(self) -> None:
+        """CONTROL-H's exit: the table has no unexplained rows.
+
+        A failure lists the exact variables, because a count would tell nobody
+        what to fix. A `command` route that names an unregistered id fails the
+        same way an unclassified variable does — a promise the editor cannot
+        keep is not better than an admitted gap.
+        """
+        self.assertEqual([], env_route_problems())
 
 
 if __name__ == "__main__":

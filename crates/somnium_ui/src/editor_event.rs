@@ -194,6 +194,17 @@ pub enum EditorEvent {
     PasteClipboard,
     /// Select every entity in the scene.
     SelectAll,
+    /// Write one Seam-4 setting. Core refuses it if the environment has taken
+    /// the field over, and says which variable did.
+    SetSetting {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        value: somnium_ecs::reflect::ReflectValue,
+    },
+    /// Restore every setting to its declared default.
+    ResetAllSettings,
+    /// Ask for a different project folder — the 27-G picker, unblocked.
+    OpenProjectPicker,
     /// `Esc` during a viewport rubber-band: drop it, change nothing.
     CancelMarquee,
     /// Toggle one Outliner badge. `lock` picks the column; `value` is `None`
