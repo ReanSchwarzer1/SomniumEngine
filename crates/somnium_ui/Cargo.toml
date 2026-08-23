@@ -12,10 +12,10 @@ winit      = { workspace = true }
 wgpu       = { workspace = true }
 tracing    = { workspace = true }
 somnium_ecs = { path = "../somnium_ecs" }
+somnium_asset = { path = "../somnium_asset" }
 glam       = { workspace = true }
 bytemuck   = { workspace = true }
 fontdue    = { workspace = true }
 resvg      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
-image      = { workspace = true }

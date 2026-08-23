@@ -12,6 +12,7 @@ glam      = { workspace = true }
 tracing   = { workspace = true }
 serde     = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 ureq = "2.12"

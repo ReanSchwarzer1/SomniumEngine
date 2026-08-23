@@ -4,6 +4,9 @@
 //! Somnium-native types (`LoadedScene`) that the renderer can upload
 //! without ever seeing `gltf::` crate types directly.
 
+pub mod database;
+pub mod preview;
+
 use std::collections::HashMap;
 use std::path::Path;
 

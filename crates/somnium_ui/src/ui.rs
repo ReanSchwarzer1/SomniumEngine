@@ -118,6 +118,14 @@ impl UserInterface {
         to_nh(self.root_ih)
     }
 
+    /// Screen-space bounds of a node after layout.
+    pub fn screen_bounds(&self, handle: NodeHandle) -> Rect {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|node| node.widget.screen_bounds())
+            .unwrap_or(Rect::ZERO)
+    }
+
     /// Set the viewport handle so mouse events in the viewport area pass through to the game.
     pub fn set_viewport_handle(&mut self, handle: NodeHandle) {
         self.viewport_handle = handle;

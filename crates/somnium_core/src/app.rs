@@ -27,6 +27,7 @@ use crate::editor_commands::{
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
+use crate::jobs::{JobHandle, JobPriority, JobRegistry};
 use crate::{
     CameraSettingsComponent, FoliageComponent, LightComponent, LightType, MaterialComponent,
     MeshComponent, MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent,
@@ -85,6 +86,29 @@ fn synchronize_path_trace_pause(
     } else if let Some(previous) = previous_state.take() {
         clock.state = previous;
         *accumulator = 0.0;
+    }
+}
+
+/// Some editor shortcuts reuse keys that remain meaningful to the viewport.
+///
+/// The command is still consumed by the editor, but its physical key transition
+/// must also reach the game input state. Otherwise Ctrl+S followed by RMB leaves
+/// the fly camera unaware that `S` is held until the user releases and presses it
+/// again.
+fn shortcut_preserves_game_key(action: somnium_ui::commands::CommandAction) -> bool {
+    matches!(action, somnium_ui::commands::CommandAction::SaveScene)
+}
+
+#[cfg(test)]
+mod shortcut_input_tests {
+    use super::shortcut_preserves_game_key;
+    use somnium_ui::commands::CommandAction;
+
+    #[test]
+    fn save_keeps_the_physical_s_transition_for_viewport_flight() {
+        assert!(shortcut_preserves_game_key(CommandAction::SaveScene));
+        assert!(!shortcut_preserves_game_key(CommandAction::Undo));
+        assert!(!shortcut_preserves_game_key(CommandAction::Redo));
     }
 }
 
@@ -375,6 +399,17 @@ pub struct Engine<G: GameApp> {
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
     ui_manager: Option<UiManager>,
+    /// Shared bounded workers for imports, inventory scans, bakes and previews.
+    jobs: JobRegistry,
+    asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
+    asset_gate: somnium_asset::database::DebouncedAssetDb,
+    next_asset_scan: std::time::Instant,
+    preview_jobs: std::collections::HashMap<
+        std::path::PathBuf,
+        JobHandle<Option<somnium_asset::preview::PreparedPreview>>,
+    >,
+    preview_ready: std::collections::VecDeque<(std::path::PathBuf, Vec<u8>)>,
+    import_job: Option<JobHandle<(String, somnium_asset::LoadedScene)>>,
     selected_entity: Option<somnium_ecs::entity::Entity>,
     state: LifecycleState,
     /// Bounded command history for editor undo/redo (128-command capacity).
@@ -473,7 +508,7 @@ pub struct Engine<G: GameApp> {
 
 impl<G: GameApp + 'static> Engine<G> {
     /// Start the engine loop. This will take control of the current thread.
-    pub fn run(config: EngineConfig, game: G) -> Result<(), EngineError> {
+    pub fn run(mut config: EngineConfig, game: G) -> Result<(), EngineError> {
         // Phase 11.5M: install both the fmt layer and the log-capture layer.
         let (capture_layer, log_rx) = crate::log_capture::make_log_capture();
         {
@@ -489,6 +524,11 @@ impl<G: GameApp + 'static> Engine<G> {
                 .ok();
         }
 
+        if config.content_root.is_relative() {
+            config.content_root = std::env::current_dir()
+                .unwrap_or_default()
+                .join(&config.content_root);
+        }
         info!(
             title = %config.window_title,
             size = ?config.window_size,
@@ -512,6 +552,13 @@ impl<G: GameApp + 'static> Engine<G> {
             render_ctx: None,
             renderer: None,
             ui_manager: None,
+            jobs: JobRegistry::default(),
+            asset_scan: None,
+            asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
+            next_asset_scan: std::time::Instant::now(),
+            preview_jobs: std::collections::HashMap::new(),
+            preview_ready: std::collections::VecDeque::new(),
+            import_job: None,
             selected_entity: None,
             state: LifecycleState::Uninitialized,
             undo_stack: UndoStack::new(128),
@@ -752,7 +799,7 @@ impl<G: GameApp> Engine<G> {
         name: &str,
         force_extension: Option<&str>,
     ) -> Option<std::path::PathBuf> {
-        let root = std::env::current_dir().unwrap_or_default().join("assets");
+        let root = self.config.content_root.clone();
         match resolve_content_target(&root, parent, name, force_extension) {
             Ok(path) if path.exists() => {
                 self.report_content_error(&path, "something with that name is already here");
@@ -789,10 +836,7 @@ impl<G: GameApp> Engine<G> {
     /// Never overwrites: a name that exists gets a numeric suffix. Losing
     /// someone's script to a menu click is not a recoverable mistake.
     fn create_script(&mut self) {
-        let folder = std::env::current_dir()
-            .unwrap_or_default()
-            .join("assets")
-            .join("scripts");
+        let folder = self.config.content_root.join("scripts");
         if let Err(error) = std::fs::create_dir_all(&folder) {
             error!("cannot create {}: {error}", folder.display());
             return;
@@ -1068,6 +1112,22 @@ fn reveal_in_file_browser(path: &std::path::Path) -> Result<(), String> {
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 
+fn edit_content_asset(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err("that asset is no longer there".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    result.map(|_| ()).map_err(|error| error.to_string())
+}
+
 /// The seed every play session's script random streams derive from.
 ///
 /// Fixed rather than clock-derived: Phase 16 promises that the same build
@@ -1291,6 +1351,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         }
                         Some(A::SaveScene) => {
                             self.handle_editor_event(EditorEvent::SaveScene);
+                            if shortcut_preserves_game_key(A::SaveScene) {
+                                if let Some(engine_event) = translate_window_event(&event) {
+                                    self.forward_engine_event(event_loop, engine_event);
+                                }
+                            }
                             return;
                         }
                         Some(A::Undo) => {
@@ -1504,45 +1569,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── 5. Forward remaining events to game ──────────────────────────────
         if let Some(engine_event) = translate_window_event(&event) {
-            // Phase 16-C: scripts see a sampled snapshot per fixed step
-            // rather than the event stream, so the tracker folds every
-            // event in here and the phase reads it later.
-            self.script_input.observe(&engine_event);
-            let mut ctx = EngineContext::new(
-                &self.time,
-                &self.config,
-                &mut self.world,
-                self.physics.as_mut().unwrap(),
-                self.audio.as_mut().unwrap(),
-                self.render_ctx.as_ref(),
-                self.renderer.as_mut(),
-                &mut self.selected_entity,
-                self.ui_manager.as_mut().unwrap(),
-                crate::camera_speed_from_normalized(self.camera_speed_norm),
-                self.simulation_clock,
-                &mut self.scripts,
-            );
-            self.game.on_event(&mut ctx, &engine_event);
-            let speed_request = ctx.camera_speed_request;
-
-            if ctx.should_exit {
-                self.initiate_shutdown(event_loop);
-                return;
-            }
-
-            if matches!(engine_event, EngineEvent::WindowCloseRequested) {
-                self.initiate_shutdown(event_loop);
-            }
-
-            // Phase 20B: apply a camera-speed change requested by game code
-            // (RMB + wheel) and keep the toolbar slider in sync with it.
-            if let Some(norm) = speed_request {
-                self.camera_speed_norm = norm;
-                let speed = crate::camera_speed_from_normalized(norm);
-                if let Some(ui) = &mut self.ui_manager {
-                    ui.update_camera_speed(norm, speed);
-                }
-            }
+            self.forward_engine_event(event_loop, engine_event);
         }
     }
 
@@ -2085,6 +2112,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.update_asset_pipeline();
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
                 ui.begin_frame(window);
@@ -2237,6 +2265,171 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 }
 
 impl<G: GameApp> Engine<G> {
+    /// Poll immutable asset scans and worker previews without doing file IO in
+    /// the frame loop. A periodic 350 ms scan is the portable watcher fallback;
+    /// the two-sample gate debounces partial external writes.
+    fn update_asset_pipeline(&mut self) {
+        let completed_scan = self.asset_scan.as_ref().and_then(JobHandle::try_take);
+        if let Some(result) = completed_scan {
+            self.asset_scan = None;
+            match result {
+                Ok(snapshot) => {
+                    if let Some(published) = self.asset_gate.stage(snapshot) {
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.set_asset_snapshot(published);
+                        }
+                    }
+                }
+                Err(error) => warn!(?error, "asset inventory scan failed"),
+            }
+        }
+
+        let now = std::time::Instant::now();
+        if self.asset_scan.is_none() && now >= self.next_asset_scan {
+            let root = self.config.content_root.clone();
+            match self.jobs.submit("Asset inventory", JobPriority::Background, move |ctx| {
+                ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
+                let snapshot = somnium_asset::database::AssetDb::scan(root)?;
+                ctx.set_progress(1.0);
+                Ok(snapshot)
+            }) {
+                Ok(handle) => self.asset_scan = Some(handle),
+                Err(error) => warn!(?error, "asset scan queue is full"),
+            }
+            self.next_asset_scan = now + std::time::Duration::from_millis(350);
+        }
+
+        let requests = self
+            .ui_manager
+            .as_mut()
+            .map(UiManager::take_thumbnail_requests)
+            .unwrap_or_default();
+        for request in requests {
+            if self.preview_jobs.contains_key(&request.path) {
+                continue;
+            }
+            let record = self
+                .asset_gate
+                .published()
+                .and_then(|snapshot| snapshot.records().iter().find(|r| r.absolute_path == request.path))
+                .cloned();
+            let Some(record) = record else {
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.fail_thumbnail(&request.path);
+                }
+                continue;
+            };
+            let cache_root = self.config.content_root.join(".somnium/thumbnails");
+            let priority = if request.visible { JobPriority::Visible } else { JobPriority::Background };
+            let key = request.path.clone();
+            match self.jobs.submit("Asset preview", priority, move |ctx| {
+                ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
+                let result = somnium_asset::preview::prepare_preview(&record, &cache_root)?;
+                ctx.set_progress(1.0);
+                Ok(result)
+            }) {
+                Ok(handle) => { self.preview_jobs.insert(key, handle); }
+                Err(error) => warn!(?error, "preview queue is full"),
+            }
+        }
+
+        let finished: Vec<_> = self
+            .preview_jobs
+            .iter()
+            .filter_map(|(path, handle)| handle.try_take().map(|result| (path.clone(), result)))
+            .collect();
+        for (path, result) in finished {
+            self.preview_jobs.remove(&path);
+            match result {
+                Ok(Some(preview)) => self.preview_ready.push_back((path, preview.rgba)),
+                Ok(None) | Err(_) => {
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.fail_thumbnail(&path);
+                    }
+                }
+            }
+        }
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.deliver_thumbnails_budgeted(
+                &mut self.preview_ready,
+                somnium_ui::thumbnail::DEFAULT_APPLY_BUDGET,
+            );
+        }
+
+        let completed_import = self.import_job.as_ref().and_then(JobHandle::try_take);
+        if let Some(result) = completed_import {
+            self.import_job = None;
+            match result {
+                Ok((path, scene)) => self.finish_import_model(path, scene),
+                Err(error) => {
+                    warn!(?error, "model import failed");
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast("Import failed — see the Output Log");
+                    }
+                }
+            }
+        }
+        let active = self.jobs.active();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            let status: Vec<_> = active
+                .iter()
+                .rev()
+                .map(|job| somnium_ui::UiJobStatus {
+                    id: job.id,
+                    name: job.name,
+                    progress: job.progress,
+                })
+                .collect();
+            ui.update_jobs(&status);
+        }
+        self.jobs.prune_finished();
+    }
+
+    /// Deliver an already-translated input event through the same game/script
+    /// path whether it came from the ordinary window route or from an editor
+    /// shortcut that deliberately preserves its physical key transition.
+    fn forward_engine_event(&mut self, event_loop: &ActiveEventLoop, engine_event: EngineEvent) {
+        // Phase 16-C: scripts see a sampled snapshot per fixed step rather
+        // than the event stream, so the tracker folds every event in here and
+        // the phase reads it later.
+        self.script_input.observe(&engine_event);
+        let mut ctx = EngineContext::new(
+            &self.time,
+            &self.config,
+            &mut self.world,
+            self.physics.as_mut().unwrap(),
+            self.audio.as_mut().unwrap(),
+            self.render_ctx.as_ref(),
+            self.renderer.as_mut(),
+            &mut self.selected_entity,
+            self.ui_manager.as_mut().unwrap(),
+            crate::camera_speed_from_normalized(self.camera_speed_norm),
+            self.simulation_clock,
+            &mut self.scripts,
+        );
+        self.game.on_event(&mut ctx, &engine_event);
+        let speed_request = ctx.camera_speed_request;
+
+        if ctx.should_exit {
+            self.initiate_shutdown(event_loop);
+            return;
+        }
+
+        if matches!(engine_event, EngineEvent::WindowCloseRequested) {
+            self.initiate_shutdown(event_loop);
+        }
+
+        // Phase 20B: apply a camera-speed change requested by game code
+        // (RMB + wheel) and keep the toolbar slider in sync with it.
+        if let Some(norm) = speed_request {
+            self.camera_speed_norm = norm;
+            let speed = crate::camera_speed_from_normalized(norm);
+            if let Some(ui) = &mut self.ui_manager {
+                ui.update_camera_speed(norm, speed);
+            }
+        }
+    }
+
     fn initiate_shutdown(&mut self, event_loop: &ActiveEventLoop) {
         if self.state == LifecycleState::ShuttingDown {
             return;
@@ -2569,20 +2762,37 @@ impl<G: GameApp> Engine<G> {
         else {
             return; // cancelled
         };
+        if self.import_job.is_some() {
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.push_toast("An import is already running");
+            }
+            return;
+        }
         let path_str = path.to_string_lossy().to_string();
+        let worker_path = path_str.clone();
+        match self.jobs.submit("glTF import", JobPriority::User, move |ctx| {
+            ctx.set_progress(0.05);
+            ctx.check_cancelled().map_err(|error| format!("{error:?}"))?;
+            let scene = somnium_asset::load_gltf(&worker_path)?;
+            ctx.set_progress(1.0);
+            Ok((worker_path, scene))
+        }) {
+            Ok(handle) => {
+                self.import_job = Some(handle);
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast("Import queued");
+                }
+            }
+            Err(error) => warn!(?error, "model import queue is full"),
+        }
+    }
 
+    /// Upload a worker-decoded glTF and spawn its renderable nodes.
+    fn finish_import_model(&mut self, path_str: String, scene: somnium_asset::LoadedScene) {
         let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref())
         else {
             warn!("Cannot import before the renderer is ready");
             return;
-        };
-
-        let scene = match somnium_asset::load_gltf(&path_str) {
-            Ok(scene) => scene,
-            Err(e) => {
-                warn!("Failed to import {}: {}", path_str, e);
-                return;
-            }
         };
 
         let uploaded = renderer.upload_scene(render_ctx, &scene);
@@ -2622,6 +2832,10 @@ impl<G: GameApp> Engine<G> {
         }
 
         info!("Imported {} ({} mesh nodes)", path_str, count);
+        self.scene_dirty = true;
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast("Import finished");
+        }
     }
 
     /// Push the scene's post-processing settings to the renderer (Phase 15A1).
@@ -4373,6 +4587,51 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::EditContentAsset(path) => {
+                let path = std::path::PathBuf::from(path);
+                if let Err(error) = edit_content_asset(&path) {
+                    self.report_content_error(&path, &error);
+                }
+            }
+
+            EditorEvent::MakeAssetUnique { source, entity, component, field } => {
+                let source = std::path::PathBuf::from(source);
+                let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("Asset");
+                let extension = source.extension().and_then(|s| s.to_str());
+                let mut suffix = 1_u32;
+                let target = loop {
+                    let mut candidate = source.with_file_name(format!("{stem}_copy{suffix}"));
+                    if let Some(extension) = extension {
+                        candidate.set_extension(extension);
+                    }
+                    if !candidate.exists() {
+                        break candidate;
+                    }
+                    suffix += 1;
+                };
+                match std::fs::copy(&source, &target) {
+                    Ok(_) => {
+                        let relative = target.strip_prefix(&self.config.content_root).unwrap_or(&target);
+                        let asset = somnium_ecs::reflect::AssetRef::from_raw(
+                            somnium_asset::database::AssetId::from_relative_path(relative).raw(),
+                        );
+                        self.handle_editor_event(EditorEvent::SetComponentField {
+                            entity,
+                            component,
+                            field,
+                            value: somnium_ecs::reflect::ReflectValue::Asset(Some(asset)),
+                            gesture: GestureId(u64::MAX),
+                            live: false,
+                        });
+                        self.next_asset_scan = std::time::Instant::now();
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.push_toast("Made unique asset copy");
+                        }
+                    }
+                    Err(error) => self.report_content_error(&source, &error.to_string()),
+                }
+            }
+
             EditorEvent::ReloadScripts => {
                 let (ok, failed) = self.scripts.reload_all_from_disk();
                 self.drain_script_output();
@@ -4499,9 +4758,11 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::ImportModel => {
                 self.import_model();
-                self.scene_dirty = true;
-                if let Some(ui) = &mut self.ui_manager {
-                    ui.push_toast("Import finished");
+            }
+
+            EditorEvent::CancelJob(id) => {
+                if !self.jobs.cancel(id) {
+                    warn!(id, "cancel requested for an unknown job");
                 }
             }
 

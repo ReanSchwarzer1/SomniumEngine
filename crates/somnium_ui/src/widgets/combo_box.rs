@@ -21,6 +21,10 @@ pub enum ComboBoxMessage {
     BindPopup { popup: NodeHandle, list: NodeHandle },
     Open,
     Close,
+    /// Replace filtered entries without replacing/focusing the widget.
+    SetItems(Vec<String>),
+    /// Optional asset paths aligned with items; dropdown draws their previews.
+    SetAssetPaths(Vec<Option<std::path::PathBuf>>),
 }
 
 pub struct ComboBox {
@@ -109,6 +113,12 @@ impl Control for ComboBox {
                     ));
                 }
             }
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
+            self.items = items.clone();
+            self.selected = self.selected.min(self.items.len().saturating_sub(1));
             msg.handled = true;
             return;
         }
@@ -255,6 +265,7 @@ pub struct ComboDropdown {
     pub popup: NodeHandle,
     pub font_id: u8,
     pub px: f32,
+    pub asset_paths: Vec<Option<std::path::PathBuf>>,
 }
 
 impl Control for ComboDropdown {
@@ -293,9 +304,21 @@ impl Control for ComboDropdown {
                 ));
                 ctx.push_paint(row, &sel);
             }
+            let text_x = if let Some(Some(path)) = self.asset_paths.get(i) {
+                let icon = Rect::new(row.x + 3.0, row.y + 2.0, 20.0, 20.0);
+                if let Some(uv) = ctx.thumbnails.uv(path) {
+                    ctx.push_primitive(
+                        crate::primitive::Primitive::textured(icon, uv, [255; 4]),
+                        Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),
+                    );
+                }
+                row.x + 28.0
+            } else {
+                row.x + 8.0
+            };
             ctx.push_text(
                 item,
-                Vec2::new(row.x + 8.0, row.y + 4.0),
+                Vec2::new(text_x, row.y + 4.0),
                 self.font_id,
                 self.px,
                 t.semantic.text.primary.bytes(),
@@ -317,6 +340,17 @@ impl Control for ComboDropdown {
             if *i < self.items.len() {
                 self.selected = *i;
             }
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
+            self.items = items.clone();
+            self.selected = self.selected.min(self.items.len().saturating_sub(1));
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetAssetPaths(paths)) = msg.data::<ComboBoxMessage>() {
+            self.asset_paths = paths.clone();
             msg.handled = true;
             return;
         }
@@ -361,6 +395,7 @@ pub struct ComboDropdownBuilder {
     popup: NodeHandle,
     font_id: u8,
     px: f32,
+    asset_paths: Vec<Option<std::path::PathBuf>>,
 }
 
 impl ComboDropdownBuilder {
@@ -372,6 +407,7 @@ impl ComboDropdownBuilder {
             popup: NodeHandle::NONE,
             font_id: 0,
             px: 12.0,
+            asset_paths: Vec::new(),
         }
     }
 
@@ -395,6 +431,14 @@ impl ComboDropdownBuilder {
         self
     }
 
+    pub fn with_asset_paths(
+        mut self,
+        paths: impl IntoIterator<Item = Option<std::path::PathBuf>>,
+    ) -> Self {
+        self.asset_paths = paths.into_iter().collect();
+        self
+    }
+
     pub fn build(self) -> UiNode {
         UiNode::new(
             self.widget.build(),
@@ -405,6 +449,7 @@ impl ComboDropdownBuilder {
                 popup: self.popup,
                 font_id: self.font_id,
                 px: self.px,
+                asset_paths: self.asset_paths,
             }),
         )
     }

@@ -31,6 +31,26 @@ export type Color = vector
 
 -- ── Components, generated from the type registry ──────────────
 
+--- `somnium.BuoyantVessel` (schema version 1).
+export type SomniumBuoyantVessel = {
+	water_id: number,
+	water_origin: Vec3,
+	buoyancy_per_sample: number,
+	linear_drag: number,
+	angular_drag: number,
+	propulsion_force: number,
+	draft: number,
+	righting: number,
+}
+
+--- `somnium.CameraSettings` (schema version 1).
+export type SomniumCameraSettings = {
+	frustum_cull: boolean,
+	dynamic_resolution: boolean,
+	dynamic_target_ms: number,
+	dynamic_floor: number,
+}
+
 --- `somnium.Foliage` (schema version 1).
 export type SomniumFoliage = {
 	enabled: boolean,
@@ -89,6 +109,86 @@ export type SomniumName = {
 --- `somnium.Parent` (schema version 1).
 export type SomniumParent = {
 	entity: Entity?,
+}
+
+--- `somnium.ParticleEmitter` (schema version 1).
+export type SomniumParticleEmitter = {
+	max_particles: number,
+	spawn_rate: number,
+	lifetime: number,
+	initial_speed: number,
+	spread_angle: number,
+	size_start: number,
+	size_end: number,
+	color_start: Vec4,
+	color_end: Vec4,
+	gravity: number,
+}
+
+--- `somnium.PostProcess` (schema version 1).
+export type SomniumPostProcess = {
+	ev100: number,
+	aperture_f_stops: number,
+	shutter_speed_s: number,
+	sensitivity_iso: number,
+	use_physical_camera: boolean,
+	auto_exposure: boolean,
+	exposure_compensation: number,
+	tonemapper: number --[[ AgX | ACES | Reinhard ]],
+	temperature: number,
+	tint: number,
+	contrast: number,
+	saturation: number,
+	gain: number,
+	lift: number,
+	gamma: number,
+	grain: number,
+	bloom_enabled: boolean,
+	bloom_intensity: number,
+	gtao_enabled: boolean,
+	dof_enabled: boolean,
+	dof_focus_distance: number,
+	taa_enabled: boolean,
+	restir_enabled: boolean,
+	restir_gi_enabled: boolean,
+	rt_reflect_enabled: boolean,
+	rt_refract_enabled: boolean,
+	cas_enabled: boolean,
+	cas_sharpness: number,
+	cas_strength: number,
+	motion_blur_enabled: boolean,
+	motion_blur_shutter: number,
+	restir_gi_intensity: number,
+	volumetrics_enabled: boolean,
+	light_shafts: boolean,
+	fog_density: number,
+	fog_height_falloff: number,
+	fog_asymmetry: number,
+	gtao_radius: number,
+	gtao_intensity: number,
+	cel_shading: boolean,
+	vignette_enabled: boolean,
+	vignette_strength: number,
+	ca_enabled: boolean,
+	ca_strength: number,
+	fxaa_enabled: boolean,
+	pcss_enabled: boolean,
+	contact_shadows_enabled: boolean,
+	ibl_intensity: number,
+	world_cache: boolean,
+	cache_intensity: number,
+	cache_cell_size: number,
+	specular_gi: boolean,
+	spec_roughness: number,
+	path_tracer: boolean,
+	path_bounces: number,
+	mesh_sdf: boolean,
+	probes: boolean,
+	probe_intensity: number,
+	analytic_grad: boolean,
+	shaft_intensity: number,
+	fsr_enabled: boolean,
+	fsr_sharpness: number,
 }
 
 --- `somnium.RigidBody` (schema version 1).
@@ -164,6 +264,8 @@ export type SomniumWater = {
 
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
+	buoyantVessel: SomniumBuoyantVessel?,
+	cameraSettings: SomniumCameraSettings?,
 	foliage: SomniumFoliage?,
 	light: SomniumLight?,
 	material: SomniumMaterial?,
@@ -171,6 +273,8 @@ export type SelfComponents = {
 	meshKind: SomniumMeshKind?,
 	name: SomniumName?,
 	parent: SomniumParent?,
+	particleEmitter: SomniumParticleEmitter?,
+	postProcess: SomniumPostProcess?,
 	rigidBody: SomniumRigidBody?,
 	terrain: SomniumTerrain?,
 	transform: SomniumTransform?,

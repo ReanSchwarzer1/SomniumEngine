@@ -100,6 +100,26 @@ pub struct ContentEntry {
     pub is_dir: bool,
     pub icon: IconId,
     pub is_engine: bool,
+    /// Immutable database identity; absent only for virtual Engine entries.
+    pub asset_id: Option<somnium_asset::database::AssetId>,
+    /// Precomputed facts shown by the drawer tooltip.
+    pub tooltip: String,
+}
+
+impl From<somnium_asset::database::AssetRecord> for ContentEntry {
+    fn from(record: somnium_asset::database::AssetRecord) -> Self {
+        let is_dir = record.kind == somnium_asset::database::AssetKind::Folder;
+        let tooltip = record.tooltip();
+        Self {
+            icon: icon_for_path(&record.absolute_path, is_dir),
+            path: record.absolute_path,
+            name: record.name,
+            is_dir,
+            is_engine: false,
+            asset_id: Some(record.id),
+            tooltip,
+        }
+    }
 }
 
 pub fn icon_for_path(path: &Path, is_dir: bool) -> IconId {
@@ -172,13 +192,24 @@ pub fn list_content(
                 icon: icon_for_path(&path, is_dir),
                 is_dir,
                 is_engine: false,
+                asset_id: None,
+                tooltip: String::new(),
                 name,
                 path,
             });
         }
     }
     if show_engine && (current.as_os_str().is_empty() || current == root) {
-        for (name, icon) in [
+        out.extend(virtual_engine_content(&filter));
+    }
+    out
+}
+
+/// Built-in entries are virtual and never require a filesystem query.
+pub fn virtual_engine_content(filter: &str) -> Vec<ContentEntry> {
+    let filter = filter.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (name, icon) in [
             ("Cube", IconId::Cube),
             ("Sphere", IconId::Sphere),
             ("Plane", IconId::Plane),
@@ -192,9 +223,10 @@ pub fn list_content(
                     is_dir: false,
                     icon,
                     is_engine: true,
+                    asset_id: None,
+                    tooltip: "Built-in Engine asset".into(),
                 });
             }
-        }
     }
     out
 }
@@ -555,6 +587,8 @@ mod browser_workflow_tests {
             icon: icon_for_path(&path, is_dir),
             is_dir,
             is_engine: false,
+            asset_id: None,
+            tooltip: String::new(),
             name: name.to_string(),
             path,
         }

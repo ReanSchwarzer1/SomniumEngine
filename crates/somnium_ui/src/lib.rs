@@ -139,6 +139,30 @@ struct GeneratedBinding {
     edit: GeneratedEdit,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AssetPickerAction {
+    Edit,
+    Locate,
+    MakeUnique,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ContentToolbarAction {
+    Back,
+    Forward,
+    Up,
+    Kind(crate::metaphor::ContentFilterKind),
+    Sort,
+    Density,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GeneratedAssetPicker {
+    pub combo: NodeHandle,
+    pub list: NodeHandle,
+    pub kind_mask: u64,
+}
+
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -279,6 +303,14 @@ pub struct ProfilerRow {
     pub depth: u8,
 }
 
+/// Engine-neutral status-bar projection of an active background job.
+#[derive(Debug, Clone)]
+pub struct UiJobStatus {
+    pub id: u64,
+    pub name: &'static str,
+    pub progress: f32,
+}
+
 /// Rows the overlay can show before it starts dropping them.
 pub const PROFILER_ROWS: usize = 40;
 
@@ -394,13 +426,16 @@ struct EditorLayout {
     window_popup: NodeHandle,
     help_menu_popup: NodeHandle,
     status_text: NodeHandle,
+    status_cancel: NodeHandle,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
     content_drawer: NodeHandle,
     content_search: NodeHandle,
     content_breadcrumb: NodeHandle,
     content_engine_toggle: NodeHandle,
+    content_scroll: NodeHandle,
     content_list: NodeHandle,
+    content_toolbar_actions: Vec<(NodeHandle, ContentToolbarAction)>,
     outliner_tree: NodeHandle,
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
@@ -557,6 +592,10 @@ pub struct UiManager {
     generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
     generated_rows: HashMap<NodeHandle, GeneratedBinding>,
     generated_gestures: HashMap<NodeHandle, GestureId>,
+    generated_asset_choices:
+        HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
+    generated_asset_searches: HashMap<NodeHandle, GeneratedAssetPicker>,
+    generated_asset_actions: HashMap<NodeHandle, (NodeHandle, AssetPickerAction)>,
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -583,13 +622,17 @@ pub struct UiManager {
     /// workspace preset and persisted with it.
     drawer_height: f32,
     status_text: NodeHandle,
+    status_cancel: NodeHandle,
+    status_cancel_job: Option<u64>,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
     content_drawer: NodeHandle,
     content_search: NodeHandle,
     content_breadcrumb: NodeHandle,
     content_engine_toggle: NodeHandle,
+    content_scroll: NodeHandle,
     content_list: NodeHandle,
+    content_toolbar_actions: Vec<(NodeHandle, ContentToolbarAction)>,
     outliner_tree: NodeHandle,
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
@@ -628,6 +671,10 @@ pub struct UiManager {
     content_history: crate::metaphor::ContentHistory,
     content_kind: crate::metaphor::ContentFilterKind,
     content_density: crate::metaphor::ContentDensity,
+    /// Published immutable asset inventory; drawer queries never walk disk.
+    asset_db: somnium_asset::database::AssetDbSnapshot,
+    content_sort: somnium_asset::database::AssetSort,
+    content_sort_descending: bool,
     /// Paths selected in the drawer. Multi-select is a set rather than a range
     /// because the tiles wrap, so "everything between A and B" has no stable
     /// meaning once the panel is resized.
@@ -985,6 +1032,9 @@ impl UiManager {
             generated_bindings: HashMap::new(),
             generated_rows: HashMap::new(),
             generated_gestures: HashMap::new(),
+            generated_asset_choices: HashMap::new(),
+            generated_asset_searches: HashMap::new(),
+            generated_asset_actions: HashMap::new(),
             inner_h: layout.inner_h,
             content_split_h: layout.content_split_h,
             right_split_h: layout.right_split_h,
@@ -1007,13 +1057,17 @@ impl UiManager {
             active_workspace: crate::workspace::Workspace::Layout,
             drawer_height: theme::BOTTOM_DRAWER_HEIGHT,
             status_text: layout.status_text,
+            status_cancel: layout.status_cancel,
+            status_cancel_job: None,
             drawer_button: layout.drawer_button,
             log_button: layout.log_button,
             content_drawer: layout.content_drawer,
             content_search: layout.content_search,
             content_breadcrumb: layout.content_breadcrumb,
             content_engine_toggle: layout.content_engine_toggle,
+            content_scroll: layout.content_scroll,
             content_list: layout.content_list,
+            content_toolbar_actions: layout.content_toolbar_actions,
             outliner_tree: layout.outliner_tree,
             outliner_search: layout.outliner_search,
             inspector_search: layout.inspector_search,
@@ -1050,6 +1104,9 @@ impl UiManager {
             content_history: crate::metaphor::ContentHistory::new(String::new()),
             content_kind: crate::metaphor::ContentFilterKind::All,
             content_density: crate::metaphor::ContentDensity::Comfortable,
+            asset_db: somnium_asset::database::AssetDbSnapshot::default(),
+            content_sort: somnium_asset::database::AssetSort::Name,
+            content_sort_descending: false,
             content_selection: std::collections::HashSet::new(),
             outliner_expanded: std::collections::HashSet::new(),
             log_lines: VecDeque::new(),
@@ -1358,6 +1415,7 @@ impl UiManager {
         let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
+        self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
         self.native_ui.perform_layout();
@@ -1581,6 +1639,19 @@ impl UiManager {
         ));
         self.native_ui
             .send(TextMessage::set_text(self.status_text, text.to_string()));
+    }
+
+    /// Show the highest-priority active job and expose cancellation.
+    pub fn update_jobs(&mut self, jobs: &[UiJobStatus]) {
+        let job = jobs.first();
+        self.status_cancel_job = job.map(|job| job.id);
+        self.native_ui.set_visibility(self.status_cancel, job.is_some());
+        if let Some(job) = job {
+            self.native_ui.send(TextMessage::set_text(
+                self.status_text,
+                format!("{} — {:.0}%", job.name, job.progress * 100.0),
+            ));
+        }
     }
 
     pub fn set_scene_dirty(&mut self, dirty: bool) {
@@ -2783,12 +2854,12 @@ impl UiManager {
 
     /// Previews the engine must render, drained for the host to fulfil.
     ///
-    /// `somnium_ui` decodes images itself but owns no renderer, so meshes and
-    /// scenes are requests. The host answers with [`Self::deliver_thumbnail`]
+    /// The UI owns no filesystem decoder or renderer. The host answers with
+    /// [`Self::deliver_thumbnail`]
     /// or [`Self::fail_thumbnail`]; an unanswered request leaves the tile on
     /// its type icon, which is a correct resting state rather than a bug.
     pub fn take_thumbnail_requests(&mut self) -> Vec<crate::thumbnail::ThumbnailRequest> {
-        self.native_ui.draw_ctx.thumbnails.take_requests()
+        self.native_ui.draw_ctx.thumbnails.take_requests(8)
     }
 
     /// Supply a rendered preview: `CELL * CELL` RGBA8.
@@ -2796,27 +2867,101 @@ impl UiManager {
         self.native_ui.draw_ctx.thumbnails.deliver(path, rgba)
     }
 
+    /// Copy prepared previews into the atlas within an actual wall-clock
+    /// budget. Unfinished results remain queued for the next frame.
+    pub fn deliver_thumbnails_budgeted(
+        &mut self,
+        ready: &mut VecDeque<(std::path::PathBuf, Vec<u8>)>,
+        budget: std::time::Duration,
+    ) -> usize {
+        self.native_ui
+            .draw_ctx
+            .thumbnails
+            .deliver_budgeted(ready, budget)
+    }
+
     /// Record that a preview could not be produced, so it is not retried.
     pub fn fail_thumbnail(&mut self, path: &std::path::Path) {
         self.native_ui.draw_ctx.thumbnails.mark_failed(path);
     }
 
+    /// Atomically replace the drawer's inventory with a worker-built snapshot.
+    pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
+        self.asset_db = snapshot;
+        self.refresh_content_list();
+    }
+
+    /// Select sort order for the current database query.
+    pub fn set_content_sort(
+        &mut self,
+        sort: somnium_asset::database::AssetSort,
+        descending: bool,
+    ) {
+        self.content_sort = sort;
+        self.content_sort_descending = descending;
+        self.refresh_content_list();
+    }
+
+    /// Promote only tiles intersecting the scroll viewport. This runs after
+    /// layout so scrolling changes priority without rebuilding the drawer.
+    fn request_visible_thumbnails(&mut self) {
+        let viewport = self.native_ui.screen_bounds(self.content_scroll);
+        let visible: Vec<_> = self
+            .content_entries
+            .iter()
+            .filter(|(_, entry)| !entry.is_dir && !entry.is_engine)
+            .filter_map(|(handle, entry)| {
+                let bounds = self.native_ui.screen_bounds(*handle);
+                let intersection = viewport.intersect(&bounds);
+                (intersection.w > 0.0 && intersection.h > 0.0).then(|| entry.path.clone())
+            })
+            .collect();
+        for path in visible {
+            self.native_ui.draw_ctx.thumbnails.request(&path, true);
+        }
+    }
+
     fn refresh_content_list(&mut self) {
-        let root = std::env::current_dir().unwrap_or_default().join("assets");
-        let current = if self.content_path.is_empty() {
-            std::path::PathBuf::new()
-        } else {
-            root.join(&self.content_path)
+        let kind_mask = match self.content_kind {
+            crate::metaphor::ContentFilterKind::All => u64::MAX,
+            crate::metaphor::ContentFilterKind::Folders => {
+                somnium_asset::database::AssetKind::Folder.bit()
+            }
+            crate::metaphor::ContentFilterKind::Models => {
+                somnium_asset::database::AssetKind::Mesh.bit()
+            }
+            crate::metaphor::ContentFilterKind::Textures => {
+                somnium_asset::database::AssetKind::Texture.bit()
+            }
+            crate::metaphor::ContentFilterKind::Scripts => {
+                somnium_asset::database::AssetKind::Script.bit()
+            }
+            crate::metaphor::ContentFilterKind::Scenes => {
+                somnium_asset::database::AssetKind::Scene.bit()
+            }
+            crate::metaphor::ContentFilterKind::Audio => {
+                somnium_asset::database::AssetKind::Audio.bit()
+            }
         };
-        let entries: Vec<crate::metaphor::ContentEntry> = crate::metaphor::list_content(
-            &root,
-            self.show_engine_content,
-            &self.content_filter,
-            &current,
-        )
-        .into_iter()
-        .filter(|e| self.content_kind.accepts(e))
-        .collect();
+        let mut entries: Vec<crate::metaphor::ContentEntry> = self
+            .asset_db
+            .query(&somnium_asset::database::AssetQuery {
+                parent: self.content_path.clone(),
+                text: self.content_filter.clone(),
+                kind_mask,
+                sort: self.content_sort,
+                descending: self.content_sort_descending,
+            })
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        if self.show_engine_content && self.content_path.is_empty() {
+            entries.extend(
+                crate::metaphor::virtual_engine_content(&self.content_filter)
+                .into_iter()
+                .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
+            );
+        }
         let (tile_w, tile_h, icon_px) = self.content_density.metrics();
         self.native_ui.clear_children(self.content_list);
         self.content_entries.clear();
@@ -2859,12 +3004,6 @@ impl UiManager {
                     .with_orientation(Orientation::Vertical)
                     .build();
             let col_h = self.native_ui.add_node(col, bh);
-            // Phase 27-G. Ask for a preview; the tile shows its type icon until
-            // one arrives, and forever if none can be made. `request` is
-            // idempotent, so the drawer's per-frame rebuild costs a lookup.
-            if !entry.is_dir && !entry.is_engine {
-                self.native_ui.draw_ctx.thumbnails.request(&entry.path);
-            }
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
                     .with_width(tile_w)
@@ -3367,15 +3506,22 @@ impl UiManager {
             self.generated_bindings.clear();
             self.generated_rows.clear();
             self.generated_gestures.clear();
-            let (root, bindings, rows) = build_generated_details(
+            self.generated_asset_choices.clear();
+            self.generated_asset_searches.clear();
+            self.generated_asset_actions.clear();
+            let (root, bindings, rows, asset_choices, asset_searches, asset_actions) = build_generated_details(
                 &mut self.native_ui,
                 self.inspector_stack,
                 self.font_id,
                 &panels,
+                &self.asset_db,
             );
             self.generated_root = root;
             self.generated_bindings = bindings;
             self.generated_rows = rows;
+            self.generated_asset_choices = asset_choices;
+            self.generated_asset_searches = asset_searches;
+            self.generated_asset_actions = asset_actions;
             self.generated_entity = entity;
             self.generated_signature = signature;
             self.native_ui.invalidate_ancestors(self.inspector_stack);
@@ -3884,6 +4030,78 @@ impl UiManager {
                 continue;
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if msg.destination == self.status_cancel {
+                    if let Some(id) = self.status_cancel_job {
+                        self.editor_events.push_back(EditorEvent::CancelJob(id));
+                    }
+                    continue;
+                }
+                if let Some((_, action)) = self
+                    .content_toolbar_actions
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .copied()
+                {
+                    match action {
+                        ContentToolbarAction::Back => { self.content_back(); }
+                        ContentToolbarAction::Forward => { self.content_forward(); }
+                        ContentToolbarAction::Up => {
+                            let up = std::path::Path::new(&self.content_path)
+                                .parent()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            self.navigate_content(up);
+                        }
+                        ContentToolbarAction::Kind(kind) => self.set_content_kind(kind),
+                        ContentToolbarAction::Sort => {
+                            self.content_sort = match self.content_sort {
+                                somnium_asset::database::AssetSort::Name => somnium_asset::database::AssetSort::Kind,
+                                somnium_asset::database::AssetSort::Kind => somnium_asset::database::AssetSort::Size,
+                                somnium_asset::database::AssetSort::Size => somnium_asset::database::AssetSort::Modified,
+                                somnium_asset::database::AssetSort::Modified => somnium_asset::database::AssetSort::Name,
+                            };
+                            self.refresh_content_list();
+                        }
+                        ContentToolbarAction::Density => { self.cycle_content_density(); }
+                    }
+                    continue;
+                }
+                if let Some((combo, action)) = self
+                    .generated_asset_actions
+                    .get(&msg.destination)
+                    .copied()
+                {
+                    let binding = self.generated_bindings.get(&combo).cloned();
+                    let record = binding.as_ref().and_then(|binding| match binding.value {
+                        somnium_ecs::reflect::ReflectValue::Asset(Some(asset)) => self
+                            .asset_db
+                            .get(somnium_asset::database::AssetId::from_raw(asset.raw()))
+                            .cloned(),
+                        _ => None,
+                    });
+                    match (action, binding, record) {
+                        (AssetPickerAction::Locate, _, Some(record)) => {
+                            self.navigate_content(record.parent);
+                        }
+                        (AssetPickerAction::Edit, _, Some(record)) => {
+                            self.editor_events.push_back(EditorEvent::EditContentAsset(
+                                record.absolute_path.to_string_lossy().into_owned(),
+                            ));
+                        }
+                        (AssetPickerAction::MakeUnique, Some(binding), Some(record)) => {
+                            if let Some(entity) = self.selected_entity {
+                                self.editor_events.push_back(EditorEvent::MakeAssetUnique {
+                                    source: record.absolute_path.to_string_lossy().into_owned(),
+                                    entity,
+                                    component: binding.component,
+                                    field: binding.field,
+                                });
+                            }
+                        }
+                        _ => self.push_toast("Choose an asset first"),
+                    }
+                    continue;
+                }
                 if msg.destination == self.unsaved_save {
                     self.close_unsaved();
                     self.editor_events.push_back(EditorEvent::SaveScene);
@@ -4147,7 +4365,7 @@ impl UiManager {
                     .cloned()
                 {
                     if entry.is_dir {
-                        let root = std::env::current_dir().unwrap_or_default().join("assets");
+                        let root = self.asset_db.root().to_path_buf();
                         // Through `navigate_content` so the move lands in
                         // history. Setting `content_path` directly is what would
                         // leave Back pointing at a folder the user never left.
@@ -4169,19 +4387,16 @@ impl UiManager {
                             self.editor_events
                                 .push_back(EditorEvent::CreateEntity(kind));
                         }
-                    } else if entry
-                        .path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
-                    {
-                        // Phase 16-D: clicking a script attaches it to the
-                        // selection. `app.rs` refuses with a toast if there
-                        // is nothing selected, rather than silently doing
-                        // nothing.
-                        self.editor_events.push_back(EditorEvent::AttachScript(
-                            entry.path.to_string_lossy().into_owned(),
-                        ));
+                    } else {
+                        let additive = self.native_ui.modifiers().ctrl;
+                        self.select_content(entry.path.clone(), additive);
+                        if entry.path.extension().and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
+                        {
+                            self.editor_events.push_back(EditorEvent::AttachScript(
+                                entry.path.to_string_lossy().into_owned(),
+                            ));
+                        }
                     }
                     continue;
                 }
@@ -4477,6 +4692,40 @@ impl UiManager {
                 }
                 self.last_outliner_state = None;
             } else if let Some(SearchBoxMessage::Query(q)) = msg.data::<SearchBoxMessage>() {
+                if let Some(picker) = self.generated_asset_searches.get(&msg.destination).copied() {
+                    use crate::editor::property_editors::AssetEditorContext;
+                    let candidates = AssetEditorContext::query(&self.asset_db, q, picker.kind_mask);
+                    let mut labels = vec!["None".to_string()];
+                    labels.extend(candidates.iter().map(|candidate| candidate.label.clone()));
+                    let mut choices = vec![None];
+                    choices.extend(candidates.iter().map(|candidate| Some(candidate.id)));
+                    let mut paths = vec![None];
+                    paths.extend(candidates.iter().map(|candidate| {
+                        self.asset_db
+                            .get(somnium_asset::database::AssetId::from_raw(candidate.id.raw()))
+                            .map(|record| record.absolute_path.clone())
+                    }));
+                    self.generated_asset_choices.insert(picker.combo, choices);
+                    self.native_ui.send(UiMessage::new(
+                        picker.combo,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetItems(labels.clone()),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        picker.list,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetItems(labels),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        picker.list,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetAssetPaths(paths.clone()),
+                    ));
+                    for path in paths.into_iter().flatten().take(8) {
+                        self.native_ui.draw_ctx.thumbnails.request(&path, true);
+                    }
+                    continue;
+                }
                 if msg.destination == self.content_search {
                     self.content_filter = q.clone();
                     self.refresh_content_list();
@@ -4624,6 +4873,20 @@ impl UiManager {
             if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
                 if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
                     let gesture = self.allocate_property_gesture();
+                    if let Some(choice) = self
+                        .generated_asset_choices
+                        .get(&msg.destination)
+                        .and_then(|choices| choices.get(*index))
+                        .copied()
+                    {
+                        self.queue_generated_binding(
+                            &binding,
+                            somnium_ecs::reflect::ReflectValue::Asset(choice),
+                            gesture,
+                            false,
+                        );
+                        continue;
+                    }
                     self.queue_generated_binding(
                         &binding,
                         somnium_ecs::reflect::ReflectValue::I64(*index as i64),

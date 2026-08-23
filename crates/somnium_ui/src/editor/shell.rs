@@ -958,8 +958,15 @@ pub(crate) fn build_editor_layout(
         .build();
     let bottom_swap_h = ui.add_node(bottom_swap, bottom_h);
 
-    let (content_drawer, content_search, content_breadcrumb, content_engine_toggle, content_list) =
-        build_content_drawer(ui, bottom_swap_h, font_id);
+    let (
+        content_drawer,
+        content_search,
+        content_breadcrumb,
+        content_engine_toggle,
+        content_scroll,
+        content_list,
+        content_toolbar_actions,
+    ) = build_content_drawer(ui, bottom_swap_h, font_id);
 
     let log_panel = GridBuilder::new(
         WidgetBuilder::new()
@@ -1110,6 +1117,16 @@ pub(crate) fn build_editor_layout(
     .with_text("")
     .build();
     let status_text = ui.add_node(status_lbl, status_stack_h);
+    let status_cancel = ButtonBuilder::new(
+        WidgetBuilder::new().with_height(theme::ROW_HEIGHT).with_visibility(false),
+    )
+    .build();
+    let status_cancel = ui.add_node(status_cancel, status_stack_h);
+    let cancel_label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 3.0)))
+        .with_role(TextRole::Caption)
+        .with_text("Cancel")
+        .build();
+    ui.add_node(cancel_label, status_cancel);
 
     let status_stats_stack = StackPanelBuilder::new(
         WidgetBuilder::new()
@@ -1408,13 +1425,16 @@ pub(crate) fn build_editor_layout(
         window_popup,
         help_menu_popup,
         status_text,
+        status_cancel,
         drawer_button,
         log_button,
         content_drawer,
         content_search,
         content_breadcrumb,
         content_engine_toggle,
+        content_scroll,
         content_list,
+        content_toolbar_actions,
         outliner_tree,
         outliner_search,
         inspector_search,

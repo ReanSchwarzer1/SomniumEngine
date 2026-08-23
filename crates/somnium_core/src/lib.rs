@@ -55,6 +55,7 @@ pub mod event;
 pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
+pub mod jobs;
 pub mod map;
 pub mod reflect_registry;
 pub mod scene_schema;

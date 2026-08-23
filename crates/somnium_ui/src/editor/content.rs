@@ -41,7 +41,15 @@ pub(crate) fn build_content_drawer(
     ui: &mut UserInterface,
     parent: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
+) -> (
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    Vec<(NodeHandle, crate::ContentToolbarAction)>,
+) {
     let panel = BorderBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
@@ -84,16 +92,41 @@ pub(crate) fn build_content_drawer(
     .build();
     let engine_h = ui.add_node(engine, grid_h);
 
+    let toolbar = StackPanelBuilder::new(
+        WidgetBuilder::new().with_row(1).with_column(0).with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let toolbar = ui.add_node(toolbar, grid_h);
+    let mut toolbar_actions = Vec::new();
+    for (label, action) in [
+        ("‹", crate::ContentToolbarAction::Back),
+        ("›", crate::ContentToolbarAction::Forward),
+        ("↑", crate::ContentToolbarAction::Up),
+        ("All", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::All)),
+        ("Models", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Models)),
+        ("Textures", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Textures)),
+        ("Scripts", crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Scripts)),
+        ("Sort", crate::ContentToolbarAction::Sort),
+        ("Size", crate::ContentToolbarAction::Density),
+    ] {
+        let button = ButtonBuilder::new(WidgetBuilder::new().with_height(22.0)).build();
+        let button = ui.add_node(button, toolbar);
+        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(5.0, 3.0)))
+            .with_text(label)
+            .with_font_id(font_id)
+            .with_font_size(10.0)
+            .build();
+        ui.add_node(text, button);
+        toolbar_actions.push((button, action));
+    }
     let crumb = BreadcrumbBuilder::new(
-        WidgetBuilder::new()
-            .with_row(1)
-            .with_column(0)
-            .with_background(theme::TRANSPARENT),
+        WidgetBuilder::new().with_background(theme::TRANSPARENT),
     )
     .with_parts(["Game"])
     .with_font_id(font_id)
     .build();
-    let crumb_h = ui.add_node(crumb, grid_h);
+    let crumb_h = ui.add_node(crumb, toolbar);
 
     let list_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
@@ -112,7 +145,15 @@ pub(crate) fn build_content_drawer(
     .build();
     let list_h = ui.add_node(list, list_scroll_h);
 
-    (panel_h, search_h, crumb_h, engine_h, list_h)
+    (
+        panel_h,
+        search_h,
+        crumb_h,
+        engine_h,
+        list_scroll_h,
+        list_h,
+        toolbar_actions,
+    )
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).

@@ -240,6 +240,8 @@ pub enum EditorEvent {
     /// File > Import Model — opens a native file picker and imports a glTF/GLB
     /// model into the scene at the world origin (Phase 19B).
     ImportModel,
+    /// Cancel a job advertised by the status bar.
+    CancelJob(u64),
     /// Live vs commit matches reflected property edits. `rgba` is linear.
     SetMaterialBaseColor {
         rgba: [f32; 4],
@@ -337,6 +339,16 @@ pub enum EditorEvent {
     /// launching whatever is associated with the extension would be a
     /// worse experience than saying where the file is.
     ShowContentItemInFolder(String),
+    /// Open an asset in its configured OS editor.
+    EditContentAsset(String),
+    /// Copy an asset beside itself and commit the new reference through the
+    /// same reflected undo path.
+    MakeAssetUnique {
+        source: String,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+    },
 }
 use somnium_ecs::Entity;
 use somnium_ecs::reflect::{FieldId, ReflectValue, StableId};

@@ -18,11 +18,14 @@ use crate::{
         check_box::CheckBoxBuilder,
         color_picker::ColorSwatchBuilder,
         combo_box::ComboBoxBuilder,
+        combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         numeric_field::NumericFieldBuilder,
         property_row::PropertyRowBuilder,
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
         text_box::TextBoxBuilder,
+        search_box::SearchBoxBuilder,
+        popup::{PopupBuilder, PopupPlacement},
     },
 };
 
@@ -220,10 +223,14 @@ pub(crate) fn build_generated_details(
     parent: NodeHandle,
     font_id: u8,
     panels: &[GeneratedComponentPanel],
+    assets: &somnium_asset::database::AssetDbSnapshot,
 ) -> (
     NodeHandle,
     HashMap<NodeHandle, GeneratedBinding>,
     HashMap<NodeHandle, GeneratedBinding>,
+    HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
+    HashMap<NodeHandle, GeneratedAssetPicker>,
+    HashMap<NodeHandle, (NodeHandle, AssetPickerAction)>,
 ) {
     let root = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .with_orientation(Orientation::Vertical)
@@ -231,6 +238,9 @@ pub(crate) fn build_generated_details(
     let root = ui.add_node(root, parent);
     let mut bindings = HashMap::new();
     let mut rows = HashMap::new();
+    let mut asset_choices = HashMap::new();
+    let mut asset_searches = HashMap::new();
+    let mut asset_actions = HashMap::new();
 
     for panel in panels {
         let heading =
@@ -393,8 +403,93 @@ pub(crate) fn build_generated_details(
                     attach_combo_popup(ui, handle, names, font_id);
                     bindings.insert(handle, base);
                 }
+                PropertyEditorKind::AssetPicker => {
+                    let candidates = crate::editor::property_editors::AssetEditorContext::query(
+                        assets,
+                        "",
+                        model.asset_kind_mask,
+                    );
+                    let mut labels = Vec::with_capacity(candidates.len() + 1);
+                    labels.push("None".to_string());
+                    labels.extend(candidates.iter().map(|candidate| candidate.label.clone()));
+                    let mut choices = Vec::with_capacity(candidates.len() + 1);
+                    choices.push(None);
+                    choices.extend(candidates.iter().map(|candidate| Some(candidate.id)));
+                    let selected = match model.value {
+                        somnium_ecs::reflect::ReflectValue::Asset(current) => choices
+                            .iter()
+                            .position(|choice| *choice == current)
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    let handle = ui.add_node(
+                        ComboBoxBuilder::new(widget)
+                            .with_items(labels.iter().map(String::as_str))
+                            .with_selected(selected)
+                            .with_font_id(font_id)
+                            .build(),
+                        row_handle,
+                    );
+                    let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::BG_PANEL))
+                        .with_anchor(handle)
+                        .with_placement(PopupPlacement::AnchorBelow)
+                        .build();
+                    let popup = ui.add_node(popup, ui.root());
+                    let column = StackPanelBuilder::new(
+                        WidgetBuilder::new().with_width(360.0).with_background(theme::BG_PANEL),
+                    )
+                    .with_orientation(Orientation::Vertical)
+                    .build();
+                    let column = ui.add_node(column, popup);
+                    let search = SearchBoxBuilder::new(
+                        WidgetBuilder::new().with_height(theme::ROW_HEIGHT).with_background(theme::BG_INPUT),
+                    )
+                    .with_font_id(font_id)
+                    .build();
+                    let search = ui.add_node(search, column);
+                    let paths = std::iter::once(None)
+                        .chain(candidates.iter().map(|candidate| {
+                            assets
+                                .get(somnium_asset::database::AssetId::from_raw(candidate.id.raw()))
+                                .map(|record| record.absolute_path.clone())
+                        }))
+                        .collect::<Vec<_>>();
+                    let list = ComboDropdownBuilder::new(WidgetBuilder::new())
+                        .with_items(labels.iter().map(String::as_str))
+                        .with_asset_paths(paths)
+                        .with_combo(handle)
+                        .with_popup(popup)
+                        .with_font_id(font_id)
+                        .build();
+                    let list = ui.add_node(list, column);
+                    let actions = StackPanelBuilder::new(WidgetBuilder::new())
+                        .with_orientation(Orientation::Horizontal)
+                        .build();
+                    let actions = ui.add_node(actions, column);
+                    for (label, action) in [
+                        ("Edit", AssetPickerAction::Edit),
+                        ("Locate", AssetPickerAction::Locate),
+                        ("Make Unique", AssetPickerAction::MakeUnique),
+                    ] {
+                        let button = ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT)).build();
+                        let button = ui.add_node(button, actions);
+                        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(7.0, 4.0)))
+                            .with_role(TextRole::Caption)
+                            .with_text(label)
+                            .build();
+                        ui.add_node(text, button);
+                        asset_actions.insert(button, (handle, action));
+                    }
+                    ui.send(ComboBoxMessage::bind_popup(handle, popup, list));
+                    asset_searches.insert(search, GeneratedAssetPicker {
+                        combo: handle,
+                        list,
+                        kind_mask: model.asset_kind_mask,
+                    });
+                    asset_choices.insert(handle, choices);
+                    bindings.insert(handle, base);
+                }
                 PropertyEditorKind::EntityPicker
-                | PropertyEditorKind::AssetPicker
                 | PropertyEditorKind::Collection
                 | PropertyEditorKind::Unsupported => {
                     let value = TextBuilder::new(widget)
@@ -406,5 +501,5 @@ pub(crate) fn build_generated_details(
             }
         }
     }
-    (root, bindings, rows)
+    (root, bindings, rows, asset_choices, asset_searches, asset_actions)
 }

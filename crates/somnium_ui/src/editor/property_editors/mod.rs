@@ -30,6 +30,19 @@ pub trait AssetEditorContext: Send + Sync {
     }
 }
 
+impl AssetEditorContext for somnium_asset::database::AssetDbSnapshot {
+    fn query(&self, text: &str, kind_mask: u64) -> Vec<AssetCandidate> {
+        self.search(text, kind_mask)
+            .into_iter()
+            .map(|record| AssetCandidate {
+                id: AssetRef::from_raw(record.id.raw()),
+                label: record.relative_path,
+                kind_bit: record.kind.bit(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyEditorKind {
     CheckBox,
@@ -159,5 +172,18 @@ mod tests {
             registry.for_type(&inner).kind(),
             PropertyEditorKind::ColorSwatch
         );
+    }
+
+    #[test]
+    fn asset_commit_rejects_the_wrong_kind() {
+        struct Catalog;
+        impl AssetEditorContext for Catalog {
+            fn query(&self, _: &str, _: u64) -> Vec<AssetCandidate> {
+                vec![AssetCandidate { id: AssetRef::from_raw(7), label: "rock.png".into(), kind_bit: 2 }]
+            }
+        }
+        assert_eq!(Catalog.commit(None, 2).unwrap(), ReflectValue::Asset(None));
+        assert!(Catalog.commit(Some(AssetRef::from_raw(7)), 4).is_err());
+        assert_eq!(Catalog.commit(Some(AssetRef::from_raw(7)), 2).unwrap(), ReflectValue::Asset(Some(AssetRef::from_raw(7))));
     }
 }
