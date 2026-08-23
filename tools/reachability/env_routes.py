@@ -68,22 +68,18 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_SNAP_TRANSLATE": ("setting", "somnium.EditorSettings.snap_translate_m"),
     "SOMNIUM_SNAP_ROTATE": ("setting", "somnium.EditorSettings.snap_rotate_deg"),
 
-    # ── Debug visualisations: CONTROL-G's view-mode menu ───────────────────
-    "SOMNIUM_SHADOW_DEBUG": ("command", "editor.view.debug.shadow"),
-    "SOMNIUM_CENSUS": ("command", "editor.view.debug.pixel_census"),
-    "SOMNIUM_CULL_STATS": ("command", "editor.view.debug.cull_stats"),
-    "SOMNIUM_TAA_DEBUG": ("command", "editor.view.debug.taa"),
-    "SOMNIUM_TAA_MATDBG": ("command", "editor.view.debug.taa_material"),
-    "SOMNIUM_RT_DEBUG": ("command", "editor.view.debug.ray_tracing"),
-    "SOMNIUM_WATER_VIEW": ("command", "editor.view.debug.water"),
-    "SOMNIUM_TIME_VIEW": ("command", "editor.view.debug.timing"),
-    "SOMNIUM_KIT_VIEW": ("command", "editor.view.debug.kit"),
-    "SOMNIUM_SHADE_BINS": ("command", "editor.view.debug.shading_bins"),
-    "SOMNIUM_SHADE_ABLATE": ("command", "editor.view.debug.shading_ablation"),
-    "SOMNIUM_SHADOWTEST": ("command", "editor.view.debug.shadow_test"),
+    # ── Debug visualisations and pipeline switches: CONTROL-G's view menu ──
+    # Every id below is generated from `somnium_ui::debug`'s own tables, so a
+    # renamed view is a build failure here rather than a menu entry that
+    # quietly stops matching.
+    "SOMNIUM_SHADOW_DEBUG": ("command", "editor.view.debug.shadow_factor"),
+    "SOMNIUM_CENSUS": ("command", "editor.view.pipeline.pixel_census"),
+    "SOMNIUM_CULL_STATS": ("command", "editor.view.pipeline.cull_stats"),
+    "SOMNIUM_SHADE_BINS": ("command", "editor.view.pipeline.shading_bins"),
+    "SOMNIUM_TAA_DEBUG": ("command", "editor.view.pipeline.taa_debug"),
+    "SOMNIUM_TAA_MATDBG": ("command", "editor.view.pipeline.taa_material_debug"),
+    "SOMNIUM_RT_DEBUG": ("command", "editor.view.pipeline.rt_debug"),
     "SOMNIUM_PROFILE": ("command", "editor.view.profiler"),
-
-    # ── Renderer pipeline switches: CONTROL-G's view menu ──────────────────
     "SOMNIUM_NO_MESHLETS": ("command", "editor.view.pipeline.meshlets"),
     "SOMNIUM_NO_OCCLUSION": ("command", "editor.view.pipeline.occlusion"),
     "SOMNIUM_CASCADE_CULL": ("command", "editor.view.pipeline.cascade_cull"),
@@ -149,4 +145,9 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_SHADOW_RADIUS": ("harness", "Recorded shadow repro override; the authored route is the light's source radius."),
     "SOMNIUM_AERIAL_SPLIT": ("harness", "Forces every terrain tile onto the near pipeline for an A/B timing run."),
     "SOMNIUM_TAA_DILATE_EPS": ("harness", "Numerical epsilon held for a recorded TAA repro."),
+    "SOMNIUM_WATER_VIEW": ("harness", "Places the camera at a water body for a recorded capture. The editor route is Focus Selection and the camera bookmarks."),
+    "SOMNIUM_KIT_VIEW": ("harness", "Places the camera for an XV-J kit capture. The editor route is Focus Selection and the camera bookmarks."),
+    "SOMNIUM_TIME_VIEW": ("harness", "Chooses the pose a `.somtime` run measures from. The editor route is the camera bookmarks."),
+    "SOMNIUM_SHADOWTEST": ("harness", "Spawns a synthetic shadow-test scene at startup, before any editor surface exists."),
+    "SOMNIUM_SHADE_ABLATE": ("harness", "Disables shading stages for an A/B measurement; its own documentation says it is never set from the UI."),
 }

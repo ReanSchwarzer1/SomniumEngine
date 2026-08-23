@@ -203,8 +203,43 @@ pub enum EditorEvent {
     },
     /// Restore every setting to its declared default.
     ResetAllSettings,
+    /// Write a setting addressed by field *name*.
+    ///
+    /// The by-`FieldId` form is what a generated row emits, because it already
+    /// holds the schema address. A hand-built control like the snap cluster
+    /// knows the name and not the id, and resolving the name in core is
+    /// cheaper than making every such control carry a schema lookup.
+    SetSettingByName {
+        component: somnium_ecs::reflect::StableId,
+        field_name: &'static str,
+        value: somnium_ecs::reflect::ReflectValue,
+    },
+    /// Flip a boolean setting addressed by field name.
+    ToggleSetting {
+        component: somnium_ecs::reflect::StableId,
+        field_name: &'static str,
+    },
     /// Ask for a different project folder — the 27-G picker, unblocked.
     OpenProjectPicker,
+    /// Select a named debug visualisation. `"lit"` returns to the ordinary
+    /// image, which is why the code that used to mean "off" needs no special
+    /// case.
+    SetDebugView(&'static str),
+    /// Flip one named renderer pipeline switch.
+    ToggleRenderSwitch(&'static str),
+    /// Point the editor camera down a world axis: 0 top, 1 front, 2 side,
+    /// 3 back to a perspective three-quarter view.
+    ViewPreset(u8),
+    /// Store the current camera pose in slot 1..=9.
+    SetCameraBookmark(u8),
+    /// Recall slot 1..=9.
+    RecallCameraBookmark(u8),
+    /// Orbit around the selection rather than around the camera itself.
+    ToggleOrbitSelection,
+    /// `command()`+right-click: list everything selectable under the cursor.
+    OpenPiercingMenu,
+    /// Choose one entity from the piercing menu.
+    PickPierced(u32),
     /// `Esc` during a viewport rubber-band: drop it, change nothing.
     CancelMarquee,
     /// Toggle one Outliner badge. `lock` picks the column; `value` is `None`

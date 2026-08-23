@@ -272,6 +272,15 @@ struct GizmoDragState {
     ring_bitangent: glam::Vec3,
     /// Gizmo world position at drag start.
     gizmo_pos: glam::Vec3,
+    /// The rest of the selection, with the transform each started at.
+    ///
+    /// CONTROL-F made the selection a set; a gizmo that still moved one thing
+    /// would have made multi-select a lie the moment anyone dragged. The
+    /// *deltas* are applied to these, not the primary's final value, so twelve
+    /// objects keep their relative positions.
+    followers: Vec<(u32, Transform)>,
+    /// Whether the drag axes follow the object's own rotation.
+    local_space: bool,
 }
 
 /// State captured while a terrain brush stroke is in progress (Phase 14D).
@@ -442,6 +451,19 @@ pub struct Engine<G: GameApp> {
     /// Seam 4: preferences, project settings, and which of them the
     /// environment has taken out of the author's hands.
     settings: crate::settings::SettingsStore,
+    /// Camera poses stored in slots 1..=9: `(position, yaw, pitch)`.
+    ///
+    /// Stored here rather than in the game so a bookmark survives whatever the
+    /// camera implementation is; the recall is a focus request like `F`.
+    camera_bookmarks: [Option<(glam::Vec3, f32, f32)>; 9],
+    /// Orbit the camera around the selection rather than around itself.
+    orbit_selection: bool,
+    /// A pending exact camera pose: `(position, yaw degrees, pitch degrees)`.
+    /// Distinct from `camera_focus_request`, which asks the game to frame
+    /// something and leaves the heading to it.
+    camera_pose_request: Option<(glam::Vec3, f32, f32)>,
+    /// Entities under the cursor, newest piercing menu first.
+    piercing_candidates: Vec<somnium_ecs::entity::Entity>,
     /// Most-recently-opened scenes, newest first.
     recent_scenes: Vec<std::path::PathBuf>,
     /// The entity clipboard. Values, never handles — see `clipboard.rs`.
@@ -628,6 +650,10 @@ impl<G: GameApp + 'static> Engine<G> {
             selection: crate::selection::Selection::default(),
             outliner_order: Vec::new(),
             settings: settings_store,
+            camera_bookmarks: [None; 9],
+            orbit_selection: false,
+            camera_pose_request: None,
+            piercing_candidates: Vec::new(),
             recent_scenes: crate::settings::load_recent_scenes(),
             entity_clipboard: crate::clipboard::EntityClipboard::default(),
             camera_focus_request: None,
@@ -928,6 +954,22 @@ impl<G: GameApp> Engine<G> {
         (panels, overrides)
     }
 
+    /// Resolve a settings field by name. `None` for a stale address, so a
+    /// renamed setting makes a control inert rather than panicking.
+    fn settings_field_id(
+        &self,
+        component: somnium_ecs::reflect::StableId,
+        field_name: &str,
+    ) -> Option<somnium_ecs::reflect::FieldId> {
+        self.settings
+            .registry()
+            .by_stable_id(component)?
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .map(|field| field.id)
+    }
+
     /// Record a scene in the recent list, newest first, without duplicates.
     fn remember_recent_scene(&mut self, path: &std::path::Path) {
         let path = path.to_path_buf();
@@ -955,12 +997,95 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    /// Frame the selection with the editor camera.
+    /// Ground height under a world position, if any terrain is beneath it.
     ///
-    /// The pivot is the centroid of the selected transforms, and the distance
-    /// comes from how far apart they are, so `F` on one object and `F` on
-    /// twelve both end up looking at the thing the user meant.
-    fn focus_camera_on_selection(&mut self) {
+    /// A downward ray from well above rather than a heightfield lookup,
+    /// because the terrain the editor draws is the terrain the renderer holds
+    /// and its raycast is the one function that already accounts for the
+    /// terrain's own model matrix.
+    fn surface_height_at(&mut self, position: glam::Vec3) -> Option<f32> {
+        let terrains: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| {
+                let component = self.world.get::<TerrainComponent>(entity)?;
+                let model = self
+                    .world
+                    .get::<Transform>(entity)
+                    .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+                Some((component.terrain_id, model))
+            })
+            .collect();
+        let renderer = self.renderer.as_mut()?;
+        let origin = glam::Vec3::new(position.x, position.y + 10_000.0, position.z);
+        let mut best: Option<f32> = None;
+        for (id, model) in terrains {
+            let Some(terrain) = renderer.terrain_mut(id) else {
+                continue;
+            };
+            terrain.model = model;
+            if let Some(hit) = terrain.raycast(origin, glam::Vec3::NEG_Y) {
+                best = Some(best.map_or(hit.y, |current: f32| current.max(hit.y)));
+            }
+        }
+        best
+    }
+
+    /// Every pickable entity under the cursor, nearest first.
+    ///
+    /// The same ray and the same AABB test the drag-and-drop probe uses, kept
+    /// as one function so the piercing menu can never disagree with what a
+    /// plain click would have hit.
+    fn entities_under_cursor(&self) -> Vec<somnium_ecs::entity::Entity> {
+        let Some((origin, direction)) = self.cursor_ray() else {
+            return Vec::new();
+        };
+        let Some(renderer) = self.renderer.as_ref() else {
+            return Vec::new();
+        };
+        let mut hits: Vec<_> = self
+            .world
+            .entities()
+            .filter(|entity| {
+                let flags = self
+                    .world
+                    .get::<EditorFlags>(*entity)
+                    .copied()
+                    .unwrap_or_default();
+                !flags.locked && !flags.hidden
+            })
+            .filter_map(|entity| {
+                let mesh = self.world.get::<MeshComponent>(entity)?;
+                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
+                let model = self
+                    .world
+                    .get::<WorldTransform>(entity)
+                    .map(|w| w.0)
+                    .or_else(|| {
+                        self.world
+                            .get::<Transform>(entity)
+                            .map(Transform::to_matrix)
+                    })?;
+                let inverse = model.inverse();
+                let local_origin = inverse.transform_point3(origin);
+                let local_direction = inverse.transform_vector3(direction);
+                let t = ray_aabb_distance(
+                    local_origin,
+                    local_direction,
+                    glam::Vec3::from_array(min),
+                    glam::Vec3::from_array(max),
+                )?;
+                let world_hit = model.transform_point3(local_origin + local_direction * t);
+                Some((origin.distance_squared(world_hit), entity))
+            })
+            .collect();
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        hits.into_iter().map(|(_, entity)| entity).collect()
+    }
+
+    /// The centre and radius the camera should frame: the selection when
+    /// there is one, and nothing otherwise.
+    fn focus_target(&self) -> Option<(glam::Vec3, f32)> {
         let points: Vec<glam::Vec3> = self
             .selection
             .as_slice()
@@ -976,19 +1101,27 @@ impl<G: GameApp> Engine<G> {
                     })
             })
             .collect();
-        let Some(first) = points.first().copied() else {
-            return;
-        };
+        let first = points.first().copied()?;
         let mut min = first;
         let mut max = first;
         for point in &points {
             min = min.min(*point);
             max = max.max(*point);
         }
-        let centre = (min + max) * 0.5;
-        // A minimum radius keeps a single point from putting the camera inside
-        // the object it was asked to look at.
-        let radius = ((max - min).length() * 0.5).max(2.0);
+        Some(((min + max) * 0.5, ((max - min).length() * 0.5).max(2.0)))
+    }
+
+    /// Frame the selection with the editor camera.
+    ///
+    /// The pivot is the centroid of the selected transforms, and the distance
+    /// comes from how far apart they are, so `F` on one object and `F` on
+    /// twelve both end up looking at the thing the user meant.
+    fn focus_camera_on_selection(&mut self) {
+        // The minimum radius inside `focus_target` keeps a single point from
+        // putting the camera inside the object it was asked to look at.
+        let Some((centre, radius)) = self.focus_target() else {
+            return;
+        };
         // The editor camera belongs to the game layer, so this is a request
         // rather than a write — the same shape `camera_speed_request` already
         // uses. CONTROL-G builds bookmarks, orbit and view presets on this
@@ -1829,13 +1962,34 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ..
             } = &event
             {
-                let drag = try_start_gizmo_drag(
-                    self.renderer.as_ref(),
-                    &self.world,
-                    &self.selection.primary,
-                    self.cursor_pos,
-                    self.viewport_size,
-                );
+                // Godot 4.6's select-only mode. A real bug class rather than a
+                // preference: without it a click that happens to land on a
+                // gizmo axis moves the object you were only trying to select,
+                // and the damage is silent until you notice it later.
+                let drag = if self.settings.editor().select_only {
+                    None
+                } else {
+                    try_start_gizmo_drag(
+                        self.renderer.as_ref(),
+                        &self.world,
+                        &self.selection.primary,
+                        self.cursor_pos,
+                        self.viewport_size,
+                    )
+                    .map(|mut drag| {
+                        drag.local_space = self.settings.editor().gizmo_local_space;
+                        drag.followers = self
+                            .selection
+                            .as_slice()
+                            .iter()
+                            .filter(|entity| entity.index() != drag.entity_index)
+                            .filter_map(|entity| {
+                                Some((entity.index(), *self.world.get::<Transform>(*entity)?))
+                            })
+                            .collect();
+                        drag
+                    })
+                };
                 if drag.is_some() {
                     self.gizmo_drag = drag;
                     gizmo_consumed = true;
@@ -2011,20 +2165,90 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── Gizmo drag: update entity transform each frame while dragging ────
+        // Snapping is settings, not constants (Seam 4), and `command()` held
+        // during the drag inverts it.
+        let snap = SnapSettings {
+            translate_m: self.settings.editor().snap_translate_m,
+            rotate_deg: self.settings.editor().snap_rotate_deg,
+            scale: self.settings.editor().snap_scale,
+        }
+        .inverted(
+            self.ui_manager
+                .as_ref()
+                .is_some_and(somnium_ui::UiManager::command_modifier_held),
+        );
         let drag_result: Option<(u32, Transform)> = self.gizmo_drag.as_ref().and_then(|drag| {
             let (cam, inv_vp) = self
                 .renderer
                 .as_ref()
                 .map(|r| (r.camera_pos, r.view_proj.inverse()))
                 .unwrap_or((glam::Vec3::ZERO, glam::Mat4::IDENTITY));
-            let new_t = apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, self.viewport_size);
+            let new_t =
+                apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, self.viewport_size, snap);
             Some((drag.entity_index, new_t))
         });
-        if let Some((idx, new_t)) = drag_result {
-            if let Some(entity) = self.world.find_entity_by_index(idx) {
-                if let Some(t) = self.world.get_mut::<Transform>(entity) {
-                    *t = new_t;
+        if let Some((idx, mut new_t)) = drag_result {
+            // Snap-to-surface, applied after grid snapping: the grid decides
+            // where in the plane the object lands, and the ground decides how
+            // high. Doing it the other way round would have the grid quantise
+            // the terrain height, which is meaningless.
+            if self.settings.editor().snap_to_surface
+                && self
+                    .gizmo_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.mode == GizmoMode::Translate)
+                && let Some(height) = self.surface_height_at(new_t.translation)
+            {
+                new_t.translation.y = height;
+            }
+            let start = self
+                .gizmo_drag
+                .as_ref()
+                .map_or(new_t, |drag| drag.start_transform);
+            if let Some(entity) = self.world.find_entity_by_index(idx)
+                && let Some(t) = self.world.get_mut::<Transform>(entity)
+            {
+                *t = new_t;
+            }
+            // The same delta, applied to every follower's own starting
+            // transform. Rotation composes and scale multiplies, because that
+            // is what those operations mean; translation adds.
+            let offset = new_t.translation - start.translation;
+            let spin = new_t.rotation * start.rotation.inverse();
+            let growth = glam::Vec3::new(
+                safe_ratio(new_t.scale.x, start.scale.x),
+                safe_ratio(new_t.scale.y, start.scale.y),
+                safe_ratio(new_t.scale.z, start.scale.z),
+            );
+            let pivot = self
+                .settings
+                .editor()
+                .gizmo_pivot_centre
+                .then(|| self.focus_target().map(|(centre, _)| centre))
+                .flatten();
+            let followers = self
+                .gizmo_drag
+                .as_ref()
+                .map(|drag| drag.followers.clone())
+                .unwrap_or_default();
+            for (index, began) in followers {
+                let Some(entity) = self.world.find_entity_by_index(index) else {
+                    continue;
+                };
+                let Some(transform) = self.world.get_mut::<Transform>(entity) else {
+                    continue;
+                };
+                let mut moved = began;
+                moved.translation = began.translation + offset;
+                moved.rotation = spin * began.rotation;
+                moved.scale = began.scale * growth;
+                if let Some(pivot) = pivot {
+                    // Pivot mode: the selection turns and grows about its
+                    // shared centre rather than about each object's origin.
+                    let arm = began.translation - pivot;
+                    moved.translation = pivot + spin * (arm * growth) + offset;
                 }
+                *transform = moved;
             }
             if let Some(r) = &mut self.renderer {
                 r.set_gizmo_world_pos(new_t.translation);
@@ -2032,6 +2256,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         {
+            // Computed before the context borrows the world, because the
+            // orbit pivot reads the selection's transforms.
+            let camera_focus = self.camera_focus_request.take();
+            let camera_pose = self.camera_pose_request.take();
+            let orbit_selection = self.orbit_selection;
+            let orbit_pivot = self.focus_target().map(|(centre, _)| centre);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -2049,7 +2279,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // Handed over on the update tick only: the game's camera moves in
             // `on_update`, so delivering it anywhere else would leave the
             // request sitting for a frame or be honoured twice.
-            ctx.camera_focus = self.camera_focus_request.take();
+            ctx.camera_focus = camera_focus;
+            ctx.camera_pose = camera_pose;
+            ctx.orbit_selection = orbit_selection;
+            ctx.orbit_pivot = orbit_pivot;
             self.game.on_update(&mut ctx);
         }
 
@@ -2330,6 +2563,55 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // the same call the entity inspector uses — against the settings
             // store's private world instead of the scene's.
             let (settings_panels, settings_overrides) = self.settings_panels();
+            // The corner axis widget's three directions, projected with the
+            // live view matrix so it turns with the camera. The rotation is
+            // taken without translation: the widget shows orientation, not
+            // where the axes happen to be in the world.
+            let axis_directions =
+                self.renderer
+                    .as_ref()
+                    .map_or([(1.0, 0.0), (0.0, -1.0), (0.0, 1.0)], |renderer| {
+                        let view = renderer.view_proj;
+                        std::array::from_fn(|index| {
+                            let world = match index {
+                                0 => glam::Vec3::X,
+                                1 => glam::Vec3::Y,
+                                _ => glam::Vec3::Z,
+                            };
+                            let projected = view.transform_vector3(world);
+                            let flat = glam::Vec2::new(projected.x, -projected.y);
+                            let flat = flat.normalize_or_zero();
+                            (flat.x, flat.y)
+                        })
+                    });
+            let snap_state = (
+                self.settings.editor().snap_translate_m,
+                self.settings.editor().snap_rotate_deg,
+                self.settings.editor().snap_to_surface,
+                self.settings.editor().gizmo_local_space,
+                self.settings.editor().select_only,
+            );
+            // The statistics overlay reports the frame the renderer actually
+            // submitted, so it is read here, after the frame's draws exist.
+            let viewport_statistics = self.settings.editor().show_statistics.then(|| {
+                self.renderer.as_ref().map_or_else(
+                    somnium_ui::debug::ViewportStats::default,
+                    |renderer| {
+                        let counters = renderer.profiler.counters;
+                        let (width, height) = renderer.scene_extent();
+                        somnium_ui::debug::ViewportStats {
+                            draw_calls: counters.draw_calls,
+                            instances: counters.instances,
+                            triangles: counters.triangles,
+                            terrain_chunks: counters.terrain_chunks,
+                            shadow_casters: counters.shadow_casters,
+                            resolution: (width, height),
+                            resolution_scale: renderer.dynamic_resolution.scale(),
+                            vram_bytes: 0,
+                        }
+                    },
+                )
+            });
             let drop_probe_entity = self.viewport_entity_drop_pick();
             let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
@@ -2337,6 +2619,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.set_outliner_entity_handles(all_entities.iter().copied());
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
+                ui.set_viewport_statistics(viewport_statistics);
+                ui.set_axis_widget(axis_directions);
+                ui.set_snap_state(
+                    snap_state.0,
+                    snap_state.1,
+                    snap_state.2,
+                    snap_state.3,
+                    snap_state.4,
+                );
                 if ui.preferences_open() {
                     ui.update_settings_panels(settings_panels, &settings_overrides);
                 }
@@ -4634,6 +4925,44 @@ impl<G: GameApp> Engine<G> {
                 self.apply_settings();
             }
 
+            EditorEvent::SetSettingByName {
+                component,
+                field_name,
+                value,
+            } => {
+                let Some(field) = self.settings_field_id(component, field_name) else {
+                    return;
+                };
+                self.handle_editor_event(EditorEvent::SetSetting {
+                    component,
+                    field,
+                    value,
+                });
+            }
+
+            EditorEvent::ToggleSetting {
+                component,
+                field_name,
+            } => {
+                let Some(field) = self.settings_field_id(component, field_name) else {
+                    return;
+                };
+                let Some(schema) = self.settings.registry().by_stable_id(component) else {
+                    return;
+                };
+                let (world, entity) = self.settings.world();
+                let current =
+                    (schema.snapshot)(world, entity).and_then(|record| record.get(&field).cloned());
+                let Some(somnium_ecs::reflect::ReflectValue::Bool(value)) = current else {
+                    return;
+                };
+                self.handle_editor_event(EditorEvent::SetSetting {
+                    component,
+                    field,
+                    value: somnium_ecs::reflect::ReflectValue::Bool(!value),
+                });
+            }
+
             EditorEvent::ResetAllSettings => {
                 for schema in crate::settings::SettingsStore::schemas() {
                     for field in &schema.fields {
@@ -4669,6 +4998,138 @@ impl<G: GameApp> Engine<G> {
                             ui.push_toast(&reason);
                         }
                     }
+                }
+            }
+
+            EditorEvent::SetDebugView(id) => {
+                let Some(view) = somnium_ui::debug::debug_view(id) else {
+                    return;
+                };
+                self.terrain_debug_view = view.code;
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.shading_debug = view.code;
+                }
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_active_debug_view(id);
+                    ui.push_toast(view.label);
+                }
+            }
+
+            EditorEvent::ToggleRenderSwitch(id) => {
+                let Some(renderer) = self.renderer.as_mut() else {
+                    return;
+                };
+                let next = !renderer.debug_toggles.is_on(id);
+                match renderer.debug_toggles.set(id, next) {
+                    Ok(()) => {
+                        renderer.apply_debug_toggles();
+                        let states = renderer.debug_toggles.clone();
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.set_render_toggles(states);
+                        }
+                    }
+                    Err(reason) => {
+                        if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.push_toast(&reason);
+                        }
+                    }
+                }
+            }
+
+            EditorEvent::ViewPreset(index) => {
+                // A preset frames the selection when there is one and the
+                // origin otherwise, so "Top" always looks at something.
+                let (centre, radius) = self.focus_target().unwrap_or((glam::Vec3::ZERO, 20.0));
+                // The offset direction, from the subject toward the camera.
+                let direction = match index {
+                    // Straight down is a degenerate yaw, so Top is nudged a
+                    // hair off the pole: an exactly vertical look has no
+                    // defined heading and the camera would spin on recall.
+                    0 => glam::Vec3::new(0.0, 1.0, 0.001).normalize(),
+                    1 => glam::Vec3::Z,
+                    2 => glam::Vec3::X,
+                    _ => glam::Vec3::new(0.6, 0.5, 0.6).normalize(),
+                };
+                let position = centre + direction * (radius * 3.0);
+                let look = (centre - position).normalize_or_zero();
+                self.camera_pose_request = Some((
+                    position,
+                    look.z.atan2(look.x).to_degrees(),
+                    look.y.clamp(-1.0, 1.0).asin().to_degrees(),
+                ));
+            }
+
+            EditorEvent::SetCameraBookmark(slot) => {
+                let Some(index) = slot.checked_sub(1).map(usize::from) else {
+                    return;
+                };
+                let Some(renderer) = self.renderer.as_ref() else {
+                    return;
+                };
+                let forward = renderer
+                    .view_proj
+                    .inverse()
+                    .transform_vector3(glam::Vec3::NEG_Z);
+                let forward = forward.normalize_or_zero();
+                let yaw = forward.z.atan2(forward.x).to_degrees();
+                let pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+                self.camera_bookmarks[index.min(8)] = Some((renderer.camera_pos, yaw, pitch));
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(&format!("Bookmark {slot} set"));
+                }
+            }
+
+            EditorEvent::RecallCameraBookmark(slot) => {
+                let Some(index) = slot.checked_sub(1).map(usize::from) else {
+                    return;
+                };
+                let Some((position, yaw, pitch)) = self.camera_bookmarks[index.min(8)] else {
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast(&format!("Bookmark {slot} is empty"));
+                    }
+                    return;
+                };
+                self.camera_pose_request = Some((position, yaw, pitch));
+            }
+
+            EditorEvent::ToggleOrbitSelection => {
+                self.orbit_selection = !self.orbit_selection;
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(if self.orbit_selection {
+                        "Orbit around selection"
+                    } else {
+                        "Orbit around camera"
+                    });
+                }
+            }
+
+            EditorEvent::OpenPiercingMenu => {
+                // Unity 6's affordance, and craft defect C9: in a foliage
+                // cluster the thing you want is behind three things you do
+                // not, and clicking repeatedly is not a way to reach it.
+                self.piercing_candidates = self.entities_under_cursor();
+                let rows: Vec<_> = self
+                    .piercing_candidates
+                    .iter()
+                    .map(|entity| {
+                        (
+                            entity.index(),
+                            self.world.get::<Name>(*entity).map_or_else(
+                                || format!("Entity {}", entity.index()),
+                                |name| name.as_str().to_owned(),
+                            ),
+                        )
+                    })
+                    .collect();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.open_piercing_menu(rows);
+                }
+            }
+
+            EditorEvent::PickPierced(index) => {
+                if let Some(entity) = self.world.find_entity_by_index(index) {
+                    self.selection.set_single(Some(entity));
+                    self.after_selection_change();
                 }
             }
 
@@ -6148,6 +6609,10 @@ fn try_start_gizmo_drag(
     };
 
     Some(GizmoDragState {
+        // Filled by the caller, which is the only place that knows the
+        // selection and the settings.
+        followers: Vec::new(),
+        local_space: false,
         axis,
         mode,
         entity_index: entity.index(),
@@ -6161,12 +6626,68 @@ fn try_start_gizmo_drag(
 }
 
 /// Compute the new entity transform given the current cursor ray.
+/// Scale ratio that never divides by zero. A zero starting scale is degenerate
+/// but authored scenes contain one occasionally, and `NaN` would spread from
+/// it into every follower.
+fn safe_ratio(new: f32, old: f32) -> f32 {
+    if old.abs() > 1e-6 { new / old } else { 1.0 }
+}
+
+/// The snap increments a gizmo drag rounds to.
+///
+/// Zero means "no snapping on this axis of the problem", which is why they are
+/// plain numbers rather than `Option`: a settings file storing `0.0` and a
+/// person meaning "off" are the same thing, and one representation for both is
+/// one fewer state to get wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SnapSettings {
+    /// Translation grid, in metres.
+    pub translate_m: f32,
+    /// Rotation increment, in degrees.
+    pub rotate_deg: f32,
+    /// Scale increment.
+    pub scale: f32,
+}
+
+impl SnapSettings {
+    /// Round `value` to the nearest multiple of `step`, or leave it alone when
+    /// `step` is zero or not finite.
+    #[must_use]
+    pub fn quantise(value: f32, step: f32) -> f32 {
+        if step > 0.0 && step.is_finite() {
+            (value / step).round() * step
+        } else {
+            value
+        }
+    }
+
+    /// `command()` held during a drag inverts snapping: on becomes off and off
+    /// becomes on. Blender, Unity and Unreal all do this, and it is what makes
+    /// a grid usable — you want it most of the time and need to escape it
+    /// occasionally, without visiting a menu either way.
+    #[must_use]
+    pub fn inverted(self, held: bool) -> Self {
+        if !held {
+            return self;
+        }
+        // Inverting "off" needs a value to invert *to*. These are the same
+        // defaults the settings ship with, so holding the modifier in a scene
+        // with snapping off gives the grid everyone expects.
+        Self {
+            translate_m: if self.translate_m > 0.0 { 0.0 } else { 0.25 },
+            rotate_deg: if self.rotate_deg > 0.0 { 0.0 } else { 15.0 },
+            scale: if self.scale > 0.0 { 0.0 } else { 0.1 },
+        }
+    }
+}
+
 fn apply_gizmo_drag(
     drag: &GizmoDragState,
     camera_pos: glam::Vec3,
     inv_vp: glam::Mat4,
     cursor_pos: (f32, f32),
     viewport_size: (f32, f32),
+    snap: SnapSettings,
 ) -> Transform {
     let mut result = drag.start_transform;
     let (vw, vh) = viewport_size;
@@ -6176,13 +6697,31 @@ fn apply_gizmo_drag(
 
     let world_pt = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
     let ray_dir = (world_pt - camera_pos).normalize();
-    let axis_dir = drag.axis.world_dir();
+    // Local space turns the handle with the object. World space is the
+    // default because a scene's grid is a world-space idea; local is what you
+    // want the moment anything is rotated.
+    let axis_dir = if drag.local_space {
+        (drag.start_transform.rotation * drag.axis.world_dir()).normalize_or_zero()
+    } else {
+        drag.axis.world_dir()
+    };
+    if axis_dir == glam::Vec3::ZERO {
+        return result;
+    }
 
     match drag.mode {
         GizmoMode::Translate => {
             if let Some(s) = ray_axis_param(camera_pos, ray_dir, drag.gizmo_pos, axis_dir) {
-                result.translation =
+                let moved =
                     drag.start_transform.translation + (s - drag.start_axis_param) * axis_dir;
+                // Snap the *result*, not the delta: an object already off the
+                // grid should land on it, which is what "snap to grid" means
+                // to everyone who has used one.
+                result.translation = glam::Vec3::new(
+                    SnapSettings::quantise(moved.x, snap.translate_m),
+                    SnapSettings::quantise(moved.y, snap.translate_m),
+                    SnapSettings::quantise(moved.z, snap.translate_m),
+                );
             }
         }
         GizmoMode::Scale => {
@@ -6191,9 +6730,9 @@ fn apply_gizmo_drag(
                     let factor = (s / drag.start_axis_param).abs().max(0.01);
                     let mut sc = drag.start_transform.scale;
                     match drag.axis {
-                        GizmoAxis::X => sc.x *= factor,
-                        GizmoAxis::Y => sc.y *= factor,
-                        GizmoAxis::Z => sc.z *= factor,
+                        GizmoAxis::X => sc.x = SnapSettings::quantise(sc.x * factor, snap.scale),
+                        GizmoAxis::Y => sc.y = SnapSettings::quantise(sc.y * factor, snap.scale),
+                        GizmoAxis::Z => sc.z = SnapSettings::quantise(sc.z * factor, snap.scale),
                     }
                     result.scale = sc;
                 }
@@ -6208,7 +6747,11 @@ fn apply_gizmo_drag(
                 drag.ring_tangent,
                 drag.ring_bitangent,
             ) {
-                let delta = angle - drag.start_angle;
+                let delta = SnapSettings::quantise(
+                    (angle - drag.start_angle).to_degrees(),
+                    snap.rotate_deg,
+                )
+                .to_radians();
                 result.rotation =
                     glam::Quat::from_axis_angle(axis_dir, delta) * drag.start_transform.rotation;
             }
@@ -6285,4 +6828,110 @@ fn ray_aabb_distance(
         far = far.min(t0.max(t1));
     }
     (far >= near.max(0.0)).then(|| near.max(0.0))
+}
+
+#[cfg(test)]
+mod viewport_control_tests {
+    use super::{SnapSettings, ray_aabb_distance};
+
+    /// Snapping rounds the *result*, so an object already off the grid lands
+    /// on it. Rounding the delta instead would preserve the original error
+    /// forever, which is not what "snap to grid" means to anyone.
+    #[test]
+    fn snapping_lands_on_the_grid_rather_than_preserving_an_offset() {
+        assert_eq!(SnapSettings::quantise(1.13, 0.25), 1.25);
+        assert_eq!(SnapSettings::quantise(-1.13, 0.25), -1.25);
+        assert_eq!(SnapSettings::quantise(1.13, 1.0), 1.0);
+    }
+
+    /// A zero step means "off", and so does a step that is not a number. Both
+    /// leave the value exactly alone rather than collapsing it to zero.
+    #[test]
+    fn a_zero_or_invalid_step_disables_snapping() {
+        assert_eq!(SnapSettings::quantise(1.13, 0.0), 1.13);
+        assert_eq!(SnapSettings::quantise(1.13, -1.0), 1.13);
+        assert_eq!(SnapSettings::quantise(1.13, f32::NAN), 1.13);
+    }
+
+    /// `command()` inverts snapping in both directions — that is what makes a
+    /// grid usable, and testing only one direction would miss the half that
+    /// gives a grid to a scene that has none configured.
+    #[test]
+    fn the_modifier_inverts_snapping_both_ways() {
+        let on = SnapSettings {
+            translate_m: 0.5,
+            rotate_deg: 45.0,
+            scale: 0.1,
+        };
+        let off = on.inverted(true);
+        assert_eq!(off.translate_m, 0.0);
+        assert_eq!(off.rotate_deg, 0.0);
+        assert_eq!(off.scale, 0.0);
+
+        let none = SnapSettings::default();
+        let forced = none.inverted(true);
+        assert!(forced.translate_m > 0.0);
+        assert!(forced.rotate_deg > 0.0);
+        assert!(forced.scale > 0.0);
+
+        assert_eq!(on.inverted(false), on, "not holding it changes nothing");
+    }
+
+    /// The piercing menu and a plain click share one ray test, so this is
+    /// the shared half: the nearest box wins, a box behind the camera never
+    /// does, and a miss is a miss.
+    #[test]
+    fn the_ray_test_orders_by_distance_and_ignores_what_is_behind() {
+        let origin = glam::Vec3::ZERO;
+        let forward = glam::Vec3::Z;
+        let near = ray_aabb_distance(
+            origin,
+            forward,
+            glam::Vec3::new(-1.0, -1.0, 4.0),
+            glam::Vec3::new(1.0, 1.0, 6.0),
+        );
+        let far = ray_aabb_distance(
+            origin,
+            forward,
+            glam::Vec3::new(-1.0, -1.0, 20.0),
+            glam::Vec3::new(1.0, 1.0, 22.0),
+        );
+        assert!(near.unwrap() < far.unwrap());
+
+        assert_eq!(
+            ray_aabb_distance(
+                origin,
+                forward,
+                glam::Vec3::new(-1.0, -1.0, -6.0),
+                glam::Vec3::new(1.0, 1.0, -4.0),
+            ),
+            None,
+            "a box behind the camera is not under the cursor"
+        );
+        assert_eq!(
+            ray_aabb_distance(
+                origin,
+                forward,
+                glam::Vec3::new(5.0, 5.0, 4.0),
+                glam::Vec3::new(6.0, 6.0, 6.0),
+            ),
+            None,
+            "a box the ray misses is not under the cursor"
+        );
+    }
+
+    /// A ray that starts inside a box hits it at zero, not at a negative
+    /// distance — otherwise a camera inside geometry would sort it last.
+    #[test]
+    fn a_ray_starting_inside_a_box_hits_it_at_zero() {
+        assert_eq!(
+            ray_aabb_distance(
+                glam::Vec3::ZERO,
+                glam::Vec3::Z,
+                glam::Vec3::splat(-1.0),
+                glam::Vec3::splat(1.0),
+            ),
+            Some(0.0)
+        );
+    }
 }

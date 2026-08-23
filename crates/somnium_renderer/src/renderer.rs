@@ -239,6 +239,12 @@ pub struct SomniumRenderer {
     terrain_materials: crate::material::pool::TerrainMaterialPool,
     /// Inspector override for `SOMNIUM_SHADOW_DEBUG` (0 = use env).
     pub shading_debug: f32,
+    /// CONTROL-G: the named pipeline switches, seeded from the environment.
+    ///
+    /// The individual fields below stay as they are — every pass reads them
+    /// and nothing about that changes. This is the *authored* state, and
+    /// [`Self::apply_debug_toggles`] is the one place it reaches them.
+    pub debug_toggles: somnium_ui::debug::DebugToggles,
     /// Deterministic HDR frame readback for A/B measurement. Inert unless
     /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
     capture: crate::capture::FrameCapture,
@@ -373,6 +379,49 @@ pub struct SomniumRenderer {
 }
 
 impl SomniumRenderer {
+    /// Push [`Self::debug_toggles`] into the fields the passes actually read.
+    ///
+    /// Called after every menu flip rather than every frame: the toggles are
+    /// authored state that changes when a person changes it, and copying them
+    /// per frame would quietly overwrite anything else that writes the same
+    /// field — which is exactly how the terrain inspector's parallax control
+    /// and a view-menu toggle would end up fighting.
+    pub fn apply_debug_toggles(&mut self) {
+        let on = |id: &str| self.debug_toggles.is_on(id);
+        self.meshlet_draws = on("meshlets");
+        self.occlusion_off = !on("occlusion");
+        self.cull_stats = on("cull_stats");
+        self.cascade_caster_cull = on("cascade_cull");
+        self.aerial_split_enabled = on("aerial");
+        self.aerial_hero_bank = on("aerial_hero");
+        self.census_pass.enabled = on("pixel_census");
+        self.classify_pass.enabled = on("shading_bins");
+
+        let hex = on("hex_tiling");
+        let morph = on("terrain_lod_morph");
+        let height_blend = on("terrain_height_blend");
+        let triplanar = u32::from(on("terrain_triplanar"));
+        let macro_on = on("terrain_macro");
+        let detail_fade = on("terrain_detail_fade");
+        let parallax = on("terrain_parallax");
+        for terrain in &mut self.terrains {
+            terrain.hex_tiling = hex;
+            terrain.lod_morph = morph;
+            terrain.height_blend = height_blend;
+            terrain.projection_mode = triplanar;
+            // Strength and distance are authored numbers, not booleans: the
+            // toggle turns the effect off and restores the held value rather
+            // than inventing one.
+            terrain.macro_strength = if macro_on { 0.55 } else { 0.0 };
+            terrain.detail_fade_start = if detail_fade { 60.0 } else { 1.0e9 };
+            terrain.parallax_scale = if parallax { terrain.parallax_held } else { 0.0 };
+            terrain.invalidate_unique_colour();
+        }
+        for clipmap in &mut self.clipmaps {
+            clipmap.enabled = on("terrain_clipmap");
+        }
+    }
+
     /// Initialize the renderer using the provided `RenderContext`.
     pub fn new(ctx: &RenderContext) -> Self {
         let geometry = GeometryPool::new(&ctx.device);
@@ -770,6 +819,7 @@ impl SomniumRenderer {
             camera_submersion: 0.0,
             terrain_materials,
             shading_debug: 0.0,
+            debug_toggles: somnium_ui::debug::DebugToggles::from_env(),
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             timing: crate::timing::TimingRun::from_env(),
@@ -2149,7 +2199,7 @@ impl SomniumRenderer {
             // traced shadows; without it, the TLAS holds the same scene 24J saw.
             if self.raytrace_pass.supported()
                 && !self.rebuilt_chunks.is_empty()
-                && std::env::var("SOMNIUM_RT_TERRAIN").as_deref() != Ok("0")
+                && self.debug_toggles.is_on("rt_terrain")
             {
                 if let Some((rt_index_offset, rt_index_count)) = terrain.rt_index_block() {
                     let vertex_count = terrain.chunk_vertex_capacity();

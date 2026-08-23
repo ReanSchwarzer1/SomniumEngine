@@ -1598,6 +1598,15 @@ impl GameApp for HelloGame {
         // here, so the engine hands over a centre and a radius and this is
         // where it becomes a pose — keeping the current viewing direction so
         // `F` reframes rather than reorienting.
+        // CONTROL-G: an exact pose — a view preset or a recalled bookmark —
+        // is applied before a focus request, because it says *both* where to
+        // be and which way to look, so a focus in the same frame would only
+        // half-overwrite it.
+        if let Some((position, yaw, pitch)) = ctx.take_camera_pose() {
+            self.camera.position = position;
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch;
+        }
         if let Some((centre, radius)) = ctx.take_camera_focus() {
             let direction = (self.camera.position - centre).normalize_or_zero();
             let direction = if direction == Vec3::ZERO {

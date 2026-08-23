@@ -307,12 +307,37 @@ def _load_env_routes():
 
 
 def declared_command_ids() -> set[str]:
-    """Every `id` string in the CONTROL-A2 registry declarations."""
-    path = ROOT / "crates/somnium_ui/src/commands.rs"
-    if not path.exists():
-        return set()
-    text = path.read_text(encoding="utf-8")
-    return set(re.findall(r'"(editor\.[a-z0-9_.]+)"', text))
+    """Every command id the registry will hold at runtime.
+
+    Two sources, because the registry has two: the hand-written `command!`
+    declarations carry literal ids, while CONTROL-G's view-mode menu builds
+    its ids from `somnium_ui::debug`'s tables. Deriving the second set the same
+    way Rust does is what keeps a renamed debug view a build failure rather
+    than a menu entry that silently stops matching.
+    """
+    ids: set[str] = set()
+    commands = ROOT / "crates/somnium_ui/src/commands.rs"
+    if commands.exists():
+        ids |= set(re.findall(r'"(editor\.[a-z0-9_.]+)"', commands.read_text(encoding="utf-8")))
+
+    debug = ROOT / "crates/somnium_ui/src/debug.rs"
+    if debug.exists():
+        text = debug.read_text(encoding="utf-8")
+        for const, prefix in (
+            ("DEBUG_VIEWS", "editor.view.debug."),
+            ("TOGGLES", "editor.view.pipeline."),
+        ):
+            start = text.find(f"pub const {const}")
+            if start < 0:
+                continue
+            body = text[start : text.find("\n];", start)]
+            ids |= {prefix + name for name in re.findall(r'id:\s*"([a-z0-9_]+)"', body)}
+    for slot in range(1, 10):
+        ids.add(f"editor.view.bookmark.set.{slot}")
+        ids.add(f"editor.view.bookmark.recall.{slot}")
+    for preset in ("top", "front", "side", "perspective"):
+        ids.add(f"editor.view.preset.{preset}")
+    return ids
 
 
 def declared_setting_overrides() -> set[str]:

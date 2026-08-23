@@ -639,6 +639,96 @@ pub(crate) fn build_editor_layout(
     .build();
     let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
 
+    // ── CONTROL-G: the snap cluster ─────────────────────────────────────────
+    //
+    // On the floating context bar because snapping is something you change
+    // *while* looking at what you are moving. The whole cluster is one node so
+    // the overflow rule can hide it in a single call: Unreal 5.6's answer to a
+    // narrow viewport, and necessary rather than optional here because Zeta's
+    // 68 px budget leaves the bar genuinely short at 1280.
+    let snap_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let snap_cluster = ui.add_node(snap_cluster, vp_stack_h);
+
+    let snap_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 8.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_role(TextRole::Label)
+    .with_text("Snap")
+    .build();
+    ui.add_node(snap_lbl, snap_cluster);
+
+    let snap_grid_combo = ui.add_node(
+        ComboBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(84.0)
+                .with_margin(Thickness::axes(0.0, 2.0))
+                .with_tooltip("Translate grid. Hold Ctrl while dragging to invert."),
+        )
+        .with_items(SNAP_GRID_NAMES)
+        .with_selected(0)
+        .with_font_id(font_id)
+        .build(),
+        snap_cluster,
+    );
+    let snap_angle_combo = ui.add_node(
+        ComboBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(72.0)
+                .with_margin(Thickness::axes(4.0, 2.0))
+                .with_tooltip("Rotate increment. Hold Ctrl while dragging to invert."),
+        )
+        .with_items(SNAP_ANGLE_NAMES)
+        .with_selected(0)
+        .with_font_id(font_id)
+        .build(),
+        snap_cluster,
+    );
+    let (snap_surface_toggle, _) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Landscape,
+        "Surface",
+        "Drop a dragged object onto whatever is under it.",
+        font_id,
+        22.0,
+    );
+    let (gizmo_space_toggle, gizmo_space_label) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Translate,
+        "World",
+        "Gizmo axes: world or the object's own rotation.",
+        font_id,
+        22.0,
+    );
+    let (select_only_toggle, _) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Select,
+        "Select Only",
+        "Picking cannot start a transform drag.",
+        font_id,
+        22.0,
+    );
+
+    // The overflow chevron, shown only when the cluster is hidden.
+    let (snap_overflow, _) = labeled_icon_button(
+        ui,
+        vp_stack_h,
+        IconId::ChevronDown,
+        "Snap",
+        "Snapping and gizmo options.",
+        font_id,
+        22.0,
+    );
+    ui.set_visibility(snap_overflow, false);
+
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
     // instead of stealing layout from it. Rows are built once and rewritten
@@ -1427,6 +1517,14 @@ pub(crate) fn build_editor_layout(
         status_selection,
         status_stats,
         vp_bar_h,
+        snap_cluster,
+        snap_grid_combo,
+        snap_angle_combo,
+        snap_surface_toggle,
+        gizmo_space_toggle,
+        gizmo_space_label,
+        select_only_toggle,
+        snap_overflow,
         inner_h,
         content_split_h,
         right_split_h,

@@ -1,5 +1,6 @@
 pub mod color;
 pub mod commands;
+pub mod debug;
 pub mod drag_drop;
 pub mod draw;
 pub mod editor;
@@ -331,6 +332,27 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Island Tree",
 ];
 
+/// The table entry closest to a value, so a settings file holding `0.3` shows
+/// the nearest offered step rather than an empty combo.
+fn nearest_index(table: &[f32], value: f32) -> usize {
+    table
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - value).abs().total_cmp(&(*b - value).abs()))
+        .map_or(0, |(index, _)| index)
+}
+
+/// CONTROL-G's translate grid steps. The values the phase names, plus "Off",
+/// because a grid you cannot leave is worse than no grid.
+pub(crate) const SNAP_GRID_NAMES: [&str; 6] = ["Off", "0.1 m", "0.25 m", "0.5 m", "1 m", "5 m"];
+/// The metres each entry means. Index 0 is off.
+pub(crate) const SNAP_GRID_VALUES: [f32; 6] = [0.0, 0.1, 0.25, 0.5, 1.0, 5.0];
+/// CONTROL-G's rotate increments.
+pub(crate) const SNAP_ANGLE_NAMES: [&str; 5] =
+    ["Off", "1\u{b0}", "5\u{b0}", "15\u{b0}", "45\u{b0}"];
+/// The degrees each entry means. Index 0 is off.
+pub(crate) const SNAP_ANGLE_VALUES: [f32; 5] = [0.0, 1.0, 5.0, 15.0, 45.0];
+
 const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
     ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
@@ -409,6 +431,14 @@ struct EditorLayout {
     /// Held for the layout regression test that pins the 68 px scene budget.
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
+    snap_cluster: NodeHandle,
+    snap_grid_combo: NodeHandle,
+    snap_angle_combo: NodeHandle,
+    snap_surface_toggle: NodeHandle,
+    gizmo_space_toggle: NodeHandle,
+    gizmo_space_label: NodeHandle,
+    select_only_toggle: NodeHandle,
+    snap_overflow: NodeHandle,
     /// Mode-scope command labels. Collapse to icon-only under 1400 px.
     mode_labels: [NodeHandle; 4],
     inner_h: NodeHandle,
@@ -663,6 +693,14 @@ pub struct UiManager {
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
     preferences: crate::editor::preferences::PreferencesHandles,
+    snap_cluster: NodeHandle,
+    snap_grid_combo: NodeHandle,
+    snap_angle_combo: NodeHandle,
+    snap_surface_toggle: NodeHandle,
+    gizmo_space_toggle: NodeHandle,
+    gizmo_space_label: NodeHandle,
+    select_only_toggle: NodeHandle,
+    snap_overflow: NodeHandle,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -730,6 +768,10 @@ pub struct UiManager {
     /// `(button, path)` for the File menu's recent tail. The separator carries
     /// an empty path and is never clickable.
     recent_menu_items: Vec<(NodeHandle, String)>,
+    active_debug_view: &'static str,
+    render_toggles: crate::debug::DebugToggles,
+    /// `(entity index, name)` for the open piercing menu.
+    piercing_rows: Vec<(u32, String)>,
     tooltip_delay_ms: f32,
     /// The value a badge-column drag is painting, so the run stays uniform.
     badge_drag_value: Option<bool>,
@@ -1143,6 +1185,14 @@ impl UiManager {
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
             preferences: layout.preferences,
+            snap_cluster: layout.snap_cluster,
+            snap_grid_combo: layout.snap_grid_combo,
+            snap_angle_combo: layout.snap_angle_combo,
+            snap_surface_toggle: layout.snap_surface_toggle,
+            gizmo_space_toggle: layout.gizmo_space_toggle,
+            gizmo_space_label: layout.gizmo_space_label,
+            select_only_toggle: layout.select_only_toggle,
+            snap_overflow: layout.snap_overflow,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -1190,6 +1240,9 @@ impl UiManager {
             binding_rows: Vec::new(),
             recent_scenes: Vec::new(),
             recent_menu_items: Vec::new(),
+            active_debug_view: "lit",
+            render_toggles: crate::debug::DebugToggles::default(),
+            piercing_rows: Vec::new(),
             tooltip_delay_ms: 500.0,
             badge_drag_value: None,
             marquee_active: false,
@@ -1583,6 +1636,15 @@ impl UiManager {
             if self.native_ui.cancel_active_gesture() {
                 return true;
             }
+            if self.native_ui.modifiers().command()
+                && self.native_ui.is_under(
+                    self.native_ui.hit_test(self.native_ui.cursor_pos),
+                    self.viewport_handle,
+                )
+            {
+                self.editor_events.push_back(EditorEvent::OpenPiercingMenu);
+                return true;
+            }
             if self.open_content_menu(self.native_ui.cursor_pos) {
                 return true;
             }
@@ -1716,6 +1778,21 @@ impl UiManager {
             ..
         } = event
         {
+            if let Some((axis, positive)) =
+                self.native_ui.axis_widget_hit(self.native_ui.cursor_pos)
+            {
+                // The widget's ends map onto the view presets: clicking +Y is
+                // Top, and the negative ends are the same presets from the
+                // other side, which is why the preset carries the sign.
+                let preset = match (axis, positive) {
+                    (1, _) => 0,
+                    (2, _) => 1,
+                    _ => 2,
+                };
+                self.editor_events
+                    .push_back(EditorEvent::ViewPreset(preset));
+                return true;
+            }
             self.arm_internal_drag();
             let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
             if self.is_title_chrome_hit(hit) {
@@ -3143,6 +3220,131 @@ impl UiManager {
         self.tooltip_delay_ms = ms.max(0.0);
     }
 
+    /// Publish the viewport statistics overlay. `None` hides it, which is what
+    /// the `show_statistics` preference being off means.
+    pub fn set_viewport_statistics(&mut self, stats: Option<crate::debug::ViewportStats>) {
+        let area = stats.map(|stats| {
+            (
+                self.native_ui.screen_bounds(self.viewport_handle),
+                stats.lines(),
+            )
+        });
+        self.native_ui.set_statistics(area);
+    }
+
+    /// Publish the snapping and gizmo state to the viewport context bar.
+    ///
+    /// Also applies Unreal 5.6's overflow rule: below the collapse width the
+    /// whole cluster is hidden behind a chevron rather than clipped, because a
+    /// half-drawn control is worse than one you have to open.
+    pub fn set_snap_state(
+        &mut self,
+        translate_m: f32,
+        rotate_deg: f32,
+        snap_to_surface: bool,
+        local_space: bool,
+        select_only: bool,
+    ) {
+        let rules = CollapseRules::for_width(self.window_size.0 as f32);
+        self.native_ui
+            .set_visibility(self.snap_cluster, rules.context_bar_snap_inline);
+        self.native_ui
+            .set_visibility(self.snap_overflow, !rules.context_bar_snap_inline);
+
+        let grid = nearest_index(&SNAP_GRID_VALUES, translate_m);
+        let angle = nearest_index(&SNAP_ANGLE_VALUES, rotate_deg);
+        self.native_ui
+            .send(ComboBoxMessage::set_selected(self.snap_grid_combo, grid));
+        self.native_ui
+            .send(ComboBoxMessage::set_selected(self.snap_angle_combo, angle));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.snap_surface_toggle,
+            snap_to_surface,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.gizmo_space_toggle,
+            local_space,
+        ));
+        self.native_ui.send(TextMessage::set_text(
+            self.gizmo_space_label,
+            if local_space { "Local" } else { "World" }.to_string(),
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.select_only_toggle,
+            select_only,
+        ));
+    }
+
+    /// Publish the corner axis widget. `axes` are the world X/Y/Z directions
+    /// projected into screen space, y already flipped.
+    pub fn set_axis_widget(&mut self, axes: [(f32, f32); 3]) {
+        let viewport = self.native_ui.screen_bounds(self.viewport_handle);
+        self.native_ui
+            .set_axis_widget(viewport, axes.map(|(x, y)| Vec2::new(x, y)));
+    }
+
+    /// Which debug visualisation is active, so the View menu can mark it and
+    /// the status bar can say so. `"lit"` means the ordinary image.
+    pub fn set_active_debug_view(&mut self, id: &'static str) {
+        self.active_debug_view = id;
+    }
+
+    /// The active debug visualisation.
+    #[must_use]
+    pub fn active_debug_view(&self) -> &'static str {
+        self.active_debug_view
+    }
+
+    /// Mirror of the renderer's pipeline switches, so the View menu can show
+    /// each one checked, and disabled with its variable named when the
+    /// environment owns it.
+    pub fn set_render_toggles(&mut self, toggles: crate::debug::DebugToggles) {
+        self.render_toggles = toggles;
+    }
+
+    /// The live pipeline switches.
+    #[must_use]
+    pub fn render_toggles(&self) -> &crate::debug::DebugToggles {
+        &self.render_toggles
+    }
+
+    /// Show every selectable entity under the cursor — Unity 6's piercing
+    /// menu, and craft defect C9.
+    ///
+    /// Reuses the Outliner's context-menu popup: the rows are entity names
+    /// and the ids are entity indices, so nothing new has to learn how a
+    /// menu is placed or dismissed.
+    pub fn open_piercing_menu(&mut self, rows: Vec<(u32, String)>) {
+        self.piercing_rows = rows;
+        if self.piercing_rows.is_empty() {
+            self.push_toast("Nothing under the cursor");
+            return;
+        }
+        let items: Vec<MenuItem> = self
+            .piercing_rows
+            .iter()
+            .map(|(index, name)| MenuItem {
+                id: format!("pierce:{index}"),
+                label: name.clone(),
+                enabled: true,
+            })
+            .collect();
+        let pos = self.native_ui.cursor_pos;
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        self.native_ui.set_desired_position(self.outliner_menu, pos);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui
+            .invalidate_ancestors(self.outliner_menu_popup);
+    }
+
     /// The chord in force for a command, for menus and tooltips.
     #[must_use]
     pub fn chord_for(&self, id: &str) -> Option<crate::commands::Chord> {
@@ -3158,6 +3360,88 @@ impl UiManager {
     /// because every one of them is answered the same way — publish a
     /// `SetSetting` and let core decide whether the environment has taken the
     /// field away — and because the window is either open or it is not.
+    /// The viewport context bar's snap cluster.
+    ///
+    /// Every one of these writes a Seam-4 setting rather than an ad-hoc field,
+    /// which is what makes them survive a restart and appear in Preferences
+    /// without a second implementation.
+    fn handle_snap_message(&mut self, msg: &UiMessage) -> bool {
+        if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
+            if msg.destination == self.snap_grid_combo {
+                self.push_setting(
+                    "somnium.EditorSettings",
+                    "snap_translate_m",
+                    somnium_ecs::reflect::ReflectValue::F64(f64::from(
+                        SNAP_GRID_VALUES.get(*index).copied().unwrap_or(0.0),
+                    )),
+                );
+                return true;
+            }
+            if msg.destination == self.snap_angle_combo {
+                self.push_setting(
+                    "somnium.EditorSettings",
+                    "snap_rotate_deg",
+                    somnium_ecs::reflect::ReflectValue::F64(f64::from(
+                        SNAP_ANGLE_VALUES.get(*index).copied().unwrap_or(0.0),
+                    )),
+                );
+                return true;
+            }
+        }
+        if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            return false;
+        }
+        if msg.destination == self.snap_overflow {
+            // The overflow opens Preferences at the Settings tab rather than
+            // duplicating the cluster in a popup: one place these live.
+            if !self.preferences_open {
+                self.toggle_preferences();
+            }
+            self.preferences_query = "snap".into();
+            self.settings_signature.clear();
+            return true;
+        }
+        for (handle, component, field) in [
+            (
+                self.snap_surface_toggle,
+                "somnium.EditorSettings",
+                "snap_to_surface",
+            ),
+            (
+                self.gizmo_space_toggle,
+                "somnium.EditorSettings",
+                "gizmo_local_space",
+            ),
+            (
+                self.select_only_toggle,
+                "somnium.EditorSettings",
+                "select_only",
+            ),
+        ] {
+            if msg.destination == handle {
+                self.editor_events.push_back(EditorEvent::ToggleSetting {
+                    component: somnium_ecs::reflect::StableId::new(component),
+                    field_name: field,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    fn push_setting(
+        &mut self,
+        component: &'static str,
+        field_name: &'static str,
+        value: somnium_ecs::reflect::ReflectValue,
+    ) {
+        self.editor_events.push_back(EditorEvent::SetSettingByName {
+            component: somnium_ecs::reflect::StableId::new(component),
+            field_name,
+            value,
+        });
+    }
+
     fn handle_preferences_message(&mut self, msg: &UiMessage) -> bool {
         if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
             if msg.destination == self.preferences.close {
@@ -3321,6 +3605,20 @@ impl UiManager {
             A::Redo => self.editor_events.push_back(EditorEvent::Redo),
             A::DeleteSelected => self.editor_events.push_back(EditorEvent::DeleteSelected),
             A::DuplicateSelected => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            A::SetDebugView(id) => self.editor_events.push_back(EditorEvent::SetDebugView(id)),
+            A::ToggleRenderSwitch(id) => self
+                .editor_events
+                .push_back(EditorEvent::ToggleRenderSwitch(id)),
+            A::ViewPreset(index) => self.editor_events.push_back(EditorEvent::ViewPreset(index)),
+            A::SetBookmark(slot) => self
+                .editor_events
+                .push_back(EditorEvent::SetCameraBookmark(slot)),
+            A::RecallBookmark(slot) => self
+                .editor_events
+                .push_back(EditorEvent::RecallCameraBookmark(slot)),
+            A::ToggleOrbitSelection => self
+                .editor_events
+                .push_back(EditorEvent::ToggleOrbitSelection),
             A::OpenPreferences => self.toggle_preferences(),
             A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
             A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
@@ -4666,6 +4964,9 @@ impl UiManager {
             if self.handle_preferences_message(&msg) {
                 continue;
             }
+            if self.handle_snap_message(&msg) {
+                continue;
+            }
             if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
                 && let Some((_, path)) = self
                     .recent_menu_items
@@ -4965,6 +5266,14 @@ impl UiManager {
                 }
                 if msg.destination == self.outliner_menu {
                     self.close_outliner_menu();
+                    if let Some(index) = id.strip_prefix("pierce:")
+                        && let Ok(index) = index.parse::<u32>()
+                    {
+                        self.piercing_rows.clear();
+                        self.editor_events
+                            .push_back(EditorEvent::PickPierced(index));
+                        continue;
+                    }
                     self.run_command_id(id);
                     continue;
                 }
@@ -5789,6 +6098,12 @@ pub struct CollapseRules {
     pub search_field: bool,
     /// The status bar shows the object count beside the frame rate.
     pub status_objects: bool,
+    /// CONTROL-G, following Unreal 5.6: the floating viewport context bar
+    /// keeps its snap cluster inline. Below the threshold the cluster moves
+    /// into an overflow menu rather than clipping, because Zeta's 68 px
+    /// pre-scene budget makes the bar genuinely too short at 1280 and a
+    /// control that is half-drawn is worse than one behind a chevron.
+    pub context_bar_snap_inline: bool,
 }
 
 impl CollapseRules {
@@ -5797,6 +6112,7 @@ impl CollapseRules {
             transport_label: width >= 1400.0,
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
+            context_bar_snap_inline: width >= 1600.0,
         }
     }
 }

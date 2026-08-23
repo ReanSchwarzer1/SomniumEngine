@@ -273,6 +273,18 @@ pub enum CommandAction {
     ContentRefresh,
     OpenPreferences,
     OpenProjectPicker,
+    /// Select a named debug visualisation. Mutually exclusive with the others.
+    SetDebugView(&'static str),
+    /// Flip one named renderer pipeline switch.
+    ToggleRenderSwitch(&'static str),
+    /// Point the editor camera down a world axis.
+    ViewPreset(u8),
+    /// Store the current camera pose in a numbered slot.
+    SetBookmark(u8),
+    /// Recall a numbered camera pose.
+    RecallBookmark(u8),
+    /// Orbit the camera around the selection rather than around itself.
+    ToggleOrbitSelection,
 }
 
 /// One editor command declaration.
@@ -361,6 +373,7 @@ const TOOLBAR: &[CommandSurface] = &[CommandSurface::Toolbar];
 const VIEW_TOOLBAR: &[CommandSurface] =
     &[CommandSurface::Menu(Menu::View), CommandSurface::Toolbar];
 const CONTENT: &[CommandSurface] = &[CommandSurface::ContentContext];
+const VIEW_MENU: &[CommandSurface] = &[CommandSurface::Menu(Menu::View)];
 const EDIT_OUTLINER: &[CommandSurface] = &[
     CommandSurface::Menu(Menu::Edit),
     CommandSurface::OutlinerContext,
@@ -393,6 +406,106 @@ macro_rules! command {
 
 const fn ctrl(letter: char) -> Option<Chord> {
     Some(Chord::press(CommandKey::Letter(letter)).ctrl())
+}
+
+/// CONTROL-G's view-mode menu, generated from the renderer's own tables.
+///
+/// Written as a loop rather than fifty `command!` blocks on purpose: the whole
+/// claim of this sub-phase is that a debug visualisation costs a *row*, not a
+/// feature, and a hand-copied list would be the first thing to drift from
+/// `somnium_renderer::debug`. Every id, label and Help line here is the
+/// renderer's, so the menu cannot describe a view the shader does not have.
+fn view_mode_commands() -> Vec<Command> {
+    let mut commands = Vec::new();
+    for view in crate::debug::DEBUG_VIEWS {
+        commands.push(Command {
+            id: leak_id("editor.view.debug.", view.id),
+            label: view.label,
+            category: "View Mode",
+            default_binding: None,
+            help: view.help,
+            action: CommandAction::SetDebugView(view.id),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        });
+    }
+    for toggle in crate::debug::TOGGLES {
+        commands.push(Command {
+            id: leak_id("editor.view.pipeline.", toggle.id),
+            label: toggle.label,
+            category: "Pipeline",
+            default_binding: None,
+            help: toggle.help,
+            action: CommandAction::ToggleRenderSwitch(toggle.id),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        });
+    }
+    commands
+}
+
+/// Ids are `&'static str` throughout the registry, and the registry is built
+/// once per process. Leaking the handful of generated ids is cheaper and
+/// clearer than threading a lifetime through every command surface for
+/// strings that live until the editor exits anyway.
+fn leak_id(prefix: &str, suffix: &str) -> &'static str {
+    Box::leak(format!("{prefix}{suffix}").into_boxed_str())
+}
+
+/// Camera bookmarks and view presets, also generated: nine slots and four
+/// presets are a table, and writing them out would be thirteen near-identical
+/// blocks that only a diff could tell apart.
+fn camera_commands() -> Vec<Command> {
+    const PRESETS: [(&str, &str, u8); 4] = [
+        ("top", "Top", 0),
+        ("front", "Front", 1),
+        ("side", "Side", 2),
+        ("perspective", "Perspective", 3),
+    ];
+    let mut commands = Vec::new();
+    for (id, label, index) in PRESETS {
+        commands.push(Command {
+            id: leak_id("editor.view.preset.", id),
+            label: Box::leak(format!("{label} View").into_boxed_str()),
+            category: "Camera",
+            default_binding: None,
+            help: Box::leak(
+                format!(
+                    "Point the editor camera along the {} axis.",
+                    label.to_lowercase()
+                )
+                .into_boxed_str(),
+            ),
+            action: CommandAction::ViewPreset(index),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        });
+    }
+    for slot in 1..=9u8 {
+        commands.push(Command {
+            id: leak_id("editor.view.bookmark.set.", &slot.to_string()),
+            label: Box::leak(format!("Set Bookmark {slot}").into_boxed_str()),
+            category: "Camera",
+            default_binding: Some(Chord::press(CommandKey::Letter((b'0' + slot) as char)).ctrl()),
+            help: Box::leak(
+                format!("Store the current camera pose in slot {slot}.").into_boxed_str(),
+            ),
+            action: CommandAction::SetBookmark(slot),
+            surfaces: &[],
+            enabled: always,
+        });
+        commands.push(Command {
+            id: leak_id("editor.view.bookmark.recall.", &slot.to_string()),
+            label: Box::leak(format!("Recall Bookmark {slot}").into_boxed_str()),
+            category: "Camera",
+            default_binding: Some(Chord::press(CommandKey::Letter((b'0' + slot) as char))),
+            help: Box::leak(format!("Return the camera to slot {slot}.").into_boxed_str()),
+            action: CommandAction::RecallBookmark(slot),
+            surfaces: &[],
+            enabled: always,
+        });
+    }
+    commands
 }
 
 fn declarations() -> Vec<Command> {
@@ -1065,7 +1178,15 @@ impl CommandRegistry {
 /// Process-wide immutable editor registry.
 pub fn registry() -> &'static CommandRegistry {
     static REGISTRY: OnceLock<CommandRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(|| CommandRegistry::new(declarations()))
+    REGISTRY.get_or_init(|| {
+        // Hand-written declarations first, then the two generated families.
+        // The order matters only for the menu, and "the things a person
+        // reaches for" belongs above "every visualisation the shader has".
+        let mut commands = declarations();
+        commands.extend(view_mode_commands());
+        commands.extend(camera_commands());
+        CommandRegistry::new(commands)
+    })
 }
 
 /// Persisted command-palette usage history.
@@ -1344,6 +1465,55 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// CONTROL-G's exit clause: "type 24 into that field" is not required to
+    /// reach any debug view. Every code the shader branches on, and every
+    /// pipeline switch that used to be shell-only, is a named menu entry with
+    /// a Help line.
+    #[test]
+    fn every_debug_view_and_pipeline_switch_is_a_registered_command() {
+        let registry = registry();
+        for view in crate::debug::DEBUG_VIEWS {
+            let id = format!("editor.view.debug.{}", view.id);
+            let command = registry
+                .get(&id)
+                .unwrap_or_else(|| panic!("{id} is not registered"));
+            assert_eq!(command.action, CommandAction::SetDebugView(view.id));
+            assert!(!command.help.trim().is_empty());
+            assert!(
+                command.surfaces.contains(&CommandSurface::Menu(Menu::View)),
+                "{id} must appear in the View menu"
+            );
+        }
+        for toggle in crate::debug::TOGGLES {
+            let id = format!("editor.view.pipeline.{}", toggle.id);
+            let command = registry
+                .get(&id)
+                .unwrap_or_else(|| panic!("{id} is not registered"));
+            assert_eq!(command.action, CommandAction::ToggleRenderSwitch(toggle.id));
+        }
+    }
+
+    /// Nine bookmarks, set with `command()` and recalled bare — and the two
+    /// families must not collide with each other or with anything else.
+    #[test]
+    fn camera_bookmarks_are_nine_pairs_with_distinct_chords() {
+        let registry = registry();
+        let mut chords = std::collections::HashSet::new();
+        for slot in 1..=9u8 {
+            let set = registry
+                .get(&format!("editor.view.bookmark.set.{slot}"))
+                .expect("set command");
+            let recall = registry
+                .get(&format!("editor.view.bookmark.recall.{slot}"))
+                .expect("recall command");
+            assert_ne!(set.default_binding, recall.default_binding);
+            assert!(chords.insert(set.default_binding.expect("set has a chord")));
+            assert!(chords.insert(recall.default_binding.expect("recall has a chord")));
+            assert_eq!(set.action, CommandAction::SetBookmark(slot));
+            assert_eq!(recall.action, CommandAction::RecallBookmark(slot));
+        }
+    }
 
     /// An override is what dispatch consults; the declaration is the fallback.
     #[test]

@@ -85,6 +85,13 @@ pub struct UserInterface {
     /// Viewport rubber-band, painted with the tree so it sits above the
     /// viewport image but below every panel.
     marquee: Option<Rect>,
+    /// CONTROL-G's statistics overlay: its lines, and where they go.
+    statistics: Option<(Rect, Vec<String>)>,
+    /// The corner axis widget's screen-space axis endpoints, recomputed each
+    /// frame from the live view matrix: `(axis index, tip, positive)`.
+    axis_widget: Vec<(u8, Vec2, bool)>,
+    /// Where the widget sits, so a click can be tested against it.
+    axis_widget_bounds: Rect,
     modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
@@ -120,6 +127,9 @@ impl UserInterface {
             drag_drop: crate::drag_drop::DragDropState::default(),
             drop_highlight: None,
             marquee: None,
+            statistics: None,
+            axis_widget: Vec::new(),
+            axis_widget_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
             modal_focus: None,
             viewport_handle: NodeHandle::NONE,
         }
@@ -144,6 +154,51 @@ impl UserInterface {
 
     pub fn set_drop_acceptance(&mut self, value: Option<crate::drag_drop::DropAcceptance>) {
         self.drag_drop.set_acceptance(value);
+    }
+
+    /// Publish the corner axis widget: the viewport it sits in, and each
+    /// axis's direction in view space.
+    ///
+    /// Core supplies the directions because it holds the view matrix; the
+    /// widget is otherwise pure paint and pure hit-testing, which is what lets
+    /// it be clickable without the UI learning what a camera is.
+    pub fn set_axis_widget(&mut self, viewport: Rect, axes: [Vec2; 3]) {
+        const SIZE: f32 = 56.0;
+        let bounds = Rect::new(
+            viewport.x + viewport.w - SIZE - 16.0,
+            viewport.y + viewport.h - SIZE - 16.0,
+            SIZE,
+            SIZE,
+        );
+        self.axis_widget_bounds = bounds;
+        let centre = Vec2::new(bounds.x + SIZE * 0.5, bounds.y + SIZE * 0.5);
+        let radius = SIZE * 0.36;
+        self.axis_widget.clear();
+        for (index, dir) in axes.iter().enumerate() {
+            // Both ends: a gizmo that only shows +X cannot be clicked to look
+            // from the other side, which is half of what it is for.
+            self.axis_widget
+                .push((index as u8, centre + *dir * radius, true));
+            self.axis_widget
+                .push((index as u8, centre - *dir * radius, false));
+        }
+    }
+
+    /// Which axis end a click lands on, if any. `(axis index, positive)`.
+    #[must_use]
+    pub fn axis_widget_hit(&self, pos: Vec2) -> Option<(u8, bool)> {
+        if !self.axis_widget_bounds.contains(pos) {
+            return None;
+        }
+        self.axis_widget
+            .iter()
+            .find(|(_, tip, _)| tip.distance(pos) <= 9.0)
+            .map(|(axis, _, positive)| (*axis, *positive))
+    }
+
+    /// The statistics overlay's lines and the viewport they sit in.
+    pub fn set_statistics(&mut self, area: Option<(Rect, Vec<String>)>) {
+        self.statistics = area;
     }
 
     /// The live viewport rubber-band, or `None` when there is not one.
@@ -898,8 +953,118 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
+        self.draw_axis_widget();
+        self.draw_statistics();
         self.draw_marquee();
         self.draw_drag_overlay();
+    }
+
+    /// The corner axis widget. Three labelled ends, each a click target.
+    fn draw_axis_widget(&mut self) {
+        if self.axis_widget.is_empty() {
+            return;
+        }
+        let bounds = self.axis_widget_bounds;
+        let centre = Vec2::new(bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5);
+        let theme = crate::theme::active();
+        // Fixed colours rather than theme tokens: X is red, Y is green and Z
+        // is blue in every tool anyone has used, and a themed axis gizmo would
+        // be a small daily confusion for no gain.
+        const AXIS_COLOURS: [[u8; 4]; 3] = [
+            [0xE0, 0x5A, 0x5A, 0xFF],
+            [0x5A, 0xD0, 0x6A, 0xFF],
+            [0x5A, 0x8A, 0xE0, 0xFF],
+        ];
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        // Far ends first, so a near axis draws over one pointing away.
+        let mut ends = self.axis_widget.clone();
+        ends.sort_by(|a, b| centre.distance(b.1).total_cmp(&centre.distance(a.1)));
+        for (axis, tip, positive) in ends {
+            let colour = AXIS_COLOURS[axis as usize % 3];
+            let colour = if positive {
+                colour
+            } else {
+                crate::theme::with_alpha(colour, 120)
+            };
+            // The stem, stepped rather than stroked: the primitive pipeline
+            // draws axis-aligned quads, and at a 20 px radius a run of 2 px
+            // dots is indistinguishable from a line while needing no new
+            // primitive kind for one widget.
+            for step in 1..10 {
+                let t = step as f32 / 10.0;
+                let point = centre + (tip - centre) * t;
+                self.draw_ctx.push_round_rect(
+                    Rect::new(point.x - 1.0, point.y - 1.0, 2.0, 2.0),
+                    1.0,
+                    colour,
+                );
+            }
+            self.draw_ctx.push_round_rect(
+                Rect::new(tip.x - 6.0, tip.y - 6.0, 12.0, 12.0),
+                6.0,
+                colour,
+            );
+            if positive {
+                let label = ["X", "Y", "Z"][axis as usize % 3];
+                let size = self.draw_ctx.font_atlas.measure_text(label, style.px, font);
+                self.draw_ctx.push_text(
+                    label,
+                    Vec2::new(tip.x - size.x * 0.5, tip.y - style.px * 0.5),
+                    font,
+                    style.px,
+                    theme.semantic.text.primary.bytes(),
+                );
+            }
+        }
+    }
+
+    /// The statistics overlay, in the viewport's top-right corner.
+    ///
+    /// Top-*right* because the floating context bar owns the top-centre and
+    /// the gizmo usually sits near the middle; a panel that covers the thing
+    /// being judged is worse than no panel.
+    fn draw_statistics(&mut self) {
+        let Some((viewport, lines)) = self.statistics.clone() else {
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        let width = lines
+            .iter()
+            .map(|line| {
+                self.draw_ctx
+                    .font_atlas
+                    .measure_text(line, style.px, font)
+                    .x
+            })
+            .fold(0.0f32, f32::max)
+            + 20.0;
+        let line_height = style.px + 5.0;
+        let panel = Rect::new(
+            viewport.x + viewport.w - width - 12.0,
+            viewport.y + 12.0,
+            width,
+            lines.len() as f32 * line_height + 12.0,
+        );
+        let theme = crate::theme::active();
+        self.draw_ctx.push_round_rect(
+            panel,
+            theme.geometry.radius_popup,
+            crate::theme::with_alpha(theme.semantic.surface.panel.bytes(), 216),
+        );
+        for (index, line) in lines.iter().enumerate() {
+            self.draw_ctx.push_text(
+                line,
+                Vec2::new(panel.x + 10.0, panel.y + 6.0 + index as f32 * line_height),
+                font,
+                style.px,
+                theme.semantic.text.secondary.bytes(),
+            );
+        }
     }
 
     /// The selection rubber-band: an accent hairline over a faint wash, using
