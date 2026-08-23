@@ -2399,7 +2399,7 @@ polished GPU reconstruction (roughness 0.2/metallic 1), scene reference
 round-trip with no pool id, generic live-gesture undo/redo, vector assignment,
 Make Unique's non-deleting undo, and glTF sibling creation.
 
-#### CONTROL-E — Drag and drop (26-D2)
+#### CONTROL-E — Drag and drop (26-D2) — **COMPLETE 2026-08-23**
 
 Seam 3, plus its routes.
 
@@ -2437,7 +2437,18 @@ Plus the mechanics:
 cursor and highlight *before* the button comes up, and a cancelled drag leaves
 nothing behind. One capture per route.
 
-#### CONTROL-F — Outliner, selection, clipboard
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-E_drag_drop.md`](phase%20CONTROL/CONTROL-E_drag_drop.md). All seven
+routes land as exactly one undo step through one semantic `DropRequest`; the
+acceptance the adorner renders *is* the value `release()` returns, because both
+read one cached `DropAcceptance`. Viewport picking exists for the first time
+(ray/AABB in model space). The fourteen captures are **owed** — no GPU-backed
+capture run was available — and the `.somnium` route's undo granularity is
+bounded by scene load clearing the stack, which CONTROL-J states rather than
+papers over.
+
+#### CONTROL-F — Outliner, selection, clipboard — **COMPLETE 2026-08-23**
 
 The second-riskiest sub-phase after B, and it is taken alone.
 
@@ -2476,7 +2487,20 @@ The second-riskiest sub-phase after B, and it is taken alone.
 row shows `—` and does not overwrite when untouched. Copy a subtree, paste it,
 and the hierarchy and every property survive.
 
-#### CONTROL-G — Viewport control
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-F_selection.md`](phase%20CONTROL/CONTROL-F_selection.md). `Selection`
+keeps `primary` a public `Option<Entity>`, so the ~60 single-selection call
+sites compiled unchanged; one reconcile point per frame keeps the set honest.
+Multi-edit is a schema intersection with a `mixed` flag — Details learned
+nothing. `EditorFlags` makes hide/lock a real serialised component. Found and
+fixed a live bug: `EntitySnapshot::respawn` silently dropped a mesh that had no
+material, losing geometry on delete-then-undo. **Three §8 bullets are
+deferred with stated prerequisites**: sticky section headers (the tree never
+sees the scroll offset), property-group copy/paste (`group` is not a section
+node yet), and "take value from…" (Details has no context menu).
+
+#### CONTROL-G — Viewport control — **COMPLETE 2026-08-23**
 
 - **Snapping**: translate grid (0.1 / 0.25 / 0.5 / 1 / 5 m), rotate angle
   (1 / 5 / 15 / 45°), scale increment, snap-to-surface, with a snap cluster in
@@ -2512,7 +2536,20 @@ placement variables.
 view; a box moved with snapping on lands on the grid; clicking through a foliage
 cluster reaches the object behind it.
 
-#### CONTROL-H — Preferences, keybindings, project settings
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-G_viewport.md`](phase%20CONTROL/CONTROL-G_viewport.md). The view-mode
+menu is **generated** from `somnium_ui::debug`'s tables, so all 34 shader debug
+codes and 18 pipeline switches are named commands with Help lines and a
+renamed view is a build failure. This is what closed CONTROL-H's env-route
+gate. Snapping rounds the result rather than the delta and `command()` inverts
+it both ways; the gizmo moves the whole selection by one delta. Camera
+bookmarks, view presets and the clickable axis widget arrive on a new
+`camera_pose` request beside `camera_focus`. `ViewportStats::vram_bytes` is
+always zero and never drawn — wgpu exposes no allocation total on this path,
+and a confident-looking estimate is exactly what Zeta-G's status bar avoids.
+
+#### CONTROL-H — Preferences, keybindings, project settings — **COMPLETE 2026-08-23**
 
 - **Seam 4's resolution order, implemented**, with the env var winning and
   **saying so in the UI** — "overridden by `SOMNIUM_HEXTILE`", control disabled,
@@ -2546,7 +2583,19 @@ stated reason why one is deliberately capture-harness-only.
 **Exit:** the table has no unexplained rows; setting a value in the window and
 restarting preserves it; an env var override is visible, disabled and explained.
 
-#### CONTROL-I — Log, diagnostics, jump to source
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-H_settings.md`](phase%20CONTROL/CONTROL-H_settings.md). Seam 4 is
+implemented *as* Seam 1: two `Component`s with schemas on one entity in a
+private `World`, so Preferences is the generated Details panel and a setting
+costs one schema line. Files are hand-rolled flat TOML — the value space is
+four scalar types and a dependency was not worth it. **The exit condition is
+met and enforced**: all 106 `SOMNIUM_*` variables have a verified route (24
+schema, 6 setting, 23 command, 53 harness-with-a-reason, zero unexplained), and
+a `command` route naming an unregistered id fails exactly as an unclassified
+variable does. `autosave_interval_s` lands here but is consumed by CONTROL-J.
+
+#### CONTROL-I — Log, diagnostics, jump to source — **COMPLETE 2026-08-23**
 
 - **Clickable `file:line:column`** in the Output Log → opens the external editor
   from CONTROL-H's setting **at the line**, or reveals the file if none is set.
@@ -2561,7 +2610,19 @@ restarting preserves it; an env var override is visible, disabled and explained.
 
 **Exit:** a Luau syntax error is one click from the offending line.
 
-#### CONTROL-J — Scene lifecycle
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-I_log.md`](phase%20CONTROL/CONTROL-I_log.md). "One click from the
+offending line" is a parsing problem, so `parse_source_refs` is pure and tested
+directly: a Windows drive letter is a colon that is not a separator, a
+timestamp is three numbers with no file, trailing punctuation is not path.
+`OutputLog` holds the policy so it is testable without a GPU device. Error
+toasts persist until dismissed, classified by the same `infer` the log uses, so
+seventy existing call sites got the behaviour untouched. The external editor is
+spawned but **not verified** — a program that starts and ignores its arguments
+looks like success, which is the honest boundary of a shell-out.
+
+#### CONTROL-J — Scene lifecycle — **COMPLETE 2026-08-23**
 
 - **Fix `LoadScene`.** Route by file version: v2 recipes to `map::load_map`,
   schema scenes to `scene_schema::load_scene_schema` plus GPU-side
@@ -2594,6 +2655,24 @@ restarting preserves it; an env var override is visible, disabled and explained.
 
 **Exit:** save, quit, reopen, and the scene is the scene. The `NEXT:` line at the
 top of `context.md` is deleted, not reworded.
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-J_scene_lifecycle.md`](phase%20CONTROL/CONTROL-J_scene_lifecycle.md).
+`LoadScene` routes by format through `SceneKind`, and a schema scene rebuilds
+the GPU state the file deliberately omits — primitives overwritten *in place*
+so identity, parent and authored material survive, terrain sidecars, material
+pool slots. `RetainedUnknowns` closes §6.2.3's silent data-loss path. The
+`.somnium` container is a framed header plus body, so the drawer reads a
+thumbnail with a `seek`; unframed files still load with no migration. Autosave
+and crash recovery are in, offered rather than applied. The undo history is a
+clickable list with the position marked. **The `NEXT:` line in `context.md` is
+deleted.** Two things are owed and stated: the thumbnail's *pixels* (the
+plumbing is complete, but the renderer has no non-capture readback path), and
+`RetainedUnknowns` travelling through the clipboard.
+
+**Track 1 is complete.** Track 2 and Track 3 have not started; §9.1 records
+that they are not optional, because CONTROL-K is a hard dependency of
+MORROWIND-H, MORROWIND-L and MORROWIND-AG.
 
 ### Track 2 — Author
 
