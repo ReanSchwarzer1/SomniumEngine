@@ -21,8 +21,8 @@
 //! **off** — a measurement nobody is reading is a measurement not worth paying
 //! for, which is the same argument §17.7 makes for the profiler's own toggle.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Counters written by `census.wgsl`. The order is the shader's `BIN_*`
 /// constants and the two must not drift.
@@ -340,7 +340,13 @@ impl CensusPass {
         // is not read back — the previous count is still on screen and one
         // skipped sample is cheaper than a stall.
         if let Some(i) = self.slots.iter().position(|s| !s.in_flight) {
-            encoder.copy_buffer_to_buffer(&self.counters, 0, &self.slots[i].readback, 0, Self::BYTES);
+            encoder.copy_buffer_to_buffer(
+                &self.counters,
+                0,
+                &self.slots[i].readback,
+                0,
+                Self::BYTES,
+            );
             self.next_slot = i;
         } else {
             self.next_slot = usize::MAX;

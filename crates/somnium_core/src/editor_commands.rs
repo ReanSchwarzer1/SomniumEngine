@@ -9,7 +9,11 @@ use crate::{
     Children, LightComponent, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
     TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent, WorldTransform,
 };
+use somnium_ecs::reflect::{
+    ChangeScope, FieldFlags, FieldId, ReflectObject, ReflectValue, StableId,
+};
 use somnium_ecs::{Entity, World};
+use somnium_ui::GestureId;
 
 // ─── EditorCommand trait ──────────────────────────────────────────────────
 
@@ -25,6 +29,10 @@ pub trait EditorCommand: Send + 'static {
     fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>);
     /// Short human-readable description shown in the status bar.
     fn description(&self) -> &str;
+    /// Commands whose final value equals their gesture baseline do not enter history.
+    fn is_no_op(&self) -> bool {
+        false
+    }
 }
 
 // ─── UndoStack ────────────────────────────────────────────────────────────
@@ -61,6 +69,9 @@ impl UndoStack {
         selected: &mut Option<Entity>,
     ) {
         cmd.execute(world, selected);
+        if cmd.is_no_op() {
+            return;
+        }
         self.redo_stack.clear();
         self.executed.push(cmd);
         if self.executed.len() > self.max_size {
@@ -103,6 +114,310 @@ impl UndoStack {
         if self.executed.len() > self.max_size {
             self.executed.remove(0);
         }
+    }
+}
+
+// ─── Generic reflected property edit ─────────────────────────────────────
+
+/// State width selected by [`ChangeScope`] for one reversible property edit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldUndoSnapshot {
+    Field {
+        component: StableId,
+        field: FieldId,
+        value: ReflectValue,
+    },
+    Component {
+        component: StableId,
+        values: ReflectObject,
+    },
+    Entity(Vec<(StableId, ReflectObject)>),
+    Scene(Vec<(Entity, Vec<(StableId, ReflectObject)>)>),
+}
+
+impl FieldUndoSnapshot {
+    pub fn capture(
+        world: &World,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+        scope: ChangeScope,
+    ) -> Option<Self> {
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry.by_stable_id(component)?;
+        match scope {
+            ChangeScope::Field => Some(Self::Field {
+                component,
+                field,
+                value: (schema.read_field)(world, entity, field)?,
+            }),
+            ChangeScope::Component => Some(Self::Component {
+                component,
+                values: (schema.snapshot)(world, entity)?,
+            }),
+            ChangeScope::Entity => Some(Self::Entity(
+                registry
+                    .schemas_on(world, entity)
+                    .into_iter()
+                    .filter_map(|schema| {
+                        (schema.snapshot)(world, entity).map(|values| (schema.stable_id, values))
+                    })
+                    .collect(),
+            )),
+            ChangeScope::Scene => Some(Self::Scene(
+                world
+                    .entities()
+                    .map(|item| {
+                        let values = registry
+                            .schemas_on(world, item)
+                            .into_iter()
+                            .filter_map(|schema| {
+                                (schema.snapshot)(world, item)
+                                    .map(|values| (schema.stable_id, values))
+                            })
+                            .collect();
+                        (item, values)
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    fn restore(&self, world: &mut World) {
+        let registry = crate::reflect_registry::component_registry();
+        let mut restore_component = |entity, component, values: &ReflectObject| {
+            if let Some(schema) = registry.by_stable_id(component) {
+                let _ = (schema.apply)(world, entity, values);
+            }
+        };
+        match self {
+            Self::Field {
+                component,
+                field,
+                value,
+            } => {
+                // Field snapshots are restored by SetFieldCmd, which knows the entity.
+                let _ = (component, field, value);
+            }
+            Self::Component { .. } => {}
+            Self::Entity(_) => {}
+            Self::Scene(entities) => {
+                for (entity, components) in entities {
+                    for (component, values) in components {
+                        restore_component(*entity, *component, values);
+                    }
+                }
+            }
+        }
+    }
+
+    fn field_value(
+        &self,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+    ) -> Option<ReflectValue> {
+        match self {
+            Self::Field {
+                component: owner,
+                field: owned,
+                value,
+            } if *owner == component && *owned == field => Some(value.clone()),
+            Self::Component {
+                component: owner,
+                values,
+            } if *owner == component => values.get(&field).cloned(),
+            Self::Entity(components) => components
+                .iter()
+                .find(|(owner, _)| *owner == component)
+                .and_then(|(_, values)| values.get(&field))
+                .cloned(),
+            Self::Scene(entities) => entities
+                .iter()
+                .find(|(owner, _)| *owner == entity)
+                .and_then(|(_, components)| {
+                    components.iter().find(|(owner, _)| *owner == component)
+                })
+                .and_then(|(_, values)| values.get(&field))
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+pub struct SetFieldCmd {
+    entity: Entity,
+    component: StableId,
+    field: FieldId,
+    value: ReflectValue,
+    before_value: ReflectValue,
+    before: FieldUndoSnapshot,
+    gesture: GestureId,
+    description: String,
+}
+
+impl SetFieldCmd {
+    pub fn new(
+        world: &World,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+        value: ReflectValue,
+        gesture: GestureId,
+        before: Option<FieldUndoSnapshot>,
+    ) -> Result<Self, String> {
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry
+            .by_stable_id(component)
+            .ok_or_else(|| format!("unknown component {component}"))?;
+        let field_schema = schema
+            .field(field)
+            .ok_or_else(|| format!("unknown field #{}", field.0))?;
+        if !field_schema.flags.contains(FieldFlags::EDIT) || field_schema.read_only {
+            return Err(format!("{}.{} is read-only", component, field_schema.name));
+        }
+        field_schema
+            .validate(&value)
+            .map_err(|error| error.to_string())?;
+        let before = before
+            .or_else(|| {
+                FieldUndoSnapshot::capture(world, entity, component, field, field_schema.scope)
+            })
+            .ok_or_else(|| "could not snapshot property edit".to_string())?;
+        let before_value = before
+            .field_value(entity, component, field)
+            .ok_or_else(|| "snapshot omitted the edited field".to_string())?;
+        Ok(Self {
+            entity,
+            component,
+            field,
+            value,
+            before_value,
+            before,
+            gesture,
+            description: format!(
+                "Set {}",
+                field_schema.display_name.unwrap_or(field_schema.name)
+            ),
+        })
+    }
+
+    pub fn apply_live(
+        world: &mut World,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+        mut value: ReflectValue,
+    ) -> Result<(), String> {
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry
+            .by_stable_id(component)
+            .ok_or_else(|| format!("unknown component {component}"))?;
+        let field_schema = schema
+            .field(field)
+            .ok_or_else(|| format!("unknown field #{}", field.0))?;
+        if !field_schema.flags.contains(FieldFlags::EDIT) || field_schema.read_only {
+            return Err("field is read-only".into());
+        }
+        if component.as_str() == "somnium.Water"
+            && matches!(field_schema.name, "absorption" | "scattering")
+        {
+            if let (Some(ReflectValue::Vec3(current)), ReflectValue::Vec3(tint)) =
+                ((schema.read_field)(world, entity, field), &value)
+            {
+                let magnitude = current[0].max(current[1]).max(current[2]).max(1.0e-6);
+                value = ReflectValue::Vec3([
+                    tint[0] * magnitude,
+                    tint[1] * magnitude,
+                    tint[2] * magnitude,
+                ]);
+            }
+        }
+        field_schema
+            .validate(&value)
+            .map_err(|error| error.to_string())?;
+        let mut patch = ReflectObject::new();
+        patch.insert(field, value);
+        (schema.apply)(world, entity, &patch).map_err(|error| error.to_string())?;
+        // Preserve component invariants formerly enforced by bespoke toggle
+        // handlers. The generic path owns these now, so scripts, generated UI,
+        // undo, and future surfaces all observe the same mutual exclusions.
+        if component.as_str() == "somnium.PostProcess" {
+            if let Some(pp) = world.get_mut::<crate::PostProcessComponent>(entity) {
+                match field_schema.name {
+                    "taa_enabled" => pp.set_taa_enabled(pp.taa_enabled),
+                    "fsr_enabled" => pp.set_fsr_enabled(pp.fsr_enabled),
+                    "cas_enabled" => pp.set_cas_enabled(pp.cas_enabled),
+                    "volumetrics_enabled" => pp.set_volumetrics_enabled(pp.volumetrics_enabled),
+                    "light_shafts" => pp.set_light_shafts_enabled(pp.light_shafts),
+                    "world_cache" => pp.set_world_cache_enabled(pp.world_cache),
+                    "mesh_sdf" => pp.set_mesh_sdf_enabled(pp.mesh_sdf),
+                    _ => {}
+                }
+            }
+        }
+        if component.as_str() == "somnium.Light" && field_schema.name == "color" {
+            if let Some(light) = world.get_mut::<crate::LightComponent>(entity) {
+                light.color_temperature_k = 0.0;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scope(component: StableId, field: FieldId) -> Option<ChangeScope> {
+        crate::reflect_registry::component_registry()
+            .by_stable_id(component)?
+            .field(field)
+            .map(|schema| schema.scope)
+    }
+
+    pub fn gesture(&self) -> GestureId {
+        self.gesture
+    }
+}
+
+impl EditorCommand for SetFieldCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let _ = Self::apply_live(
+            world,
+            self.entity,
+            self.component,
+            self.field,
+            self.value.clone(),
+        );
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        let registry = crate::reflect_registry::component_registry();
+        match &self.before {
+            FieldUndoSnapshot::Field {
+                component,
+                field,
+                value,
+            } => {
+                let _ = Self::apply_live(world, self.entity, *component, *field, value.clone());
+            }
+            FieldUndoSnapshot::Component { component, values } => {
+                if let Some(schema) = registry.by_stable_id(*component) {
+                    let _ = (schema.apply)(world, self.entity, values);
+                }
+            }
+            FieldUndoSnapshot::Entity(components) => {
+                for (component, values) in components {
+                    if let Some(schema) = registry.by_stable_id(*component) {
+                        let _ = (schema.apply)(world, self.entity, values);
+                    }
+                }
+            }
+            FieldUndoSnapshot::Scene(_) => self.before.restore(world),
+        }
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn is_no_op(&self) -> bool {
+        self.before_value == self.value
     }
 }
 
@@ -857,11 +1172,7 @@ impl EditorCommand for ReorderScriptCmd {
             if from >= set.attachments.len() || to >= set.attachments.len() {
                 return;
             }
-            before = set
-                .attachments
-                .iter()
-                .map(|a| a.execution_order)
-                .collect();
+            before = set.attachments.iter().map(|a| a.execution_order).collect();
             let moved = set.attachments.remove(from);
             set.attachments.insert(to, moved);
             renumber(set);
@@ -942,7 +1253,7 @@ impl EditorCommand for SetScriptEnabledCmd {
 
 /// Edit one of a script's declared properties.
 ///
-/// Follows the live-scrub convention `SetInspectorValue` established: a
+/// Follows the inspector live-scrub convention: a
 /// drag is applied to the world and never recorded, and the gesture's
 /// final value arrives once as a command. So this type only ever exists
 /// for a committed edit.
@@ -1142,5 +1453,126 @@ mod landscape_tests {
         let water = world.get::<Children>(terrain).unwrap().as_slice()[0];
         assert_eq!(world.get::<Parent>(water).unwrap().entity, terrain);
         assert!(world.get::<WaterComponent>(water).is_some());
+    }
+
+    #[test]
+    fn reflected_field_edit_is_one_undo_step_and_redoes() {
+        let mut world = World::new();
+        let entity = world.spawn((Transform::default(),));
+        let mut selected = Some(entity);
+        let mut stack = UndoStack::new(8);
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry.by_name("somnium.Transform").unwrap();
+        let field = schema.field_by_name("translation").unwrap().id;
+        let command = SetFieldCmd::new(
+            &world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::Vec3([2.0, 3.0, 4.0]),
+            GestureId(7),
+            None,
+        )
+        .unwrap();
+        assert_eq!(command.gesture(), GestureId(7));
+        stack.push(Box::new(command), &mut world, &mut selected);
+        assert_eq!(
+            world.get::<Transform>(entity).unwrap().translation,
+            glam::vec3(2.0, 3.0, 4.0)
+        );
+        assert!(stack.undo(&mut world, &mut selected));
+        assert_eq!(
+            world.get::<Transform>(entity).unwrap().translation,
+            glam::Vec3::ZERO
+        );
+        assert!(stack.redo(&mut world, &mut selected));
+        assert_eq!(
+            world.get::<Transform>(entity).unwrap().translation,
+            glam::vec3(2.0, 3.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn live_gesture_uses_the_mouse_down_baseline_and_coalesces() {
+        let mut world = World::new();
+        let entity = world.spawn((Transform::default(), TerrainComponent::default()));
+        let mut selected = Some(entity);
+        let mut stack = UndoStack::new(8);
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry.by_name("somnium.Terrain").unwrap();
+        let field = schema.field_by_name("chunk_cells").unwrap().id;
+        let baseline = FieldUndoSnapshot::capture(
+            &world,
+            entity,
+            schema.stable_id,
+            field,
+            ChangeScope::Entity,
+        )
+        .unwrap();
+        SetFieldCmd::apply_live(
+            &mut world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::I64(96),
+        )
+        .unwrap();
+        SetFieldCmd::apply_live(
+            &mut world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::I64(128),
+        )
+        .unwrap();
+        world.get_mut::<Transform>(entity).unwrap().translation.x = 99.0;
+        let command = SetFieldCmd::new(
+            &world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::I64(128),
+            GestureId(9),
+            Some(baseline),
+        )
+        .unwrap();
+        stack.push(Box::new(command), &mut world, &mut selected);
+        assert!(stack.undo(&mut world, &mut selected));
+        assert_eq!(
+            world.get::<TerrainComponent>(entity).unwrap().chunk_cells,
+            TerrainComponent::default().chunk_cells
+        );
+        assert_eq!(
+            world.get::<Transform>(entity).unwrap().translation,
+            glam::Vec3::ZERO,
+            "entity-scoped undo restores dependent state"
+        );
+        assert!(
+            !stack.undo(&mut world, &mut selected),
+            "all live writes coalesce into one entry"
+        );
+    }
+
+    #[test]
+    fn no_op_reflected_edit_is_discarded() {
+        let mut world = World::new();
+        let entity = world.spawn((Transform::default(),));
+        let mut selected = Some(entity);
+        let mut stack = UndoStack::new(8);
+        let registry = crate::reflect_registry::component_registry();
+        let schema = registry.by_name("somnium.Transform").unwrap();
+        let field = schema.field_by_name("translation").unwrap().id;
+        let command = SetFieldCmd::new(
+            &world,
+            entity,
+            schema.stable_id,
+            field,
+            ReflectValue::Vec3([0.0; 3]),
+            GestureId(1),
+            None,
+        )
+        .unwrap();
+        stack.push(Box::new(command), &mut world, &mut selected);
+        assert!(!stack.can_undo());
     }
 }

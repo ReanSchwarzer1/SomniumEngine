@@ -66,14 +66,11 @@ pub mod value;
 
 pub use attachment::{CURRENT_API_VERSION, PropertyBag, ScriptAttachment, ScriptSet};
 pub use backend::{
-    Budget, Callback, CallbackMask, ComponentUse, CompiledModule, Diagnostic, Diagnostics,
-    PhaseCall,
-    ScriptBackend, ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
+    Budget, Callback, CallbackMask, CompiledModule, ComponentUse, Diagnostic, Diagnostics,
+    PhaseCall, ScriptBackend, ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
 };
 pub use capability::Capabilities;
-pub use command::{
-    CommandBuffer, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken,
-};
+pub use command::{CommandBuffer, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken};
 pub use ids::{InstanceUuid, LanguageTag, ScriptAssetId, ScriptInstanceId};
 pub use lifecycle::LifecycleState;
 pub use order::OrderKey;

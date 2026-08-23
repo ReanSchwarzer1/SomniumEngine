@@ -404,7 +404,12 @@ impl World {
     pub fn has_component(&self, entity: Entity, id: ComponentId) -> bool {
         self.entities
             .is_alive(entity)
-            .then(|| self.locations.get(entity.index() as usize).copied().flatten())
+            .then(|| {
+                self.locations
+                    .get(entity.index() as usize)
+                    .copied()
+                    .flatten()
+            })
             .flatten()
             .is_some_and(|loc| {
                 self.archetypes[loc.archetype_id.raw() as usize]
@@ -423,7 +428,11 @@ impl World {
         if !self.entities.is_alive(entity) {
             return None;
         }
-        let loc = self.locations.get(entity.index() as usize).copied().flatten()?;
+        let loc = self
+            .locations
+            .get(entity.index() as usize)
+            .copied()
+            .flatten()?;
         Some(
             self.archetypes[loc.archetype_id.raw() as usize]
                 .component_set()
@@ -493,7 +502,9 @@ impl World {
         // archetype change, so no migration.
         if self.archetypes[old_idx].component_set().contains(info.id) {
             let col = self.archetypes[old_idx].column_index(info.id).unwrap();
-            let dst = self.archetypes[old_idx].column_mut(col).get_raw_mut(loc.row);
+            let dst = self.archetypes[old_idx]
+                .column_mut(col)
+                .get_raw_mut(loc.row);
             unsafe {
                 if let Some(drop_fn) = info.drop_fn {
                     drop_fn(dst);
@@ -506,7 +517,8 @@ impl World {
         }
 
         let new_set = self.archetypes[old_idx].component_set().with(info.id);
-        let mut infos: Vec<ComponentInfo> = self.archetypes[old_idx].column_infos().cloned().collect();
+        let mut infos: Vec<ComponentInfo> =
+            self.archetypes[old_idx].column_infos().cloned().collect();
         infos.push(info.clone());
         let new_arch_id = self.get_or_create_archetype(&new_set, &infos);
 

@@ -738,7 +738,11 @@ impl ShadingPass {
             // below always compiles a real pipeline for every slot it creates.
             while self.bin_pipelines.len() <= bin {
                 let idx = self.bin_pipelines.len();
-                let init = if idx == bin { spec } else { ShadingSpec::COMPACT };
+                let init = if idx == bin {
+                    spec
+                } else {
+                    ShadingSpec::COMPACT
+                };
                 let pipeline = Self::make_pipeline(
                     device,
                     &self.shader,
@@ -757,7 +761,10 @@ impl ShadingPass {
         }
         tracing::info!(
             bin,
-            name = crate::pass::classify::BIN_NAMES.get(bin).copied().unwrap_or("?"),
+            name = crate::pass::classify::BIN_NAMES
+                .get(bin)
+                .copied()
+                .unwrap_or("?"),
             hex = spec.hex,
             pom = spec.pom,
             pcss = spec.pcss,
@@ -799,9 +806,7 @@ impl ShadingPass {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.tile_params,
                         offset: 0,
-                        size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<TileParams>() as u64
-                        ),
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<TileParams>() as u64),
                     }),
                 },
             ],
@@ -852,7 +857,13 @@ impl ShadingPass {
     /// Only `split_depth` matters here — `vs_main` reads nothing else — but the
     /// whole struct is written so a stale tile-path value cannot survive in the
     /// same slice.
-    pub fn write_split_params(&self, queue: &wgpu::Queue, split_depth: f32, width: u32, height: u32) {
+    pub fn write_split_params(
+        &self,
+        queue: &wgpu::Queue,
+        split_depth: f32,
+        width: u32,
+        height: u32,
+    ) {
         let params = TileParams {
             tiles_x: 1,
             tile_size: 1,

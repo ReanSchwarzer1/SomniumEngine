@@ -118,7 +118,10 @@ impl Slice {
     }
 
     fn translation(&self) -> glam::Vec3 {
-        self.world.get::<Transform>(self.entity).unwrap().translation
+        self.world
+            .get::<Transform>(self.entity)
+            .unwrap()
+            .translation
     }
 }
 
@@ -260,7 +263,9 @@ fn a_script_can_despawn_its_own_entity_from_inside_a_callback() {
 fn a_syntax_error_is_a_positioned_diagnostic_not_a_panic() {
     let mut backend = backend();
     let diagnostics = backend
-        .compile(&source("return Script.define({\n    onInit = function(self ctx)\n"))
+        .compile(&source(
+            "return Script.define({\n    onInit = function(self ctx)\n",
+        ))
         .expect_err("this should not compile");
 
     assert!(diagnostics.has_errors());
@@ -537,7 +542,9 @@ fn instances_are_released_and_do_not_accumulate() {
     let ids: Vec<_> = (0..100)
         .map(|_| {
             let id = ScriptInstanceId::next();
-            backend.instantiate(id, module, &PropertyBag::new()).unwrap();
+            backend
+                .instantiate(id, module, &PropertyBag::new())
+                .unwrap();
             id
         })
         .collect();
@@ -584,7 +591,9 @@ fn declared_state_survives_an_in_process_module_swap() {
         .unwrap();
 
     let before = ScriptInstanceId::next();
-    backend.instantiate(before, old, &PropertyBag::new()).unwrap();
+    backend
+        .instantiate(before, old, &PropertyBag::new())
+        .unwrap();
 
     let mut world = World::new();
     let entity = world.spawn((Name::new("start"), Transform::default()));
@@ -611,7 +620,9 @@ fn declared_state_survives_an_in_process_module_swap() {
     backend.unload(before);
 
     let after = ScriptInstanceId::next();
-    backend.instantiate(after, new, &PropertyBag::new()).unwrap();
+    backend
+        .instantiate(after, new, &PropertyBag::new())
+        .unwrap();
     backend.import_state(after, state).unwrap();
 
     let mut commands = CommandBuffer::new();
@@ -775,8 +786,11 @@ fn a_mirrored_field_only_queues_a_command_when_it_changes() {
         "#,
         PropertyBag::new(),
     );
-    slice.world.get_mut::<Transform>(slice.entity).unwrap().translation =
-        glam::Vec3::new(5.0, 6.0, 7.0);
+    slice
+        .world
+        .get_mut::<Transform>(slice.entity)
+        .unwrap()
+        .translation = glam::Vec3::new(5.0, 6.0, 7.0);
     slice.step(Callback::FixedUpdate).unwrap();
     assert!(
         (slice.translation() - glam::Vec3::new(5.0, 6.0, 7.0)).length() < 1.0e-6,
@@ -802,7 +816,9 @@ fn a_script_cannot_write_an_engine_owned_field_through_the_mirror() {
         ))
         .unwrap();
     let instance = ScriptInstanceId::next();
-    backend.instantiate(instance, module, &PropertyBag::new()).unwrap();
+    backend
+        .instantiate(instance, module, &PropertyBag::new())
+        .unwrap();
 
     let mut world = World::new();
     let entity = world.spawn((somnium_core::MeshComponent::default(), Transform::default()));
@@ -825,7 +841,10 @@ fn a_script_cannot_write_an_engine_owned_field_through_the_mirror() {
     let outcome = apply_commands(&mut world, &registry, commands.drain_sorted());
     assert!(outcome.is_clean(), "{:?}", outcome.rejected);
     assert_eq!(
-        world.get::<somnium_core::MeshComponent>(entity).unwrap().index_count,
+        world
+            .get::<somnium_core::MeshComponent>(entity)
+            .unwrap()
+            .index_count,
         0,
         "an engine-owned field must not be writable through the mirror either"
     );
@@ -854,6 +873,9 @@ fn the_transform_written_by_a_script_is_the_one_the_engine_reads() {
     slice.step(Callback::FixedUpdate).unwrap();
     slice.step(Callback::Update).unwrap();
 
-    assert_eq!(slice.world.get::<Name>(slice.entity).unwrap().as_str(), "1,2,3");
+    assert_eq!(
+        slice.world.get::<Name>(slice.entity).unwrap().as_str(),
+        "1,2,3"
+    );
     let _ = TRANSFORM;
 }

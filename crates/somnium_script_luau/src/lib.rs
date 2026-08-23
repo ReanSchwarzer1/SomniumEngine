@@ -53,9 +53,8 @@ use mlua::chunk::{ChunkMode, Compiler};
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use somnium_script::attachment::PropertyBag;
 use somnium_script::backend::{
-    PhaseCall,
-    Budget, Callback, CallbackMask, CompiledModule, Diagnostic, Diagnostics, ScriptBackend,
-    ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
+    Budget, Callback, CallbackMask, CompiledModule, Diagnostic, Diagnostics, PhaseCall,
+    ScriptBackend, ScriptError, ScriptFieldSchema, ScriptSchema, ScriptSource, Severity,
 };
 use somnium_script::command::CommandBuffer;
 use somnium_script::ids::{LanguageTag, ScriptAssetId, ScriptInstanceId};
@@ -685,7 +684,11 @@ impl ScriptBackend for LuauBackend {
     ) -> Result<(), ScriptError> {
         // A script's declared defaults are part of its schema, so an
         // attachment that overrides nothing still needs it.
-        if self.modules.get(&module.handle).is_some_and(|e| e.schema.is_none()) {
+        if self
+            .modules
+            .get(&module.handle)
+            .is_some_and(|e| e.schema.is_none())
+        {
             self.describe(module)
                 .map_err(|d| ScriptError::HostRejected {
                     message: d.to_string(),
@@ -739,7 +742,6 @@ impl ScriptBackend for LuauBackend {
         );
         Ok(())
     }
-
 
     // Resolve pass, mirror in, dispatch, mirror out, quarantine — one
     // phase, in the order it happens. Splitting it would mean threading
@@ -804,8 +806,8 @@ impl ScriptBackend for LuauBackend {
             };
             // The module simply has no such callback, or the entity handle
             // could not be built. Neither is an error.
-            let runnable = instance.callbacks[callback as usize].is_some()
-                && instance.entity_handle.is_some();
+            let runnable =
+                instance.callbacks[callback as usize].is_some() && instance.entity_handle.is_some();
             resolved.push(runnable.then_some(instance));
         }
 
@@ -893,7 +895,11 @@ impl ScriptBackend for LuauBackend {
                     for mirror in mirrors {
                         for field in &mirror.fields {
                             let value = world
-                                .read_field_id(call.snapshot.self_entity, mirror.component, field.id)
+                                .read_field_id(
+                                    call.snapshot.self_entity,
+                                    mirror.component,
+                                    field.id,
+                                )
                                 .unwrap_or(ScriptValue::Nil);
                             mirror
                                 .table
@@ -1015,8 +1021,7 @@ impl ScriptBackend for LuauBackend {
             .module_environment(&imports)
             .map_err(host::to_script_error)?;
         let entry = self.module(module)?;
-        let descriptor =
-            self.with_deadline(self.budget.per_call, || self.evaluate(entry, env))?;
+        let descriptor = self.with_deadline(self.budget.per_call, || self.evaluate(entry, env))?;
 
         let Ok(Value::Function(migrate)) =
             descriptor.get::<Value>(Callback::MigrateState.script_name())

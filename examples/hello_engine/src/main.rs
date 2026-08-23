@@ -1362,10 +1362,11 @@ impl GameApp for HelloGame {
         // by its displayed name so the populated Details surface is captured
         // without inventing fixture data or synthesising an Outliner click.
         if let Ok(name) = std::env::var("SOMNIUM_AUDIT_SELECT_ENTITY") {
-            *ctx.selected_entity = ctx
-                .world
-                .entities()
-                .find(|&entity| ctx.world.get::<Name>(entity).is_some_and(|n| n.as_str() == name));
+            *ctx.selected_entity = ctx.world.entities().find(|&entity| {
+                ctx.world
+                    .get::<Name>(entity)
+                    .is_some_and(|n| n.as_str() == name)
+            });
             if ctx.selected_entity.is_none() {
                 tracing::warn!("SOMNIUM_AUDIT_SELECT_ENTITY={name} did not match an entity");
             }
@@ -2320,7 +2321,9 @@ fn spawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
     });
 
     let mut player_scripts = somnium_script::attachment::ScriptSet::new();
-    player_scripts.attach(somnium_script::attachment::ScriptAttachment::new(controller));
+    player_scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+        controller,
+    ));
     let player = ctx.world.spawn((
         Transform::from_translation(centre),
         WorldTransform::identity(),
@@ -2331,7 +2334,9 @@ fn spawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
     ));
 
     let mut camera_scripts = somnium_script::attachment::ScriptSet::new();
-    camera_scripts.attach(somnium_script::attachment::ScriptAttachment::new(camera_script));
+    camera_scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+        camera_script,
+    ));
     let camera = ctx.world.spawn((
         Transform::from_translation(Vec3::Y * PLAYER_EYE_HEIGHT),
         WorldTransform::identity(),
@@ -2409,10 +2414,7 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
     //
     // Imported from disk so the file watcher picks up edits: change the
     // walk speed in the `.luau` and it takes effect without a restart.
-    for (path, slot) in [
-        (CONTROLLER_SCRIPT_PATH, 0),
-        (CAMERA_SCRIPT_PATH, 1),
-    ] {
+    for (path, slot) in [(CONTROLLER_SCRIPT_PATH, 0), (CAMERA_SCRIPT_PATH, 1)] {
         match ctx.scripts.import_script_file(std::path::Path::new(path)) {
             Ok(id) => {
                 if slot == 0 {
@@ -2465,9 +2467,10 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
     };
 
     let mut attachment = somnium_script::attachment::ScriptAttachment::new(asset);
-    attachment
-        .properties
-        .insert("spinSpeed".into(), somnium_script::value::ScriptValue::F64(2.0));
+    attachment.properties.insert(
+        "spinSpeed".into(),
+        somnium_script::value::ScriptValue::F64(2.0),
+    );
     if let Some(set) = ctx
         .world
         .get_mut::<somnium_script::attachment::ScriptSet>(entity)

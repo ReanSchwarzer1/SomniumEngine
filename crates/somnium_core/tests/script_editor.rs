@@ -274,7 +274,11 @@ fn the_new_script_template_compiles_and_declares_what_the_panel_draws() {
         .unwrap_or_else(|d| panic!("the template a new script starts from must compile:\n{d}"));
 
     let schema = host.runtime().asset_schema(asset).unwrap();
-    assert_eq!(schema.fields.len(), 1, "one property, so the panel is not empty");
+    assert_eq!(
+        schema.fields.len(),
+        1,
+        "one property, so the panel is not empty"
+    );
     assert_eq!(schema.fields[0].name, "speed");
     assert!(
         schema
@@ -337,7 +341,10 @@ fn f5_recompiles_from_disk_and_a_broken_edit_leaves_the_old_module_live() {
     )
     .unwrap();
     assert_eq!(host.reload_all_from_disk(), (1, 0));
-    assert_eq!(host.runtime().asset_schema(asset).unwrap().schema_version, 7);
+    assert_eq!(
+        host.runtime().asset_schema(asset).unwrap().schema_version,
+        7
+    );
 
     // A bad one. The module on record must not change.
     std::fs::write(&path, "return Script.define({").unwrap();

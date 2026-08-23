@@ -102,7 +102,10 @@ impl ScriptSet {
 
     /// Remove an attachment by its durable id.
     pub fn detach(&mut self, instance: InstanceUuid) -> Option<ScriptAttachment> {
-        let index = self.attachments.iter().position(|a| a.instance == instance)?;
+        let index = self
+            .attachments
+            .iter()
+            .position(|a| a.instance == instance)?;
         Some(self.attachments.remove(index))
     }
 

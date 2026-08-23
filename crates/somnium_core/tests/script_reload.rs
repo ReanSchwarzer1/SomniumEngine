@@ -26,10 +26,7 @@ struct Scratch(std::path::PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "somnium_reload_{}_{tag}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("somnium_reload_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
@@ -62,7 +59,10 @@ impl Sim {
         let entity = world.spawn((Name::new("Subject"), Transform::default(), ScriptSet::new()));
         let attachment = ScriptAttachment::new(asset);
         let instance = attachment.instance;
-        world.get_mut::<ScriptSet>(entity).unwrap().attach(attachment);
+        world
+            .get_mut::<ScriptSet>(entity)
+            .unwrap()
+            .attach(attachment);
         Self {
             host,
             world,
@@ -195,7 +195,10 @@ fn a_require_cycle_is_rejected_at_link_time_with_both_names() {
     let error = host.import_script_file(&b).unwrap_err();
     let text = error.to_string();
     assert!(text.contains("cycle"), "got: {text}");
-    assert!(text.contains("a.luau") && text.contains("b.luau"), "got: {text}");
+    assert!(
+        text.contains("a.luau") && text.contains("b.luau"),
+        "got: {text}"
+    );
 }
 
 #[test]
@@ -477,10 +480,7 @@ fn a_callback_that_is_not_a_function_is_rejected_with_a_diagnostic() {
     let path = dir.write("main.luau", "return Script.define({ onFixedUpdate = 5 })");
     let mut host = ScriptHost::new(Budget::default());
     let error = host.import_script_file(&path).unwrap_err();
-    assert!(
-        error.to_string().contains("onFixedUpdate"),
-        "got: {error}"
-    );
+    assert!(error.to_string().contains("onFixedUpdate"), "got: {error}");
 }
 
 // ── The watcher ────────────────────────────────────────────────────────
@@ -546,7 +546,11 @@ fn the_watcher_recompiles_and_a_broken_edit_costs_only_a_diagnostic() {
     let _ = sim.host.poll_file_changes(Duration::ZERO);
     assert_eq!(sim.host.reload_changed(Duration::ZERO), (1, 0));
     assert_eq!(
-        sim.host.runtime().asset_schema(asset).unwrap().schema_version,
+        sim.host
+            .runtime()
+            .asset_schema(asset)
+            .unwrap()
+            .schema_version,
         5
     );
 
@@ -554,7 +558,11 @@ fn the_watcher_recompiles_and_a_broken_edit_costs_only_a_diagnostic() {
     let _ = sim.host.poll_file_changes(Duration::ZERO);
     assert_eq!(sim.host.reload_changed(Duration::ZERO), (0, 1));
     assert_eq!(
-        sim.host.runtime().asset_schema(asset).unwrap().schema_version,
+        sim.host
+            .runtime()
+            .asset_schema(asset)
+            .unwrap()
+            .schema_version,
         5,
         "the last good module is still the one loaded"
     );

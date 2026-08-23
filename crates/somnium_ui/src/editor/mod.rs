@@ -4,7 +4,10 @@
 //! surface and returns its handles; none of them owns state.
 
 pub(crate) mod content;
+pub mod editing_rules;
 pub(crate) mod help;
 pub(crate) mod inspector;
+pub mod inspector_gen;
 pub(crate) mod parts;
+pub mod property_editors;
 pub(crate) mod shell;

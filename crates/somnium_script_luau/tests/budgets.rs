@@ -26,9 +26,9 @@
 
 use std::time::{Duration, Instant};
 
+use somnium_core::Transform;
 use somnium_core::reflect_registry::component_registry;
 use somnium_core::script_bridge::{EngineWorldView, apply_commands};
-use somnium_core::Transform;
 use somnium_ecs::{PersistentId, World};
 use somnium_script::attachment::PropertyBag;
 use somnium_script::backend::{Budget, Callback, PhaseCall, ScriptBackend, ScriptSource};
@@ -53,7 +53,11 @@ fn budget(name: &str, measured: Duration, ceiling: Duration) -> bool {
         measured.as_secs_f64() * 1000.0,
         ceiling.as_secs_f64() * 1000.0,
         if met { "PASS" } else { "OVER" },
-        if ENFORCED { "" } else { "  (debug: not enforced)" }
+        if ENFORCED {
+            ""
+        } else {
+            "  (debug: not enforced)"
+        }
     );
     met
 }
@@ -97,7 +101,12 @@ struct Fleet {
     backend: LuauBackend,
     world: World,
     registry: somnium_ecs::reflect::TypeRegistry,
-    entities: Vec<(somnium_ecs::Entity, PersistentId, ScriptInstanceId, OrderKey)>,
+    entities: Vec<(
+        somnium_ecs::Entity,
+        PersistentId,
+        ScriptInstanceId,
+        OrderKey,
+    )>,
     /// (invoke, sort, apply) from the most recent phase.
     last_split: (Duration, Duration, Duration),
 }
@@ -204,7 +213,9 @@ fn budget_table() {
         for _ in 0..20 {
             fleet.phase(Callback::FixedUpdate);
         }
-        let samples: Vec<Duration> = (0..100).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+        let samples: Vec<Duration> = (0..100)
+            .map(|_| fleet.phase(Callback::FixedUpdate))
+            .collect();
         if !budget(
             "1,000 empty lifecycle callbacks",
             p95(samples),
@@ -237,7 +248,9 @@ fn budget_table() {
         for _ in 0..5 {
             fleet.phase(Callback::FixedUpdate);
         }
-        let samples: Vec<Duration> = (0..40).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+        let samples: Vec<Duration> = (0..40)
+            .map(|_| fleet.phase(Callback::FixedUpdate))
+            .collect();
         if !budget(
             "10,000 component reads + 10,000 queued writes",
             p95(samples),
@@ -250,22 +263,29 @@ fn budget_table() {
     // ── Isolate the mirror from the script ─────────────────────────
     {
         for (label, script) in [
-            ("mirror declared, callback empty", r#"
+            (
+                "mirror declared, callback empty",
+                r#"
                 return Script.define({
                     uses = { ["somnium.Transform"] = { "translation" } },
                     onFixedUpdate = function() end,
                 })
-            "#),
-            ("no mirror, callback empty", r#"
+            "#,
+            ),
+            (
+                "no mirror, callback empty",
+                r#"
                 return Script.define({ onFixedUpdate = function() end })
-            "#),
+            "#,
+            ),
         ] {
             let mut fleet = Fleet::new(script, 10_000);
             for _ in 0..5 {
                 fleet.phase(Callback::FixedUpdate);
             }
-            let samples: Vec<Duration> =
-                (0..20).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+            let samples: Vec<Duration> = (0..20)
+                .map(|_| fleet.phase(Callback::FixedUpdate))
+                .collect();
             let (invoke, _, apply) = fleet.last_split;
             println!(
                 "  {label:<50} total {:>7.3} ms  invoke {:>7.3}  apply {:>6.3}",
@@ -300,7 +320,9 @@ fn budget_table() {
         for _ in 0..5 {
             fleet.phase(Callback::FixedUpdate);
         }
-        let samples: Vec<Duration> = (0..40).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+        let samples: Vec<Duration> = (0..40)
+            .map(|_| fleet.phase(Callback::FixedUpdate))
+            .collect();
         let (invoke, sort, apply) = fleet.last_split;
         println!(
             "      split: invoke {:.3} ms | sort {:.3} ms | apply {:.3} ms",
@@ -337,7 +359,9 @@ fn budget_table() {
         for _ in 0..10 {
             fleet.phase(Callback::FixedUpdate);
         }
-        let samples: Vec<Duration> = (0..60).map(|_| fleet.phase(Callback::FixedUpdate)).collect();
+        let samples: Vec<Duration> = (0..60)
+            .map(|_| fleet.phase(Callback::FixedUpdate))
+            .collect();
         if !budget(
             "1,000 representative scripted entities @ 60 Hz",
             p95(samples),
@@ -349,7 +373,8 @@ fn budget_table() {
 
     // ── Compile + describe + instantiate a 1,000-line asset ────────
     {
-        let mut body = String::from("return Script.define({\n  onFixedUpdate = function(self, ctx, dt)\n");
+        let mut body =
+            String::from("return Script.define({\n  onFixedUpdate = function(self, ctx, dt)\n");
         for i in 0..1_000 {
             body.push_str(&format!("    local v{i} = {i} * 2\n"));
         }
@@ -378,8 +403,10 @@ fn budget_table() {
 
     if !over.is_empty() {
         println!("  missed: {over:?}");
-        println!("  see `dev records/phase 16/16-B_budgets.md` for the cause
-");
+        println!(
+            "  see `dev records/phase 16/16-B_budgets.md` for the cause
+"
+        );
     }
     println!();
 }
@@ -421,7 +448,10 @@ fn an_infinite_loop_is_isolated_within_two_milliseconds_of_its_deadline() {
         );
     }
     let overshoot = started.elapsed().saturating_sub(Duration::from_millis(5));
-    println!("  infinite loop overshoot: {:.3} ms", overshoot.as_secs_f64() * 1000.0);
+    println!(
+        "  infinite loop overshoot: {:.3} ms",
+        overshoot.as_secs_f64() * 1000.0
+    );
     assert!(
         overshoot < Duration::from_millis(2),
         "the interrupt fired {overshoot:?} past its deadline"
@@ -446,14 +476,18 @@ fn a_hundred_instantiate_teardown_cycles_leak_nothing() {
     // allocation.
     for _ in 0..10 {
         let id = ScriptInstanceId::next();
-        backend.instantiate(id, module, &PropertyBag::new()).unwrap();
+        backend
+            .instantiate(id, module, &PropertyBag::new())
+            .unwrap();
         backend.unload(id);
     }
     let baseline = backend.memory_used();
 
     for _ in 0..100 {
         let id = ScriptInstanceId::next();
-        backend.instantiate(id, module, &PropertyBag::new()).unwrap();
+        backend
+            .instantiate(id, module, &PropertyBag::new())
+            .unwrap();
         backend.unload(id);
     }
 

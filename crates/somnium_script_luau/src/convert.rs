@@ -17,8 +17,8 @@
 //! does.
 
 use mlua::{FromLua, IntoLua, Lua, UserData, UserDataMethods, Value, Vector};
-use somnium_ecs::reflect::AssetRef;
 use somnium_ecs::Entity;
+use somnium_ecs::reflect::AssetRef;
 use somnium_script::value::ScriptValue;
 
 /// An entity reference as a script sees it.
@@ -44,12 +44,14 @@ macro_rules! impl_handle_from_lua {
                     other => Err(mlua::Error::FromLuaConversionError {
                         from: other.type_name(),
                         to: $name.to_string(),
-                        message: Some(concat!(
-                            "expected an engine ",
-                            $name,
-                            " handle; these cannot be constructed from a number"
-                        )
-                        .to_string()),
+                        message: Some(
+                            concat!(
+                                "expected an engine ",
+                                $name,
+                                " handle; these cannot be constructed from a number"
+                            )
+                            .to_string(),
+                        ),
                     }),
                 }
             }
@@ -298,7 +300,10 @@ mod tests {
             matches!(value, Value::Vector(_)),
             "Vec3 must be a Luau vector, not a table"
         );
-        assert_eq!(from_lua(&value).unwrap(), ScriptValue::Vec3([1.0, 2.0, 3.0]));
+        assert_eq!(
+            from_lua(&value).unwrap(),
+            ScriptValue::Vec3([1.0, 2.0, 3.0])
+        );
     }
 
     #[test]
@@ -381,10 +386,7 @@ mod tests {
     #[test]
     fn a_cyclic_table_is_refused_rather_than_overflowing_the_stack() {
         let lua = lua();
-        let cyclic: Value = lua
-            .load("local t = {} t[1] = {t} return t")
-            .eval()
-            .unwrap();
+        let cyclic: Value = lua.load("local t = {} t[1] = {t} return t").eval().unwrap();
         let err = from_lua(&cyclic).unwrap_err();
         assert!(err.contains("nests deeper"), "got: {err}");
     }

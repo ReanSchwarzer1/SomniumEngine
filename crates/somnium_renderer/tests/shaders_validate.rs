@@ -84,7 +84,10 @@ fn the_classify_module_validates() {
     // Phase DOOM-C. Shares `pixel_class.wgsl` with the census above, which is
     // the structural guarantee that a tile is routed by the same test that
     // counted it.
-    check("classify", &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"));
+    check(
+        "classify",
+        &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"),
+    );
 }
 
 #[test]

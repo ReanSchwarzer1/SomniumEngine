@@ -248,7 +248,11 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
         if (a.mean - b).abs() > 0.5 {
             out.push(format!(
                 "{:<28} {:>9.0} {:>9.0} {:>+9.0}          {}",
-                a.name, b, a.mean, a.mean - b, a.kind
+                a.name,
+                b,
+                a.mean,
+                a.mean - b,
+                a.kind
             ));
         }
     }
@@ -709,7 +713,10 @@ mod tests {
         let after = run_of(&[("New pass", 1, 0.5, 0.0)]);
         let report = compare(&before, &after).join("\n");
         assert!(report.contains("New pass"), "{report}");
-        assert!(!report.contains("NaN") && !report.contains("inf"), "{report}");
+        assert!(
+            !report.contains("NaN") && !report.contains("inf"),
+            "{report}"
+        );
     }
 
     #[test]

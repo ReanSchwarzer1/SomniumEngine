@@ -161,8 +161,7 @@ pub trait WorldView {
     fn read_component(&self, entity: Entity, component: StableId) -> Option<ReflectObject>;
 
     /// Copy out one field, by its declared name.
-    fn read_field(&self, entity: Entity, component: StableId, field: &str)
-    -> Option<ScriptValue>;
+    fn read_field(&self, entity: Entity, component: StableId, field: &str) -> Option<ScriptValue>;
 
     /// The durable id of an entity, if it has one.
     fn persistent_id(&self, entity: Entity) -> Option<PersistentId>;
@@ -204,8 +203,12 @@ pub trait WorldView {
     /// The mirrored-property path resolves names once when an attachment
     /// is first called and then reads by id every frame, so this is the
     /// form that runs in the hot loop.
-    fn read_field_id(&self, entity: Entity, component: StableId, field: FieldId)
-    -> Option<ScriptValue>;
+    fn read_field_id(
+        &self,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+    ) -> Option<ScriptValue>;
 
     /// Every script-visible field of a component: name, id, and whether a
     /// script may write it.

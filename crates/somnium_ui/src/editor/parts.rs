@@ -20,7 +20,6 @@ use crate::{
     widgets::{
         border::BorderBuilder,
         button::ButtonBuilder,
-        check_box::CheckBoxBuilder,
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         image::ImageBuilder,
         menu::MenuBuilder,
@@ -33,79 +32,6 @@ use crate::{
 // Glob the crate root for the shared handle bundles and name tables, and the
 // sibling `parts` module for the small builders. Explicit imports above shadow
 // the globs, so this cannot silently change which `TextBuilder` is in scope.
-
-pub(crate) fn make_palette_button(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-) -> (NodeHandle, NodeHandle) {
-    let btn = ButtonBuilder::new(
-        WidgetBuilder::new()
-            .with_height(20.0)
-            .with_width(52.0)
-            .with_margin(Thickness {
-                left: 2.0,
-                top: 1.0,
-                right: 2.0,
-                bottom: 1.0,
-            })
-            .with_background(theme::BG_DARK),
-    )
-    .build();
-    let btn_h = ui.add_node(btn, parent);
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 3.0,
-        top: 3.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_text(&format!(" {text}"))
-    .with_font_size(10.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
-    .build();
-    let lbl_h = ui.add_node(lbl, btn_h);
-    (btn_h, lbl_h)
-}
-
-/// Build a checkbox toggle row (Phase 26-B). Both handles are the CheckBox
-/// so existing inspector fields that stored a separate label still compile.
-pub(crate) fn make_toggle(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-) -> (NodeHandle, NodeHandle) {
-    make_toggle_checked(ui, text, font_id, parent, false)
-}
-
-pub(crate) fn make_toggle_checked(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-    checked: bool,
-) -> (NodeHandle, NodeHandle) {
-    let cb = CheckBoxBuilder::new(
-        WidgetBuilder::new()
-            .with_height(22.0)
-            .with_margin(Thickness {
-                left: 6.0,
-                top: 2.0,
-                right: 6.0,
-                bottom: 0.0,
-            })
-            .with_background(theme::TRANSPARENT),
-    )
-    .with_checked(checked)
-    .with_label(text)
-    .with_font_id(font_id)
-    .with_font_size(11.0)
-    .build();
-    let h = ui.add_node(cb, parent);
-    (h, h)
-}
 
 pub(crate) fn attach_combo_popup(
     ui: &mut UserInterface,

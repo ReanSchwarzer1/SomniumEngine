@@ -1324,10 +1324,10 @@ pub(crate) fn build_editor_layout(
     let color_picker = ui.add_node(color_picker_node, color_popup);
 
     let foliage_kind_combo = inspector_handles.foliage_kind_button;
-    let post_tonemap_combo = inspector_handles.post_tonemap_button;
+    let post_tonemap_combo = NodeHandle::NONE;
     let foliage_kind_popup =
         attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
-    let post_tonemap_popup = attach_combo_popup(ui, post_tonemap_combo, &TONEMAP_NAMES, font_id);
+    let post_tonemap_popup = NodeHandle::NONE;
     let viewport_res_popup =
         attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
 

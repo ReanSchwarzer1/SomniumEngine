@@ -669,7 +669,10 @@ impl GpuProfiler {
         if !self.enabled || self.stats_set.is_none() || self.current == usize::MAX {
             return None;
         }
-        self.frames.get_mut(self.current)?.timeline.reserve_stats(name)
+        self.frames
+            .get_mut(self.current)?
+            .timeline
+            .reserve_stats(name)
     }
 
     /// The statistics query set, for a pass that reserved a slot.

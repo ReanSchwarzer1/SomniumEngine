@@ -145,7 +145,12 @@ fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
         },
         ReflectValue::Asset(Some(asset)) => json!({ "$asset": format!("{:032x}", asset.0) }),
         ReflectValue::Array(items) => {
-            json!(items.iter().map(|i| value_to_json(world, i)).collect::<Vec<_>>())
+            json!(
+                items
+                    .iter()
+                    .map(|i| value_to_json(world, i))
+                    .collect::<Vec<_>>()
+            )
         }
         ReflectValue::Object(fields) => {
             let mut map = serde_json::Map::new();
@@ -323,7 +328,10 @@ fn attachment_from_json(
     Some(ScriptAttachment {
         instance: InstanceUuid::parse_hex(json.get("instance")?.as_str()?)?,
         asset: ScriptAssetId::parse_hex(json.get("asset")?.as_str()?)?,
-        enabled: json.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        enabled: json
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         execution_order: json
             .get("execution_order")
             .and_then(serde_json::Value::as_i64)
@@ -476,7 +484,9 @@ pub fn scene_from_json(
             .and_then(serde_json::Value::as_str)
             .and_then(PersistentId::parse_hex)
         else {
-            return Err(SceneError::Malformed("entity without a persistent id".into()));
+            return Err(SceneError::Malformed(
+                "entity without a persistent id".into(),
+            ));
         };
         let entity = world.spawn((id,));
         by_id.insert(id, entity);
@@ -494,7 +504,10 @@ pub fn scene_from_json(
             .unwrap_or("?")
             .to_owned();
 
-        if let Some(components) = entry.get("components").and_then(serde_json::Value::as_object) {
+        if let Some(components) = entry
+            .get("components")
+            .and_then(serde_json::Value::as_object)
+        {
             for (name, body) in components {
                 let Some(schema) = registry.by_name(name) else {
                     report.warnings.push(SceneWarning {
@@ -661,7 +674,12 @@ mod tests {
         let transform = loaded.get::<Transform>(sun).unwrap();
         assert!((transform.translation - glam::Vec3::new(1.5, -2.0, 3.25)).length() < 1.0e-6);
         assert!((transform.scale - glam::Vec3::new(1.0, 2.0, 3.0)).length() < 1.0e-6);
-        assert!(transform.rotation.angle_between(glam::Quat::from_rotation_x(0.75)) < 1.0e-5);
+        assert!(
+            transform
+                .rotation
+                .angle_between(glam::Quat::from_rotation_x(0.75))
+                < 1.0e-5
+        );
 
         let light = loaded.get::<LightComponent>(sun).unwrap();
         assert!((light.intensity - 50_000.0).abs() < 1.0e-2);
@@ -745,12 +763,18 @@ mod tests {
         attachment.execution_order = -3;
         attachment.enabled = false;
         attachment.schema_version = 4;
-        attachment.properties.insert("speed".into(), ScriptValue::F64(12.5));
-        attachment.properties.insert("label".into(), ScriptValue::Str("wheel".into()));
+        attachment
+            .properties
+            .insert("speed".into(), ScriptValue::F64(12.5));
+        attachment
+            .properties
+            .insert("label".into(), ScriptValue::Str("wheel".into()));
         attachment
             .properties
             .insert("offset".into(), ScriptValue::Vec3([1.0, 0.0, -1.0]));
-        attachment.properties.insert("armed".into(), ScriptValue::Bool(true));
+        attachment
+            .properties
+            .insert("armed".into(), ScriptValue::Bool(true));
         let instance = attachment.instance;
 
         let mut set = ScriptSet::new();
@@ -824,7 +848,15 @@ mod tests {
         assert!(report.warnings.is_empty());
 
         let entity = find(&loaded, "Haunted");
-        assert_eq!(loaded.get::<ScriptSet>(entity).unwrap().get(instance).unwrap().asset, ghost);
+        assert_eq!(
+            loaded
+                .get::<ScriptSet>(entity)
+                .unwrap()
+                .get(instance)
+                .unwrap()
+                .asset,
+            ghost
+        );
 
         // Saving again must not lose it.
         let again = scene_to_json(&mut loaded, &registry);
@@ -877,7 +909,13 @@ mod tests {
         let report = scene_from_json(&mut loaded, &registry, &document).unwrap();
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].message.contains("mod.FromANewerBuild"));
-        assert_eq!(loaded.get::<Name>(find(&loaded, "Future")).unwrap().as_str(), "Future");
+        assert_eq!(
+            loaded
+                .get::<Name>(find(&loaded, "Future"))
+                .unwrap()
+                .as_str(),
+            "Future"
+        );
     }
 
     #[test]
@@ -907,7 +945,12 @@ mod tests {
 
         let mut loaded = World::new();
         let report = scene_from_json(&mut loaded, &registry, &document).unwrap();
-        assert!(report.warnings.iter().any(|w| w.message.contains("version 0")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("version 0"))
+        );
         assert!(loaded.get::<Transform>(find(&loaded, "Old")).is_some());
     }
 
@@ -942,7 +985,10 @@ mod tests {
     fn a_file_on_disk_round_trips() {
         let registry = component_registry();
         let mut world = World::new();
-        world.spawn((Name::new("OnDisk"), Transform::from_translation(glam::Vec3::Y)));
+        world.spawn((
+            Name::new("OnDisk"),
+            Transform::from_translation(glam::Vec3::Y),
+        ));
 
         let path = std::env::temp_dir().join("somnium_scene_schema_round_trip.somnium");
         let path = path.to_str().unwrap();

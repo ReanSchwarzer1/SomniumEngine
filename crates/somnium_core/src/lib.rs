@@ -57,8 +57,8 @@ pub mod light_units;
 pub mod log_capture;
 pub mod map;
 pub mod reflect_registry;
-pub mod scene_serial;
 pub mod scene_schema;
+pub mod scene_serial;
 pub mod script_bridge;
 pub mod script_cook;
 pub mod script_decls;
@@ -70,6 +70,7 @@ pub mod time;
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
 pub use app::{Engine, GameApp};
+pub use character::RigidBodyComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
@@ -87,7 +88,6 @@ pub use map::{
     spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
-pub use character::RigidBodyComponent;
 pub use script_host::{HostServices, ScriptHost, ScriptLogLine, SyncReport};
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;

@@ -176,7 +176,15 @@ fn many_migrations_keep_every_entity_readable() {
     // Migrate every third entity out, then a different third back and forth.
     for (i, &e) in entities.iter().enumerate() {
         if i % 3 == 0 {
-            world.insert_component(e, Vel { dx: i as f32, dy: 0.0 }).unwrap();
+            world
+                .insert_component(
+                    e,
+                    Vel {
+                        dx: i as f32,
+                        dy: 0.0,
+                    },
+                )
+                .unwrap();
         }
     }
     for (i, &e) in entities.iter().enumerate() {
@@ -209,7 +217,11 @@ fn a_moved_component_is_not_dropped() {
     assert_eq!(world.get::<Tracked>(e).unwrap().label, "payload");
 
     world.despawn(e);
-    assert_eq!(drops.load(Ordering::Relaxed), 1, "despawn drops exactly once");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "despawn drops exactly once"
+    );
 }
 
 #[test]
@@ -225,7 +237,11 @@ fn a_removed_component_is_dropped_exactly_once() {
     assert_eq!(world.get::<Pos>(e), Some(&Pos { x: 0.0, y: 0.0 }));
 
     world.despawn(e);
-    assert_eq!(drops.load(Ordering::Relaxed), 1, "no second drop on despawn");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "no second drop on despawn"
+    );
 }
 
 #[test]
@@ -235,7 +251,9 @@ fn replacing_a_component_drops_the_old_value_once() {
     let e = world.spawn((tracked("first", &drops),));
     assert_eq!(world.archetype_count(), 1);
 
-    world.insert_component(e, tracked("second", &drops)).unwrap();
+    world
+        .insert_component(e, tracked("second", &drops))
+        .unwrap();
 
     // In-place replacement: no new archetype, old value dropped once.
     assert_eq!(world.archetype_count(), 1);

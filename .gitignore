@@ -57,6 +57,7 @@ dev records/*
 dev records/phase CONTROL/*
 !dev records/phase CONTROL/CONTROL-A_reachability.md
 !dev records/phase CONTROL/CONTROL-A_census.md
+!dev records/phase CONTROL/CONTROL-B_property_seam.md
 !dev records/phase CONTROL/README.md
 !dev records/phase CONTROL/CONTROL-A_baseline/
 dev records/phase CONTROL/CONTROL-A_baseline/*

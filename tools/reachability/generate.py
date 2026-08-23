@@ -22,6 +22,19 @@ ROOT = Path(__file__).resolve().parents[2]
 REACHABILITY = ROOT / "dev records" / "phase CONTROL" / "CONTROL-A_reachability.md"
 CENSUS = ROOT / "dev records" / "phase CONTROL" / "CONTROL-A_census.md"
 
+# This is evidence from the CONTROL-A exit, not a value to be recomputed from
+# the progressively migrated tree.  Keeping the historical row here makes the
+# generated census deterministic and lets each later sub-phase show its delta.
+CONTROL_A_HAND_WIRING_CENSUS = {
+    "InspectorField variants": 106,
+    "ColorField variants": 9,
+    "PostFxToggle variants": 27,
+    "InspectorHandles fields": 226,
+    "field_bindings rows": 106,
+    "IF:: occurrences in app.rs": 202,
+    "total": 676,
+}
+
 
 @dataclass(frozen=True)
 class Occurrence:
@@ -516,7 +529,7 @@ def generate_reachability() -> str:
         "`Source fields` counts named Rust struct fields where that is statically unambiguous. "
         "The inventory contains declared types used through core World component access or `ComponentId::of`, plus every registered schema type. "
         "`Legacy rows` counts `field_bindings` plus routed colour/toggle variants. "
-        "`Generated EDIT rows` is deliberately zero until CONTROL-B's generic schema consumer exists.",
+        "`Generated EDIT rows` counts editable schema fields consumed by CONTROL-B's generic schema inspector.",
         "",
         "| Component type | Declaration | Source fields | Schema | Schema fields | EDIT fields | Legacy rows | InspectorField variants | Generated EDIT rows |",
         "|---|---|---:|---|---:|---:|---:|---:|---:|",
@@ -564,14 +577,16 @@ def generate_reachability() -> str:
 
 def generate_census() -> str:
     census = hand_wiring_census()
+    baseline = CONTROL_A_HAND_WIRING_CENSUS
     return "\n".join([
         "# CONTROL hand-wiring census",
         "",
-        "CONTROL-A's baseline is generated from the current tree. Later sub-phases add a row after regenerating the reachability report.",
+        "CONTROL-A is the preserved historical baseline. Later sub-phases are generated from the current tree so the decrease remains visible.",
         "",
         "| Sub-phase | InspectorField | ColorField | PostFxToggle | InspectorHandles | field_bindings | IF:: in app.rs | Total |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| CONTROL-A | {census['InspectorField variants']} | {census['ColorField variants']} | {census['PostFxToggle variants']} | {census['InspectorHandles fields']} | {census['field_bindings rows']} | {census['IF:: occurrences in app.rs']} | **{census['total']}** |",
+        f"| CONTROL-A | {baseline['InspectorField variants']} | {baseline['ColorField variants']} | {baseline['PostFxToggle variants']} | {baseline['InspectorHandles fields']} | {baseline['field_bindings rows']} | {baseline['IF:: occurrences in app.rs']} | **{baseline['total']}** |",
+        f"| CONTROL-B | {census['InspectorField variants']} | {census['ColorField variants']} | {census['PostFxToggle variants']} | {census['InspectorHandles fields']} | {census['field_bindings rows']} | {census['IF:: occurrences in app.rs']} | **{census['total']}** |",
         "",
     ])
 

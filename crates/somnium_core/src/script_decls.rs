@@ -190,7 +190,11 @@ fn write_components(out: &mut String, registry: &TypeRegistry) {
             schema.stable_id.as_str(),
             schema.version
         );
-        let _ = writeln!(out, "export type {} = {{", luau_type_name(schema.stable_id.as_str()));
+        let _ = writeln!(
+            out,
+            "export type {} = {{",
+            luau_type_name(schema.stable_id.as_str())
+        );
         for field in &schema.fields {
             if !field.flags.contains(FieldFlags::SCRIPT_READ) {
                 continue;

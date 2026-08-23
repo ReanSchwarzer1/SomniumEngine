@@ -25,15 +25,17 @@ pub mod widget;
 pub mod widgets;
 pub mod workspace;
 
+use crate::editor::inspector_gen::GeneratedComponentPanel;
+use crate::editor::property_editors::PropertyEditorKind;
 use crate::editor::{
     content::{build_content_drawer, build_create_popup},
     help::{build_help_overlay, fill_help_body},
-    inspector::build_inspector,
+    inspector::{build_generated_details, build_inspector},
     shell::build_editor_layout,
 };
 pub use editor_event::{
-    ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle, ScriptAttachmentRow,
-    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState,
+    CreateKind, EditorEvent, FoliageBrushField, GestureId, ScriptAttachmentRow, ScriptFieldKind,
+    ScriptFieldRow, ScriptInspectorState, TerrainToolField,
 };
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
@@ -42,7 +44,6 @@ pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
 
 use crate::{
-    editor_event::InspectorField as IF,
     message::{MessageDirection, Modifiers, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     pass::UiPass,
     types::Thickness,
@@ -72,7 +73,7 @@ use crate::{
     },
 };
 use glam::Vec2;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
@@ -112,92 +113,50 @@ enum ScriptWidgetAction {
     Bool(usize, String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorTarget {
+    Reflected {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        vec4: bool,
+    },
+    MaterialBase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedEdit {
+    Whole,
+    Lane(u8),
+    Euler(u8),
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedBinding {
+    component: somnium_ecs::reflect::StableId,
+    field: somnium_ecs::reflect::FieldId,
+    value: somnium_ecs::reflect::ReflectValue,
+    default: somnium_ecs::reflect::ReflectValue,
+    edit: GeneratedEdit,
+}
+
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
 #[allow(dead_code)]
-struct InspectorHandles {
-    pos_x: NodeHandle,
-    pos_y: NodeHandle,
-    pos_z: NodeHandle,
-    rot_x: NodeHandle,
-    rot_y: NodeHandle,
-    rot_z: NodeHandle,
-    sc_x: NodeHandle,
-    sc_y: NodeHandle,
-    sc_z: NodeHandle,
-    // Light section (Phase 13E) — hidden unless a light is selected.
-    light_section: NodeHandle,
-    light_intensity: NodeHandle,
-    light_range: NodeHandle,
-    light_inner: NodeHandle,
-    light_outer: NodeHandle,
-    /// Linear-RGB colour rows (Phase 22C) — kept for event compatibility; hidden.
-    light_col_r: NodeHandle,
-    light_col_g: NodeHandle,
-    light_col_b: NodeHandle,
-    light_color: NodeHandle,
-    light_temp_k: NodeHandle,
-    /// Row containers for the point/spot-only fields, so they can be hidden
-    /// wholesale (label included) when a directional light is selected — range
-    /// and cone angles mean nothing for a sun.
-    light_range_row: NodeHandle,
-    light_inner_row: NodeHandle,
-    light_outer_row: NodeHandle,
-    /// Row container for directional-only moonlight intensity field (Phase 25M-2).
-    light_moon_row: NodeHandle,
-    light_moon_int: NodeHandle,
-    light_radius: NodeHandle,
-    light_width_row: NodeHandle,
-    light_width: NodeHandle,
-    light_height_row: NodeHandle,
-    light_height: NodeHandle,
-    // Camera section (Phase CR-C) — hidden unless a Camera entity is selected.
-    camera_section: NodeHandle,
-    camera_frustum_toggle: NodeHandle,
-    camera_frustum_label: NodeHandle,
-    /// Phase DOOM-F.
-    camera_dynres_toggle: NodeHandle,
-    camera_dynres_label: NodeHandle,
-    camera_dynres_target: NodeHandle,
-    camera_dynres_floor: NodeHandle,
-    /// Phase DOOM-E (terrain) and DOOM-B/C (post FX diagnostics).
+#[derive(Default)]
+struct ToolHandles {
+    post_section: NodeHandle,
+    post_census_toggle: NodeHandle,
+    post_bins_toggle: NodeHandle,
+
+    terrain_section: NodeHandle,
+    terrain_paint_toggle: NodeHandle,
+    terrain_hex_toggle: NodeHandle,
+    terrain_parallax_toggle: NodeHandle,
+    terrain_clipmap_toggle: NodeHandle,
     terrain_aerial_toggle: NodeHandle,
-    terrain_aerial_label: NodeHandle,
     terrain_aerial_dist: NodeHandle,
     terrain_aerial_hero_toggle: NodeHandle,
-    terrain_aerial_hero_label: NodeHandle,
-    post_census_toggle: NodeHandle,
-    post_census_label: NodeHandle,
-    post_bins_toggle: NodeHandle,
-    post_bins_label: NodeHandle,
-    // Post-processing section (Phase 15A1) — hidden unless a Post Processing
-    // entity is selected.
-    post_section: NodeHandle,
-    post_exposure: NodeHandle,
-    post_exp_comp: NodeHandle,
-    post_auto_exp_toggle: NodeHandle,
-    post_auto_exp_label: NodeHandle,
-    post_tonemap_button: NodeHandle,
-    post_tonemap_label: NodeHandle,
-    post_vig_toggle: NodeHandle,
-    post_vig_str: NodeHandle,
-    post_ca_toggle: NodeHandle,
-    post_ca_str: NodeHandle,
-    /// Scene-wide indirect-light strength (Phase 22C).
-    post_ibl: NodeHandle,
-    // Terrain + foliage sections (Phase 17C), hidden unless a terrain is picked.
-    terrain_section: NodeHandle,
-    terrain_mode_label: NodeHandle,
-    terrain_paint_toggle: NodeHandle,
-    terrain_paint_label: NodeHandle,
-    terrain_hex_toggle: NodeHandle,
-    terrain_hex_label: NodeHandle,
-    terrain_parallax_toggle: NodeHandle,
-    terrain_parallax_label: NodeHandle,
-    terrain_clipmap_toggle: NodeHandle,
-    terrain_clipmap_label: NodeHandle,
     terrain_morph_toggle: NodeHandle,
-    terrain_morph_label: NodeHandle,
     terrain_morph_start: NodeHandle,
     terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
@@ -208,158 +167,26 @@ struct InspectorHandles {
     terrain_wetness: NodeHandle,
     terrain_macro: NodeHandle,
     terrain_debug: NodeHandle,
-    water_section: NodeHandle,
-    water_surface: NodeHandle,
-    water_depth: NodeHandle,
-    water_clarity: NodeHandle,
-    water_amplitude: NodeHandle,
-    water_roughness: NodeHandle,
-    water_ssr: NodeHandle,
-    water_rt_reflect: NodeHandle,
-    water_reflect_debug: NodeHandle,
-    water_wave_a: NodeHandle,
-    water_wave_b: NodeHandle,
-    water_speed: NodeHandle,
-    water_steepness: NodeHandle,
-    water_wind_speed: NodeHandle,
-    water_foam_decay: NodeHandle,
-    water_foam_threshold: NodeHandle,
-    water_spectrum_blend: NodeHandle,
-    water_edge_scale: NodeHandle,
-    water_anisotropy: NodeHandle,
-    water_caustic: NodeHandle,
-    water_deep: NodeHandle,
-    water_shallow: NodeHandle,
-    water_edge: NodeHandle,
-    water_abs: NodeHandle,
-    water_scatter: NodeHandle,
-    water_abs_mag: NodeHandle,
-    water_scatter_mag: NodeHandle,
-    water_underwater: NodeHandle,
-    water_dir_ax: NodeHandle,
-    water_dir_az: NodeHandle,
-    water_dir_bx: NodeHandle,
-    water_dir_bz: NodeHandle,
-    particle_section: NodeHandle,
-    particle_start: NodeHandle,
-    particle_end: NodeHandle,
-    material_section: NodeHandle,
-    material_base: NodeHandle,
-    /// Phase 16-D. The Scripts section holds a header, a "New Script"
-    /// button and `script_list`; every row inside the list is built from a
-    /// script's declared schema at refresh time, not here.
-    script_section: NodeHandle,
-    script_add: NodeHandle,
-    script_list: NodeHandle,
-    vessel_section: NodeHandle,
-    vessel_buoyancy: NodeHandle,
-    vessel_drag: NodeHandle,
-    vessel_angular_drag: NodeHandle,
-    vessel_thrust: NodeHandle,
-    vessel_draft: NodeHandle,
-    vessel_righting: NodeHandle,
+
     foliage_section: NodeHandle,
     foliage_toggle: NodeHandle,
-    foliage_label: NodeHandle,
     foliage_paint_toggle: NodeHandle,
-    foliage_paint_label: NodeHandle,
     foliage_erase_toggle: NodeHandle,
-    foliage_erase_label: NodeHandle,
     foliage_single_toggle: NodeHandle,
-    foliage_single_label: NodeHandle,
-    /// Button that opens the picker; its label shows the current entry.
     foliage_kind_button: NodeHandle,
-    foliage_kind_label: NodeHandle,
     foliage_density: NodeHandle,
     foliage_seed: NodeHandle,
     foliage_slope: NodeHandle,
     foliage_layer: NodeHandle,
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
-    foliage_shadow: NodeHandle,
-    foliage_cull: NodeHandle,
-    foliage_lod: NodeHandle,
-    foliage_impostor: NodeHandle,
-    /// Text label inside each toggle button, so the tick can be redrawn.
-    post_vig_label: NodeHandle,
-    post_ca_label: NodeHandle,
-    post_fxaa_toggle: NodeHandle,
-    post_fxaa_label: NodeHandle,
-    post_cel_toggle: NodeHandle,
-    post_cel_label: NodeHandle,
-    post_fsr_toggle: NodeHandle,
-    post_fsr_label: NodeHandle,
-    post_fsr_sharp: NodeHandle,
-    post_taa_toggle: NodeHandle,
-    post_taa_label: NodeHandle,
-    post_gtao_toggle: NodeHandle,
-    post_gtao_label: NodeHandle,
-    post_restir_toggle: NodeHandle,
-    post_restir_gi_toggle: NodeHandle,
-    post_rt_reflect_toggle: NodeHandle,
-    post_rt_reflect_label: NodeHandle,
-    post_rt_refract_toggle: NodeHandle,
-    post_rt_refract_label: NodeHandle,
-    post_cas_toggle: NodeHandle,
-    post_mb_toggle: NodeHandle,
-    post_mb_label: NodeHandle,
-    post_mb_shutter: NodeHandle,
-    post_gi_intensity: NodeHandle,
-    post_cas_label: NodeHandle,
-    post_cas_sharp: NodeHandle,
-    post_cas_strength: NodeHandle,
-    post_restir_gi_label: NodeHandle,
-    post_restir_label: NodeHandle,
-    post_pcss_toggle: NodeHandle,
-    post_pcss_label: NodeHandle,
-    post_contact_toggle: NodeHandle,
-    post_contact_label: NodeHandle,
-    post_bloom_toggle: NodeHandle,
-    post_bloom_label: NodeHandle,
-    post_bloom_amt: NodeHandle,
-    post_dof_toggle: NodeHandle,
-    post_dof_label: NodeHandle,
-    post_dof_focus: NodeHandle,
-    post_temperature: NodeHandle,
-    post_contrast: NodeHandle,
-    post_saturation: NodeHandle,
-    post_grain: NodeHandle,
-    post_vol_toggle: NodeHandle,
-    post_vol_label: NodeHandle,
-    post_shafts_toggle: NodeHandle,
-    post_shafts_label: NodeHandle,
-    post_phys_toggle: NodeHandle,
-    post_phys_label: NodeHandle,
-    post_aperture: NodeHandle,
-    post_shutter: NodeHandle,
-    post_iso: NodeHandle,
-    post_tint: NodeHandle,
-    post_lift: NodeHandle,
-    post_gamma: NodeHandle,
-    post_gain: NodeHandle,
-    post_ao_radius: NodeHandle,
-    post_ao_intensity: NodeHandle,
-    post_fog_density: NodeHandle,
-    post_fog_height: NodeHandle,
-    post_fog_asym: NodeHandle,
-    post_world_cache_toggle: NodeHandle,
-    post_world_cache_label: NodeHandle,
-    post_cache_intensity: NodeHandle,
-    post_cache_cell: NodeHandle,
-    post_specular_toggle: NodeHandle,
-    post_specular_label: NodeHandle,
-    post_spec_rough: NodeHandle,
-    post_path_toggle: NodeHandle,
-    post_path_label: NodeHandle,
-    post_path_bounces: NodeHandle,
-    post_sdf_toggle: NodeHandle,
-    post_sdf_label: NodeHandle,
-    post_probes_toggle: NodeHandle,
-    post_probes_label: NodeHandle,
-    post_probe_intensity: NodeHandle,
-    post_analytic_toggle: NodeHandle,
-    post_analytic_label: NodeHandle,
-    post_shaft_amt: NodeHandle,
+
+    material_section: NodeHandle,
+    material_base: NodeHandle,
+
+    script_section: NodeHandle,
+    script_add: NodeHandle,
+    script_list: NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -468,7 +295,6 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Island Tree",
 ];
 
-const TONEMAP_NAMES: [&str; 3] = ["AgX", "ACES", "Reinhard"];
 const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
     ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
@@ -526,7 +352,7 @@ struct EditorLayout {
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
-    inspector_handles: InspectorHandles,
+    inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
     /// Selection readout floating over the render, bottom-left.
     vp_overlay: NodeHandle,
@@ -687,9 +513,11 @@ pub struct UiManager {
     /// Persisted palette learning state.
     command_history: crate::commands::CommandHistory,
     // Inspector field handles
-    inspector_handles: InspectorHandles,
+    inspector_handles: ToolHandles,
     // Editor event queue drained by app.rs each frame
     editor_events: VecDeque<EditorEvent>,
+    selected_entity: Option<somnium_ecs::Entity>,
+    next_property_gesture: u64,
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
@@ -719,7 +547,16 @@ pub struct UiManager {
     /// layer does not know component defaults, and inventing them would make
     /// the dot lie. "Unsaved edit to this property" is the honest reading, and
     /// it is the one that pairs with the status bar's save state.
-    inspector_baseline: std::collections::HashMap<IF, f32>,
+    generated_root: NodeHandle,
+    generated_entity: Option<somnium_ecs::Entity>,
+    generated_signature: Vec<(
+        somnium_ecs::reflect::StableId,
+        somnium_ecs::reflect::FieldId,
+        GeneratedEdit,
+    )>,
+    generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    generated_rows: HashMap<NodeHandle, GeneratedBinding>,
+    generated_gestures: HashMap<NodeHandle, GestureId>,
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -808,7 +645,8 @@ pub struct UiManager {
     palette_open: bool,
     unsaved_open: bool,
     color_open: bool,
-    color_target: Option<crate::ColorField>,
+    color_target: Option<ColorTarget>,
+    color_gesture: Option<GestureId>,
     color_original: [f32; 4],
     color_live: [f32; 4],
     /// What the Content Drawer's right-click menu is currently about.
@@ -970,6 +808,80 @@ enum PaletteTarget {
 }
 
 impl UiManager {
+    fn allocate_property_gesture(&mut self) -> GestureId {
+        let gesture = GestureId(self.next_property_gesture);
+        self.next_property_gesture = self.next_property_gesture.wrapping_add(1).max(1);
+        gesture
+    }
+
+    fn queue_generated_binding(
+        &mut self,
+        binding: &GeneratedBinding,
+        value: somnium_ecs::reflect::ReflectValue,
+        gesture: GestureId,
+        live: bool,
+    ) {
+        self.queue_generated_address(binding.component, binding.field, value, gesture, live);
+    }
+
+    fn queue_generated_address(
+        &mut self,
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        value: somnium_ecs::reflect::ReflectValue,
+        gesture: GestureId,
+        live: bool,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        self.editor_events
+            .push_back(EditorEvent::SetComponentField {
+                entity,
+                component,
+                field,
+                value,
+                gesture,
+                live,
+            });
+    }
+
+    fn numeric_reflect_value(
+        binding: &GeneratedBinding,
+        edited: f32,
+    ) -> Option<somnium_ecs::reflect::ReflectValue> {
+        use somnium_ecs::reflect::ReflectValue as RV;
+        Some(match (&binding.value, binding.edit) {
+            (RV::I64(_), GeneratedEdit::Whole) => RV::I64(edited.round() as i64),
+            (RV::F64(_), GeneratedEdit::Whole) => RV::F64(f64::from(edited)),
+            (RV::Vec2(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec2(v)
+            }
+            (RV::Vec3(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec3(v)
+            }
+            (RV::Vec4(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec4(v)
+            }
+            (RV::Quat(current), GeneratedEdit::Euler(lane)) => {
+                let (x, y, z) = glam::Quat::from_array(*current).to_euler(glam::EulerRot::XYZ);
+                let mut euler = [x, y, z];
+                euler[lane as usize] = edited.to_radians();
+                RV::Quat(
+                    glam::Quat::from_euler(glam::EulerRot::XYZ, euler[0], euler[1], euler[2])
+                        .to_array(),
+                )
+            }
+            _ => return None,
+        })
+    }
+
     pub fn new(
         device: &wgpu::Device,
         output_format: wgpu::TextureFormat,
@@ -1051,6 +963,8 @@ impl UiManager {
             command_history: crate::commands::CommandHistory::load(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
+            selected_entity: None,
+            next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
@@ -1065,7 +979,12 @@ impl UiManager {
             status_dirty: layout.status_dirty,
             status_selection: layout.status_selection,
             status_stats: layout.status_stats,
-            inspector_baseline: std::collections::HashMap::new(),
+            generated_root: NodeHandle::NONE,
+            generated_entity: None,
+            generated_signature: Vec::new(),
+            generated_bindings: HashMap::new(),
+            generated_rows: HashMap::new(),
+            generated_gestures: HashMap::new(),
             inner_h: layout.inner_h,
             content_split_h: layout.content_split_h,
             right_split_h: layout.right_split_h,
@@ -1146,6 +1065,7 @@ impl UiManager {
             unsaved_open: false,
             color_open: false,
             color_target: None,
+            color_gesture: None,
             color_original: [1.0, 1.0, 1.0, 1.0],
             color_live: [1.0, 1.0, 1.0, 1.0],
             content_menu_target: None,
@@ -2617,6 +2537,7 @@ impl UiManager {
     fn dismiss_color_ui(&mut self) {
         self.color_open = false;
         self.color_target = None;
+        self.color_gesture = None;
         self.native_ui.send(UiMessage::new(
             self.color_popup,
             MessageDirection::ToWidget,
@@ -2626,20 +2547,41 @@ impl UiManager {
     }
 
     fn close_color_picker(&mut self, commit: bool) {
-        if let Some(field) = self.color_target {
-            if commit {
-                self.editor_events
-                    .push_back(EditorEvent::SetInspectorColor {
-                        field,
-                        rgba: self.color_live,
-                        live: false,
-                    });
+        if let (Some(target), Some(gesture)) = (self.color_target, self.color_gesture) {
+            let rgba = if commit {
+                self.color_live
             } else {
-                self.editor_events
-                    .push_back(EditorEvent::CancelInspectorColor {
-                        field,
-                        rgba: self.color_original,
-                    });
+                self.color_original
+            };
+            match target {
+                ColorTarget::Reflected {
+                    component,
+                    field,
+                    vec4,
+                } => {
+                    let value = if vec4 {
+                        somnium_ecs::reflect::ReflectValue::Vec4(rgba)
+                    } else {
+                        somnium_ecs::reflect::ReflectValue::Vec3([rgba[0], rgba[1], rgba[2]])
+                    };
+                    if let Some(entity) = self.selected_entity {
+                        self.editor_events
+                            .push_back(EditorEvent::SetComponentField {
+                                entity,
+                                component,
+                                field,
+                                value,
+                                gesture,
+                                live: false,
+                            });
+                    }
+                }
+                ColorTarget::MaterialBase if commit => self
+                    .editor_events
+                    .push_back(EditorEvent::SetMaterialBaseColor { rgba, live: false }),
+                ColorTarget::MaterialBase => self
+                    .editor_events
+                    .push_back(EditorEvent::CancelMaterialBaseColor { rgba }),
             }
         }
         self.dismiss_color_ui();
@@ -3018,22 +2960,12 @@ impl UiManager {
         let q = self.inspector_filter.to_ascii_lowercase();
         let h = &self.inspector_handles;
         let pairs = [
-            (h.light_section, "light"),
-            (
-                h.camera_section,
-                "camera frustum cull dynamic resolution target floor",
-            ),
-            (
-                h.post_section,
-                "post fx bloom exposure tonemap census shade bins",
-            ),
+            (h.post_section, "renderer diagnostics census shade bins"),
             (
                 h.terrain_section,
                 "terrain paint layer hex aerial lod distance",
             ),
-            (h.foliage_section, "foliage grass tree"),
-            (h.water_section, "water body wave"),
-            (h.vessel_section, "vessel buoyancy"),
+            (h.foliage_section, "foliage brush grass tree"),
         ];
         if q.is_empty() {
             return;
@@ -3046,43 +2978,16 @@ impl UiManager {
         }
     }
 
-    /// Forget every recorded baseline, so no property reads as modified.
-    ///
-    /// Called when the selection changes and when the scene is saved or
-    /// replaced: those are the three moments where "modified" would otherwise
-    /// keep referring to a value the user can no longer see.
-    pub fn reset_inspector_baseline(&mut self) {
-        self.inspector_baseline.clear();
-        let bindings = Self::field_bindings(&self.inspector_handles);
-        for (field_handle, _) in bindings {
-            if let Some(row) = self.native_ui.parent_of(field_handle) {
-                self.native_ui
-                    .send(PropertyRowMessage::set_modified(row, false));
-            }
-        }
-    }
+    /// Schema defaults are the durable baseline; rebuilding Details does not
+    /// manufacture a second save-relative notion of "modified".
+    pub fn reset_inspector_baseline(&mut self) {}
 
-    /// Light or clear the modified dot on every inspector row.
-    ///
-    /// Runs once per frame after the `update_*` writes have landed. The first
-    /// observation of a field becomes its baseline, which is why this must be
-    /// called *after* the inspector has been populated for the frame and not
-    /// before.
     pub fn refresh_modified_dots(&mut self) {
-        let bindings = Self::field_bindings(&self.inspector_handles);
-        for (field_handle, field) in bindings {
-            let Some(value) = self.native_ui.numeric_value_of(field_handle) else {
-                continue;
-            };
-            let baseline = *self.inspector_baseline.entry(field).or_insert(value);
-            // Float equality is the right test here: the baseline is a copy of
-            // a value that came through the same path, so an untouched field
-            // compares bit-identical. An epsilon would hide small real edits.
-            let modified = baseline != value;
-            if let Some(row) = self.native_ui.parent_of(field_handle) {
-                self.native_ui
-                    .send(PropertyRowMessage::set_modified(row, modified));
-            }
+        for (row, binding) in &self.generated_rows {
+            self.native_ui.send(PropertyRowMessage::set_modified(
+                *row,
+                binding.value != binding.default,
+            ));
         }
     }
 
@@ -3426,299 +3331,140 @@ impl UiManager {
             .invalidate_ancestors(self.inspector_handles.script_list);
     }
 
-    /// Update inspector NumericFields from a Transform.
+    /// Refresh the live schema-generated Details tree for one selection.
+    pub fn update_generated_details(
+        &mut self,
+        entity: Option<somnium_ecs::Entity>,
+        panels: Vec<GeneratedComponentPanel>,
+    ) {
+        let signature: Vec<_> = panels
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .flat_map(|row| {
+                let edits: Vec<_> = match row.editor {
+                    PropertyEditorKind::Vec2 => (0..2).map(GeneratedEdit::Lane).collect(),
+                    PropertyEditorKind::Vec3 | PropertyEditorKind::Vec4 => {
+                        let n = if row.editor == PropertyEditorKind::Vec3 {
+                            3
+                        } else {
+                            4
+                        };
+                        (0..n).map(GeneratedEdit::Lane).collect()
+                    }
+                    PropertyEditorKind::Euler => (0..3).map(GeneratedEdit::Euler).collect(),
+                    _ => vec![GeneratedEdit::Whole],
+                };
+                edits
+                    .into_iter()
+                    .map(move |edit| (row.component, row.field, edit))
+            })
+            .collect();
+        let rebuild = self.generated_entity != entity || self.generated_signature != signature;
+        if rebuild {
+            if self.generated_root.is_some() {
+                self.native_ui.remove_node(self.generated_root);
+            }
+            self.generated_bindings.clear();
+            self.generated_rows.clear();
+            self.generated_gestures.clear();
+            let (root, bindings, rows) = build_generated_details(
+                &mut self.native_ui,
+                self.inspector_stack,
+                self.font_id,
+                &panels,
+            );
+            self.generated_root = root;
+            self.generated_bindings = bindings;
+            self.generated_rows = rows;
+            self.generated_entity = entity;
+            self.generated_signature = signature;
+            self.native_ui.invalidate_ancestors(self.inspector_stack);
+        }
+
+        let values: HashMap<_, _> = panels
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .map(|row| {
+                (
+                    (row.component, row.field),
+                    (row.value.clone(), row.default.clone()),
+                )
+            })
+            .collect();
+        for (handle, binding) in &mut self.generated_bindings {
+            let Some((value, default)) = values.get(&(binding.component, binding.field)) else {
+                continue;
+            };
+            binding.value = value.clone();
+            binding.default = default.clone();
+            match (&binding.value, binding.edit) {
+                (somnium_ecs::reflect::ReflectValue::Bool(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(CheckBoxMessage::set_checked(*handle, *value)),
+                (somnium_ecs::reflect::ReflectValue::I64(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(NumericFieldMessage::set_value(*handle, *value as f32)),
+                (somnium_ecs::reflect::ReflectValue::F64(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(NumericFieldMessage::set_value(*handle, *value as f32)),
+                (somnium_ecs::reflect::ReflectValue::Vec2(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec3(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec4(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Quat(value), GeneratedEdit::Euler(lane)) => {
+                    let e = glam::Quat::from_array(*value).to_euler(glam::EulerRot::XYZ);
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        [e.0, e.1, e.2][lane as usize].to_degrees(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for binding in self.generated_rows.values_mut() {
+            if let Some((value, default)) = values.get(&(binding.component, binding.field)) {
+                binding.value = value.clone();
+                binding.default = default.clone();
+            }
+        }
+    }
+
+    /// Update selection visibility. Reflected fields are populated separately.
     /// `transform` is (translation, euler_degrees, scale)`.
     pub fn update_inspector(
         &mut self,
-        entity_idx: Option<u32>,
+        entity: Option<somnium_ecs::Entity>,
         pos: Option<[f32; 3]>,
         rot_deg: Option<[f32; 3]>,
         scale: Option<[f32; 3]>,
     ) {
+        let _ = (pos, rot_deg, scale);
         // Phase 27-G. An empty Details panel now says so. Before this it
         // rendered POSITION / ROTATION / SCALE at 0.000 next to a status bar
         // reading "No selection", which says "the selection sits at the origin"
         // rather than "there is no selection".
-        let has_selection = entity_idx.is_some();
+        self.selected_entity = entity;
+        let has_selection = entity.is_some();
         self.native_ui
             .set_visibility(self.inspector_stack, has_selection);
         self.native_ui
             .set_visibility(self.details_empty, !has_selection);
-
-        let h = &self.inspector_handles;
-        let send = |ui: &mut UserInterface, handle: NodeHandle, v: f32| {
-            ui.send(NumericFieldMessage::set_value(handle, v));
-        };
-        if let Some([x, y, z]) = pos {
-            send(&mut self.native_ui, h.pos_x, x);
-            send(&mut self.native_ui, h.pos_y, y);
-            send(&mut self.native_ui, h.pos_z, z);
-        }
-        if let Some([x, y, z]) = rot_deg {
-            send(&mut self.native_ui, h.rot_x, x);
-            send(&mut self.native_ui, h.rot_y, y);
-            send(&mut self.native_ui, h.rot_z, z);
-        }
-        if let Some([x, y, z]) = scale {
-            send(&mut self.native_ui, h.sc_x, x);
-            send(&mut self.native_ui, h.sc_y, y);
-            send(&mut self.native_ui, h.sc_z, z);
-        }
     }
 
-    /// Show or hide the inspector's Light section and refresh it
-    /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
-    pub fn update_light_inspector(&mut self, values: Option<LightInspectorState>) {
-        let h = &self.inspector_handles;
-        let (section, intensity, range, inner, outer) = (
-            h.light_section,
-            h.light_intensity,
-            h.light_range,
-            h.light_inner,
-            h.light_outer,
-        );
-        let light_color = h.light_color;
-        let light_temp = h.light_temp_k;
-        let (range_row, inner_row, outer_row, moon_row, moon_int) = (
-            h.light_range_row,
-            h.light_inner_row,
-            h.light_outer_row,
-            h.light_moon_row,
-            h.light_moon_int,
-        );
-        match values {
-            Some(LightInspectorState {
-                values: [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
-                kelvin,
-                directional,
-                show_cone,
-                show_width,
-                show_height,
-            }) => {
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(intensity, i));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(range, r));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(inner, ia));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(outer, oa));
-                self.native_ui.send(UiMessage::new(
-                    light_color,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor([cr, cg, cb, 1.0]),
-                ));
-                self.native_ui.send(UiMessage::new(
-                    light_color,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetLocked(kelvin > 0.0),
-                ));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(light_temp, kelvin));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(moon_int, moon_i));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_radius, radius));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_width, width));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_height, height));
-                self.native_ui.set_visibility(range_row, !directional);
-                self.native_ui.set_visibility(inner_row, show_cone);
-                self.native_ui.set_visibility(outer_row, show_cone);
-                self.native_ui.set_visibility(moon_row, directional);
-                self.native_ui.set_visibility(h.light_width_row, show_width);
-                self.native_ui
-                    .set_visibility(h.light_height_row, show_height);
-            }
-            None => self.native_ui.set_visibility(section, false),
-        }
-    }
-
-    /// Show or hide the Camera section (Phase CR-C, extended by DOOM-F).
-    ///
-    /// `dynamic` is `(enabled, target_ms, floor_fraction)`. The floor is shown
-    /// as a percentage because "67" is a number someone can reason about and
-    /// "0.67" is not.
-    pub fn update_camera_inspector(
-        &mut self,
-        frustum_cull: Option<bool>,
-        dynamic: Option<(bool, f32, f32)>,
-    ) {
-        let h = &self.inspector_handles;
-        let (dynres_toggle, dynres_target, dynres_floor) = (
-            h.camera_dynres_toggle,
-            h.camera_dynres_target,
-            h.camera_dynres_floor,
-        );
-        let (section, frustum) = (h.camera_section, h.camera_frustum_toggle);
-        match frustum_cull {
-            Some(on) => {
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(CheckBoxMessage::set_checked(frustum, on));
-            }
-            None => {
-                self.native_ui.set_visibility(section, false);
-                return;
-            }
-        }
-        if let Some((on, target_ms, floor)) = dynamic {
-            self.native_ui
-                .send(CheckBoxMessage::set_checked(dynres_toggle, on));
-            self.native_ui
-                .send(NumericFieldMessage::set_value(dynres_target, target_ms));
-            self.native_ui
-                .send(NumericFieldMessage::set_value(dynres_floor, floor * 100.0));
-        }
-    }
-
-    /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
-    ///
-    /// `values` is `[exposure, vignette_strength, ca_strength, ibl_intensity]`
-    /// plus the three enable flags; pass `None` when the selection has no
-    /// `PostProcessComponent`.
-    ///
-    /// Grouped into a struct rather than a tuple: it had already grown to four
-    /// positional booleans, which is exactly the shape that invites passing
-    /// them in the wrong order.
-    pub fn update_post_inspector(&mut self, values: Option<PostInspectorState>) {
-        let h = &self.inspector_handles;
-        let (section, exposure, vig_str, ca_str, ibl) = (
-            h.post_section,
-            h.post_exposure,
-            h.post_vig_str,
-            h.post_ca_str,
-            h.post_ibl,
-        );
-        let vig_toggle = h.post_vig_toggle;
-        let ca_toggle = h.post_ca_toggle;
-        let fxaa_toggle = h.post_fxaa_toggle;
-        let auto_toggle = h.post_auto_exp_toggle;
-        let tonemap_combo = h.post_tonemap_button;
-        let cel_toggle = h.post_cel_toggle;
-        let taa_toggle = h.post_taa_toggle;
-        let gtao_toggle = h.post_gtao_toggle;
-        let restir_toggle = h.post_restir_toggle;
-        let restir_gi_toggle = h.post_restir_gi_toggle;
-        let pcss_toggle = h.post_pcss_toggle;
-        let contact_toggle = h.post_contact_toggle;
-        let cas_toggle = h.post_cas_toggle;
-        let mb_toggle = h.post_mb_toggle;
-        let bloom_toggle = h.post_bloom_toggle;
-        let dof_toggle = h.post_dof_toggle;
-        let vol_toggle = h.post_vol_toggle;
-        let shafts_toggle = h.post_shafts_toggle;
-        let phys_toggle = h.post_phys_toggle;
-        let exp_comp = h.post_exp_comp;
-
-        match values {
-            Some(v) => {
-                let ([exp, ec, vig, ca, ibl_i], vig_on, ca_on, fxaa_on, auto_on, tonemap) = (
-                    v.values,
-                    v.vignette,
-                    v.chromatic,
-                    v.fxaa,
-                    v.auto_exposure,
-                    v.tonemapper,
-                );
-                let cel_on = v.cel_shading;
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(exposure, exp));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(exp_comp, ec));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(vig_str, vig));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(ca_str, ca));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(ibl, ibl_i));
-                // Redraw the tick in each toggle's checkbox.
-                let tick = |ui: &mut UserInterface, handle: NodeHandle, on: bool| {
-                    ui.send(CheckBoxMessage::set_checked(handle, on));
-                };
-                tick(&mut self.native_ui, vig_toggle, vig_on);
-                tick(&mut self.native_ui, ca_toggle, ca_on);
-                tick(&mut self.native_ui, fxaa_toggle, fxaa_on);
-                tick(&mut self.native_ui, auto_toggle, auto_on);
-                self.native_ui.send(ComboBoxMessage::set_selected(
-                    tonemap_combo,
-                    crate::metaphor::tonemap_index(tonemap),
-                ));
-                tick(&mut self.native_ui, cel_toggle, cel_on);
-                for (handle, on) in [
-                    (taa_toggle, v.taa),
-                    (gtao_toggle, v.gtao),
-                    (restir_toggle, v.restir),
-                    (restir_gi_toggle, v.restir_gi),
-                    (h.post_rt_reflect_toggle, v.rt_reflect),
-                    (h.post_rt_refract_toggle, v.rt_refract),
-                    (pcss_toggle, v.pcss),
-                    (contact_toggle, v.contact_shadows),
-                    (cas_toggle, v.cas),
-                    (mb_toggle, v.motion_blur),
-                    (bloom_toggle, v.bloom),
-                    (dof_toggle, v.dof),
-                    (vol_toggle, v.volumetrics),
-                    (shafts_toggle, v.shafts),
-                    (phys_toggle, v.physical_camera),
-                    (h.post_world_cache_toggle, v.world_cache),
-                    (h.post_specular_toggle, v.specular_gi),
-                    (h.post_path_toggle, v.path_tracer),
-                    (h.post_sdf_toggle, v.mesh_sdf),
-                    (h.post_probes_toggle, v.probes),
-                    (h.post_analytic_toggle, v.analytic_grad),
-                    (h.post_fsr_toggle, v.fsr),
-                ] {
-                    tick(&mut self.native_ui, handle, on);
-                }
-                for (field, value) in [
-                    (h.post_bloom_amt, v.extras[0]),
-                    (h.post_dof_focus, v.extras[1]),
-                    (h.post_temperature, v.extras[2]),
-                    (h.post_contrast, v.extras[3]),
-                    (h.post_saturation, v.extras[4]),
-                    (h.post_grain, v.extras[5]),
-                    (h.post_fog_density, v.extras[6]),
-                    (h.post_fog_height, v.extras[7]),
-                    (h.post_fog_asym, v.extras[8]),
-                    (h.post_tint, v.extras[9]),
-                    (h.post_lift, v.extras[10]),
-                    (h.post_gamma, v.extras[11]),
-                    (h.post_gain, v.extras[12]),
-                    (h.post_aperture, v.extras[13]),
-                    (h.post_shutter, v.extras[14]),
-                    (h.post_iso, v.extras[15]),
-                    (h.post_ao_radius, v.extras[16]),
-                    (h.post_ao_intensity, v.extras[17]),
-                    (h.post_cas_sharp, v.extras[18]),
-                    (h.post_cas_strength, v.extras[19]),
-                    (h.post_mb_shutter, v.extras[20]),
-                    (h.post_gi_intensity, v.extras[21]),
-                    (h.post_cache_intensity, v.cache_intensity),
-                    (h.post_cache_cell, v.cache_cell),
-                    (h.post_spec_rough, v.spec_rough),
-                    (h.post_path_bounces, v.path_bounces),
-                    (h.post_probe_intensity, v.probe_intensity),
-                    (h.post_shaft_amt, v.shaft_intensity),
-                    (h.post_fsr_sharp, v.fsr_sharpness),
-                ] {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(field, value));
-                }
-            }
-            None => self.native_ui.set_visibility(section, false),
-        }
-    }
-
-    /// Refresh the profiler overlay (Phase 29).
-    ///
-    /// `None` hides it. Rows past [`PROFILER_ROWS`] are dropped rather than
-    /// grown into: the overlay is a glance at the frame, and a panel that
-    /// resizes itself every time a pass appears is harder to read than one that
-    /// stays put.
     pub fn update_profiler(&mut self, rows: Option<&[ProfilerRow]>) {
         let panel = self.profiler_panel;
         let Some(rows) = rows else {
@@ -3734,17 +3480,14 @@ impl UiManager {
             self.profiler_toggle_lbl,
             "Profiler".to_string(),
         ));
-
         let names = self.profiler_names.clone();
         let values = self.profiler_values.clone();
         for i in 0..names.len() {
             let (label, value) = match rows.get(i) {
-                Some(r) => (
-                    format!("{}{}", "   ".repeat(r.depth as usize), r.label),
-                    r.value.clone(),
+                Some(row) => (
+                    format!("{}{}", "   ".repeat(row.depth as usize), row.label),
+                    row.value.clone(),
                 ),
-                // Blanked rather than hidden: hiding a row would reflow the
-                // panel every frame a pass drops out of the list.
                 None => (String::new(), String::new()),
             };
             self.native_ui.send(TextMessage::set_text(names[i], label));
@@ -3760,8 +3503,6 @@ impl UiManager {
         let wetness = h.terrain_wetness;
         let macro_s = h.terrain_macro;
         let debug = h.terrain_debug;
-        let mode_label = h.terrain_mode_label;
-        let _paint_label = h.terrain_paint_label;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
@@ -3784,17 +3525,6 @@ impl UiManager {
                 let paint =
                     (v.paint_layer.round().max(0.0) as usize).min(TERRAIN_LAYER_SHORT.len() - 1);
                 let brush = (v.brush as usize).min(TERRAIN_BRUSH_NAMES.len() - 1);
-                let status = if v.foliage_paint {
-                    "Active: FOLIAGE paint".to_string()
-                } else if v.terrain_edit && v.terrain_paint {
-                    format!("Active: TERRAIN paint — {}", TERRAIN_LAYER_SHORT[paint])
-                } else if v.terrain_edit {
-                    format!("Active: TERRAIN sculpt — {}", TERRAIN_BRUSH_NAMES[brush])
-                } else {
-                    "Active: none — click Terrain Paint or a layer".to_string()
-                };
-                self.native_ui
-                    .send(TextMessage::set_text(mode_label, status));
                 self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_paint_toggle,
                     v.terrain_paint && !v.foliage_paint,
@@ -3850,111 +3580,6 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 19]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(values) => {
-                self.native_ui.set_visibility(h.water_section, true);
-                for (handle, value) in [
-                    h.water_surface,
-                    h.water_depth,
-                    h.water_clarity,
-                    h.water_amplitude,
-                    h.water_roughness,
-                    h.water_ssr,
-                    h.water_rt_reflect,
-                    h.water_reflect_debug,
-                    h.water_wave_a,
-                    h.water_wave_b,
-                    h.water_speed,
-                    h.water_steepness,
-                    h.water_wind_speed,
-                    h.water_foam_decay,
-                    h.water_foam_threshold,
-                    h.water_spectrum_blend,
-                    h.water_edge_scale,
-                    h.water_anisotropy,
-                    h.water_caustic,
-                ]
-                .into_iter()
-                .zip(values)
-                {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(handle, value));
-                }
-            }
-            None => self.native_ui.set_visibility(h.water_section, false),
-        }
-    }
-
-    pub fn update_water_iris(
-        &mut self,
-        values: Option<(
-            [f32; 4],
-            [f32; 4],
-            [f32; 4],
-            [f32; 3],
-            [f32; 3],
-            bool,
-            [f32; 4],
-        )>,
-    ) {
-        let h = &self.inspector_handles;
-        match values {
-            Some((deep, shallow, edge, abs, scatter, underwater, dirs)) => {
-                let (abs_tint, abs_mag) = crate::color::split_magnitude(abs);
-                let (sc_tint, sc_mag) = crate::color::split_magnitude(scatter);
-                for (handle, rgba) in [
-                    (h.water_deep, deep),
-                    (h.water_shallow, shallow),
-                    (h.water_edge, edge),
-                    (h.water_abs, [abs_tint[0], abs_tint[1], abs_tint[2], 1.0]),
-                    (h.water_scatter, [sc_tint[0], sc_tint[1], sc_tint[2], 1.0]),
-                ] {
-                    self.native_ui.send(UiMessage::new(
-                        handle,
-                        MessageDirection::ToWidget,
-                        ColorSwatchMessage::SetColor(rgba),
-                    ));
-                }
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_abs_mag, abs_mag));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_scatter_mag, sc_mag));
-                self.native_ui
-                    .send(CheckBoxMessage::set_checked(h.water_underwater, underwater));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_ax, dirs[0]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_az, dirs[1]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_bx, dirs[2]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_bz, dirs[3]));
-            }
-            None => {}
-        }
-    }
-
-    pub fn update_particle_inspector(&mut self, values: Option<([f32; 4], [f32; 4])>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some((start, end)) => {
-                self.native_ui.set_visibility(h.particle_section, true);
-                self.native_ui.send(UiMessage::new(
-                    h.particle_start,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(start),
-                ));
-                self.native_ui.send(UiMessage::new(
-                    h.particle_end,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(end),
-                ));
-            }
-            None => self.native_ui.set_visibility(h.particle_section, false),
-        }
-    }
 
     pub fn update_material_inspector(&mut self, values: Option<[f32; 4]>) {
         let h = &self.inspector_handles;
@@ -3968,31 +3593,6 @@ impl UiManager {
                 ));
             }
             None => self.native_ui.set_visibility(h.material_section, false),
-        }
-    }
-
-    /// Show buoyancy controls when a `BuoyantVessel` is selected.
-    pub fn update_vessel_inspector(&mut self, values: Option<[f32; 6]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(values) => {
-                self.native_ui.set_visibility(h.vessel_section, true);
-                for (handle, value) in [
-                    h.vessel_buoyancy,
-                    h.vessel_drag,
-                    h.vessel_angular_drag,
-                    h.vessel_thrust,
-                    h.vessel_draft,
-                    h.vessel_righting,
-                ]
-                .into_iter()
-                .zip(values)
-                {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(handle, value));
-                }
-            }
-            None => self.native_ui.set_visibility(h.vessel_section, false),
         }
     }
 
@@ -4010,15 +3610,11 @@ impl UiManager {
             h.foliage_layer,
             h.foliage_smin,
             h.foliage_smax,
-            h.foliage_shadow,
-            h.foliage_cull,
-            h.foliage_lod,
-            h.foliage_impostor,
         ];
         match values {
             Some((v, flags)) => {
                 self.native_ui.set_visibility(section, true);
-                for (f, val) in fields.iter().zip(v.iter()) {
+                for (f, val) in fields.iter().zip(v[..6].iter()) {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(*f, *val));
                 }
@@ -4078,143 +3674,59 @@ impl UiManager {
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
-    /// Every inspector numeric field paired with the `InspectorField` it
-    /// writes.
-    ///
-    /// Extracted from `process_outgoing` in Phase 26-Zeta-G because the
-    /// modified-dot sync needs exactly the same pairing, and two copies of a
-    /// 100-row table would drift the first time a field was added.
-    fn field_bindings(h: &InspectorHandles) -> Vec<(NodeHandle, IF)> {
-        vec![
-            (h.pos_x, IF::PosX),
-            (h.pos_y, IF::PosY),
-            (h.pos_z, IF::PosZ),
-            (h.rot_x, IF::RotX),
-            (h.rot_y, IF::RotY),
-            (h.rot_z, IF::RotZ),
-            (h.sc_x, IF::ScaleX),
-            (h.sc_y, IF::ScaleY),
-            (h.sc_z, IF::ScaleZ),
-            (h.light_intensity, IF::LightIntensity),
-            (h.light_range, IF::LightRange),
-            (h.light_inner, IF::LightInnerAngle),
-            (h.light_outer, IF::LightOuterAngle),
-            (h.light_col_r, IF::LightColorR),
-            (h.light_col_g, IF::LightColorG),
-            (h.light_col_b, IF::LightColorB),
-            (h.light_temp_k, IF::LightColorTemperature),
-            (h.light_moon_int, IF::LightMoonIntensity),
-            (h.light_radius, IF::LightSourceRadius),
-            (h.light_width, IF::LightAreaWidth),
-            (h.light_height, IF::LightAreaHeight),
-            (h.terrain_aerial_dist, IF::TerrainAerialDistance),
-            (h.camera_dynres_target, IF::CameraDynResTargetMs),
-            (h.camera_dynres_floor, IF::CameraDynResFloor),
-            (h.post_exposure, IF::PostExposure),
-            (h.post_exp_comp, IF::PostExposureCompensation),
-            (h.post_bloom_amt, IF::PostBloomIntensity),
-            (h.post_dof_focus, IF::PostFocusDistance),
-            (h.post_temperature, IF::PostTemperature),
-            (h.post_contrast, IF::PostContrast),
-            (h.post_saturation, IF::PostSaturation),
-            (h.post_grain, IF::PostGrain),
-            (h.post_fog_density, IF::PostFogDensity),
-            (h.post_fog_height, IF::PostFogHeight),
-            (h.post_fog_asym, IF::PostFogAsymmetry),
-            (h.post_tint, IF::PostTint),
-            (h.post_lift, IF::PostLift),
-            (h.post_gamma, IF::PostGamma),
-            (h.post_gain, IF::PostGain),
-            (h.post_aperture, IF::PostAperture),
-            (h.post_shutter, IF::PostShutter),
-            (h.post_iso, IF::PostIso),
-            (h.post_ao_radius, IF::PostAoRadius),
-            (h.post_ao_intensity, IF::PostAoIntensity),
-            (h.post_fsr_sharp, IF::PostFsrSharpness),
-            (h.post_cas_sharp, IF::PostCasSharpness),
-            (h.post_cas_strength, IF::PostCasStrength),
-            (h.post_mb_shutter, IF::PostMotionBlurShutter),
-            (h.post_gi_intensity, IF::PostGiIntensity),
-            (h.post_cache_intensity, IF::PostCacheIntensity),
-            (h.post_cache_cell, IF::PostCacheCell),
-            (h.post_spec_rough, IF::PostSpecRough),
-            (h.post_path_bounces, IF::PostPathBounces),
-            (h.post_probe_intensity, IF::PostProbeIntensity),
-            (h.post_shaft_amt, IF::PostShaftIntensity),
-            (h.post_vig_str, IF::PostVignetteStrength),
-            (h.post_ca_str, IF::PostCaStrength),
-            (h.post_ibl, IF::PostIblIntensity),
-            (h.terrain_layer, IF::TerrainPaintLayer),
-            (h.terrain_tile, IF::TerrainTile0),
-            (h.terrain_relief, IF::TerrainRelief),
-            (h.terrain_wetness, IF::TerrainWetness),
-            (h.terrain_macro, IF::TerrainMacroStrength),
-            (h.terrain_debug, IF::TerrainDebugView),
-            (h.terrain_morph_start, IF::TerrainMorphStart),
-            (h.water_surface, IF::WaterSurface),
-            (h.water_depth, IF::WaterMaxDepth),
-            (h.water_clarity, IF::WaterClarity),
-            (h.water_amplitude, IF::WaterAmplitude),
-            (h.water_roughness, IF::WaterRoughness),
-            (h.water_ssr, IF::WaterSsrStrength),
-            (h.water_rt_reflect, IF::WaterRtReflect),
-            (h.water_reflect_debug, IF::WaterReflectDebug),
-            (h.water_wave_a, IF::WaterWaveLengthA),
-            (h.water_wave_b, IF::WaterWaveLengthB),
-            (h.water_speed, IF::WaterWaveSpeed),
-            (h.water_steepness, IF::WaterWaveSteepness),
-            (h.water_wind_speed, IF::WaterWindSpeed),
-            (h.water_foam_decay, IF::WaterFoamDecay),
-            (h.water_foam_threshold, IF::WaterFoamThreshold),
-            (h.water_spectrum_blend, IF::WaterSpectrumBlend),
-            (h.water_edge_scale, IF::WaterEdgeScale),
-            (h.water_anisotropy, IF::WaterAnisotropy),
-            (h.water_caustic, IF::WaterCausticStrength),
-            (h.water_dir_ax, IF::WaterWaveDirAX),
-            (h.water_dir_az, IF::WaterWaveDirAZ),
-            (h.water_dir_bx, IF::WaterWaveDirBX),
-            (h.water_dir_bz, IF::WaterWaveDirBZ),
-            (h.water_abs_mag, IF::WaterAbsorptionMag),
-            (h.water_scatter_mag, IF::WaterScatteringMag),
-            (h.vessel_buoyancy, IF::VesselBuoyancy),
-            (h.vessel_drag, IF::VesselDrag),
-            (h.vessel_angular_drag, IF::VesselAngularDrag),
-            (h.vessel_thrust, IF::VesselThrust),
-            (h.vessel_draft, IF::VesselDraft),
-            (h.vessel_righting, IF::VesselRighting),
-            (h.foliage_density, IF::FoliageDensity),
-            (h.foliage_seed, IF::FoliageSeed),
-            (h.foliage_slope, IF::FoliageSlope),
-            (h.foliage_layer, IF::FoliageLayer),
-            (h.foliage_smin, IF::FoliageScaleMin),
-            (h.foliage_smax, IF::FoliageScaleMax),
-            (h.foliage_shadow, IF::FoliageShadowDistance),
-            (h.foliage_cull, IF::FoliageCullDistance),
-            (h.foliage_lod, IF::FoliageLodDistance),
-            (h.foliage_impostor, IF::FoliageImpostorDistance),
-        ]
-    }
-
     fn process_outgoing(&mut self, msgs: Vec<UiMessage>) {
         let h = &self.inspector_handles;
-        let field_map = Self::field_bindings(h);
-
-        let color_map: &[(NodeHandle, crate::ColorField)] = &[
-            (h.light_color, crate::ColorField::Light),
-            (h.water_deep, crate::ColorField::WaterDeep),
-            (h.water_shallow, crate::ColorField::WaterShallow),
-            (h.water_edge, crate::ColorField::WaterEdge),
-            (h.water_abs, crate::ColorField::WaterAbsorption),
-            (h.water_scatter, crate::ColorField::WaterScattering),
-            (h.particle_start, crate::ColorField::ParticleStart),
-            (h.particle_end, crate::ColorField::ParticleEnd),
-            (h.material_base, crate::ColorField::MaterialBase),
+        let terrain_numeric = [
+            (h.terrain_aerial_dist, TerrainToolField::AerialDistance),
+            (h.terrain_layer, TerrainToolField::PaintLayer),
+            (h.terrain_tile, TerrainToolField::TileScale),
+            (h.terrain_relief, TerrainToolField::Relief),
+            (h.terrain_wetness, TerrainToolField::Wetness),
+            (h.terrain_macro, TerrainToolField::MacroStrength),
+            (h.terrain_debug, TerrainToolField::DebugView),
+            (h.terrain_morph_start, TerrainToolField::MorphStart),
         ];
+        let foliage_numeric = [
+            (h.foliage_density, FoliageBrushField::Density),
+            (h.foliage_seed, FoliageBrushField::Radius),
+            (h.foliage_slope, FoliageBrushField::MaxSlope),
+            (h.foliage_layer, FoliageBrushField::Kind),
+            (h.foliage_smin, FoliageBrushField::ScaleMin),
+            (h.foliage_smax, FoliageBrushField::ScaleMax),
+        ];
+        let color_map: [(NodeHandle, ColorTarget); 1] =
+            [(h.material_base, ColorTarget::MaterialBase)];
 
         for msg in msgs {
             if let Some(ColorSwatchMessage::Clicked(rgba)) = msg.data::<ColorSwatchMessage>() {
-                if let Some((_, field)) = color_map.iter().find(|(h, _)| *h == msg.destination) {
-                    self.color_target = Some(*field);
+                let generated_target =
+                    self.generated_bindings
+                        .get(&msg.destination)
+                        .and_then(|binding| match binding.value {
+                            somnium_ecs::reflect::ReflectValue::Vec3(_) => {
+                                Some(ColorTarget::Reflected {
+                                    component: binding.component,
+                                    field: binding.field,
+                                    vec4: false,
+                                })
+                            }
+                            somnium_ecs::reflect::ReflectValue::Vec4(_) => {
+                                Some(ColorTarget::Reflected {
+                                    component: binding.component,
+                                    field: binding.field,
+                                    vec4: true,
+                                })
+                            }
+                            _ => None,
+                        });
+                if let Some(field) = generated_target.or_else(|| {
+                    color_map
+                        .iter()
+                        .find(|(h, _)| *h == msg.destination)
+                        .map(|(_, target)| *target)
+                }) {
+                    self.color_target = Some(field);
+                    self.color_gesture = Some(self.allocate_property_gesture());
                     self.color_open = true;
                     self.color_original = *rgba;
                     self.color_live = *rgba;
@@ -4238,34 +3750,86 @@ impl UiManager {
                 continue;
             }
             if let Some(cmsg) = msg.data::<ColorPickerMessage>() {
-                if let Some(field) = self.color_target {
+                if let (Some(field), Some(gesture)) = (self.color_target, self.color_gesture) {
                     match cmsg {
                         ColorPickerMessage::Changing(rgba) => {
                             self.color_live = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::SetInspectorColor {
+                            match field {
+                                ColorTarget::Reflected {
+                                    component,
                                     field,
-                                    rgba: *rgba,
-                                    live: true,
-                                });
+                                    vec4,
+                                } => {
+                                    let value = if vec4 {
+                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
+                                    } else {
+                                        somnium_ecs::reflect::ReflectValue::Vec3([
+                                            rgba[0], rgba[1], rgba[2],
+                                        ])
+                                    };
+                                    self.queue_generated_address(
+                                        component, field, value, gesture, true,
+                                    );
+                                }
+                                ColorTarget::MaterialBase => self.editor_events.push_back(
+                                    EditorEvent::SetMaterialBaseColor {
+                                        rgba: *rgba,
+                                        live: true,
+                                    },
+                                ),
+                            }
                         }
                         ColorPickerMessage::Changed(rgba) => {
                             self.color_live = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::SetInspectorColor {
+                            match field {
+                                ColorTarget::Reflected {
+                                    component,
                                     field,
-                                    rgba: *rgba,
-                                    live: false,
-                                });
+                                    vec4,
+                                } => {
+                                    let value = if vec4 {
+                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
+                                    } else {
+                                        somnium_ecs::reflect::ReflectValue::Vec3([
+                                            rgba[0], rgba[1], rgba[2],
+                                        ])
+                                    };
+                                    self.queue_generated_address(
+                                        component, field, value, gesture, false,
+                                    );
+                                }
+                                ColorTarget::MaterialBase => self.editor_events.push_back(
+                                    EditorEvent::SetMaterialBaseColor {
+                                        rgba: *rgba,
+                                        live: false,
+                                    },
+                                ),
+                            }
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::Cancelled(rgba) => {
                             self.color_original = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::CancelInspectorColor {
+                            match field {
+                                ColorTarget::Reflected {
+                                    component,
                                     field,
-                                    rgba: *rgba,
-                                });
+                                    vec4,
+                                } => {
+                                    let value = if vec4 {
+                                        somnium_ecs::reflect::ReflectValue::Vec4(*rgba)
+                                    } else {
+                                        somnium_ecs::reflect::ReflectValue::Vec3([
+                                            rgba[0], rgba[1], rgba[2],
+                                        ])
+                                    };
+                                    self.queue_generated_address(
+                                        component, field, value, gesture, false,
+                                    );
+                                }
+                                ColorTarget::MaterialBase => self.editor_events.push_back(
+                                    EditorEvent::CancelMaterialBaseColor { rgba: *rgba },
+                                ),
+                            }
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::SetColor(_) => {}
@@ -4367,14 +3931,6 @@ impl UiManager {
                             }
                         }
                     }
-                    continue;
-                }
-            }
-            if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
-                if msg.destination == self.inspector_handles.water_underwater {
-                    let _ = on;
-                    self.editor_events
-                        .push_back(EditorEvent::ToggleWaterUnderwater);
                     continue;
                 }
             }
@@ -4481,10 +4037,6 @@ impl UiManager {
                 }
                 if msg.destination == self.stop_button {
                     self.run_command_id("editor.simulation.stop");
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_tonemap_button {
-                    self.editor_events.push_back(EditorEvent::CycleTonemapper);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_toggle {
@@ -4801,22 +4353,6 @@ impl UiManager {
                     }
                     continue;
                 }
-                // Inspector checkboxes share the same destinations as the old buttons.
-                if msg.destination == self.inspector_handles.post_vig_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Vignette, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_auto_exp_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::AutoExposure, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_cel_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::CelShading, *on));
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.foliage_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleFoliage);
                     continue;
@@ -4843,13 +4379,6 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.terrain_clipmap_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainClipmap);
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.camera_frustum_toggle {
-                    if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events
-                            .push_back(EditorEvent::SetCpuFrustum(*on));
-                    }
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_aerial_toggle {
@@ -4879,13 +4408,6 @@ impl UiManager {
                     }
                     continue;
                 }
-                if msg.destination == self.inspector_handles.camera_dynres_toggle {
-                    if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events
-                            .push_back(EditorEvent::SetDynamicResolution(*on));
-                    }
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainMorph);
@@ -4901,108 +4423,8 @@ impl UiManager {
                         .push_back(EditorEvent::ToggleFoliageSingle);
                     continue;
                 }
-                if msg.destination == self.inspector_handles.post_fxaa_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Fxaa, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_ca_toggle {
-                    self.editor_events.push_back(EditorEvent::SetPostFx(
-                        PostFxToggle::ChromaticAberration,
-                        *on,
-                    ));
-                    continue;
-                }
-                for (handle, which) in [
-                    (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
-                    (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
-                    (
-                        self.inspector_handles.post_restir_toggle,
-                        PostFxToggle::Restir,
-                    ),
-                    (
-                        self.inspector_handles.post_restir_gi_toggle,
-                        PostFxToggle::RestirGi,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_reflect_toggle,
-                        PostFxToggle::RtReflect,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_refract_toggle,
-                        PostFxToggle::RtRefract,
-                    ),
-                    (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
-                    (
-                        self.inspector_handles.post_contact_toggle,
-                        PostFxToggle::ContactShadows,
-                    ),
-                    (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
-                    (
-                        self.inspector_handles.post_mb_toggle,
-                        PostFxToggle::MotionBlur,
-                    ),
-                    (
-                        self.inspector_handles.post_bloom_toggle,
-                        PostFxToggle::Bloom,
-                    ),
-                    (
-                        self.inspector_handles.post_dof_toggle,
-                        PostFxToggle::DepthOfField,
-                    ),
-                    (
-                        self.inspector_handles.post_vol_toggle,
-                        PostFxToggle::Volumetrics,
-                    ),
-                    (
-                        self.inspector_handles.post_shafts_toggle,
-                        PostFxToggle::LightShafts,
-                    ),
-                    (
-                        self.inspector_handles.post_phys_toggle,
-                        PostFxToggle::PhysicalCamera,
-                    ),
-                    (
-                        self.inspector_handles.post_world_cache_toggle,
-                        PostFxToggle::WorldCache,
-                    ),
-                    (
-                        self.inspector_handles.post_specular_toggle,
-                        PostFxToggle::SpecularGi,
-                    ),
-                    (
-                        self.inspector_handles.post_path_toggle,
-                        PostFxToggle::PathTracer,
-                    ),
-                    (
-                        self.inspector_handles.post_sdf_toggle,
-                        PostFxToggle::MeshSdf,
-                    ),
-                    (
-                        self.inspector_handles.post_probes_toggle,
-                        PostFxToggle::Probes,
-                    ),
-                    (
-                        self.inspector_handles.post_analytic_toggle,
-                        PostFxToggle::AnalyticGrad,
-                    ),
-                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
-                ] {
-                    if msg.destination == handle {
-                        self.editor_events
-                            .push_back(EditorEvent::SetPostFx(which, *on));
-                        break;
-                    }
-                }
             } else if let Some(ComboBoxMessage::SelectionChanged(i)) = msg.data::<ComboBoxMessage>()
             {
-                if msg.destination == self.inspector_handles.post_tonemap_button
-                    || msg.destination == self.post_tonemap_combo
-                {
-                    self.editor_events
-                        .push_back(EditorEvent::SetTonemapper(*i as u8));
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.foliage_kind_button
                     || msg.destination == self.foliage_kind_combo
                 {
@@ -5098,20 +4520,9 @@ impl UiManager {
                 msg.data::<PropertyRowMessage>(),
                 Some(PropertyRowMessage::RevertRequested)
             ) {
-                if let Some(&(field_handle, field)) = field_map
-                    .iter()
-                    .find(|(fh, _)| self.native_ui.parent_of(*fh) == Some(msg.destination))
-                {
-                    if let Some(&baseline) = self.inspector_baseline.get(&field) {
-                        self.native_ui
-                            .send(NumericFieldMessage::set_value(field_handle, baseline));
-                        self.editor_events
-                            .push_back(EditorEvent::SetInspectorValue {
-                                field,
-                                value: baseline,
-                                live: false,
-                            });
-                    }
+                if let Some(binding) = self.generated_rows.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(&binding, binding.default.clone(), gesture, false);
                 }
             }
 
@@ -5122,10 +4533,46 @@ impl UiManager {
                 _ => None,
             };
             if let Some((v, live)) = numeric {
-                if let Some(&(_, field)) = field_map.iter().find(|(fh, _)| *fh == msg.destination) {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = if live {
+                        if let Some(gesture) =
+                            self.generated_gestures.get(&msg.destination).copied()
+                        {
+                            gesture
+                        } else {
+                            let gesture = self.allocate_property_gesture();
+                            self.generated_gestures.insert(msg.destination, gesture);
+                            gesture
+                        }
+                    } else {
+                        self.generated_gestures
+                            .remove(&msg.destination)
+                            .unwrap_or_else(|| self.allocate_property_gesture())
+                    };
+                    if let Some(value) = Self::numeric_reflect_value(&binding, v) {
+                        self.queue_generated_binding(&binding, value, gesture, live);
+                    }
+                    continue;
+                }
+                if let Some((_, field)) = terrain_numeric
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                {
                     self.editor_events
-                        .push_back(EditorEvent::SetInspectorValue {
-                            field,
+                        .push_back(EditorEvent::SetTerrainToolValue {
+                            field: *field,
+                            value: v,
+                            live,
+                        });
+                    continue;
+                }
+                if let Some((_, field)) = foliage_numeric
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SetFoliageBrushValue {
+                            field: *field,
                             value: v,
                             live,
                         });
@@ -5147,6 +4594,43 @@ impl UiManager {
                         value: v,
                         live,
                     });
+                }
+            }
+
+            if let Some(CheckBoxMessage::Check(value)) = msg.data::<CheckBoxMessage>() {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Bool(*value),
+                        gesture,
+                        false,
+                    );
+                    continue;
+                }
+            }
+            if let Some(TextBoxMessage::TextCommit(value)) = msg.data::<TextBoxMessage>() {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Str(value.clone()),
+                        gesture,
+                        false,
+                    );
+                    continue;
+                }
+            }
+            if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::I64(*index as i64),
+                        gesture,
+                        false,
+                    );
+                    continue;
                 }
             }
         }
@@ -5508,15 +4992,15 @@ mod styx_budget_tests {
             inst.len()
         );
 
-        // Floors, not exact counts: adding chrome should never take these
-        // backwards. The first run after the widget migration measured 49 / 28 /
-        // 20 / 4 / 17, and the wash count was 1 until `wash_from` stopped
-        // treating a caller-supplied background as a request for flatness.
+        // CONTROL-B no longer constructs 100+ hidden component rows at shell
+        // startup; those rows exist only when a selected entity supplies a
+        // schema. Keep a floor for real idle-shell strokes without fabricating
+        // invisible legacy chrome merely to preserve the old count.
         assert!(rounded >= 40, "corner radius regressed to {rounded}");
         assert!(gradients >= 20, "chrome wash regressed to {gradients}");
         assert!(shadows >= 15, "elevation regressed to {shadows}");
         assert!(insets >= 4, "recession regressed to {insets}");
-        assert!(borders >= 15, "strokes regressed to {borders}");
+        assert!(borders >= 10, "strokes regressed to {borders}");
 
         // Content grounds must stay flat: a wash on every surface is exactly the
         // "lit like a toy" failure §5.2 forbids.
@@ -5883,99 +5367,38 @@ mod must_not_break {
     }
 
     #[test]
-    fn every_inspector_control_is_actually_hittable() {
-        // Phase 26-Zeta-G moved every inspector row into `PropertyRow`, which
-        // arranges its value control itself. A row that measures to zero height
-        // or zero width still *draws* its label, so a broken control looks
-        // present and silently ignores clicks. This walks the whole handle
-        // bundle and fails on anything that cannot be hit.
+    fn every_tool_only_inspector_control_is_hittable() {
         let mut ui = UserInterface::new(1920.0, 1080.0);
-        let l = build_editor_layout(
+        let layout = build_editor_layout(
             &mut ui,
             0,
             crate::layout_persist::ChromeLayout::default().resolved(1920.0, 1080.0),
         );
-        // Sections are hidden until something of that type is selected; make
-        // them all visible so their rows get arranged.
-        let h = &l.inspector_handles;
+        let handles = &layout.inspector_handles;
         for section in [
-            h.light_section,
-            h.camera_section,
-            h.post_section,
-            h.terrain_section,
-            h.foliage_section,
-            h.water_section,
-            h.vessel_section,
-            h.particle_section,
-            h.material_section,
+            handles.post_section,
+            handles.terrain_section,
+            handles.foliage_section,
+            handles.material_section,
         ] {
             ui.set_visibility(section, true);
         }
-        // Rows revealed conditionally by light type or foliage mode. They are
-        // hidden at rest by design; the test still has to prove they arrange to
-        // something clickable when they are shown.
-        for row in [h.light_width_row, h.light_height_row] {
-            ui.set_visibility(row, true);
-        }
-        if let Some(row) = ui.parent_of(h.foliage_layer) {
-            ui.set_visibility(row, true);
-        }
         ui.perform_layout();
-
-        let mut broken = Vec::new();
-
-        // Toggles, combos and colour swatches do not appear in
-        // `field_bindings`, so a check that only walked that table would miss
-        // exactly the controls the Details panel is mostly made of.
-        for (name, handle) in [
-            ("post tonemap combo", h.post_tonemap_button),
-            ("foliage kind combo", h.foliage_kind_button),
-            ("water underwater", h.water_underwater),
-            ("camera frustum cull", h.camera_frustum_toggle),
-            ("camera dynamic resolution", h.camera_dynres_toggle),
-            ("terrain paint", h.terrain_paint_toggle),
-            ("terrain hex", h.terrain_hex_toggle),
-            ("foliage enabled", h.foliage_toggle),
-            ("foliage paint", h.foliage_paint_toggle),
-            ("foliage erase", h.foliage_erase_toggle),
-            ("foliage single", h.foliage_single_toggle),
-            ("post bloom", h.post_bloom_toggle),
-            ("post vignette", h.post_vig_toggle),
-            ("post fsr", h.post_fsr_toggle),
-            ("light colour", h.light_color),
-            ("water deep colour", h.water_deep),
-            ("water scattering colour", h.water_scatter),
-            ("particle start colour", h.particle_start),
-            ("material base colour", h.material_base),
+        for handle in [
+            handles.post_census_toggle,
+            handles.post_bins_toggle,
+            handles.terrain_paint_toggle,
+            handles.terrain_aerial_dist,
+            handles.foliage_kind_button,
+            handles.foliage_density,
+            handles.material_base,
         ] {
-            if handle.is_none() {
-                broken.push(format!("{name} (no widget)"));
-                continue;
-            }
-            let b = bounds_of(&ui, handle);
-            if b.w < 8.0 || b.h < 8.0 {
-                broken.push(format!("{name} ({}x{})", b.w, b.h));
-            }
+            let bounds = bounds_of(&ui, handle);
+            assert!(
+                bounds.w >= 8.0 && bounds.h >= 8.0,
+                "{handle} is not hittable"
+            );
         }
-
-        for (handle, field) in UiManager::field_bindings(h) {
-            if handle.is_none() {
-                // Retired bindings (the pre-Iris light R/G/B rows) keep their
-                // `InspectorField` so the event contract is stable, but have no
-                // widget.
-                continue;
-            }
-            let b = bounds_of(&ui, handle);
-            if b.w < 8.0 || b.h < 8.0 {
-                broken.push(format!("{field:?} ({}x{})", b.w, b.h));
-            }
-        }
-        assert!(
-            broken.is_empty(),
-            "{} inspector controls cannot be clicked: {:?}",
-            broken.len(),
-            broken
-        );
     }
 
     #[test]

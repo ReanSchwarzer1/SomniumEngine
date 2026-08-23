@@ -46,11 +46,11 @@ use std::collections::BTreeMap;
 use somnium_ecs::{Entity, PersistentId, ReflectObject};
 
 use crate::attachment::PropertyBag;
-use crate::capability::Capabilities;
 use crate::backend::{
     Budget, Callback, CallbackMask, CompiledModule, Diagnostic, Diagnostics, PhaseCall,
     ScriptBackend, ScriptError, ScriptSchema, ScriptSource, Severity,
 };
+use crate::capability::Capabilities;
 use crate::command::{CommandBuffer, SpawnToken};
 use crate::ids::{InstanceUuid, LanguageTag, ScriptAssetId, ScriptInstanceId};
 use crate::lifecycle::LifecycleState;
@@ -448,7 +448,8 @@ impl ScriptRuntime {
                 &source.display_path,
                 &format!("no backend is registered for `{}`", source.language),
             );
-            self.diagnostics.extend(diagnostics.messages.iter().cloned());
+            self.diagnostics
+                .extend(diagnostics.messages.iter().cloned());
             return Err(diagnostics);
         };
 
@@ -463,7 +464,8 @@ impl ScriptRuntime {
         // The name has to be registered before the link pass, so that a
         // module can be required by something loaded after it *and* by
         // something loaded before it once that is relinked.
-        self.module_keys.insert(module_key(&source.display_path), id);
+        self.module_keys
+            .insert(module_key(&source.display_path), id);
         self.module_paths.insert(id, source.display_path.clone());
         let (module, schema) = self.build(backend, &source)?;
         self.assets.insert(
@@ -561,9 +563,8 @@ impl ScriptRuntime {
         display_path: &str,
         module: CompiledModule,
     ) -> Result<(), Diagnostics> {
-        let backend = module_backend(&self.backends, module.language).ok_or_else(|| {
-            single(asset, "<link>", "no backend is registered for this module")
-        })?;
+        let backend = module_backend(&self.backends, module.language)
+            .ok_or_else(|| single(asset, "<link>", "no backend is registered for this module"))?;
         let names = self.backends[backend].module_requires(module);
 
         // ── 1. Names to assets ───────────────────────────────────────
@@ -768,9 +769,7 @@ impl ScriptRuntime {
 
     /// Every loaded asset, in id order.
     pub fn assets(&self) -> impl Iterator<Item = (ScriptAssetId, &ScriptSource)> {
-        self.assets
-            .iter()
-            .map(|(id, record)| (*id, &record.source))
+        self.assets.iter().map(|(id, record)| (*id, &record.source))
     }
 
     /// Swap an asset's module under its live instances, carrying declared
@@ -835,8 +834,11 @@ impl ScriptRuntime {
                 continue;
             }
             if let Some(record) = self.assets.get(dependent) {
-                let (id, path, module) =
-                    (*dependent, record.source.display_path.clone(), record.module);
+                let (id, path, module) = (
+                    *dependent,
+                    record.source.display_path.clone(),
+                    record.module,
+                );
                 let _ = self.link_module(id, &path, module);
             }
         }
@@ -889,14 +891,8 @@ impl ScriptRuntime {
             let properties = record.properties.clone();
 
             // ── 7. Property migration ────────────────────────────────
-            let (migrated, notes) = self.migrate_properties(
-                backend,
-                module,
-                &schema,
-                &properties,
-                from_version,
-                asset,
-            );
+            let (migrated, notes) =
+                self.migrate_properties(backend, module, &schema, &properties, from_version, asset);
             for note in notes {
                 self.diagnostics.push(note);
             }
@@ -1114,11 +1110,8 @@ impl ScriptRuntime {
 
             let live = ScriptInstanceId::next();
             if let Err(error) = self.backends[backend].instantiate(live, module, &resolved) {
-                self.diagnostics.push(diagnostic(
-                    view.asset,
-                    "<instantiate>",
-                    &error.to_string(),
-                ));
+                self.diagnostics
+                    .push(diagnostic(view.asset, "<instantiate>", &error.to_string()));
                 report.failed.push((view.instance, error));
                 continue;
             }
@@ -1484,7 +1477,9 @@ impl ScriptRuntime {
         let doomed: Vec<InstanceUuid> = self
             .instances
             .iter()
-            .filter(|(_, record)| record.pending_destroy || record.state == LifecycleState::Destroyed)
+            .filter(|(_, record)| {
+                record.pending_destroy || record.state == LifecycleState::Destroyed
+            })
             .map(|(id, _)| *id)
             .collect();
 
@@ -1648,10 +1643,9 @@ fn participates(record: &InstanceRecord, callback: Callback) -> bool {
         // Teardown of a live instance is requested by `pending_destroy`,
         // handled above. State export/import and property migration are
         // driven explicitly by the reload, not by a phase.
-        Callback::Destroy
-        | Callback::SaveState
-        | Callback::LoadState
-        | Callback::MigrateState => false,
+        Callback::Destroy | Callback::SaveState | Callback::LoadState | Callback::MigrateState => {
+            false
+        }
     }
 }
 
@@ -1685,7 +1679,9 @@ fn seed_for(world_seed: u64, instance: InstanceUuid) -> u64 {
     let raw = instance.raw();
     #[allow(clippy::cast_possible_truncation)]
     let folded = (raw as u64) ^ ((raw >> 64) as u64);
-    let mut z = world_seed.wrapping_add(folded).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = world_seed
+        .wrapping_add(folded)
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -1758,7 +1754,11 @@ mod tests {
         let b = seed_for(1, InstanceUuid::from_raw(2));
         assert_ne!(a, b, "two attachments must not share a random stream");
         assert_eq!(a, seed_for(1, InstanceUuid::from_raw(1)), "and it replays");
-        assert_ne!(a, seed_for(2, InstanceUuid::from_raw(1)), "world seed matters");
+        assert_ne!(
+            a,
+            seed_for(2, InstanceUuid::from_raw(1)),
+            "world seed matters"
+        );
     }
 
     #[test]

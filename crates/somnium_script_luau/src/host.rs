@@ -438,9 +438,7 @@ pub fn dispatch(
     snapshot: &ScriptSnapshot,
 ) -> mlua::Result<()> {
     match callback {
-        Callback::FixedUpdate => {
-            function.call::<()>((descriptor, ctx, snapshot.time.fixed_delta))
-        }
+        Callback::FixedUpdate => function.call::<()>((descriptor, ctx, snapshot.time.fixed_delta)),
         Callback::Update => function.call::<()>((descriptor, ctx, snapshot.time.delta)),
         Callback::Event => {
             let events = lua.create_table()?;
@@ -470,8 +468,6 @@ fn format_for_log(value: &Value) -> String {
         other => format!("<{}>", other.type_name()),
     }
 }
-
-
 
 // One block per `ctx` member. Splitting it would scatter the engine's
 // entire script-facing surface across several functions, which is the one
@@ -507,7 +503,9 @@ pub fn build_ctx<'scope, 'env>(
         let keys_down = snapshot.input.keys_down.clone();
         input.set(
             "isKeyDown",
-            scope.create_function(move |_, (_self, key): (Table, u32)| Ok(keys_down.binary_search(&key).is_ok()))?,
+            scope.create_function(move |_, (_self, key): (Table, u32)| {
+                Ok(keys_down.binary_search(&key).is_ok())
+            })?,
         )?;
         let keys_pressed = snapshot.input.keys_pressed.clone();
         input.set(
@@ -560,7 +558,14 @@ pub fn build_ctx<'scope, 'env>(
     ctx.set(
         "set",
         scope.create_function(
-            move |_, (_ctx, entity, component, field, value): (Table, EntityHandle, String, String, Value)| {
+            move |_,
+                  (_ctx, entity, component, field, value): (
+                Table,
+                EntityHandle,
+                String,
+                String,
+                Value,
+            )| {
                 let stable = world.component_by_name(&component).ok_or_else(|| {
                     mlua::Error::RuntimeError(format!("unknown component `{component}`"))
                 })?;
@@ -622,7 +627,13 @@ pub fn build_ctx<'scope, 'env>(
     ctx.set(
         "applyForce",
         scope.create_function(
-            move |_, (_ctx, entity, force, impulse): (Table, EntityHandle, mlua::Vector, Option<bool>)| {
+            move |_,
+                  (_ctx, entity, force, impulse): (
+                Table,
+                EntityHandle,
+                mlua::Vector,
+                Option<bool>,
+            )| {
                 commands.borrow_mut().push(ScriptCommand::ApplyForce {
                     entity: entity.0,
                     force: [force.x(), force.y(), force.z()],

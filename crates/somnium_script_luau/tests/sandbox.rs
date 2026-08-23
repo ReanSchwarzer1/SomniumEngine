@@ -104,10 +104,37 @@ const CANDIDATE_GLOBALS: &[&str] = &[
 fn the_sandbox_surface_is_exactly_what_we_expect() {
     let present = globals();
     let expected: Vec<String> = [
-        "Field", "Script", "_VERSION", "assert", "bit32", "buffer", "coroutine", "error",
-        "getmetatable", "ipairs", "math", "newproxy", "next", "pairs", "pcall", "rawequal",
-        "rawget", "rawlen", "rawset", "select", "setmetatable", "string", "table", "tonumber",
-        "tostring", "type", "typeof", "unpack", "utf8", "vector", "xpcall",
+        "Field",
+        "Script",
+        "_VERSION",
+        "assert",
+        "bit32",
+        "buffer",
+        "coroutine",
+        "error",
+        "getmetatable",
+        "ipairs",
+        "math",
+        "newproxy",
+        "next",
+        "pairs",
+        "pcall",
+        "rawequal",
+        "rawget",
+        "rawlen",
+        "rawset",
+        "select",
+        "setmetatable",
+        "string",
+        "table",
+        "tonumber",
+        "tostring",
+        "type",
+        "typeof",
+        "unpack",
+        "utf8",
+        "vector",
+        "xpcall",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -186,11 +213,15 @@ fn the_engine_api_is_installed_and_frozen() {
     lua.sandbox(true).unwrap();
 
     assert_eq!(
-        lua.load("return type(Script.define)").eval::<String>().unwrap(),
+        lua.load("return type(Script.define)")
+            .eval::<String>()
+            .unwrap(),
         "function"
     );
     assert_eq!(
-        lua.load("return type(Field.number)").eval::<String>().unwrap(),
+        lua.load("return type(Field.number)")
+            .eval::<String>()
+            .unwrap(),
         "function"
     );
     assert!(

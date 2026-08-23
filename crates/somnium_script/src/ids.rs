@@ -123,7 +123,13 @@ impl ScriptAssetId {
         let mut hash = OFFSET;
         for byte in path
             .chars()
-            .map(|c| if c == '\\' { '/' } else { c.to_ascii_lowercase() })
+            .map(|c| {
+                if c == '\\' {
+                    '/'
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
             .flat_map(|c| {
                 let mut buffer = [0_u8; 4];
                 let encoded = c.encode_utf8(&mut buffer).as_bytes().to_vec();
@@ -238,7 +244,10 @@ mod tests {
         let asset = ScriptAssetId::mint();
         assert_eq!(ScriptAssetId::parse_hex(&asset.to_string()), Some(asset));
         let instance = InstanceUuid::mint();
-        assert_eq!(InstanceUuid::parse_hex(&instance.to_string()), Some(instance));
+        assert_eq!(
+            InstanceUuid::parse_hex(&instance.to_string()),
+            Some(instance)
+        );
     }
 
     #[test]

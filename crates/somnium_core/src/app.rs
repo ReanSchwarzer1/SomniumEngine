@@ -15,22 +15,22 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::{config::PhysicsConfig, world::PhysicsWorld};
 use somnium_renderer::{GizmoAxis, GizmoMode, RenderContext, SomniumRenderer, gizmo_hit_test};
-use somnium_ui::{ColorField, EditorEvent, LightInspectorState, TerrainInspectorState, UiManager};
+use somnium_ui::{EditorEvent, GestureId, TerrainInspectorState, UiManager};
 
 use crate::config::EngineConfig;
 use crate::context::{EngineContext, SimulationClock, SimulationState};
 use crate::editor_commands::{
-    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, SetLightCmd,
-    SetTransformCmd, TerrainEditCmd, TerrainRestoreOp, TerrainRestoreQueue, UndoStack,
+    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EntitySnapshot, FieldUndoSnapshot,
+    SetFieldCmd, SetLightCmd, SetTransformCmd, TerrainEditCmd, TerrainRestoreOp,
+    TerrainRestoreQueue, UndoStack,
 };
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::time::TimeState;
 use crate::{
-    BuoyantVessel, CameraSettingsComponent, FoliageComponent, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
-    PostProcessComponent, TerrainComponent, Transform, WaterComponent, WorldTransform,
-    look_rotation_neg_z, simulate_particles,
+    CameraSettingsComponent, FoliageComponent, LightComponent, LightType, MaterialComponent,
+    MeshComponent, MeshKind, Name, Parent, ParticleEmitter, PostProcessComponent, TerrainComponent,
+    Transform, WaterComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -117,7 +117,10 @@ mod content_target_tests {
                 "{typed} produced {path:?}"
             );
             assert!(
-                !path.to_string_lossy().to_ascii_lowercase().contains(".luau.luau"),
+                !path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(".luau.luau"),
                 "{typed} produced {path:?}"
             );
         }
@@ -339,6 +342,21 @@ struct FoliagePart {
     is_leaf: bool,
 }
 
+// Temporary exhaustiveness shell while the now-unreachable reflected colour
+// arms are deleted; only MaterialBase can enter this renderer-only function.
+#[allow(dead_code)]
+enum LegacyColorTarget {
+    Light,
+    WaterDeep,
+    WaterShallow,
+    WaterEdge,
+    WaterAbsorption,
+    WaterScattering,
+    ParticleStart,
+    ParticleEnd,
+    MaterialBase,
+}
+
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
 pub struct Engine<G: GameApp> {
     game: Box<G>,
@@ -361,6 +379,8 @@ pub struct Engine<G: GameApp> {
     state: LifecycleState,
     /// Bounded command history for editor undo/redo (128-command capacity).
     undo_stack: UndoStack,
+    /// Gesture baselines captured before the first live reflected write.
+    field_gestures: std::collections::HashMap<GestureId, FieldUndoSnapshot>,
     /// Current cursor position in physical pixels.
     cursor_pos: (f32, f32),
     /// Current window dimensions in physical pixels (updated on resize).
@@ -395,7 +415,6 @@ pub struct Engine<G: GameApp> {
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
 
-    scrub_transform: Option<(u32, Transform)>,
     scrub_light: Option<(u32, LightComponent)>,
     /// Phase 11.5M: receiver for captured tracing events forwarded to the output log.
     log_rx: Option<std::sync::mpsc::Receiver<crate::log_capture::LogEntry>>,
@@ -496,6 +515,7 @@ impl<G: GameApp + 'static> Engine<G> {
             selected_entity: None,
             state: LifecycleState::Uninitialized,
             undo_stack: UndoStack::new(128),
+            field_gestures: std::collections::HashMap::new(),
             cursor_pos: (0.0, 0.0),
             viewport_size: initial_vp,
             gizmo_drag: None,
@@ -508,7 +528,6 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_stroke_seed: 0,
             foliage_painting: false,
             terrain_colliders: std::collections::HashMap::new(),
-            scrub_transform: None,
             scrub_light: None,
             log_rx: Some(log_rx),
             shortcut_modifiers: somnium_ui::message::Modifiers::default(),
@@ -552,11 +571,7 @@ impl<G: GameApp> Engine<G> {
     /// The clock a script sees. Fixed-step callbacks are handed
     /// `fixed_delta` and simulation time and nothing else, because those
     /// are the only two values that are the same on a replay.
-    fn script_time(
-        &self,
-        fixed_dt: f32,
-        dt: f32,
-    ) -> somnium_script::snapshot::TimeSnapshot {
+    fn script_time(&self, fixed_dt: f32, dt: f32) -> somnium_script::snapshot::TimeSnapshot {
         somnium_script::snapshot::TimeSnapshot {
             fixed_delta: fixed_dt,
             delta: dt,
@@ -813,7 +828,7 @@ impl<G: GameApp> Engine<G> {
         if live {
             // Mid-drag: apply it, do not record it. The gesture's final
             // value arrives once with `live == false` and becomes the one
-            // undo step — the same convention `SetInspectorValue` uses.
+            // undo step — the same convention property scrubs use.
             if let Some(set) = self
                 .world
                 .get_mut::<somnium_script::attachment::ScriptSet>(entity)
@@ -1036,7 +1051,10 @@ fn reveal_in_file_browser(path: &std::path::Path) -> Result<(), String> {
         .arg(path)
         .spawn();
     #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    let result = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open")
         // No "select the file" on the freedesktop side, so open the
@@ -1143,7 +1161,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &render_ctx.queue,
                     Arc::clone(&window),
                 );
-
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
@@ -1272,15 +1289,42 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             }
                             return;
                         }
-                        Some(A::SaveScene) => { self.handle_editor_event(EditorEvent::SaveScene); return; }
-                        Some(A::Undo) => { self.handle_editor_event(EditorEvent::Undo); return; }
-                        Some(A::Redo) => { self.handle_editor_event(EditorEvent::Redo); return; }
-                        Some(A::DeleteSelected) => { self.handle_editor_event(EditorEvent::DeleteSelected); return; }
-                        Some(A::DuplicateSelected) => { self.handle_editor_event(EditorEvent::DuplicateSelected); return; }
-                        Some(A::SetGizmoMode(mode)) => { self.handle_editor_event(EditorEvent::SetGizmoMode(mode)); return; }
-                        Some(A::ToggleTerrainEdit) => { self.handle_editor_event(EditorEvent::ToggleTerrainEdit); return; }
-                        Some(A::ToggleFoliage) => { self.handle_editor_event(EditorEvent::ToggleFoliage); return; }
-                        Some(A::ReloadScripts) => { self.handle_editor_event(EditorEvent::ReloadScripts); return; }
+                        Some(A::SaveScene) => {
+                            self.handle_editor_event(EditorEvent::SaveScene);
+                            return;
+                        }
+                        Some(A::Undo) => {
+                            self.handle_editor_event(EditorEvent::Undo);
+                            return;
+                        }
+                        Some(A::Redo) => {
+                            self.handle_editor_event(EditorEvent::Redo);
+                            return;
+                        }
+                        Some(A::DeleteSelected) => {
+                            self.handle_editor_event(EditorEvent::DeleteSelected);
+                            return;
+                        }
+                        Some(A::DuplicateSelected) => {
+                            self.handle_editor_event(EditorEvent::DuplicateSelected);
+                            return;
+                        }
+                        Some(A::SetGizmoMode(mode)) => {
+                            self.handle_editor_event(EditorEvent::SetGizmoMode(mode));
+                            return;
+                        }
+                        Some(A::ToggleTerrainEdit) => {
+                            self.handle_editor_event(EditorEvent::ToggleTerrainEdit);
+                            return;
+                        }
+                        Some(A::ToggleFoliage) => {
+                            self.handle_editor_event(EditorEvent::ToggleFoliage);
+                            return;
+                        }
+                        Some(A::ReloadScripts) => {
+                            self.handle_editor_event(EditorEvent::ReloadScripts);
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -1767,90 +1811,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let sel_t = self
                 .selected_entity
                 .and_then(|e| self.world.get::<Transform>(e).copied());
-            let sel_camera_settings = self
-                .selected_entity
-                .and_then(|e| self.world.get::<CameraSettingsComponent>(e).copied());
-            let sel_camera = sel_camera_settings.map(|c| c.frustum_cull);
-            // Phase DOOM-F.
-            let sel_camera_dynres = sel_camera_settings
-                .map(|c| (c.dynamic_resolution, c.dynamic_target_ms, c.dynamic_floor));
-            // Phase 15A1: post-processing settings for the inspector.
-            let sel_post = self
-                .selected_entity
-                .and_then(|e| self.world.get::<PostProcessComponent>(e).copied())
-                .map(|pp| somnium_ui::PostInspectorState {
-                    values: [
-                        pp.ev100,
-                        pp.exposure_compensation,
-                        pp.vignette_strength,
-                        pp.ca_strength,
-                        pp.ibl_intensity,
-                    ],
-                    vignette: pp.vignette_enabled,
-                    chromatic: pp.ca_enabled,
-                    fxaa: pp.fxaa_enabled,
-                    cel_shading: pp.cel_shading,
-                    taa: pp.taa_enabled,
-                    gtao: pp.gtao_enabled,
-                    restir: pp.restir_enabled,
-                    restir_gi: pp.restir_gi_enabled,
-                    rt_reflect: pp.rt_reflect_enabled,
-                    rt_refract: pp.rt_refract_enabled,
-                    pcss: pp.pcss_enabled,
-                    contact_shadows: pp.contact_shadows_enabled,
-                    cas: pp.cas_enabled,
-                    motion_blur: pp.motion_blur_enabled,
-                    bloom: pp.bloom_enabled,
-                    dof: pp.dof_enabled,
-                    volumetrics: pp.volumetrics_enabled,
-                    physical_camera: pp.use_physical_camera,
-                    shafts: pp.light_shafts,
-                    world_cache: pp.world_cache,
-                    specular_gi: pp.specular_gi,
-                    path_tracer: pp.path_tracer,
-                    mesh_sdf: pp.mesh_sdf,
-                    probes: pp.probes,
-                    analytic_grad: pp.analytic_grad,
-                    fsr: pp.fsr_enabled,
-                    fsr_sharpness: pp.fsr_sharpness,
-                    cache_intensity: pp.cache_intensity,
-                    cache_cell: pp.cache_cell_size,
-                    spec_rough: pp.spec_roughness,
-                    path_bounces: pp.path_bounces as f32,
-                    probe_intensity: pp.probe_intensity,
-                    shaft_intensity: pp.shaft_intensity,
-                    extras: [
-                        pp.bloom_intensity,
-                        pp.dof_focus_distance,
-                        pp.temperature,
-                        pp.contrast,
-                        pp.saturation,
-                        pp.grain,
-                        pp.fog_density,
-                        pp.fog_height_falloff,
-                        pp.fog_asymmetry,
-                        pp.tint,
-                        pp.lift,
-                        pp.gamma,
-                        pp.gain,
-                        pp.aperture_f_stops,
-                        // Shown as the denominator: 0.01 s reads as 100.
-                        if pp.shutter_speed_s > 0.0 {
-                            1.0 / pp.shutter_speed_s
-                        } else {
-                            0.0
-                        },
-                        pp.sensitivity_iso,
-                        pp.gtao_radius,
-                        pp.gtao_intensity,
-                        pp.cas_sharpness,
-                        pp.cas_strength,
-                        pp.motion_blur_shutter,
-                        pp.restir_gi_intensity,
-                    ],
-                    auto_exposure: pp.auto_exposure,
-                    tonemapper: pp.tonemapper.label(),
-                });
             // Phase 17C: terrain layer + foliage settings for the inspector.
             let sel_terrain = self.selected_entity.and_then(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
@@ -1912,74 +1872,30 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         [f.enabled, paint_on, erase_on, single_on],
                     )
                 });
-            let sel_water = self
-                .selected_entity
-                .and_then(|entity| self.world.get::<WaterComponent>(entity).copied())
-                .map(|water| {
-                    [
-                        water.surface_level,
-                        water.max_depth,
-                        water.clarity,
-                        water.amplitude,
-                        water.roughness,
-                        water.ssr_strength,
-                        water.rt_reflect_strength,
-                        water.reflect_debug,
-                        water.wave_length_a,
-                        water.wave_length_b,
-                        water.wave_speed,
-                        water.wave_steepness,
-                        water.wind_speed,
-                        water.foam_decay,
-                        water.foam_threshold,
-                        water.spectrum_blend,
-                        water.edge_scale,
-                        water.anisotropy,
-                        water.caustic_strength,
-                    ]
-                });
-            let sel_vessel = self
-                .selected_entity
-                .and_then(|entity| self.world.get::<BuoyantVessel>(entity).copied())
-                .map(|vessel| {
-                    [
-                        vessel.buoyancy_per_sample,
-                        vessel.linear_drag,
-                        vessel.angular_drag,
-                        vessel.propulsion_force,
-                        vessel.draft,
-                        vessel.righting,
-                    ]
-                });
-
-            // Phase 13E: light properties for the inspector (angles in degrees).
-            let sel_light = self
-                .selected_entity
-                .and_then(|e| self.world.get::<LightComponent>(e).copied())
-                .map(|lc| LightInspectorState {
-                    values: [
-                        lc.intensity,
-                        lc.range,
-                        lc.inner_angle.to_degrees(),
-                        lc.outer_angle.to_degrees(),
-                        lc.tint().x,
-                        lc.tint().y,
-                        lc.tint().z,
-                        lc.moon_intensity,
-                        lc.source_radius,
-                        lc.area_width,
-                        lc.area_height,
-                    ],
-                    kelvin: lc.color_temperature_k,
-                    directional: lc.light_type == LightType::Directional,
-                    show_cone: lc.light_type == LightType::Spot,
-                    show_width: matches!(lc.light_type, LightType::Rect | LightType::Tube),
-                    show_height: lc.light_type == LightType::Rect,
-                });
             // Phase 16-D: the Scripts section, built from what each
             // attached script declared. Computed before the `ui` borrow
             // because it reads the world and the script host.
             let sel_scripts = self.script_inspector_state();
+            let generated_panels = self
+                .selected_entity
+                .map(|entity| {
+                    let editors =
+                        somnium_ui::editor::property_editors::PropertyEditorRegistry::standard();
+                    let rules = somnium_ui::editor::editing_rules::standard_editing_rules(
+                        &self.type_registry,
+                    );
+                    self.type_registry
+                        .schemas_on(&self.world, entity)
+                        .into_iter()
+                        .filter_map(|schema| {
+                            let values = (schema.snapshot)(&self.world, entity)?;
+                            Some(somnium_ui::editor::inspector_gen::generate_component_panel(
+                                schema, &values, &editors, &rules,
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             if let Some(ui) = &mut self.ui_manager {
                 ui.update_outliner_tree(&tree, selected_idx);
                 ui.set_fps(self.time.fps());
@@ -1994,7 +1910,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 if let Some(t) = sel_t {
                     let (rx, ry, rz) = t.rotation.to_euler(glam::EulerRot::XYZ);
                     ui.update_inspector(
-                        selected_idx,
+                        self.selected_entity,
                         Some(t.translation.to_array()),
                         Some([rx.to_degrees(), ry.to_degrees(), rz.to_degrees()]),
                         Some(t.scale.to_array()),
@@ -2002,36 +1918,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 } else {
                     ui.update_inspector(None, None, None, None);
                 }
-                ui.update_light_inspector(sel_light);
-                ui.update_camera_inspector(sel_camera, sel_camera_dynres);
-                ui.update_post_inspector(sel_post);
+                ui.update_generated_details(self.selected_entity, generated_panels);
                 ui.update_terrain_inspector(sel_terrain);
-                ui.update_water_inspector(sel_water);
-                ui.update_vessel_inspector(sel_vessel);
                 ui.update_foliage_inspector(sel_foliage);
-                let water_iris = self.selected_entity.and_then(|entity| {
-                    let water = self.world.get::<WaterComponent>(entity)?;
-                    Some((
-                        water.deep_color,
-                        water.shallow_color,
-                        water.edge_color,
-                        water.absorption,
-                        water.scattering,
-                        water.underwater_enabled,
-                        [
-                            water.wave_dir_a[0],
-                            water.wave_dir_a[1],
-                            water.wave_dir_b[0],
-                            water.wave_dir_b[1],
-                        ],
-                    ))
-                });
-                ui.update_water_iris(water_iris);
-                let particle = self.selected_entity.and_then(|entity| {
-                    let p = self.world.get::<ParticleEmitter>(entity)?;
-                    Some((p.color_start, p.color_end))
-                });
-                ui.update_particle_inspector(particle);
                 let material = self.selected_entity.and_then(|entity| {
                     let id = self.world.get::<MaterialComponent>(entity)?.id;
                     self.renderer
@@ -3399,18 +3288,12 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    fn apply_inspector_color(
-        &mut self,
-        field: ColorField,
-        rgba: [f32; 4],
-        live: bool,
-        cancel: bool,
-    ) {
+    fn apply_material_base_color(&mut self, rgba: [f32; 4], live: bool, cancel: bool) {
         let Some(entity) = self.selected_entity else {
             return;
         };
-        match field {
-            ColorField::Light => {
+        match LegacyColorTarget::MaterialBase {
+            LegacyColorTarget::Light => {
                 if cancel {
                     if let Some((_, old)) = self.scrub_light.take() {
                         if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
@@ -3454,7 +3337,7 @@ impl<G: GameApp> Engine<G> {
                     }
                 }
             }
-            ColorField::WaterDeep => {
+            LegacyColorTarget::WaterDeep => {
                 if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
                     w.deep_color = rgba;
                 }
@@ -3462,7 +3345,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::WaterShallow => {
+            LegacyColorTarget::WaterShallow => {
                 if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
                     w.shallow_color = rgba;
                 }
@@ -3470,7 +3353,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::WaterEdge => {
+            LegacyColorTarget::WaterEdge => {
                 if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
                     w.edge_color = rgba;
                 }
@@ -3478,7 +3361,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::WaterAbsorption => {
+            LegacyColorTarget::WaterAbsorption => {
                 if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
                     let mag = somnium_ui::color::split_magnitude(w.absorption).1;
                     w.absorption =
@@ -3488,7 +3371,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::WaterScattering => {
+            LegacyColorTarget::WaterScattering => {
                 if let Some(w) = self.world.get_mut::<WaterComponent>(entity) {
                     let mag = somnium_ui::color::split_magnitude(w.scattering).1;
                     w.scattering =
@@ -3498,7 +3381,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::ParticleStart => {
+            LegacyColorTarget::ParticleStart => {
                 if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
                     p.color_start = rgba;
                 }
@@ -3506,7 +3389,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::ParticleEnd => {
+            LegacyColorTarget::ParticleEnd => {
                 if let Some(p) = self.world.get_mut::<ParticleEmitter>(entity) {
                     p.color_end = rgba;
                 }
@@ -3514,7 +3397,7 @@ impl<G: GameApp> Engine<G> {
                     self.scene_dirty = true;
                 }
             }
-            ColorField::MaterialBase => {
+            LegacyColorTarget::MaterialBase => {
                 if let Some(mat) = self.world.get::<MaterialComponent>(entity).copied() {
                     if let (Some(renderer), Some(ctx)) =
                         (self.renderer.as_mut(), self.render_ctx.as_ref())
@@ -3535,7 +3418,7 @@ impl<G: GameApp> Engine<G> {
     }
 
     fn handle_editor_event(&mut self, ev: EditorEvent) {
-        use somnium_ui::{CreateKind, InspectorField as IF};
+        use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
         match ev {
             EditorEvent::SelectEntity(opt_idx) => {
@@ -3809,589 +3692,150 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::SetInspectorValue { field, value, live } => {
-                if !live {
-                    self.scene_dirty = true;
+            EditorEvent::SetComponentField {
+                entity,
+                component,
+                field,
+                value,
+                gesture,
+                live,
+            } => {
+                if !self.world.is_alive(entity) {
+                    self.field_gestures.remove(&gesture);
+                    return;
+                }
+                if live {
+                    if !self.field_gestures.contains_key(&gesture) {
+                        let Some(scope) = SetFieldCmd::scope(component, field) else {
+                            warn!("reflected edit addressed an unknown field");
+                            return;
+                        };
+                        let Some(snapshot) = FieldUndoSnapshot::capture(
+                            &self.world,
+                            entity,
+                            component,
+                            field,
+                            scope,
+                        ) else {
+                            warn!("could not capture reflected edit baseline");
+                            return;
+                        };
+                        self.field_gestures.insert(gesture, snapshot);
+                    }
+                    if let Err(error) =
+                        SetFieldCmd::apply_live(&mut self.world, entity, component, field, value)
+                    {
+                        warn!(%error, "rejected reflected live edit");
+                        self.field_gestures.remove(&gesture);
+                    }
+                    return;
+                }
+
+                let baseline = self.field_gestures.remove(&gesture);
+                match SetFieldCmd::new(
+                    &self.world,
+                    entity,
+                    component,
+                    field,
+                    value,
+                    gesture,
+                    baseline,
+                ) {
+                    Ok(command) => {
+                        self.undo_stack.push(
+                            Box::new(command),
+                            &mut self.world,
+                            &mut self.selected_entity,
+                        );
+                        self.scene_dirty = true;
+                    }
+                    Err(error) => warn!(%error, "rejected reflected property edit"),
+                }
+            }
+
+            EditorEvent::SetTerrainToolValue {
+                field,
+                value,
+                live: _,
+            } => {
+                if matches!(field, TT::AerialDistance) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.aerial_split = value.clamp(20.0, 4000.0);
+                        renderer.classify_pass.aerial_split = renderer.aerial_split;
+                    }
+                    return;
                 }
                 let Some(entity) = self.selected_entity else {
                     return;
                 };
-
-                if matches!(
-                    field,
-                    IF::WaterSurface
-                        | IF::WaterMaxDepth
-                        | IF::WaterClarity
-                        | IF::WaterAmplitude
-                        | IF::WaterRoughness
-                        | IF::WaterSsrStrength
-                        | IF::WaterRtReflect
-                        | IF::WaterReflectDebug
-                        | IF::WaterWaveLengthA
-                        | IF::WaterWaveLengthB
-                        | IF::WaterWaveSpeed
-                        | IF::WaterWaveSteepness
-                        | IF::WaterWindSpeed
-                        | IF::WaterFoamDecay
-                        | IF::WaterFoamThreshold
-                        | IF::WaterSpectrumBlend
-                        | IF::WaterEdgeScale
-                        | IF::WaterAnisotropy
-                        | IF::WaterCausticStrength
-                        | IF::WaterWaveDirAX
-                        | IF::WaterWaveDirAZ
-                        | IF::WaterWaveDirBX
-                        | IF::WaterWaveDirBZ
-                        | IF::WaterAbsorptionMag
-                        | IF::WaterScatteringMag
-                ) {
-                    if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
-                        match field {
-                            IF::WaterSurface => water.surface_level = value,
-                            IF::WaterMaxDepth => water.max_depth = value.max(0.01),
-                            IF::WaterClarity => water.clarity = value.clamp(0.0, 1.0),
-                            IF::WaterAmplitude => water.amplitude = value.max(0.0),
-                            IF::WaterRoughness => water.roughness = value.clamp(0.02, 1.0),
-                            IF::WaterSsrStrength => water.ssr_strength = value.clamp(0.0, 1.0),
-                            IF::WaterRtReflect => water.rt_reflect_strength = value.clamp(0.0, 1.0),
-                            IF::WaterReflectDebug => {
-                                water.reflect_debug = value.clamp(0.0, 2.0).round()
-                            }
-                            IF::WaterWaveLengthA => water.wave_length_a = value.max(0.5),
-                            IF::WaterWaveLengthB => water.wave_length_b = value.max(0.5),
-                            IF::WaterWaveSpeed => water.wave_speed = value.max(0.0),
-                            IF::WaterWaveSteepness => water.wave_steepness = value.clamp(0.0, 0.95),
-                            IF::WaterWindSpeed => water.wind_speed = value.clamp(0.1, 40.0),
-                            IF::WaterFoamDecay => water.foam_decay = value.clamp(0.01, 10.0),
-                            IF::WaterFoamThreshold => {
-                                water.foam_threshold = value.clamp(0.05, 0.95)
-                            }
-                            IF::WaterSpectrumBlend => water.spectrum_blend = value.clamp(0.0, 1.0),
-                            IF::WaterEdgeScale => water.edge_scale = value.max(0.05),
-                            IF::WaterAnisotropy => water.anisotropy = value.clamp(-0.8, 0.8),
-                            IF::WaterCausticStrength => {
-                                water.caustic_strength = value.clamp(0.0, 4.0)
-                            }
-                            IF::WaterWaveDirAX => water.wave_dir_a[0] = value,
-                            IF::WaterWaveDirAZ => water.wave_dir_a[1] = value,
-                            IF::WaterWaveDirBX => water.wave_dir_b[0] = value,
-                            IF::WaterWaveDirBZ => water.wave_dir_b[1] = value,
-                            IF::WaterAbsorptionMag => {
-                                let (tint, _) =
-                                    somnium_ui::color::split_magnitude(water.absorption);
-                                water.absorption =
-                                    somnium_ui::color::join_magnitude(tint, value.max(0.0));
-                            }
-                            IF::WaterScatteringMag => {
-                                let (tint, _) =
-                                    somnium_ui::color::split_magnitude(water.scattering);
-                                water.scattering =
-                                    somnium_ui::color::join_magnitude(tint, value.max(0.0));
-                            }
-                            _ => unreachable!(),
-                        }
-                    }
-                    if field == IF::WaterSurface {
-                        if let Some(transform) = self.world.get_mut::<Transform>(entity) {
-                            transform.translation.y = value;
-                        }
-                    }
-                    let _ = live;
-                    return;
-                }
-
-                if matches!(
-                    field,
-                    IF::VesselBuoyancy
-                        | IF::VesselDrag
-                        | IF::VesselAngularDrag
-                        | IF::VesselThrust
-                        | IF::VesselDraft
-                        | IF::VesselRighting
-                ) {
-                    if let Some(vessel) = self.world.get_mut::<BuoyantVessel>(entity) {
-                        match field {
-                            IF::VesselBuoyancy => {
-                                vessel.buoyancy_per_sample = value.clamp(0.0, 80_000.0)
-                            }
-                            IF::VesselDrag => vessel.linear_drag = value.clamp(0.0, 20_000.0),
-                            IF::VesselAngularDrag => {
-                                vessel.angular_drag = value.clamp(0.0, 40_000.0)
-                            }
-                            IF::VesselThrust => {
-                                vessel.propulsion_force = value.clamp(0.0, 40_000.0)
-                            }
-                            IF::VesselDraft => vessel.draft = value.clamp(0.1, 3.0),
-                            IF::VesselRighting => vessel.righting = value.clamp(0.0, 80_000.0),
-                            _ => unreachable!(),
-                        }
-                    }
-                    let _ = live;
-                    return;
-                }
-
-                // Phase DOOM-E: the aerial split distance is renderer state.
-                if field == IF::TerrainAerialDistance {
-                    if let Some(r) = &mut self.renderer {
-                        // Below ~20 m the split lands inside the detail the
-                        // player is standing on; above 4 km it is past the far
-                        // plane on every map that exists.
-                        r.aerial_split = value.clamp(20.0, 4000.0);
-                        r.classify_pass.aerial_split = r.aerial_split;
-                    }
-                    return;
-                }
-
-                // Phase DOOM-F: the two dynamic-resolution numbers live on the
-                // Camera singleton next to Frustum Cull.
-                if matches!(field, IF::CameraDynResTargetMs | IF::CameraDynResFloor) {
-                    let mut settings = None;
-                    if let Some(cam) = self.world.get_mut::<CameraSettingsComponent>(entity) {
-                        match field {
-                            // Below ~4 ms the controller would chase a budget
-                            // no scale can reach and sit on its floor; above
-                            // 100 ms it is not a budget.
-                            IF::CameraDynResTargetMs => {
-                                cam.dynamic_target_ms = value.clamp(4.0, 100.0);
-                            }
-                            // Entered as a percentage. 25% is a quarter of the
-                            // linear resolution — about 6% of the pixels — and
-                            // is already well past where FSR can reconstruct.
-                            IF::CameraDynResFloor => {
-                                cam.dynamic_floor = (value / 100.0).clamp(0.25, 1.0);
-                            }
-                            _ => unreachable!(),
-                        }
-                        settings = Some((
-                            cam.dynamic_resolution,
-                            cam.dynamic_target_ms,
-                            cam.dynamic_floor,
-                        ));
-                    }
-                    if let (Some((on, target, floor)), Some(r), Some(c)) =
-                        (settings, &mut self.renderer, &self.render_ctx)
-                    {
-                        r.set_dynamic_resolution(c, on, target, floor);
-                    }
-                    return;
-                }
-
-                // Phase 15A1: post-processing fields edit PostProcessComponent.
-                if matches!(
-                    field,
-                    IF::PostExposure
-                        | IF::PostExposureCompensation
-                        | IF::PostTint
-                        | IF::PostLift
-                        | IF::PostGamma
-                        | IF::PostGain
-                        | IF::PostAperture
-                        | IF::PostShutter
-                        | IF::PostIso
-                        | IF::PostAoRadius
-                        | IF::PostAoIntensity
-                        | IF::PostFsrSharpness
-                        | IF::PostCasSharpness
-                        | IF::PostCasStrength
-                        | IF::PostMotionBlurShutter
-                        | IF::PostGiIntensity
-                        | IF::PostFogDensity
-                        | IF::PostFogHeight
-                        | IF::PostFogAsymmetry
-                        | IF::PostBloomIntensity
-                        | IF::PostFocusDistance
-                        | IF::PostTemperature
-                        | IF::PostContrast
-                        | IF::PostSaturation
-                        | IF::PostGrain
-                        | IF::PostVignetteStrength
-                        | IF::PostCaStrength
-                        | IF::PostIblIntensity
-                        | IF::PostCacheIntensity
-                        | IF::PostCacheCell
-                        | IF::PostSpecRough
-                        | IF::PostPathBounces
-                        | IF::PostProbeIntensity
-                        | IF::PostShaftIntensity
-                ) {
-                    if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
-                        match field {
-                            IF::PostExposure => pp.ev100 = value,
-                            IF::PostExposureCompensation => pp.exposure_compensation = value,
-                            // Clamped hard: fog is an exponential, and a
-                            // density a couple of orders too high is an opaque
-                            // grey screen with no way back except undo.
-                            IF::PostFogDensity => pp.fog_density = value.clamp(0.0, 0.05),
-                            IF::PostFogHeight => pp.fog_height_falloff = value.max(0.0),
-                            IF::PostFogAsymmetry => pp.fog_asymmetry = value.clamp(-0.95, 0.95),
-                            IF::PostBloomIntensity => pp.bloom_intensity = value.max(0.0),
-                            IF::PostFocusDistance => pp.dof_focus_distance = value.max(0.01),
-                            IF::PostTemperature => pp.temperature = value.clamp(-1.0, 1.0),
-                            IF::PostTint => pp.tint = value.clamp(-1.0, 1.0),
-                            IF::PostLift => pp.lift = value.clamp(-1.0, 1.0),
-                            // Gamma is a divisor in the grade, so zero would
-                            // blow the midtones out to infinity.
-                            IF::PostGamma => pp.gamma = value.clamp(0.05, 4.0),
-                            IF::PostGain => pp.gain = value.max(0.0),
-                            IF::PostAperture => pp.aperture_f_stops = value.clamp(0.7, 45.0),
-                            // The row is the denominator, so 100 means 1/100 s.
-                            IF::PostShutter => {
-                                pp.shutter_speed_s = 1.0 / value.clamp(1.0, 8000.0);
-                            }
-                            IF::PostIso => pp.sensitivity_iso = value.clamp(25.0, 25600.0),
-                            IF::PostAoRadius => pp.gtao_radius = value.clamp(0.01, 20.0),
-                            IF::PostAoIntensity => pp.gtao_intensity = value.clamp(0.0, 4.0),
-                            IF::PostFsrSharpness => pp.fsr_sharpness = value.clamp(0.0, 1.0),
-                            IF::PostCasSharpness => pp.cas_sharpness = value.clamp(0.0, 1.0),
-                            IF::PostCasStrength => pp.cas_strength = value.clamp(0.0, 1.0),
-                            IF::PostMotionBlurShutter => {
-                                pp.motion_blur_shutter = value.clamp(0.0, 1.0);
-                            }
-                            IF::PostGiIntensity => {
-                                pp.restir_gi_intensity = value.clamp(0.0, 4.0);
-                            }
-                            IF::PostContrast => pp.contrast = value.max(0.0),
-                            IF::PostSaturation => pp.saturation = value.max(0.0),
-                            IF::PostGrain => pp.grain = value.max(0.0),
-                            IF::PostVignetteStrength => pp.vignette_strength = value.max(0.0),
-                            IF::PostCaStrength => pp.ca_strength = value.max(0.0),
-                            IF::PostIblIntensity => pp.ibl_intensity = value.max(0.0),
-                            IF::PostCacheIntensity => pp.cache_intensity = value.max(0.0),
-                            IF::PostCacheCell => pp.cache_cell_size = value.clamp(0.25, 32.0),
-                            IF::PostSpecRough => pp.spec_roughness = value.clamp(0.0, 1.0),
-                            IF::PostPathBounces => {
-                                pp.path_bounces = value.round().clamp(1.0, 8.0) as u32;
-                            }
-                            IF::PostProbeIntensity => pp.probe_intensity = value.max(0.0),
-                            IF::PostShaftIntensity => pp.shaft_intensity = value.max(0.0),
-                            _ => unreachable!(),
-                        }
-                    }
-                    return;
-                }
-
-                // Phase 17C: terrain layer fields reach into renderer-side
-                // TerrainData, which lives outside the ECS, so they bypass the
-                // undo stack the same way sculpting already does.
-                if matches!(
-                    field,
-                    IF::TerrainPaintLayer
-                        | IF::TerrainTile0
-                        | IF::TerrainRelief
-                        | IF::TerrainWetness
-                        | IF::TerrainMacroStrength
-                        | IF::TerrainDebugView
-                        | IF::TerrainMorphStart
-                ) {
-                    if field == IF::TerrainPaintLayer {
+                match field {
+                    TT::PaintLayer => {
                         self.terrain_brush.paint_layer = (value.round().max(0.0) as usize).min(
                             somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize - 1,
                         );
-                        return;
                     }
-                    // Phase 25H: a terrain-wide multiplier, not a per-layer
-                    // value — the layers already author their own relief and
-                    // this scales all of them together.
-                    if field == IF::TerrainRelief {
-                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
-                            return;
-                        };
-                        if let Some(t) = self
-                            .renderer
-                            .as_mut()
-                            .and_then(|r| r.terrain_mut(tc.terrain_id))
-                        {
-                            t.parallax_scale = value.clamp(0.0, 4.0);
-                            if t.parallax_scale > 0.0 {
-                                t.parallax_held = t.parallax_scale;
-                            }
-                        }
-                        return;
-                    }
-                    if field == IF::TerrainWetness {
-                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
-                            return;
-                        };
-                        if let Some(t) = self
-                            .renderer
-                            .as_mut()
-                            .and_then(|r| r.terrain_mut(tc.terrain_id))
-                        {
-                            t.wetness = value.clamp(0.0, 1.0);
-                        }
-                        return;
-                    }
-                    if field == IF::TerrainMacroStrength {
-                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
-                            return;
-                        };
-                        if let Some(t) = self
-                            .renderer
-                            .as_mut()
-                            .and_then(|r| r.terrain_mut(tc.terrain_id))
-                        {
-                            t.macro_strength = value.clamp(0.0, 1.0);
-                        }
-                        return;
-                    }
-                    if field == IF::TerrainDebugView {
+                    TT::DebugView => {
                         self.terrain_debug_view = value.round().clamp(0.0, 34.0);
-                        if let Some(r) = self.renderer.as_mut() {
-                            r.shading_debug = self.terrain_debug_view;
+                        if let Some(renderer) = self.renderer.as_mut() {
+                            renderer.shading_debug = self.terrain_debug_view;
                         }
-                        return;
                     }
-                    if field == IF::TerrainMorphStart {
-                        let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
+                    TT::TileScale
+                    | TT::Relief
+                    | TT::Wetness
+                    | TT::MacroStrength
+                    | TT::MorphStart => {
+                        let Some(component) = self.world.get::<TerrainComponent>(entity).copied()
+                        else {
                             return;
                         };
-                        if let Some(t) = self
+                        let Some(terrain) = self
                             .renderer
                             .as_mut()
-                            .and_then(|r| r.terrain_mut(tc.terrain_id))
-                        {
-                            t.lod_morph_start = value.clamp(0.0, 1.0);
-                        }
-                        return;
-                    }
-                    let Some(tc) = self.world.get::<TerrainComponent>(entity).copied() else {
-                        return;
-                    };
-                    if let Some(t) = self
-                        .renderer
-                        .as_mut()
-                        .and_then(|r| r.terrain_mut(tc.terrain_id))
-                    {
-                        let slot = self.terrain_brush.paint_layer;
-                        if let Some(layer) = t.layers.get_mut(slot) {
-                            // A tiling of zero collapses the texture to one
-                            // texel stretched over the whole terrain.
-                            layer.tiling = value.max(0.01);
-                        }
-                    }
-                    return;
-                }
-
-                // Phase 17C: foliage settings. Re-scattering is driven by the
-                // cache noticing the component changed, so nothing else to do.
-                if matches!(
-                    field,
-                    IF::FoliageDensity
-                        | IF::FoliageSeed
-                        | IF::FoliageSlope
-                        | IF::FoliageLayer
-                        | IF::FoliageScaleMin
-                        | IF::FoliageScaleMax
-                        | IF::FoliageShadowDistance
-                        | IF::FoliageCullDistance
-                        | IF::FoliageLodDistance
-                        | IF::FoliageImpostorDistance
-                ) {
-                    // Phase 17F: these edit the brush, not a scatter. Foliage
-                    // is painted now, so the settings that matter are the ones
-                    // the next stroke will use.
-                    let b = &mut self.foliage_brush;
-                    match field {
-                        IF::FoliageDensity => b.density = value.clamp(0.0, 40.0),
-                        IF::FoliageSeed => b.radius = value.clamp(0.25, 200.0),
-                        IF::FoliageSlope => b.max_slope_deg = value.clamp(0.0, 90.0),
-                        IF::FoliageLayer => {
-                            b.kind = (value.round().max(0.0) as usize)
-                                .min(FOLIAGE_PALETTE.len() - 1)
-                                as u8;
-                        }
-                        IF::FoliageScaleMin => b.scale_min = value.max(0.01),
-                        IF::FoliageScaleMax => b.scale_max = value.max(0.01),
-                        // Not a brush setting: this one lives on the component,
-                        // because it describes the foliage that already exists
-                        // rather than the next stroke.
-                        IF::FoliageShadowDistance => {
-                            if let Some(e) = self.selected_entity {
-                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
-                                    f.foliage_shadow_distance = value.clamp(0.0, 2000.0);
-                                }
-                            }
-                        }
-                        IF::FoliageCullDistance => {
-                            if let Some(e) = self.selected_entity {
-                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
-                                    f.cull_distance = value.clamp(0.0, 4000.0);
-                                }
-                            }
-                        }
-                        IF::FoliageLodDistance => {
-                            if let Some(e) = self.selected_entity {
-                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
-                                    f.lod_distance = value.clamp(0.0, 4000.0);
-                                }
-                            }
-                        }
-                        IF::FoliageImpostorDistance => {
-                            if let Some(e) = self.selected_entity {
-                                if let Some(f) = self.world.get_mut::<FoliageComponent>(e) {
-                                    f.impostor_distance = value.clamp(0.0, 4000.0);
-                                }
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
-                    return;
-                }
-
-                // Phase 13E: light fields edit LightComponent, not Transform.
-                if matches!(
-                    field,
-                    IF::LightIntensity
-                        | IF::LightRange
-                        | IF::LightInnerAngle
-                        | IF::LightOuterAngle
-                        | IF::LightColorR
-                        | IF::LightColorG
-                        | IF::LightColorB
-                        | IF::LightColorTemperature
-                        | IF::LightMoonIntensity
-                        | IF::LightSourceRadius
-                        | IF::LightAreaWidth
-                        | IF::LightAreaHeight
-                ) {
-                    if let Some(&old_light) = self.world.get::<LightComponent>(entity) {
-                        let mut new_light = old_light;
+                            .and_then(|renderer| renderer.terrain_mut(component.terrain_id))
+                        else {
+                            return;
+                        };
                         match field {
-                            // Negative intensity/range would break attenuation.
-                            IF::LightIntensity => new_light.intensity = value.max(0.0),
-                            IF::LightRange => new_light.range = value.max(0.0),
-                            // Keep inner <= outer so the spot falloff stays sane.
-                            IF::LightInnerAngle => {
-                                new_light.inner_angle =
-                                    value.to_radians().clamp(0.0, new_light.outer_angle);
+                            TT::TileScale => {
+                                if let Some(layer) =
+                                    terrain.layers.get_mut(self.terrain_brush.paint_layer)
+                                {
+                                    layer.tiling = value.max(0.01);
+                                }
                             }
-                            IF::LightOuterAngle => {
-                                new_light.outer_angle = value
-                                    .to_radians()
-                                    .clamp(new_light.inner_angle, std::f32::consts::FRAC_PI_2);
+                            TT::Relief => {
+                                terrain.parallax_scale = value.clamp(0.0, 4.0);
+                                if terrain.parallax_scale > 0.0 {
+                                    terrain.parallax_held = terrain.parallax_scale;
+                                }
                             }
-                            // Colour is linear RGB and separate from intensity,
-                            // so it is not clamped to 1 — values above white are
-                            // how you get a tinted, over-bright key light.
-                            IF::LightColorR => new_light.color.x = value.max(0.0),
-                            IF::LightColorG => new_light.color.y = value.max(0.0),
-                            IF::LightColorB => new_light.color.z = value.max(0.0),
-                            IF::LightColorTemperature => {
-                                new_light.color_temperature_k = value.max(0.0);
-                            }
-                            IF::LightMoonIntensity => {
-                                new_light.moon_intensity = value.max(0.0);
-                            }
-                            IF::LightSourceRadius => {
-                                new_light.source_radius = value.max(0.0);
-                            }
-                            IF::LightAreaWidth => {
-                                new_light.area_width = value.max(0.05);
-                            }
-                            IF::LightAreaHeight => {
-                                new_light.area_height = value.max(0.05);
-                            }
+                            TT::Wetness => terrain.wetness = value.clamp(0.0, 1.0),
+                            TT::MacroStrength => terrain.macro_strength = value.clamp(0.0, 1.0),
+                            TT::MorphStart => terrain.lod_morph_start = value.clamp(0.0, 1.0),
                             _ => unreachable!(),
                         }
-                        if live {
-                            // Mid-drag: remember where the gesture started, then
-                            // write straight through. No undo entry yet.
-                            if self.scrub_light.is_none() {
-                                self.scrub_light = Some((entity.index(), old_light));
-                            }
-                            if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
-                                *l = new_light;
-                            }
-                        } else {
-                            // End of a gesture (or a typed value). Undo has to
-                            // rewind to where the drag began, not to the last
-                            // pixel of it.
-                            let base = self
-                                .scrub_light
-                                .take()
-                                .filter(|(idx, _)| *idx == entity.index())
-                                .map(|(_, l)| l)
-                                .unwrap_or(old_light);
-                            if new_light != base {
-                                if let Some(l) = self.world.get_mut::<LightComponent>(entity) {
-                                    *l = base;
-                                }
-                                let cmd =
-                                    Box::new(SetLightCmd::new(entity.index(), base, new_light));
-                                self.undo_stack.push(
-                                    cmd,
-                                    &mut self.world,
-                                    &mut self.selected_entity,
-                                );
-                            }
-                        }
                     }
-                    return;
+                    TT::AerialDistance => unreachable!(),
                 }
+            }
 
-                if let Some(&old_t) = self.world.get::<Transform>(entity) {
-                    let mut new_t = old_t;
-                    let (ex, ey, ez) = old_t.rotation.to_euler(glam::EulerRot::XYZ);
-                    match field {
-                        IF::PosX => new_t.translation.x = value,
-                        IF::PosY => new_t.translation.y = value,
-                        IF::PosZ => new_t.translation.z = value,
-                        IF::RotX => {
-                            new_t.rotation = glam::Quat::from_euler(
-                                glam::EulerRot::XYZ,
-                                value.to_radians(),
-                                ey,
-                                ez,
-                            )
-                        }
-                        IF::RotY => {
-                            new_t.rotation = glam::Quat::from_euler(
-                                glam::EulerRot::XYZ,
-                                ex,
-                                value.to_radians(),
-                                ez,
-                            )
-                        }
-                        IF::RotZ => {
-                            new_t.rotation = glam::Quat::from_euler(
-                                glam::EulerRot::XYZ,
-                                ex,
-                                ey,
-                                value.to_radians(),
-                            )
-                        }
-                        IF::ScaleX => new_t.scale.x = value,
-                        IF::ScaleY => new_t.scale.y = value,
-                        IF::ScaleZ => new_t.scale.z = value,
-                        _ => unreachable!("light fields handled above"),
+            EditorEvent::SetFoliageBrushValue {
+                field,
+                value,
+                live: _,
+            } => {
+                let brush = &mut self.foliage_brush;
+                match field {
+                    FB::Density => brush.density = value.clamp(0.0, 40.0),
+                    FB::Radius => brush.radius = value.clamp(0.25, 200.0),
+                    FB::MaxSlope => brush.max_slope_deg = value.clamp(0.0, 90.0),
+                    FB::Kind => {
+                        brush.kind =
+                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8
                     }
-                    if live {
-                        if self.scrub_transform.is_none() {
-                            self.scrub_transform = Some((entity.index(), old_t));
-                        }
-                        if let Some(t) = self.world.get_mut::<Transform>(entity) {
-                            *t = new_t;
-                        }
-                    } else {
-                        let base = self
-                            .scrub_transform
-                            .take()
-                            .filter(|(idx, _)| *idx == entity.index())
-                            .map(|(_, t)| t)
-                            .unwrap_or(old_t);
-                        if let Some(t) = self.world.get_mut::<Transform>(entity) {
-                            *t = base;
-                        }
-                        let cmd = Box::new(SetTransformCmd::new(entity.index(), base, new_t));
-                        self.undo_stack
-                            .push(cmd, &mut self.world, &mut self.selected_entity);
-                    }
-                    // The gizmo otherwise only re-syncs on selection or on its
-                    // own drag, so typing a position left it stranded at the
-                    // object's old location.
-                    if let Some(r) = self.renderer.as_mut() {
-                        r.set_gizmo_world_pos(new_t.translation);
-                    }
+                    FB::ScaleMin => brush.scale_min = value.max(0.01),
+                    FB::ScaleMax => brush.scale_max = value.max(0.01),
                 }
             }
 
@@ -4906,7 +4350,10 @@ impl<G: GameApp> Engine<G> {
                         // which is honest, and better than silently
                         // re-pointing them at a file the author may have
                         // meant to fork.
-                        if from.extension().is_some_and(|e| e.eq_ignore_ascii_case("luau")) {
+                        if from
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
+                        {
                             let _ = self.scripts.import_script_file(&target);
                             self.drain_script_output();
                         }
@@ -5067,12 +4514,12 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::SetInspectorColor { field, rgba, live } => {
-                self.apply_inspector_color(field, rgba, live, false);
+            EditorEvent::SetMaterialBaseColor { rgba, live } => {
+                self.apply_material_base_color(rgba, live, false);
             }
 
-            EditorEvent::CancelInspectorColor { field, rgba } => {
-                self.apply_inspector_color(field, rgba, true, true);
+            EditorEvent::CancelMaterialBaseColor { rgba } => {
+                self.apply_material_base_color(rgba, true, true);
             }
 
             EditorEvent::CloseWindow => {
@@ -5150,125 +4597,6 @@ impl<G: GameApp> Engine<G> {
                         _ => crate::Tonemapper::AgX,
                     };
                     info!("Tonemapper: {}", pp.tonemapper.label());
-                }
-            }
-            EditorEvent::SetPostFx(which, on) => {
-                use somnium_ui::PostFxToggle;
-                let Some(entity) = self.selected_entity else {
-                    return;
-                };
-                if let Some(pp) = self.world.get_mut::<PostProcessComponent>(entity) {
-                    let on = match which {
-                        PostFxToggle::Vignette => {
-                            pp.vignette_enabled = on;
-                            pp.vignette_enabled
-                        }
-                        PostFxToggle::ChromaticAberration => {
-                            pp.ca_enabled = on;
-                            pp.ca_enabled
-                        }
-                        PostFxToggle::Fxaa => {
-                            pp.fxaa_enabled = on;
-                            pp.fxaa_enabled
-                        }
-                        PostFxToggle::AutoExposure => {
-                            pp.auto_exposure = on;
-                            pp.auto_exposure
-                        }
-                        PostFxToggle::CelShading => {
-                            pp.cel_shading = on;
-                            pp.cel_shading
-                        }
-                        PostFxToggle::Taa => {
-                            pp.set_taa_enabled(on);
-                            pp.taa_enabled
-                        }
-                        PostFxToggle::Gtao => {
-                            pp.gtao_enabled = on;
-                            pp.gtao_enabled
-                        }
-                        PostFxToggle::PhysicalCamera => {
-                            pp.use_physical_camera = on;
-                            pp.use_physical_camera
-                        }
-                        PostFxToggle::Volumetrics => {
-                            pp.set_volumetrics_enabled(on);
-                            pp.volumetrics_enabled
-                        }
-                        PostFxToggle::LightShafts => {
-                            pp.set_light_shafts_enabled(on);
-                            pp.light_shafts
-                        }
-                        PostFxToggle::MotionBlur => {
-                            pp.motion_blur_enabled = on;
-                            pp.motion_blur_enabled
-                        }
-                        PostFxToggle::Cas => {
-                            pp.set_cas_enabled(on);
-                            pp.cas_enabled
-                        }
-                        PostFxToggle::RestirGi => {
-                            pp.restir_gi_enabled = on;
-                            pp.restir_gi_enabled
-                        }
-                        PostFxToggle::RtReflect => {
-                            pp.rt_reflect_enabled = on;
-                            pp.rt_reflect_enabled
-                        }
-                        PostFxToggle::RtRefract => {
-                            pp.rt_refract_enabled = on;
-                            pp.rt_refract_enabled
-                        }
-                        PostFxToggle::Restir => {
-                            pp.restir_enabled = on;
-                            pp.restir_enabled
-                        }
-                        PostFxToggle::Bloom => {
-                            pp.bloom_enabled = on;
-                            pp.bloom_enabled
-                        }
-                        PostFxToggle::DepthOfField => {
-                            pp.dof_enabled = on;
-                            pp.dof_enabled
-                        }
-                        PostFxToggle::Pcss => {
-                            pp.pcss_enabled = on;
-                            pp.pcss_enabled
-                        }
-                        PostFxToggle::ContactShadows => {
-                            pp.contact_shadows_enabled = on;
-                            pp.contact_shadows_enabled
-                        }
-                        PostFxToggle::WorldCache => {
-                            pp.set_world_cache_enabled(on);
-                            pp.world_cache
-                        }
-                        PostFxToggle::SpecularGi => {
-                            pp.specular_gi = on;
-                            pp.specular_gi
-                        }
-                        PostFxToggle::PathTracer => {
-                            pp.path_tracer = on;
-                            pp.path_tracer
-                        }
-                        PostFxToggle::MeshSdf => {
-                            pp.set_mesh_sdf_enabled(on);
-                            pp.mesh_sdf
-                        }
-                        PostFxToggle::Probes => {
-                            pp.probes = on;
-                            pp.probes
-                        }
-                        PostFxToggle::AnalyticGrad => {
-                            pp.analytic_grad = on;
-                            pp.analytic_grad
-                        }
-                        PostFxToggle::Fsr => {
-                            pp.set_fsr_enabled(on);
-                            pp.fsr_enabled
-                        }
-                    };
-                    info!("Post FX {:?}: {}", which, if on { "on" } else { "off" });
                 }
             }
         }

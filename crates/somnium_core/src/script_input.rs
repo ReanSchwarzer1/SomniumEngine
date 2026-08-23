@@ -437,10 +437,16 @@ mod tests {
             delta_y: 0.5,
         });
         let delta = tracker.snapshot().mouse_delta;
-        assert!((delta[0] - 4.0).abs() < 1.0e-6 && (delta[1] + 0.5).abs() < 1.0e-6, "{delta:?}");
+        assert!(
+            (delta[0] - 4.0).abs() < 1.0e-6 && (delta[1] + 0.5).abs() < 1.0e-6,
+            "{delta:?}"
+        );
         tracker.end_step();
         let cleared = tracker.snapshot().mouse_delta;
-        assert!(cleared.iter().all(|d| d.abs() < f32::EPSILON), "{cleared:?}");
+        assert!(
+            cleared.iter().all(|d| d.abs() < f32::EPSILON),
+            "{cleared:?}"
+        );
     }
 
     #[test]
@@ -464,7 +470,10 @@ mod tests {
         let registry = component_registry();
         let mut world = World::new();
         let keep = world.spawn((Transform::default(), Name::new("Keep")));
-        let doomed = world.spawn((Transform::from_translation(glam::Vec3::X), Name::new("Doomed")));
+        let doomed = world.spawn((
+            Transform::from_translation(glam::Vec3::X),
+            Name::new("Doomed"),
+        ));
         let checkpoint = WorldCheckpoint::capture(&mut world, &registry);
         assert_eq!(checkpoint.len(), 2);
 
@@ -494,7 +503,9 @@ mod tests {
         let entity = world.spawn((Transform::default(),));
         let checkpoint = WorldCheckpoint::capture(&mut world, &registry);
 
-        world.insert_component(entity, Name::new("Added by a script")).unwrap();
+        world
+            .insert_component(entity, Name::new("Added by a script"))
+            .unwrap();
         assert!(world.get::<Name>(entity).is_some());
 
         checkpoint.restore(&mut world, &registry);
