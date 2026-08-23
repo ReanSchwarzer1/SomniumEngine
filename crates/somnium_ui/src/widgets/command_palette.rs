@@ -12,7 +12,8 @@ use glam::Vec2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandPaletteMessage {
-    Run(usize),
+    /// Run the row identified by its stable id, never its array position.
+    Run(String),
     Query(String),
     SetQuery(String),
     /// Replace the searchable set. Phase 27-G: the palette is repopulated each
@@ -76,32 +77,65 @@ impl PaletteCategory {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaletteItem {
+    /// Stable dispatch/history key.
+    pub id: String,
     pub label: String,
     pub hint: String,
     pub category: PaletteCategory,
+    /// Disabled rows remain discoverable and explain why they cannot run.
+    pub enabled: bool,
+    /// Persisted last-used tick; larger values rank first after fuzzy score.
+    pub recency: u64,
 }
 
 impl PaletteItem {
-    /// A command row. Kept as the terse constructor because the shell declares
-    /// a few dozen of these inline.
-    pub fn command(label: impl Into<String>, hint: impl Into<String>) -> Self {
+    /// A command row derived from the authoritative registry.
+    pub fn command(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
         Self {
+            id: id.into(),
             label: label.into(),
             hint: hint.into(),
             category: PaletteCategory::Command,
+            enabled: true,
+            recency: 0,
         }
     }
 
     pub fn new(
+        id: impl Into<String>,
         label: impl Into<String>,
         hint: impl Into<String>,
         category: PaletteCategory,
     ) -> Self {
         Self {
+            id: id.into(),
             label: label.into(),
             hint: hint.into(),
             category,
+            enabled: true,
+            recency: 0,
         }
+    }
+
+    /// Attach current enablement and its explanation.
+    #[must_use]
+    pub fn with_enablement(mut self, enabled: bool, reason: Option<&str>) -> Self {
+        self.enabled = enabled;
+        if let Some(reason) = reason {
+            self.hint = reason.to_string();
+        }
+        self
+    }
+
+    /// Attach the persisted usage tick.
+    #[must_use]
+    pub const fn with_recency(mut self, recency: u64) -> Self {
+        self.recency = recency;
+        self
     }
 }
 
@@ -125,28 +159,26 @@ impl CommandPalette {
         }
     }
 
-    fn filtered(&self) -> Vec<(usize, &PaletteItem)> {
+    fn filtered(&self) -> Vec<&PaletteItem> {
         let (scope, terms) = Self::parse_query(&self.query);
-        let q = terms.to_ascii_lowercase();
-        let mut out: Vec<(usize, &PaletteItem)> = self
+        let mut out: Vec<(&PaletteItem, i64, usize)> = self
             .items
             .iter()
             .enumerate()
-            .filter(|(_, it)| scope.is_none_or(|k| it.category == k))
-            .filter(|(_, it)| q.is_empty() || it.label.to_ascii_lowercase().contains(&q))
+            .filter(|(_, item)| scope.is_none_or(|kind| item.category == kind))
+            .filter_map(|(index, item)| {
+                palette_score(item, terms).map(|score| (item, score, index))
+            })
             .collect();
-
-        // A prefix match is what the user meant; a contained match is a
-        // fallback. Without this, typing "sa" surfaces "Toggle Grid Snap"
-        // above "Save Scene". Ties keep declaration order, so the command list
-        // stays in the sequence the shell declared it.
-        if !q.is_empty() {
-            out.sort_by_key(|(i, it)| {
-                let starts = !it.label.to_ascii_lowercase().starts_with(&q);
-                (starts, *i)
-            });
-        }
-        out
+        out.sort_by(
+            |(left, left_score, left_index), (right, right_score, right_index)| {
+                right_score
+                    .cmp(left_score)
+                    .then_with(|| right.recency.cmp(&left.recency))
+                    .then_with(|| left_index.cmp(right_index))
+            },
+        );
+        out.into_iter().map(|(item, _, _)| item).collect()
     }
 
     /// Rows currently matching, for tests and for the "no matches" state.
@@ -186,7 +218,10 @@ impl Control for CommandPalette {
             None,
         );
         let search = Rect::new(b.x + 8.0, b.y + 8.0, b.w - 16.0, 22.0);
-        ctx.push_paint(search, &crate::style::input(crate::style::VisualState::rest()));
+        ctx.push_paint(
+            search,
+            &crate::style::input(crate::style::VisualState::rest()),
+        );
         let shown = if self.query.is_empty() {
             "Search commands, entities, assets…"
         } else {
@@ -217,7 +252,7 @@ impl Control for CommandPalette {
             return;
         }
         let sel = self.selected.min(filtered.len().saturating_sub(1));
-        for (row, (_orig, item)) in filtered.iter().take(10).enumerate() {
+        for (row, item) in filtered.iter().take(10).enumerate() {
             let y = b.y + 36.0 + row as f32 * 22.0;
             let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, 22.0);
             if row == sel {
@@ -226,12 +261,17 @@ impl Control for CommandPalette {
                 ));
                 ctx.push_paint(row_r, &selected);
             }
+            let label_color = if item.enabled {
+                t.semantic.text.primary.bytes()
+            } else {
+                t.semantic.text.disabled.bytes()
+            };
             ctx.push_text(
                 &item.label,
                 Vec2::new(row_r.x + 8.0, y + 4.0),
                 self.font_id,
                 12.0,
-                t.semantic.text.primary.bytes(),
+                label_color,
             );
             // The category sits between the label and the shortcut, so a
             // result reads "what it is" before "how to reach it".
@@ -260,9 +300,7 @@ impl Control for CommandPalette {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
-        if let Some(CommandPaletteMessage::SetItems(items)) =
-            msg.data::<CommandPaletteMessage>()
-        {
+        if let Some(CommandPaletteMessage::SetItems(items)) = msg.data::<CommandPaletteMessage>() {
             self.items = items.clone();
             self.selected = 0;
             return;
@@ -287,28 +325,28 @@ impl Control for CommandPalette {
                 ));
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::Backspace) => {
+            WidgetMessage::KeyDown(KeyCode::Backspace, _) => {
                 self.query.pop();
                 self.selected = 0;
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::ArrowDown) => {
+            WidgetMessage::KeyDown(KeyCode::ArrowDown, _) => {
                 let n = self.filtered().len().max(1);
                 self.selected = (self.selected + 1) % n;
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::ArrowUp) => {
+            WidgetMessage::KeyDown(KeyCode::ArrowUp, _) => {
                 let n = self.filtered().len().max(1);
                 self.selected = (self.selected + n - 1) % n;
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter) => {
+            WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter, _) => {
                 let filtered = self.filtered();
-                if let Some((orig, _)) = filtered.get(self.selected) {
+                if let Some(item) = filtered.get(self.selected).filter(|item| item.enabled) {
                     emit.push(UiMessage::new(
                         widget.handle,
                         MessageDirection::FromWidget,
-                        CommandPaletteMessage::Run(*orig),
+                        CommandPaletteMessage::Run(item.id.clone()),
                     ));
                 }
                 msg.handled = true;
@@ -318,11 +356,11 @@ impl Control for CommandPalette {
                 if pos.y > b.y + 36.0 {
                     let row = ((pos.y - b.y - 36.0) / 22.0).floor() as usize;
                     let filtered = self.filtered();
-                    if let Some((orig, _)) = filtered.get(row) {
+                    if let Some(item) = filtered.get(row).filter(|item| item.enabled) {
                         emit.push(UiMessage::new(
                             widget.handle,
                             MessageDirection::FromWidget,
-                            CommandPaletteMessage::Run(*orig),
+                            CommandPaletteMessage::Run(item.id.clone()),
                         ));
                     }
                     msg.handled = true;
@@ -331,6 +369,29 @@ impl Control for CommandPalette {
             _ => {}
         }
     }
+}
+
+/// Structured fields are exact vocabulary with exact/prefix values. The
+/// remaining text is subsequence-fuzzy with prefix and word-boundary bonuses.
+fn palette_score(item: &PaletteItem, query: &str) -> Option<i64> {
+    let mut free = Vec::new();
+    for token in query.split_whitespace() {
+        let Some((field, value)) = token.split_once(':') else {
+            free.push(token);
+            continue;
+        };
+        let value = value.to_ascii_lowercase();
+        let haystack = match field {
+            "category" => item.category.label().to_ascii_lowercase(),
+            "id" => item.id.to_ascii_lowercase(),
+            _ => return None,
+        };
+        if !haystack.starts_with(&value) {
+            return None;
+        }
+    }
+    let text = format!("{} {} {}", item.label, item.hint, item.id);
+    crate::commands::fuzzy_score(&text, &free.join(" "))
 }
 
 pub struct CommandPaletteBuilder {
@@ -374,11 +435,16 @@ mod search_everywhere_tests {
 
     fn items() -> Vec<PaletteItem> {
         vec![
-            PaletteItem::command("Save Scene", "Ctrl+S"),
-            PaletteItem::command("Save All", "Ctrl+Shift+S"),
-            PaletteItem::new("Camera", "Select", PaletteCategory::Entity),
-            PaletteItem::new("scene.somnium", "Open", PaletteCategory::Asset),
-            PaletteItem::new("Scripting", "F1", PaletteCategory::Help),
+            PaletteItem::command("editor.scene.save", "Save Scene", "Ctrl+S"),
+            PaletteItem::command("editor.scene.save_all", "Save All", "Ctrl+Shift+S"),
+            PaletteItem::new("entity:camera", "Camera", "Select", PaletteCategory::Entity),
+            PaletteItem::new(
+                "asset:scene.somnium",
+                "scene.somnium",
+                "Open",
+                PaletteCategory::Asset,
+            ),
+            PaletteItem::new("help:scripting", "Scripting", "F1", PaletteCategory::Help),
         ]
     }
 
@@ -402,7 +468,11 @@ mod search_everywhere_tests {
 
     #[test]
     fn a_bare_query_searches_every_category() {
-        assert_eq!(palette("s").match_count(), 4, "Save x2, scene.somnium, Scripting");
+        assert_eq!(
+            palette("s").match_count(),
+            5,
+            "labels and action hints are searchable"
+        );
     }
 
     #[test]
@@ -430,7 +500,7 @@ mod search_everywhere_tests {
         // "sa" must surface "Save Scene" before "scene.somnium", which merely
         // contains an "s"... and before anything that only contains "sa".
         let p = palette("sa");
-        let first = p.filtered().first().map(|(_, it)| it.label.clone());
+        let first = p.filtered().first().map(|it| it.label.clone());
         assert_eq!(first.as_deref(), Some("Save Scene"));
     }
 
@@ -448,5 +518,18 @@ mod search_everywhere_tests {
             (Some(PaletteCategory::Entity), "cam")
         );
         assert_eq!(CommandPalette::parse_query("save"), (None, "save"));
+    }
+
+    #[test]
+    fn structured_tokens_do_not_fuzzy_match_their_vocabulary() {
+        assert_eq!(palette("category:com svsc").match_count(), 2);
+        assert_eq!(palette("categroy:command").match_count(), 0);
+    }
+
+    #[test]
+    fn recency_breaks_equal_scores() {
+        let mut p = palette("save");
+        p.items[1].recency = 9;
+        assert_eq!(p.filtered()[0].id, "editor.scene.save_all");
     }
 }

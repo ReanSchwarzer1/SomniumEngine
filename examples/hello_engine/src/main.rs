@@ -1357,6 +1357,19 @@ impl GameApp for HelloGame {
                 "entries": list_assets_dir(),
             }),
         );
+
+        // CONTROL-A capture harness: select one real, already-spawned entity
+        // by its displayed name so the populated Details surface is captured
+        // without inventing fixture data or synthesising an Outliner click.
+        if let Ok(name) = std::env::var("SOMNIUM_AUDIT_SELECT_ENTITY") {
+            *ctx.selected_entity = ctx
+                .world
+                .entities()
+                .find(|&entity| ctx.world.get::<Name>(entity).is_some_and(|n| n.as_str() == name));
+            if ctx.selected_entity.is_none() {
+                tracing::warn!("SOMNIUM_AUDIT_SELECT_ENTITY={name} did not match an entity");
+            }
+        }
     }
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
@@ -2635,12 +2648,44 @@ fn list_assets_dir() -> Vec<serde_json::Value> {
 // Entry point
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
+/// Exact logical window extent for deterministic UI evidence.
+///
+/// Ordinary runs never consult a second configuration source. The override is
+/// audit-only, explicit, and intentionally refuses zero or malformed extents.
+fn audit_window_size() -> Option<(u32, u32)> {
+    let raw = std::env::var("SOMNIUM_AUDIT_WINDOW_SIZE").ok()?;
+    let (width, height) = raw.split_once(['x', 'X'])?;
+    let size = (width.trim().parse().ok()?, height.trim().parse().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
 fn main() -> Result<(), somnium_core::EngineError> {
     let config = EngineConfig {
         window_title: "Somnium Engine".into(),
-        window_size: (1280, 720),
+        window_size: audit_window_size().unwrap_or((1280, 720)),
         target_fps: Some(60),
         ..Default::default()
     };
     Engine::run(config, HelloGame::new())
+}
+
+#[cfg(test)]
+mod audit_harness_tests {
+    #[test]
+    fn audit_window_extent_parser_accepts_the_evidence_sizes() {
+        // Keep environment mutation out of a parallel test: this verifies the
+        // same grammar without setting a process-global variable.
+        let parse = |raw: &str| {
+            let (width, height) = raw.split_once(['x', 'X'])?;
+            let size = (
+                width.trim().parse::<u32>().ok()?,
+                height.trim().parse::<u32>().ok()?,
+            );
+            (size.0 > 0 && size.1 > 0).then_some(size)
+        };
+        assert_eq!(parse("1280x720"), Some((1280, 720)));
+        assert_eq!(parse("1920X1080"), Some((1920, 1080)));
+        assert_eq!(parse("0x1080"), None);
+        assert_eq!(parse("wide"), None);
+    }
 }

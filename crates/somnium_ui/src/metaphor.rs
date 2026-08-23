@@ -502,7 +502,10 @@ impl ContentHistory {
     }
 
     pub fn current(&self) -> &str {
-        self.entries.get(self.cursor).map(|s| s.as_str()).unwrap_or("")
+        self.entries
+            .get(self.cursor)
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// Navigate somewhere new. A no-op when it is where we already are, so
@@ -618,8 +621,14 @@ mod browser_workflow_tests {
             seen = seen.next();
         }
         assert_eq!(seen, ContentDensity::Compact, "next() must cycle");
-        assert!(sizes[0].0 < sizes[1].0 && sizes[1].0 < sizes[2].0, "widths ascend");
-        assert!(sizes[0].2 < sizes[1].2 && sizes[1].2 < sizes[2].2, "icons ascend");
+        assert!(
+            sizes[0].0 < sizes[1].0 && sizes[1].0 < sizes[2].0,
+            "widths ascend"
+        );
+        assert!(
+            sizes[0].2 < sizes[1].2 && sizes[1].2 < sizes[2].2,
+            "icons ascend"
+        );
     }
 
     #[test]

@@ -282,7 +282,7 @@ impl Control for PropertyRow {
             }
             msg.handled = true;
         }
-        if let Some(WidgetMessage::MouseMove { pos }) = msg.data::<WidgetMessage>() {
+        if let Some(WidgetMessage::MouseMove { pos, .. }) = msg.data::<WidgetMessage>() {
             self.hover_gutter = hit_gutter(widget.screen_bounds(), *pos);
         }
         if msg

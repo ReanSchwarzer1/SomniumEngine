@@ -330,7 +330,11 @@ mod tests {
     #[test]
     fn textured_quads_get_no_aa_margin() {
         // Growing a glyph quad would sample neighbouring atlas cells.
-        let p = Primitive::glyph(Rect::new(0.0, 0.0, 4.0, 6.0), [0.0, 0.0, 0.1, 0.1], [255; 4]);
+        let p = Primitive::glyph(
+            Rect::new(0.0, 0.0, 4.0, 6.0),
+            [0.0, 0.0, 0.1, 0.1],
+            [255; 4],
+        );
         assert_eq!(p.expand, 0.0);
         assert_ne!(p.flags & FLAG_TEXT, 0);
         assert_ne!(p.flags & FLAG_TEXTURED, 0);

@@ -150,12 +150,13 @@ pub(crate) fn menu_button(
     h
 }
 
-pub(crate) fn popup_items(
+pub(crate) fn command_popup_items(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-    items: &[&str],
-) -> (NodeHandle, Vec<NodeHandle>) {
+    menu: crate::commands::Menu,
+) -> (NodeHandle, Vec<(NodeHandle, &'static str)>) {
+    let commands = crate::commands::registry().menu(menu);
     let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let popup_h = ui.add_node(popup, root);
     let border = BorderBuilder::new(
@@ -173,8 +174,8 @@ pub(crate) fn popup_items(
         .with_orientation(Orientation::Vertical)
         .build();
     let stack_h = ui.add_node(stack, border_h);
-    let mut handles = Vec::with_capacity(items.len());
-    for item in items {
+    let mut handles = Vec::with_capacity(commands.len());
+    for command in commands {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -183,13 +184,13 @@ pub(crate) fn popup_items(
         .build();
         let bh = ui.add_node(btn, stack_h);
         let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-            .with_text(*item)
+            .with_text(command.menu_label())
             .with_font_size(12.0)
             .with_font_id(font_id)
             .with_color(theme::TEXT_PRIMARY)
             .build();
         ui.add_node(lbl, bh);
-        handles.push(bh);
+        handles.push((bh, command.id));
     }
     (popup_h, handles)
 }

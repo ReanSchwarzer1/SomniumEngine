@@ -334,7 +334,7 @@ impl Control for ColorPicker {
                     msg.handled = true;
                 }
             }
-            WidgetMessage::MouseMove { pos } => match self.drag {
+            WidgetMessage::MouseMove { pos, .. } => match self.drag {
                 DragPart::Sv => {
                     self.pick_sv(pos, b, emit, widget);
                     msg.handled = true;
@@ -377,11 +377,11 @@ impl Control for ColorPicker {
                 }
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::Backspace) if self.hex_focus => {
+            WidgetMessage::KeyDown(KeyCode::Backspace, _) if self.hex_focus => {
                 self.hex.pop();
                 msg.handled = true;
             }
-            WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter) if self.hex_focus => {
+            WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter, _) if self.hex_focus => {
                 self.hex_focus = false;
                 emit.push(UiMessage::new(
                     widget.handle,

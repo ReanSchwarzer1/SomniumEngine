@@ -10,6 +10,32 @@ use std::any::Any;
 pub use winit::event::MouseButton;
 pub use winit::keyboard::KeyCode;
 
+/// Modifier keys captured at the OS-event boundary and delivered with input.
+///
+/// Keeping this on the message makes routed input self-contained: a widget can
+/// implement range selection or a precision gesture without reaching back into
+/// the editor shell's ambient state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub logo: bool,
+}
+
+impl Modifiers {
+    /// The platform's primary shortcut modifier (Command on macOS, Ctrl
+    /// elsewhere). Physical-Ctrl gestures should continue to read `ctrl`.
+    #[inline]
+    pub const fn command(self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.logo
+        } else {
+            self.ctrl
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageDirection {
     ToWidget,
@@ -61,14 +87,29 @@ impl UiMessage {
 /// Port of: WidgetMessage in fyrox-ui/src/widget.rs
 #[derive(Debug, Clone)]
 pub enum WidgetMessage {
-    MouseDown { pos: Vec2, button: MouseButton },
-    MouseUp { pos: Vec2, button: MouseButton },
-    MouseMove { pos: Vec2 },
-    MouseWheel { pos: Vec2, delta: f32 },
+    MouseDown {
+        pos: Vec2,
+        button: MouseButton,
+        mods: Modifiers,
+    },
+    MouseUp {
+        pos: Vec2,
+        button: MouseButton,
+        mods: Modifiers,
+    },
+    MouseMove {
+        pos: Vec2,
+        mods: Modifiers,
+    },
+    MouseWheel {
+        pos: Vec2,
+        delta: f32,
+        mods: Modifiers,
+    },
     MouseEnter,
     MouseLeave,
-    KeyDown(KeyCode),
-    KeyUp(KeyCode),
+    KeyDown(KeyCode, Modifiers),
+    KeyUp(KeyCode, Modifiers),
     Text(String),
     Focus,
     Unfocus,
@@ -85,14 +126,22 @@ impl WidgetMessage {
         UiMessage::new(
             dest,
             MessageDirection::FromWidget,
-            Self::MouseDown { pos, button },
+            Self::MouseDown {
+                pos,
+                button,
+                mods: Modifiers::default(),
+            },
         )
     }
     pub fn mouse_up(dest: NodeHandle, pos: Vec2, button: MouseButton) -> UiMessage {
         UiMessage::new(
             dest,
             MessageDirection::FromWidget,
-            Self::MouseUp { pos, button },
+            Self::MouseUp {
+                pos,
+                button,
+                mods: Modifiers::default(),
+            },
         )
     }
     pub fn click(dest: NodeHandle) -> UiMessage {

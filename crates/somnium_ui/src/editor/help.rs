@@ -85,6 +85,39 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
             }
         }
     }
+    if page == 0 {
+        let heading = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 0.0,
+            top: 14.0,
+            right: 8.0,
+            bottom: 6.0,
+        }))
+        .with_text("Commands")
+        .with_font_size(16.0)
+        .with_font_id(font_id)
+        .with_color(theme::ACCENT)
+        .build();
+        ui.add_node(heading, parent);
+        for command in crate::commands::registry().commands() {
+            let binding = command
+                .default_binding
+                .map(|chord| format!(" ({chord})"))
+                .unwrap_or_default();
+            let row = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                left: 12.0,
+                top: 0.0,
+                right: 8.0,
+                bottom: 4.0,
+            }))
+            .with_text(format!("{}{} — {}", command.label, binding, command.help))
+            .with_font_size(12.0)
+            .with_font_id(font_id)
+            .with_color(theme::TEXT_PRIMARY)
+            .with_wrap(true)
+            .build();
+            ui.add_node(row, parent);
+        }
+    }
 }
 
 pub(crate) fn build_help_overlay(

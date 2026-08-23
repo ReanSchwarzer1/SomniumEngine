@@ -76,7 +76,11 @@ impl MotionKey {
 
     /// Key for row `sub` of a widget that paints many.
     pub fn row(node: u32, sub: u32, property: MotionProperty) -> Self {
-        Self { node, sub, property }
+        Self {
+            node,
+            sub,
+            property,
+        }
     }
 }
 
@@ -200,14 +204,7 @@ impl Animator {
     /// Retargeting keeps the *current* value as the origin, so reversing a hover
     /// mid-fade does not snap. `duration_ms` is clamped to [`MAX_DURATION_MS`]:
     /// the ceiling belongs here, not at ~86 call sites.
-    pub fn start(
-        &mut self,
-        key: MotionKey,
-        rest: f32,
-        to: f32,
-        duration_ms: f32,
-        easing: Easing,
-    ) {
+    pub fn start(&mut self, key: MotionKey, rest: f32, to: f32, duration_ms: f32, easing: Easing) {
         let from = self.value_or(key, rest);
         if (from - to).abs() < f32::EPSILON {
             self.tracks.remove(&key);
@@ -362,7 +359,10 @@ mod tests {
     fn an_idle_animator_reports_no_work_and_does_none() {
         let mut a = Animator::new();
         assert!(a.is_idle());
-        assert!(!a.tick(16.0), "an empty tick must not claim it changed anything");
+        assert!(
+            !a.tick(16.0),
+            "an empty tick must not claim it changed anything"
+        );
     }
 
     #[test]
@@ -422,7 +422,10 @@ mod tests {
 
         a.start(HOVER, 0.0, 0.0, 100.0, Easing::Linear);
         let after = a.value_or(HOVER, 0.0);
-        assert!((after - mid).abs() < 1e-3, "retarget must not jump: {after}");
+        assert!(
+            (after - mid).abs() < 1e-3,
+            "retarget must not jump: {after}"
+        );
     }
 
     #[test]
@@ -486,7 +489,10 @@ mod tests {
         a.start(r0, 0.0, 1.0, 100.0, Easing::Linear);
         a.tick(50.0);
         a.start(r1, 0.0, 1.0, 100.0, Easing::Linear);
-        assert!(a.value_or(r0, 0.0) > a.value_or(r1, 0.0), "rows share a track");
+        assert!(
+            a.value_or(r0, 0.0) > a.value_or(r1, 0.0),
+            "rows share a track"
+        );
         assert_eq!(a.active_count(), 2);
 
         // And forgetting the node clears every row it owns.
@@ -497,9 +503,27 @@ mod tests {
     #[test]
     fn animating_nodes_are_reported_once_each_for_selective_invalidation() {
         let mut a = Animator::new();
-        a.start(MotionKey::new(3, MotionProperty::HoverWash), 0.0, 1.0, 100.0, Easing::Linear);
-        a.start(MotionKey::new(3, MotionProperty::Opacity), 0.0, 1.0, 100.0, Easing::Linear);
-        a.start(MotionKey::new(9, MotionProperty::Scale), 0.0, 1.0, 100.0, Easing::Linear);
+        a.start(
+            MotionKey::new(3, MotionProperty::HoverWash),
+            0.0,
+            1.0,
+            100.0,
+            Easing::Linear,
+        );
+        a.start(
+            MotionKey::new(3, MotionProperty::Opacity),
+            0.0,
+            1.0,
+            100.0,
+            Easing::Linear,
+        );
+        a.start(
+            MotionKey::new(9, MotionProperty::Scale),
+            0.0,
+            1.0,
+            100.0,
+            Easing::Linear,
+        );
         assert_eq!(a.animating_nodes(), vec![3, 9]);
     }
 

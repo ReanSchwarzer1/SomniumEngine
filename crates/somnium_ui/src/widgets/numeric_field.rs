@@ -5,7 +5,7 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{KeyCode, MessageDirection, NodeHandle, UiMessage, WidgetMessage},
+    message::{KeyCode, MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
     node::{Control, CursorKind, LayoutCtx, UiNode},
     theme,
     types::Rect,
@@ -79,6 +79,9 @@ pub struct NumericField {
     /// against this rather than accumulated, so the value cannot drift if
     /// something else writes to the field mid-drag.
     drag_origin: Option<(f32, f32)>,
+    /// Displayed value before the current pointer gesture. Cancellation uses
+    /// this even for the slider half, whose drag math has a different origin.
+    gesture_origin: Option<f32>,
     /// Set once the pointer has moved far enough for the gesture to count as a
     /// scrub rather than a click.
     scrubbing: bool,
@@ -119,6 +122,19 @@ fn infer_slider_range(step: f32) -> (f32, f32) {
     }
 }
 
+fn scrub_value(start: f32, dx: f32, step: f32, modifiers: Modifiers) -> f32 {
+    let precision = if modifiers.shift || modifiers.alt {
+        0.1
+    } else {
+        1.0
+    };
+    let mut value = start + dx * step * precision;
+    if modifiers.ctrl && step > 0.0 {
+        value = (value / step).round() * step;
+    }
+    value
+}
+
 impl NumericField {
     fn display_text(&self) -> String {
         self.editing_text
@@ -155,6 +171,33 @@ impl NumericField {
 }
 
 impl Control for NumericField {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
+    fn gesture_active(&self) -> bool {
+        self.drag_origin.is_some() || self.slider_dragging
+    }
+
+    fn cancel_gesture(&mut self, widget: &mut Widget, emit: &mut Vec<UiMessage>) -> bool {
+        if !self.gesture_active() {
+            return false;
+        }
+        let original = self.gesture_origin.unwrap_or(self.value);
+        self.drag_origin = None;
+        self.gesture_origin = None;
+        self.scrubbing = false;
+        self.slider_dragging = false;
+        if original != self.value {
+            self.value = original;
+            // Restoration is live rather than committed: cancelling must not
+            // create an undo step for a gesture the author declined.
+            emit.push(NumericFieldMessage::value_changing(widget.handle, original));
+        }
+        widget.invalidate_layout();
+        true
+    }
+
     // Governs whether the UI swallows keyboard input. Tied to the live edit
     // state rather than the widget type, so keys reach the game again once a
     // scrub has ended the text-edit session.
@@ -300,6 +343,7 @@ impl Control for NumericField {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {
                 WidgetMessage::MouseDown { pos, .. } => {
+                    self.gesture_origin = Some(self.value);
                     let (slider, _field) = Self::split_rects(widget.screen_bounds());
                     if slider.contains(pos) {
                         self.slider_dragging = true;
@@ -318,7 +362,7 @@ impl Control for NumericField {
                     }
                     msg.handled = true;
                 }
-                WidgetMessage::MouseMove { pos } => {
+                WidgetMessage::MouseMove { pos, mods } => {
                     if self.slider_dragging {
                         let (slider, _) = Self::split_rects(widget.screen_bounds());
                         let (lo, hi) = self.effective_range();
@@ -341,7 +385,7 @@ impl Control for NumericField {
                             self.editing_text = None;
                         }
                         if self.scrubbing {
-                            let v = start_value + dx * self.drag_step;
+                            let v = scrub_value(start_value, dx, self.drag_step, mods);
                             if v != self.value {
                                 self.value = v;
                                 emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -356,6 +400,7 @@ impl Control for NumericField {
                     self.slider_dragging = false;
                     let was_scrubbing = self.scrubbing;
                     self.drag_origin = None;
+                    self.gesture_origin = None;
                     self.scrubbing = false;
                     if was_scrubbing || was_slider {
                         emit.push(NumericFieldMessage::value_changed(
@@ -410,7 +455,7 @@ impl Control for NumericField {
                         msg.handled = true;
                     }
                 }
-                WidgetMessage::KeyDown(key) => {
+                WidgetMessage::KeyDown(key, _) => {
                     if self.focused {
                         match key {
                             KeyCode::Backspace => {
@@ -537,6 +582,7 @@ impl NumericFieldBuilder {
                 select_all: false,
                 drag_step: self.drag_step,
                 drag_origin: None,
+                gesture_origin: None,
                 scrubbing: false,
                 slider_range: self.slider_range,
                 slider_dragging: false,
@@ -554,6 +600,42 @@ mod tests {
         let r = Rect::new(0.0, 0.0, 108.0, 18.0);
         assert!((NumericField::value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
         assert!((NumericField::value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn shift_and_alt_are_precision_scrub_modifiers_and_ctrl_snaps() {
+        let ordinary = scrub_value(10.0, 7.0, 0.5, Modifiers::default());
+        let shift = scrub_value(
+            10.0,
+            7.0,
+            0.5,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        let alt = scrub_value(
+            10.0,
+            7.0,
+            0.5,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let snapped = scrub_value(
+            10.0,
+            1.2,
+            0.5,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(ordinary, 13.5);
+        assert!((shift - 10.35).abs() < 1.0e-5);
+        assert_eq!(shift, alt);
+        assert_eq!(snapped, 10.5);
     }
 }
 
@@ -590,11 +672,10 @@ mod unit_tests {
         let mut ui = UserInterface::new(400.0, 60.0);
         load_all_cuts(&mut ui);
         let root = ui.root();
-        let field = NumericFieldBuilder::new(
-            WidgetBuilder::new().with_width(200.0).with_height(22.0),
-        )
-        .with_unit(unit)
-        .build();
+        let field =
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(22.0))
+                .with_unit(unit)
+                .build();
         ui.add_node(field, root);
         ui.perform_layout();
         ui.draw();
@@ -618,10 +699,9 @@ mod unit_tests {
         let mut ui = UserInterface::new(400.0, 60.0);
         load_all_cuts(&mut ui);
         let root = ui.root();
-        let field = NumericFieldBuilder::new(
-            WidgetBuilder::new().with_width(200.0).with_height(22.0),
-        )
-        .build();
+        let field =
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(22.0))
+                .build();
         ui.add_node(field, root);
         ui.perform_layout();
         ui.draw();

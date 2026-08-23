@@ -195,7 +195,8 @@ impl ThumbnailCache {
         }
         match self.pack(rgba) {
             Some(slot) => {
-                self.states.insert(path.to_path_buf(), ThumbState::Ready(slot));
+                self.states
+                    .insert(path.to_path_buf(), ThumbState::Ready(slot));
                 true
             }
             None => {

@@ -9,6 +9,8 @@
 .idea/
 .DS_Store
 Thumbs.db
+__pycache__/
+*.pyc
 
 # ── Runtime artifacts written to the working directory ───────────────────────
 # Scene saves + terrain heightmap/splat sidecars (Phase 11.5F / 14F-3).
@@ -45,6 +47,22 @@ m25.md
 # which ARE committed. Keeping both would mean two accounts of the same
 # decision drifting apart.
 dev records/
+
+# Phase CONTROL's audit is a regenerable contract rather than a transient
+# hand-off. Keep its generator outputs/evidence manifest reviewable in-tree.
+!dev records/
+dev records/*
+!dev records/phase_CONTROL.md
+!dev records/phase CONTROL/
+dev records/phase CONTROL/*
+!dev records/phase CONTROL/CONTROL-A_reachability.md
+!dev records/phase CONTROL/CONTROL-A_census.md
+!dev records/phase CONTROL/README.md
+!dev records/phase CONTROL/CONTROL-A_baseline/
+dev records/phase CONTROL/CONTROL-A_baseline/*
+!dev records/phase CONTROL/CONTROL-A_baseline/README.md
+!dev records/phase CONTROL/CONTROL-A_baseline/*.png
+!dev records/phase CONTROL/CONTROL-A_terrain_open.somtime
 
 # Stray build output from a cargo invocation with the wrong working
 # directory. `target/` at the root is already ignored; this catches the

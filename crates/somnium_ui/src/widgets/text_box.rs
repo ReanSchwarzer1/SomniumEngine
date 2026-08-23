@@ -35,6 +35,10 @@ pub struct TextBox {
 }
 
 impl Control for TextBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn is_text_input(&self) -> bool {
         true
     }
@@ -47,9 +51,7 @@ impl Control for TextBox {
         let b = widget.screen_bounds();
         // Phase 27-D: the input recipe carries the radius, the recession and
         // the focus ring plus its glow.
-        let paint = crate::style::input(
-            crate::style::VisualState::rest().focused(self.focused),
-        );
+        let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
         ctx.push_paint(b, &paint);
         let text_origin = Vec2::new(b.x + 4.0, b.y + 3.0);
         ctx.push_text(&self.text, text_origin, self.font_id, self.px, self.color);
@@ -106,7 +108,7 @@ impl Control for TextBox {
                         msg.handled = true;
                     }
                 }
-                WidgetMessage::KeyDown(key) => {
+                WidgetMessage::KeyDown(key, _) => {
                     if self.focused {
                         match key {
                             KeyCode::Backspace => {

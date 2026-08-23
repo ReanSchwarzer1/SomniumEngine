@@ -507,7 +507,7 @@ pub const DAWN: Theme = Theme {
             success: Srgb8::opaque(0x15, 0x60, 0x3E),
             warning: Srgb8::opaque(0x6E, 0x4E, 0x08),
             error: Srgb8::opaque(0x9B, 0x1C, 0x1C),
-        busy: Srgb8::opaque(0x3A, 0x46, 0xC8),
+            busy: Srgb8::opaque(0x3A, 0x46, 0xC8),
         },
         folder: Srgb8::opaque(0x8A, 0x62, 0x2C),
     },
@@ -673,8 +673,16 @@ pub fn wash_from(base: Srgb8) -> Gradient {
     const DARKEN: f32 = 0.030;
     let b = base.bytes();
     Gradient::vertical(
-        Srgb8(crate::motion::lerp_color(b, [0xFF, 0xFF, 0xFF, b[3]], LIGHTEN)),
-        Srgb8(crate::motion::lerp_color(b, [0x00, 0x00, 0x00, b[3]], DARKEN)),
+        Srgb8(crate::motion::lerp_color(
+            b,
+            [0xFF, 0xFF, 0xFF, b[3]],
+            LIGHTEN,
+        )),
+        Srgb8(crate::motion::lerp_color(
+            b,
+            [0x00, 0x00, 0x00, b[3]],
+            DARKEN,
+        )),
     )
 }
 
@@ -1021,7 +1029,10 @@ mod asphodel_tests {
             let ember = t.ember.bytes();
             assert!(ember[0] > ember[2], "{name}: ember {ember:?} is not warm");
             let accent = t.semantic.accent.default.bytes();
-            assert!(accent[2] > accent[0], "{name}: accent {accent:?} is not cool");
+            assert!(
+                accent[2] > accent[0],
+                "{name}: accent {accent:?} is not cool"
+            );
         }
     }
 
@@ -1071,7 +1082,11 @@ mod asphodel_tests {
     #[test]
     fn ramp_steps_are_monotonic_and_land_on_the_base_at_500() {
         let base = NOCTURNE.semantic.accent.default;
-        assert_eq!(ramp_step(base, 500).bytes(), base.bytes(), "500 is the base");
+        assert_eq!(
+            ramp_step(base, 500).bytes(),
+            base.bytes(),
+            "500 is the base"
+        );
 
         let mut previous = f32::MAX;
         for step in [50u16, 100, 200, 300, 400, 500, 600, 700, 800, 900] {

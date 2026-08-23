@@ -103,13 +103,12 @@ pub(crate) fn build_inspector(
     // Phase 27-G. Transform values are three columns of `0.000` with nothing to
     // say which is metres, which is degrees and which is a multiplier. The unit
     // rides on the field so it cannot drift from the section heading.
-    let make_row_unit = |ui: &mut UserInterface,
-                         label: &str,
-                         font_id: u8,
-                         parent: NodeHandle,
-                         unit: &'static str| {
-        make_row_rw(ui, label, 0.0, font_id, parent, 0.05, unit).1
-    };
+    let make_row_unit =
+        |ui: &mut UserInterface,
+         label: &str,
+         font_id: u8,
+         parent: NodeHandle,
+         unit: &'static str| { make_row_rw(ui, label, 0.0, font_id, parent, 0.05, unit).1 };
     let make_row_step =
         |ui: &mut UserInterface,
          label: &str,
@@ -187,8 +186,15 @@ pub(crate) fn build_inspector(
         make_row_rw(ui, "Inner angle", 34.0, font_id, light_section, 0.2, "°");
     let (light_outer_row, light_outer) =
         make_row_rw(ui, "Outer angle", 34.0, font_id, light_section, 0.2, "°");
-    let (light_moon_row, light_moon_int) =
-        make_row_rw(ui, "Moon intensity", 34.0, font_id, light_section, 0.005, "");
+    let (light_moon_row, light_moon_int) = make_row_rw(
+        ui,
+        "Moon intensity",
+        34.0,
+        font_id,
+        light_section,
+        0.005,
+        "",
+    );
     let light_radius = make_row_step(ui, "Radius", 34.0, font_id, light_section, 0.01);
     let (light_width_row, light_width) =
         make_row_rw(ui, "Half width", 34.0, font_id, light_section, 0.05, "m");
@@ -287,8 +293,7 @@ pub(crate) fn build_inspector(
     // than the fullscreen draw at every tile size.
     let (post_census_toggle, post_census_label) =
         make_toggle(ui, "Pixel Census", font_id, post_section);
-    let (post_bins_toggle, post_bins_label) =
-        make_toggle(ui, "Shade Bins", font_id, post_section);
+    let (post_bins_toggle, post_bins_label) = make_toggle(ui, "Shade Bins", font_id, post_section);
     // Radius is in metres and is the control that decides whether AO reads as
     // contact darkening under an object or as a broad smear across a hillside.
     let post_ao_radius = make_row_step(ui, "AO radius", 34.0, font_id, post_section, 0.02);
@@ -435,7 +440,8 @@ pub(crate) fn build_inspector(
     // `dev records/phase DOOM/README.md`.
     let (terrain_aerial_toggle, terrain_aerial_label) =
         make_toggle(ui, "Aerial LOD", font_id, terrain_section);
-    let terrain_aerial_dist = make_row_step(ui, "Aerial dist m", 34.0, font_id, terrain_section, 5.0);
+    let terrain_aerial_dist =
+        make_row_step(ui, "Aerial dist m", 34.0, font_id, terrain_section, 5.0);
     let (terrain_aerial_hero_toggle, terrain_aerial_hero_label) =
         make_toggle(ui, "Aerial 16 layers", font_id, terrain_section);
     let (terrain_morph_toggle, terrain_morph_label) =

@@ -1798,15 +1798,24 @@ physical extents as one value.
 
 ---
 
-## 13G. Phase CONTROL — editor reach (plan reconnaissance, 2026-08-22)
+## 13G. Phase CONTROL — editor reach (reconnaissance + implementation, 2026-08-22/23)
 
 Read while expanding
 [`dev records/phase_CONTROL.md`](dev%20records/phase_CONTROL.md) from 880 to
 ~2,970 lines. **Architecture and interaction conventions studied; no code
-copied, adapted or translated.** Nothing from this section is in tree — Phase
-CONTROL is a plan. CONTROL-A expands each entry below into a full one as it
-lands, and every CONTROL sub-phase adds its own file-level citations here before
-it closes.
+copied, adapted or translated.** CONTROL-A's audit tooling is now in tree;
+CONTROL-A1/A2 are the first production implementation slices. Every CONTROL
+sub-phase adds its own file-level citations here before it closes.
+
+CONTROL-A's `tools/reachability/generate.py`, opt-in completeness tests, and
+generated evidence reports are original standard-library Python. They measure
+Somnium's own Rust source and do not copy, adapt, or translate any reference
+engine implementation. Its environment-gated surface driver and `.somtime`
+`Frame wall` diagnostic are likewise original evidence plumbing: they route
+Somnium's existing menu, overlay, modal, selection and content-folder paths and
+add no reference-derived runtime behaviour. The reference entries below are the
+complete provenance ledger for the architectural and interaction decisions the
+phase carries.
 
 Section letter: **G**. §13E and §13F were taken by Phase 27 while this plan sat
 unstarted; the plan's own §16 records the correction.

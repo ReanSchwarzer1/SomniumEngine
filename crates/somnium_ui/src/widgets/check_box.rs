@@ -25,6 +25,10 @@ pub struct CheckBox {
 }
 
 impl Control for CheckBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
         let text = ctx.measure_text(&self.label, self.px, self.font_id);
         Vec2::new(22.0 + 6.0 + text.x, text.y.max(20.0))

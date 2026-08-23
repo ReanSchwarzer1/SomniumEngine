@@ -1,4 +1,5 @@
 pub mod color;
+pub mod commands;
 pub mod draw;
 pub mod editor;
 pub mod editor_event;
@@ -11,8 +12,8 @@ pub mod metaphor;
 pub mod motion;
 pub mod node;
 pub mod pass;
-pub mod primitive;
 pub mod pool;
+pub mod primitive;
 pub mod runtime;
 pub mod style;
 pub mod theme;
@@ -42,7 +43,7 @@ pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
 
 use crate::{
     editor_event::InspectorField as IF,
-    message::{MessageDirection, NodeHandle, TextMessage, UiMessage, WidgetMessage},
+    message::{MessageDirection, Modifiers, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     pass::UiPass,
     types::Thickness,
     ui::UserInterface,
@@ -51,9 +52,9 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
-        context_menu::{ContextMenuMessage, MenuItem},
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
+        context_menu::{ContextMenuMessage, MenuItem},
         grid::GridMessage,
         image::ImageBuilder,
         menu::MenuMessage,
@@ -64,8 +65,8 @@ use crate::{
         slider::SliderMessage,
         splitter::SplitterMessage,
         stack_panel::{Orientation, StackPanelBuilder},
-        text_box::TextBoxMessage,
         text::TextBuilder,
+        text_box::TextBoxMessage,
         toast::ToastMessage,
         tree_view::{TreeItem, TreeViewMessage},
     },
@@ -77,20 +78,6 @@ use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window};
-
-/// Items the Content Drawer's right-click menu can offer.
-///
-/// Numbered rather than positional, because which items appear depends on
-/// what was clicked — a file gets Rename, empty space does not — and a
-/// menu that reported "the third one" would mean something different in
-/// each case.
-mod content_menu_id {
-    pub const NEW_FOLDER: u32 = 1;
-    pub const NEW_SCRIPT: u32 = 2;
-    pub const RENAME: u32 = 3;
-    pub const SHOW_IN_FOLDER: u32 = 4;
-    pub const REFRESH: u32 = 5;
-}
 
 /// What confirming the name prompt will do.
 ///
@@ -524,9 +511,7 @@ struct EditorLayout {
     create_popup_items: Vec<(NodeHandle, CreateKind)>,
     file_button: NodeHandle,
     file_popup: NodeHandle,
-    file_import_item: NodeHandle,
-    file_new_item: NodeHandle,
-    file_save_item: NodeHandle,
+    menu_command_items: Vec<(NodeHandle, &'static str)>,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
     viewport_res_combo: NodeHandle,
@@ -582,18 +567,6 @@ struct EditorLayout {
     view_popup: NodeHandle,
     window_popup: NodeHandle,
     help_menu_popup: NodeHandle,
-    edit_undo: NodeHandle,
-    edit_redo: NodeHandle,
-    edit_delete: NodeHandle,
-    edit_dup: NodeHandle,
-    view_profiler: NodeHandle,
-    view_content: NodeHandle,
-    window_dock_content: NodeHandle,
-    window_workspace_items: Vec<NodeHandle>,
-    window_reset_item: NodeHandle,
-    help_open_item: NodeHandle,
-    help_shortcuts: NodeHandle,
-    help_about: NodeHandle,
     status_text: NodeHandle,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
@@ -685,9 +658,8 @@ pub struct UiManager {
     file_popup: NodeHandle,
     file_popup_open: bool,
     open_combo_popup: NodeHandle,
-    file_import_item: NodeHandle,
-    file_new_item: NodeHandle,
-    file_save_item: NodeHandle,
+    /// Application menu handles mapped back to stable registry ids.
+    menu_command_items: Vec<(NodeHandle, &'static str)>,
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
@@ -710,8 +682,10 @@ pub struct UiManager {
     outliner_rows: Vec<(NodeHandle, u32)>,
     /// Entities the palette can jump to, mirrored from the Outliner.
     palette_entities: Vec<(u32, String)>,
-    /// What each *dynamic* palette row does, in append order.
-    palette_targets: Vec<PaletteTarget>,
+    /// Stable dynamic palette ids mapped to their current targets.
+    palette_targets: std::collections::HashMap<String, PaletteTarget>,
+    /// Persisted palette learning state.
+    command_history: crate::commands::CommandHistory,
     // Inspector field handles
     inspector_handles: InspectorHandles,
     // Editor event queue drained by app.rs each frame
@@ -765,24 +739,12 @@ pub struct UiManager {
     view_popup: NodeHandle,
     window_popup: NodeHandle,
     help_menu_popup: NodeHandle,
-    edit_undo: NodeHandle,
-    edit_redo: NodeHandle,
-    edit_delete: NodeHandle,
-    edit_dup: NodeHandle,
-    view_profiler: NodeHandle,
-    view_content: NodeHandle,
-    window_dock_content: NodeHandle,
-    window_workspace_items: Vec<NodeHandle>,
-    window_reset_item: NodeHandle,
     /// Workspace the shell is currently arranged for; Reset returns to its
     /// shipped preset rather than to a global default.
     active_workspace: crate::workspace::Workspace,
     /// Height of the shared bottom row when it is open. Set by the active
     /// workspace preset and persisted with it.
     drawer_height: f32,
-    help_open_item: NodeHandle,
-    help_shortcuts: NodeHandle,
-    help_about: NodeHandle,
     status_text: NodeHandle,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
@@ -822,9 +784,6 @@ pub struct UiManager {
     #[allow(dead_code)]
     drawer_docked: bool,
     show_engine_content: bool,
-    ctrl_held: bool,
-    /// Shift state, so Shift+Tab can walk the focus ring backwards.
-    shift_held: bool,
     inspector_filter: String,
     content_filter: String,
     content_path: String,
@@ -999,12 +958,8 @@ fn load_fonts(ui: &mut UserInterface) -> u8 {
 /// mangle when this file is edited programmatically.
 const SEP: [char; 2] = ['/', '\\'];
 
-/// What a *dynamic* palette row resolves to.
-///
-/// Phase 27-G. Static commands stay positional (see
-/// `UiManager::STATIC_PALETTE_COMMANDS`); everything appended after them
-/// carries its target here instead, so adding a category cannot rebind a
-/// command.
+/// What a dynamic palette row resolves to. Registered commands use stable ids
+/// directly; entities/assets use namespaced ids in this map.
 #[derive(Clone, Debug, PartialEq)]
 enum PaletteTarget {
     Entity(u32),
@@ -1028,10 +983,7 @@ impl UiManager {
         // The tree lays out in logical units so every density token keeps its
         // apparent size at any DPI. `inner_size()` is device pixels.
         let ui_scale = window.scale_factor() as f32;
-        let (sw, sh) = (
-            size.width as f32 / ui_scale,
-            size.height as f32 / ui_scale,
-        );
+        let (sw, sh) = (size.width as f32 / ui_scale, size.height as f32 / ui_scale);
         let mut native_ui = UserInterface::new(sw, sh);
         native_ui.set_ui_scale(ui_scale);
         // Now that one layout unit is one *logical* pixel, the atlas can finally
@@ -1078,9 +1030,7 @@ impl UiManager {
             file_popup: layout.file_popup,
             file_popup_open: false,
             open_combo_popup: NodeHandle::NONE,
-            file_import_item: layout.file_import_item,
-            file_new_item: layout.file_new_item,
-            file_save_item: layout.file_save_item,
+            menu_command_items: layout.menu_command_items,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
             viewport_res_combo: layout.viewport_res_combo,
@@ -1097,7 +1047,8 @@ impl UiManager {
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             palette_entities: Vec::new(),
-            palette_targets: Vec::new(),
+            palette_targets: std::collections::HashMap::new(),
+            command_history: crate::commands::CommandHistory::load(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
             viewport_handle: layout.viewport_handle,
@@ -1134,20 +1085,8 @@ impl UiManager {
             view_popup: layout.view_popup,
             window_popup: layout.window_popup,
             help_menu_popup: layout.help_menu_popup,
-            edit_undo: layout.edit_undo,
-            edit_redo: layout.edit_redo,
-            edit_delete: layout.edit_delete,
-            edit_dup: layout.edit_dup,
-            view_profiler: layout.view_profiler,
-            view_content: layout.view_content,
-            window_dock_content: layout.window_dock_content,
-            window_workspace_items: layout.window_workspace_items,
-            window_reset_item: layout.window_reset_item,
             active_workspace: crate::workspace::Workspace::Layout,
             drawer_height: theme::BOTTOM_DRAWER_HEIGHT,
-            help_open_item: layout.help_open_item,
-            help_shortcuts: layout.help_shortcuts,
-            help_about: layout.help_about,
             status_text: layout.status_text,
             drawer_button: layout.drawer_button,
             log_button: layout.log_button,
@@ -1186,8 +1125,6 @@ impl UiManager {
             drawer_open: true,
             drawer_docked: true,
             show_engine_content: false,
-            ctrl_held: false,
-            shift_held: false,
             inspector_filter: String::new(),
             content_filter: String::new(),
             content_path: String::new(),
@@ -1233,6 +1170,27 @@ impl UiManager {
             immersive_restore_fullscreen: None,
             immersive_restore_maximized: false,
         };
+        // CONTROL-A evidence harness. A relative drawer path lets a timing run
+        // queue the real `assets/terrain/` workload before frame one, without
+        // synthesising mouse input. Parent/root/prefix components are refused:
+        // this diagnostic may inspect the assets tree and nothing outside it.
+        if let Ok(raw) = std::env::var("SOMNIUM_AUDIT_CONTENT_PATH") {
+            let relative = std::path::Path::new(raw.trim());
+            let safe = !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+            let root = std::env::current_dir().unwrap_or_default().join("assets");
+            if safe && root.join(relative).is_dir() {
+                let path = relative.to_string_lossy().replace('\\', "/");
+                this.content_path.clone_from(&path);
+                this.content_history = crate::metaphor::ContentHistory::new(path);
+            } else {
+                warn!(
+                    "SOMNIUM_AUDIT_CONTENT_PATH ignored: expected an existing relative assets folder"
+                );
+            }
+        }
         this.refresh_content_list();
         // Nothing is selected at startup and `update_inspector` has not run
         // yet, so the two Details states would otherwise both be visible and
@@ -1246,7 +1204,39 @@ impl UiManager {
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
         this.apply_collapse_rules(this.window_size.0);
+        this.apply_audit_startup_state();
         this
+    }
+
+    /// Put one existing editor surface into a deterministic startup state for
+    /// CONTROL-A captures. This is inert unless the audit variable is present;
+    /// it calls the same paths as clicks/shortcuts and owns no parallel UI.
+    fn apply_audit_startup_state(&mut self) {
+        let Ok(raw) = std::env::var("SOMNIUM_AUDIT_UI_STATE") else {
+            return;
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "shell" => {}
+            "menu-file" => self.open_menu(0),
+            "menu-create" => self.open_menu(1),
+            "menu-edit" => self.open_menu(2),
+            "menu-view" => self.open_menu(3),
+            "menu-window" => self.open_menu(4),
+            "menu-help" => self.open_menu(5),
+            "palette" => self.toggle_palette(),
+            "help" => self.toggle_help(Some(0)),
+            "log" => self.toggle_log_panel(),
+            // Goes through the command/event boundary, exactly like the
+            // viewport button. The host applies it on the first frame.
+            "profiler" => {
+                self.run_command_id("editor.view.profiler");
+            }
+            "modal-unsaved" => {
+                self.scene_dirty = true;
+                self.prompt_unsaved_new();
+            }
+            other => warn!("SOMNIUM_AUDIT_UI_STATE={other} ignored: unknown audit surface"),
+        }
     }
 
     // ── Window integration ────────────────────────────────────────────────────
@@ -1480,8 +1470,13 @@ impl UiManager {
             return false;
         }
         if let WindowEvent::ModifiersChanged(m) = event {
-            self.ctrl_held = m.state().control_key();
-            self.shift_held = m.state().shift_key();
+            let state = m.state();
+            self.native_ui.set_modifiers(Modifiers {
+                ctrl: state.control_key(),
+                shift: state.shift_key(),
+                alt: state.alt_key(),
+                logo: state.super_key(),
+            });
         }
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
@@ -1498,6 +1493,9 @@ impl UiManager {
             ..
         } = event
         {
+            if self.native_ui.cancel_active_gesture() {
+                return true;
+            }
             if self.open_content_menu(self.native_ui.cursor_pos) {
                 return true;
             }
@@ -1505,31 +1503,46 @@ impl UiManager {
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
+                if pressed && !key_ev.repeat && !self.native_ui.has_text_focus() {
+                    if let Some(chord) = crate::commands::Chord::from_winit(
+                        code,
+                        self.native_ui.modifiers().command(),
+                        self.native_ui.modifiers().shift,
+                        self.native_ui.modifiers().alt,
+                        false,
+                    ) {
+                        if let Some(command) = crate::commands::registry().binding(chord).copied() {
+                            if self.run_command_id(command.id) {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 match code {
                     KeyCode::ControlLeft | KeyCode::ControlRight => {
-                        self.ctrl_held = pressed;
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.ctrl = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    KeyCode::F1 if pressed => {
-                        self.toggle_help(None);
-                        return true;
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.shift = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    // Phase 16-D. Safe to lean on: a script that no longer
-                    // compiles leaves its live instances running and only
-                    // publishes diagnostics, so a reload can never be the
-                    // thing that breaks a play session.
-                    KeyCode::F5 if pressed => {
-                        self.editor_events.push_back(EditorEvent::ReloadScripts);
-                        return true;
+                    KeyCode::AltLeft | KeyCode::AltRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.alt = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    KeyCode::Space if pressed && self.ctrl_held => {
-                        self.toggle_drawer();
-                        return true;
-                    }
-                    KeyCode::KeyP if pressed && self.ctrl_held => {
-                        self.toggle_palette();
-                        return true;
+                    KeyCode::SuperLeft | KeyCode::SuperRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.logo = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
                     KeyCode::Escape if pressed => {
+                        if self.native_ui.cancel_active_gesture() {
+                            return true;
+                        }
                         if self.close_top_overlay() {
                             return true;
                         }
@@ -1543,8 +1556,45 @@ impl UiManager {
                     //
                     // A focused text field keeps Tab for itself, so typing in
                     // the search box is not interrupted.
+                    KeyCode::Tab if pressed && self.native_ui.modal_root().is_some() => {
+                        self.advance_focus(if self.native_ui.modifiers().shift {
+                            -1
+                        } else {
+                            1
+                        });
+                        return true;
+                    }
                     KeyCode::Tab if pressed && !self.native_ui.has_text_focus() => {
-                        self.advance_focus(if self.shift_held { -1 } else { 1 });
+                        self.advance_focus(if self.native_ui.modifiers().shift {
+                            -1
+                        } else {
+                            1
+                        });
+                        return true;
+                    }
+                    KeyCode::ArrowUp
+                    | KeyCode::ArrowDown
+                    | KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::Home
+                    | KeyCode::End
+                        if pressed && self.native_ui.focused() == self.outliner_tree =>
+                    {
+                        self.native_ui.send(UiMessage::new(
+                            self.outliner_tree,
+                            MessageDirection::ToWidget,
+                            WidgetMessage::KeyDown(code, self.native_ui.modifiers()),
+                        ));
+                        return true;
+                    }
+                    KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Home | KeyCode::End
+                        if pressed
+                            && (self.native_ui.focused() == self.inspector_search
+                                || self
+                                    .native_ui
+                                    .is_under(self.native_ui.focused(), self.inspector_stack)) =>
+                    {
+                        self.native_ui.traverse_region(self.inspector_stack, code);
                         return true;
                     }
                     _ => {}
@@ -1707,35 +1757,24 @@ impl UiManager {
         // what an author means by "here".
         self.content_menu_folder = self.content_path.clone();
 
-        let mut items = vec![
-            MenuItem {
-                id: content_menu_id::NEW_FOLDER,
-                label: "New Folder…".into(),
-                enabled: true,
-            },
-            MenuItem {
-                id: content_menu_id::NEW_SCRIPT,
-                label: "New Script…".into(),
-                enabled: true,
-            },
-        ];
-        if self.content_menu_target.is_some() {
-            items.push(MenuItem {
-                id: content_menu_id::RENAME,
-                label: "Rename…".into(),
-                enabled: true,
-            });
-            items.push(MenuItem {
-                id: content_menu_id::SHOW_IN_FOLDER,
-                label: "Show in Folder".into(),
-                enabled: true,
-            });
-        }
-        items.push(MenuItem {
-            id: content_menu_id::REFRESH,
-            label: "Refresh".into(),
-            enabled: true,
-        });
+        let ctx = self.command_context();
+        let items: Vec<MenuItem> = crate::commands::registry()
+            .surface(crate::commands::CommandSurface::ContentContext)
+            .into_iter()
+            .filter(|command| {
+                self.content_menu_target.is_some()
+                    || !matches!(
+                        command.action,
+                        crate::commands::CommandAction::ContentRename
+                            | crate::commands::CommandAction::ContentShowInFolder
+                    )
+            })
+            .map(|command| MenuItem {
+                id: command.id.to_string(),
+                label: command.menu_label(),
+                enabled: command.enabled(&ctx).is_enabled(),
+            })
+            .collect();
 
         // Keep it on screen. The drawer sits at the bottom of the window,
         // which is precisely where a menu that opened downwards would
@@ -1796,11 +1835,12 @@ impl UiManager {
         ));
         self.native_ui.invalidate_ancestors(self.name_popup);
         // So the author can start typing without clicking the box first.
-        self.native_ui.set_focus(self.name_input);
+        self.enter_modal_focus(self.name_popup, self.name_input);
     }
 
     fn close_name_prompt(&mut self) {
         self.name_prompt = None;
+        self.exit_modal_focus(self.name_popup);
         self.native_ui.send(UiMessage::new(
             self.name_popup,
             MessageDirection::ToWidget,
@@ -1831,46 +1871,28 @@ impl UiManager {
     }
 
     /// Act on a chosen menu item.
-    fn activate_content_menu(&mut self, id: u32) {
+    fn activate_content_menu(&mut self, id: &str) {
+        // The context-menu row disappears on close. Restore the underlying
+        // tile (or the drawer search after a gap click) first, so a command
+        // which opens the name modal has a durable return-focus target.
+        let return_focus = self
+            .content_menu_target
+            .as_ref()
+            .and_then(|entry| {
+                self.content_entries
+                    .iter()
+                    .find(|(_, candidate)| candidate.path == entry.path)
+                    .map(|(handle, _)| *handle)
+            })
+            .unwrap_or(self.content_search);
+        self.native_ui.set_focus(return_focus);
+        self.native_ui.send(UiMessage::new(
+            return_focus,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
         self.close_content_menu();
-        let folder = self.content_menu_folder.clone();
-        let target = self.content_menu_target.clone();
-        match id {
-            content_menu_id::NEW_FOLDER => {
-                self.open_name_prompt(
-                    NamePrompt::NewFolder { parent: folder },
-                    "New folder name",
-                    "NewFolder",
-                );
-            }
-            content_menu_id::NEW_SCRIPT => {
-                self.open_name_prompt(
-                    NamePrompt::NewScript { parent: folder },
-                    "New script name",
-                    "NewScript.luau",
-                );
-            }
-            content_menu_id::RENAME => {
-                if let Some(entry) = target {
-                    let path = entry.path.to_string_lossy().into_owned();
-                    self.open_name_prompt(
-                        NamePrompt::Rename { path },
-                        "Rename to",
-                        &entry.name,
-                    );
-                }
-            }
-            content_menu_id::SHOW_IN_FOLDER => {
-                if let Some(entry) = target {
-                    self.editor_events
-                        .push_back(EditorEvent::ShowContentItemInFolder(
-                            entry.path.to_string_lossy().into_owned(),
-                        ));
-                }
-            }
-            content_menu_id::REFRESH => self.refresh_content_list(),
-            _ => {}
-        }
+        let _ = self.run_command_id(id);
     }
 
     /// Phase 16-D: how many blocking script diagnostics are outstanding.
@@ -1900,6 +1922,7 @@ impl UiManager {
             PopupMessage::Open,
         ));
         self.native_ui.invalidate_ancestors(self.unsaved_popup);
+        self.enter_modal_focus(self.unsaved_popup, self.unsaved_save);
     }
 
     pub fn set_fps(&mut self, fps: f64) {
@@ -2049,6 +2072,11 @@ impl UiManager {
     /// Returns whether anything was closed, so the caller can let the key fall
     /// through to the viewport when the editor has nothing to dismiss.
     fn close_top_overlay(&mut self) -> bool {
+        // Modal name prompts share the same focus trap as the unsaved prompt.
+        if self.name_prompt.is_some() {
+            self.close_name_prompt();
+            return true;
+        }
         // 6 — modal
         if self.unsaved_open {
             self.close_unsaved();
@@ -2137,21 +2165,29 @@ impl UiManager {
     /// application scope → mode scope → viewport context → left rail →
     /// viewport → Outliner → Details → drawer → status.
     fn focus_stops(&self) -> Vec<NodeHandle> {
-        let mut stops = vec![
-            self.palette_button,
-            self.save_button,
-            self.select_button,
-            self.landscape_button,
-            self.foliage_toolbar_button,
-            self.camera_speed_slider,
-            self.outliner_search,
-            self.outliner_tree,
-            self.inspector_search,
-        ];
-        if self.drawer_open {
+        let mut stops = if self.name_prompt.is_some() {
+            vec![self.name_input, self.name_ok, self.name_cancel]
+        } else if self.unsaved_open {
+            vec![self.unsaved_save, self.unsaved_discard, self.unsaved_cancel]
+        } else {
+            vec![
+                self.palette_button,
+                self.save_button,
+                self.select_button,
+                self.landscape_button,
+                self.foliage_toolbar_button,
+                self.camera_speed_slider,
+                self.outliner_search,
+                self.outliner_tree,
+                self.inspector_search,
+            ]
+        };
+        if self.native_ui.modal_root().is_none() && self.drawer_open {
             stops.push(self.content_search);
         }
-        stops.push(self.drawer_button);
+        if self.native_ui.modal_root().is_none() {
+            stops.push(self.drawer_button);
+        }
         stops.retain(|h| !h.is_none() && self.native_ui.is_globally_visible(*h));
         stops
     }
@@ -2224,6 +2260,7 @@ impl UiManager {
             || self.palette_open
             || self.color_open
             || self.unsaved_open
+            || self.name_prompt.is_some()
             || self.open_combo_popup.is_some()
     }
 
@@ -2246,6 +2283,8 @@ impl UiManager {
             Some(self.palette_popup)
         } else if self.color_open {
             Some(self.color_popup)
+        } else if self.name_prompt.is_some() {
+            Some(self.name_popup)
         } else if self.unsaved_open {
             Some(self.unsaved_popup)
         } else if self.open_combo_popup.is_some() {
@@ -2317,13 +2356,13 @@ impl UiManager {
             MessageDirection::ToWidget,
             PopupMessage::Open,
         ));
-        self.native_ui.set_focus(self.palette_widget);
+        self.enter_modal_focus(self.palette_popup, self.palette_widget);
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
     fn close_palette(&mut self) {
         self.palette_open = false;
-        self.native_ui.set_focus(NodeHandle::NONE);
+        self.exit_modal_focus(self.palette_popup);
         self.native_ui.send(UiMessage::new(
             self.palette_popup,
             MessageDirection::ToWidget,
@@ -2332,29 +2371,39 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
-    /// Number of statically declared palette commands, which occupy indices
-    /// `0..STATIC_PALETTE_COMMANDS` in the order `editor::shell` declares them.
-    ///
-    /// [`Self::run_palette_command`] dispatches on that position, so anything
-    /// dynamic must be **appended** after this point. Inserting or reordering a
-    /// static command silently rebinds every command after it;
-    /// `static_palette_command_count_is_pinned` fails if the count moves.
-    pub(crate) const STATIC_PALETTE_COMMANDS: usize = 15;
-
-    /// Rebuild the searchable set: the static commands, then everything that
-    /// exists right now. Called each time the palette opens, because entities
-    /// and assets change while it is closed.
+    /// Rebuild the searchable set from the command registry and current
+    /// dynamic editor objects. Every row has a stable id.
     fn refresh_palette_items(&mut self) {
         use crate::widgets::command_palette::PaletteCategory as Cat;
 
-        let mut items: Vec<PaletteItem> = crate::editor::shell::palette_commands();
-        debug_assert_eq!(items.len(), Self::STATIC_PALETTE_COMMANDS);
-        let mut targets: Vec<PaletteTarget> = Vec::new();
+        let ctx = self.command_context();
+        let mut items: Vec<PaletteItem> = crate::commands::registry()
+            .commands()
+            .iter()
+            .map(|command| {
+                let enablement = command.enabled(&ctx);
+                PaletteItem::command(
+                    command.id,
+                    command.label,
+                    command
+                        .default_binding
+                        .map(|binding| binding.to_string())
+                        .unwrap_or_default(),
+                )
+                .with_enablement(enablement.is_enabled(), enablement.reason())
+                .with_recency(self.command_history.recency(command.id))
+            })
+            .collect();
+        let mut targets = std::collections::HashMap::new();
 
         // Entities, from whatever the Outliner is currently showing.
         for (id, name) in &self.palette_entities {
-            items.push(PaletteItem::new(name.clone(), "Select", Cat::Entity));
-            targets.push(PaletteTarget::Entity(*id));
+            let key = format!("entity:{id}");
+            items.push(
+                PaletteItem::new(&key, name.clone(), "Select", Cat::Entity)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Entity(*id));
         }
 
         // Assets in the current Content Drawer folder.
@@ -2362,23 +2411,34 @@ impl UiManager {
             if entry.is_dir {
                 continue;
             }
-            items.push(PaletteItem::new(entry.name.clone(), "Open", Cat::Asset));
-            targets.push(PaletteTarget::Asset(entry.path.clone()));
+            let key = format!("asset:{}", entry.path.to_string_lossy());
+            items.push(
+                PaletteItem::new(&key, entry.name.clone(), "Open", Cat::Asset)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Asset(entry.path.clone()));
         }
 
         // Help pages, so a question is answerable from the same surface.
         for (i, title) in crate::metaphor::help_titles().iter().enumerate() {
-            items.push(PaletteItem::new((*title).to_string(), "F1", Cat::Help));
-            targets.push(PaletteTarget::Help(i as u8));
+            let key = format!("help:page:{i}");
+            items.push(
+                PaletteItem::new(&key, (*title).to_string(), "F1", Cat::Help)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Help(i as u8));
         }
 
         // Panels, so the palette can also be used to reach a surface.
-        for (label, target) in [
-            ("Content Drawer", PaletteTarget::Drawer),
-            ("Output Log", PaletteTarget::Log),
+        for (key, label, target) in [
+            ("panel:content", "Content Drawer", PaletteTarget::Drawer),
+            ("panel:log", "Output Log", PaletteTarget::Log),
         ] {
-            items.push(PaletteItem::new(label.to_string(), "", Cat::Panel));
-            targets.push(target);
+            items.push(
+                PaletteItem::new(key, label, "", Cat::Panel)
+                    .with_recency(self.command_history.recency(key)),
+            );
+            targets.insert(key.to_string(), target);
         }
 
         self.palette_targets = targets;
@@ -2389,58 +2449,163 @@ impl UiManager {
         ));
     }
 
-    fn run_palette_command(&mut self, idx: usize) {
-        // Anything past the static block is a dynamic row; the parallel target
-        // list is built in the same order `refresh_palette_items` appended them.
-        if idx >= Self::STATIC_PALETTE_COMMANDS {
-            let target = self
-                .palette_targets
-                .get(idx - Self::STATIC_PALETTE_COMMANDS)
-                .cloned();
-            match target {
-                Some(PaletteTarget::Entity(id)) => {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(id)));
-                }
+    fn command_context(&self) -> crate::commands::EditorCtx {
+        crate::commands::EditorCtx {
+            has_selection: self
+                .last_outliner_state
+                .as_ref()
+                .is_some_and(|(_, selected)| selected.is_some()),
+            // UiManager does not own the undo cursor; core remains authoritative.
+            // Keep existing reachability until CONTROL-H exposes that snapshot.
+            can_undo: true,
+            can_redo: true,
+            has_content_target: self.content_menu_target.is_some(),
+        }
+    }
+
+    fn run_command_id(&mut self, id: &str) -> bool {
+        if let Some(command) = crate::commands::registry().get(id).copied() {
+            if !command.enabled(&self.command_context()).is_enabled() {
+                return false;
+            }
+            self.run_command_action(command.action);
+        } else {
+            match self.palette_targets.get(id).cloned() {
+                Some(PaletteTarget::Entity(entity)) => self
+                    .editor_events
+                    .push_back(EditorEvent::SelectEntity(Some(entity))),
                 Some(PaletteTarget::Asset(path)) => {
                     self.editor_events
                         .push_back(EditorEvent::ShowContentItemInFolder(
                             path.to_string_lossy().into_owned(),
-                        ));
+                        ))
                 }
                 Some(PaletteTarget::Help(page)) => self.toggle_help(Some(page)),
                 Some(PaletteTarget::Drawer) => self.toggle_drawer(),
                 Some(PaletteTarget::Log) => self.toggle_log_panel(),
-                None => {}
+                None => return false,
             }
-            return;
         }
-        match idx {
-            0 => self.prompt_unsaved_new(),
-            1 => self.editor_events.push_back(EditorEvent::SaveScene),
-            2 => self.editor_events.push_back(EditorEvent::ImportModel),
-            3 => self.editor_events.push_back(EditorEvent::Undo),
-            4 => self.editor_events.push_back(EditorEvent::Redo),
-            5 => self.editor_events.push_back(EditorEvent::DeleteSelected),
-            6 => self.editor_events.push_back(EditorEvent::DuplicateSelected),
-            7 => self.editor_events.push_back(EditorEvent::PlaySimulation),
-            8 => self.editor_events.push_back(EditorEvent::PauseSimulation),
-            9 => self.editor_events.push_back(EditorEvent::StopSimulation),
-            10 => self.editor_events.push_back(EditorEvent::ToggleProfiler),
-            11 => self.toggle_drawer(),
-            12 => self.toggle_help(Some(0)),
-            13 => self
+        self.command_history.record(id);
+        self.command_history.save();
+        true
+    }
+
+    fn run_command_action(&mut self, action: crate::commands::CommandAction) {
+        use crate::commands::CommandAction as A;
+        match action {
+            A::NewScene => self.prompt_unsaved_new(),
+            A::SaveScene => self.editor_events.push_back(EditorEvent::SaveScene),
+            A::ImportModel => self.editor_events.push_back(EditorEvent::ImportModel),
+            A::Undo => self.editor_events.push_back(EditorEvent::Undo),
+            A::Redo => self.editor_events.push_back(EditorEvent::Redo),
+            A::DeleteSelected => self.editor_events.push_back(EditorEvent::DeleteSelected),
+            A::DuplicateSelected => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            A::Play => self.editor_events.push_back(EditorEvent::PlaySimulation),
+            A::Pause => self.editor_events.push_back(EditorEvent::PauseSimulation),
+            A::Stop => self.editor_events.push_back(EditorEvent::StopSimulation),
+            A::ToggleProfiler => self.editor_events.push_back(EditorEvent::ToggleProfiler),
+            A::ToggleDrawer => self.toggle_drawer(),
+            A::TogglePalette => self.toggle_palette(),
+            A::OpenHelp(page) => self.toggle_help(Some(page)),
+            A::ReloadScripts => self.editor_events.push_back(EditorEvent::ReloadScripts),
+            A::ToggleShadingMode => self.editor_events.push_back(EditorEvent::ToggleShadingMode),
+            A::SetGizmoMode(mode) => self
                 .editor_events
-                .push_back(EditorEvent::CreateEntity(CreateKind::Cube)),
-            14 => self
+                .push_back(EditorEvent::SetGizmoMode(mode)),
+            A::ToggleTerrainEdit => self.editor_events.push_back(EditorEvent::ToggleTerrainEdit),
+            A::ToggleFoliage => self.editor_events.push_back(EditorEvent::ToggleFoliage),
+            A::ToggleImmersiveViewport => self
                 .editor_events
-                .push_back(EditorEvent::CreateEntity(CreateKind::DirectionalLight)),
-            _ => {}
+                .push_back(EditorEvent::ToggleImmersiveViewport),
+            A::OpenOutputLog => self.toggle_log_panel(),
+            A::CreateEntity(kind) => self
+                .editor_events
+                .push_back(EditorEvent::CreateEntity(kind)),
+            A::DockContentDrawer => {
+                self.drawer_docked = true;
+                if !self.drawer_open {
+                    self.toggle_drawer();
+                }
+            }
+            A::SetWorkspace(workspace) => self.set_workspace(workspace),
+            A::ResetWorkspace => self.reset_workspace(),
+            A::ContentNewFolder => self.open_name_prompt(
+                NamePrompt::NewFolder {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New folder name",
+                "NewFolder",
+            ),
+            A::ContentNewScript => self.open_name_prompt(
+                NamePrompt::NewScript {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New script name",
+                "NewScript.luau",
+            ),
+            A::ContentRename => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.open_name_prompt(
+                        NamePrompt::Rename {
+                            path: entry.path.to_string_lossy().into_owned(),
+                        },
+                        "Rename to",
+                        &entry.name,
+                    );
+                }
+            }
+            A::ContentShowInFolder => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                }
+            }
+            A::ContentRefresh => self.refresh_content_list(),
+        }
+    }
+
+    fn enter_modal_focus(&mut self, root: NodeHandle, target: NodeHandle) {
+        let previous = self.native_ui.focused();
+        if previous.is_some() && previous != target {
+            self.native_ui.send(UiMessage::new(
+                previous,
+                MessageDirection::ToWidget,
+                WidgetMessage::Unfocus,
+            ));
+        }
+        self.native_ui.enter_modal(root, target);
+        self.native_ui.send(UiMessage::new(
+            target,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
+    }
+
+    fn exit_modal_focus(&mut self, root: NodeHandle) {
+        let previous = self.native_ui.focused();
+        if previous.is_some() {
+            self.native_ui.send(UiMessage::new(
+                previous,
+                MessageDirection::ToWidget,
+                WidgetMessage::Unfocus,
+            ));
+        }
+        let target = self.native_ui.exit_modal(root);
+        if target.is_some() {
+            self.native_ui.send(UiMessage::new(
+                target,
+                MessageDirection::ToWidget,
+                WidgetMessage::Focus,
+            ));
         }
     }
 
     fn close_unsaved(&mut self) {
         self.unsaved_open = false;
+        self.exit_modal_focus(self.unsaved_popup);
         self.native_ui.send(UiMessage::new(
             self.unsaved_popup,
             MessageDirection::ToWidget,
@@ -2858,8 +3023,14 @@ impl UiManager {
                 h.camera_section,
                 "camera frustum cull dynamic resolution target floor",
             ),
-            (h.post_section, "post fx bloom exposure tonemap census shade bins"),
-            (h.terrain_section, "terrain paint layer hex aerial lod distance"),
+            (
+                h.post_section,
+                "post fx bloom exposure tonemap census shade bins",
+            ),
+            (
+                h.terrain_section,
+                "terrain paint layer hex aerial lod distance",
+            ),
             (h.foliage_section, "foliage grass tree"),
             (h.water_section, "water body wave"),
             (h.vessel_section, "vessel buoyancy"),
@@ -3120,19 +3291,17 @@ impl UiManager {
             .with_stroke_thickness(Thickness::uniform(1.0))
             .build();
             let card = self.native_ui.add_node(card, list);
-            let column = StackPanelBuilder::new(
-                WidgetBuilder::new().with_background(theme::TRANSPARENT),
-            )
-            .with_orientation(Orientation::Vertical)
-            .build();
+            let column =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Vertical)
+                    .build();
             let column = self.native_ui.add_node(column, card);
 
             // Header: name, state, and the three structural controls.
-            let header = StackPanelBuilder::new(
-                WidgetBuilder::new().with_background(theme::TRANSPARENT),
-            )
-            .with_orientation(Orientation::Horizontal)
-            .build();
+            let header =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Horizontal)
+                    .build();
             let header = self.native_ui.add_node(header, column);
 
             let enable = crate::widgets::check_box::CheckBoxBuilder::new(
@@ -3232,23 +3401,19 @@ impl UiManager {
                         .with_font_size(12.0)
                         .build();
                         let check = self.native_ui.add_node(check, column);
-                        self.script_widgets.push((
-                            check,
-                            ScriptWidgetAction::Bool(index, field.name.clone()),
-                        ));
+                        self.script_widgets
+                            .push((check, ScriptWidgetAction::Bool(index, field.name.clone())));
                     }
                     ScriptFieldKind::Text(text) => {
                         // Shown, not editable. A property kind the editor
                         // cannot author yet is better visible than absent:
                         // absent looks like the script failed to declare it.
-                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(
-                            Thickness {
-                                left: 10.0,
-                                top: 2.0,
-                                right: 0.0,
-                                bottom: 2.0,
-                            },
-                        ))
+                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                            left: 10.0,
+                            top: 2.0,
+                            right: 0.0,
+                            bottom: 2.0,
+                        }))
                         .with_role(TextRole::Caption)
                         .with_text(format!("{}: {text}", field.name))
                         .build();
@@ -4108,9 +4273,12 @@ impl UiManager {
                 }
                 continue;
             }
-            if let Some(CommandPaletteMessage::Run(idx)) = msg.data::<CommandPaletteMessage>() {
-                self.run_palette_command(*idx);
+            if let Some(CommandPaletteMessage::Run(id)) = msg.data::<CommandPaletteMessage>() {
                 self.close_palette();
+                // Close (and restore focus from) the palette before running a
+                // command which may open another modal, such as New Scene's
+                // unsaved-changes prompt. Modal focus scopes never overlap.
+                self.run_command_id(id);
                 continue;
             }
             if let Some(SplitterMessage::Changed(size)) = msg.data::<SplitterMessage>() {
@@ -4152,16 +4320,6 @@ impl UiManager {
                 continue;
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
-                if msg.destination == self.file_new_item {
-                    self.close_all_menus();
-                    self.prompt_unsaved_new();
-                    continue;
-                }
-                if msg.destination == self.file_save_item {
-                    self.close_all_menus();
-                    self.editor_events.push_back(EditorEvent::SaveScene);
-                    continue;
-                }
                 if msg.destination == self.unsaved_save {
                     self.close_unsaved();
                     self.editor_events.push_back(EditorEvent::SaveScene);
@@ -4190,7 +4348,6 @@ impl UiManager {
             // prompt the three creating flows share.
             if let Some(ContextMenuMessage::Activate(id)) = msg.data::<ContextMenuMessage>() {
                 if msg.destination == self.content_menu {
-                    let id = *id;
                     self.activate_content_menu(id);
                     continue;
                 }
@@ -4227,19 +4384,45 @@ impl UiManager {
                     self.close_color_picker(true);
                 }
                 if msg.destination == self.palette_popup {
-                    self.palette_open = false;
+                    self.close_palette();
                 }
                 if msg.destination == self.unsaved_popup {
-                    self.unsaved_open = false;
+                    self.close_unsaved();
                 }
                 if msg.destination == self.name_popup {
                     // Clicking away from the prompt abandons it, the same
                     // as Cancel.
-                    self.name_prompt = None;
+                    self.close_name_prompt();
                 }
             }
 
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if let Some((_, id)) = self
+                    .menu_command_items
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .copied()
+                {
+                    if let Some(opener) = self.open_menu_button() {
+                        let previous = self.native_ui.focused();
+                        if previous.is_some() && previous != opener {
+                            self.native_ui.send(UiMessage::new(
+                                previous,
+                                MessageDirection::ToWidget,
+                                WidgetMessage::Unfocus,
+                            ));
+                        }
+                        self.native_ui.set_focus(opener);
+                        self.native_ui.send(UiMessage::new(
+                            opener,
+                            MessageDirection::ToWidget,
+                            WidgetMessage::Focus,
+                        ));
+                    }
+                    self.close_all_menus();
+                    self.run_command_id(id);
+                    continue;
+                }
                 // Outliner row
                 if msg.destination == self.palette_button {
                     self.toggle_palette();
@@ -4264,53 +4447,40 @@ impl UiManager {
                         .push_back(EditorEvent::SetTerrainPaintLayer(layer as u8));
                     continue;
                 }
-                // File > Import Model (Phase 19B)
-                if msg.destination == self.file_import_item {
-                    self.editor_events.push_back(EditorEvent::ImportModel);
-                    self.file_popup_open = false;
-                    self.native_ui.send(UiMessage::new(
-                        self.file_popup,
-                        MessageDirection::ToWidget,
-                        PopupMessage::Close,
-                    ));
-                    self.native_ui.invalidate_ancestors(self.file_popup);
-                    continue;
-                }
                 // Post-process controls are checkboxes now. Handling their
                 // underlying button-click messages as well as Check messages
                 // delivered two events for one click and flipped the setting
                 // straight back to its starting value.
                 if msg.destination == self.profiler_toggle {
-                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
+                    self.run_command_id("editor.view.profiler");
                     continue;
                 }
                 if msg.destination == self.play_button {
-                    self.editor_events.push_back(EditorEvent::PlaySimulation);
+                    self.run_command_id("editor.simulation.play");
                     continue;
                 }
                 if msg.destination == self.select_button {
-                    self.editor_events.push_back(EditorEvent::SetGizmoMode(0));
+                    self.run_command_id("editor.gizmo.translate");
                     continue;
                 }
                 if msg.destination == self.landscape_button {
-                    self.editor_events.push_back(EditorEvent::ToggleTerrainEdit);
+                    self.run_command_id("editor.terrain.edit");
                     continue;
                 }
                 if msg.destination == self.foliage_toolbar_button {
-                    self.editor_events.push_back(EditorEvent::ToggleFoliage);
+                    self.run_command_id("editor.foliage.edit");
                     continue;
                 }
                 if msg.destination == self.immersive_button {
-                    self.editor_events
-                        .push_back(EditorEvent::ToggleImmersiveViewport);
+                    self.run_command_id("editor.viewport.immersive");
                     continue;
                 }
                 if msg.destination == self.pause_button {
-                    self.editor_events.push_back(EditorEvent::PauseSimulation);
+                    self.run_command_id("editor.simulation.pause");
                     continue;
                 }
                 if msg.destination == self.stop_button {
-                    self.editor_events.push_back(EditorEvent::StopSimulation);
+                    self.run_command_id("editor.simulation.stop");
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_tonemap_button {
@@ -4380,72 +4550,9 @@ impl UiManager {
                         .push_back(EditorEvent::SetTerrainTool(tool));
                     continue;
                 }
-                if msg.destination == self.edit_undo {
-                    self.editor_events.push_back(EditorEvent::Undo);
+                if msg.destination == self.help_button {
                     self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_redo {
-                    self.editor_events.push_back(EditorEvent::Redo);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_delete {
-                    self.editor_events.push_back(EditorEvent::DeleteSelected);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_dup {
-                    self.editor_events.push_back(EditorEvent::DuplicateSelected);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.view_profiler {
-                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.view_content {
-                    self.close_all_menus();
-                    self.toggle_drawer();
-                    continue;
-                }
-                if let Some(idx) = self
-                    .window_workspace_items
-                    .iter()
-                    .position(|h| *h == msg.destination)
-                {
-                    let workspace = crate::workspace::Workspace::ALL[idx];
-                    self.close_all_menus();
-                    self.set_workspace(workspace);
-                    continue;
-                }
-                if msg.destination == self.window_reset_item {
-                    self.close_all_menus();
-                    self.reset_workspace();
-                    continue;
-                }
-                if msg.destination == self.window_dock_content {
-                    self.drawer_docked = true;
-                    if !self.drawer_open {
-                        self.toggle_drawer();
-                    }
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.help_open_item || msg.destination == self.help_button {
-                    self.close_all_menus();
-                    self.toggle_help(Some(0));
-                    continue;
-                }
-                if msg.destination == self.help_shortcuts {
-                    self.close_all_menus();
-                    self.toggle_help(Some(2));
-                    continue;
-                }
-                if msg.destination == self.help_about {
-                    self.close_all_menus();
-                    self.toggle_help(Some(4));
+                    self.run_command_id("editor.help.index");
                     continue;
                 }
                 if msg.destination == self.log_button {
@@ -4478,7 +4585,7 @@ impl UiManager {
                     continue;
                 }
                 if msg.destination == self.save_button {
-                    self.editor_events.push_back(EditorEvent::SaveScene);
+                    self.run_command_id("editor.scene.save");
                     continue;
                 }
                 if let Some((_, entry)) = self
@@ -4539,7 +4646,8 @@ impl UiManager {
                                 .push_back(EditorEvent::ReorderScript { index, delta });
                         }
                         ScriptWidgetAction::Detach(index) => {
-                            self.editor_events.push_back(EditorEvent::DetachScript(index));
+                            self.editor_events
+                                .push_back(EditorEvent::DetachScript(index));
                         }
                         // Enable and the property widgets are not buttons;
                         // they arrive as CheckBox and NumericField messages.
@@ -4559,8 +4667,15 @@ impl UiManager {
                     .iter()
                     .find(|(bh, _)| *bh == msg.destination)
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::CreateEntity(kind));
+                    if let Some(command) = crate::commands::registry()
+                        .menu(crate::commands::Menu::Create)
+                        .into_iter()
+                        .find(|command| {
+                            command.action == crate::commands::CommandAction::CreateEntity(kind)
+                        })
+                    {
+                        self.run_command_id(command.id);
+                    }
                     self.create_popup_open = false;
                     self.native_ui.send(UiMessage::new(
                         self.create_popup,
@@ -4753,7 +4868,8 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.post_census_toggle {
                     if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events.push_back(EditorEvent::SetPixelCensus(*on));
+                        self.editor_events
+                            .push_back(EditorEvent::SetPixelCensus(*on));
                     }
                     continue;
                 }
@@ -5078,8 +5194,11 @@ mod elysium_tests {
         // must be visible, at startup and after every selection change.
         let mut ui = UserInterface::new(1920.0, 1080.0);
         let font_id = load_fonts(&mut ui);
-        let layout =
-            build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
 
         // The builder leaves both visible; `UiManager::new` seeds the empty
         // one, and `update_inspector` flips them from then on. Assert the
@@ -5092,53 +5211,20 @@ mod elysium_tests {
     }
 
     #[test]
-    fn static_palette_command_count_is_pinned() {
-        // `run_palette_command` dispatches on position. If this count moves,
-        // every dynamic row is off by the difference and commands silently run
-        // the wrong action.
-        assert_eq!(
-            crate::editor::shell::palette_commands().len(),
-            UiManager::STATIC_PALETTE_COMMANDS
-        );
-    }
-
-    #[test]
-    fn static_palette_commands_keep_their_exact_positions() {
-        // The real guard: `run_palette_command` maps 0 to New Scene, 1 to Save
-        // Scene and so on. Inserting a command anywhere but the end rebinds
-        // everything after it, and nothing else in the codebase would notice.
-        let labels: Vec<String> = crate::editor::shell::palette_commands()
-            .into_iter()
-            .map(|i| i.label)
+    fn every_registered_command_is_palette_and_help_discoverable() {
+        let registry = crate::commands::registry();
+        let palette_ids: std::collections::HashSet<_> = registry
+            .commands()
+            .iter()
+            .map(|command| command.id)
             .collect();
-        assert_eq!(
-            labels,
-            vec![
-                "New Scene",
-                "Save Scene",
-                "Import Model…",
-                "Undo",
-                "Redo",
-                "Delete",
-                "Duplicate",
-                "Play",
-                "Pause",
-                "Stop",
-                "Toggle Profiler",
-                "Content Drawer",
-                "Help",
-                "Create Cube",
-                "Create Directional Light",
-            ]
+        let help_ids: std::collections::HashSet<_> =
+            registry.help_index().iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(palette_ids, help_ids);
+        assert!(
+            palette_ids.len() > 15,
+            "CONTROL-A2 must replace the old shortlist"
         );
-    }
-
-    #[test]
-    fn every_static_palette_row_is_a_command() {
-        use crate::widgets::command_palette::PaletteCategory;
-        for item in crate::editor::shell::palette_commands() {
-            assert_eq!(item.category, PaletteCategory::Command, "{}", item.label);
-        }
     }
 
     #[test]
@@ -5220,7 +5306,11 @@ mod dpi_tests {
         let mut ui = UserInterface::new(logical_w, logical_h);
         ui.set_ui_scale(scale);
         let font_id = load_fonts(&mut ui);
-        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let _ = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
         ui.perform_layout();
         ui
     }
@@ -5252,9 +5342,7 @@ mod dpi_tests {
         let b = shell(1280.0, 720.0, 2.0);
         let c = shell(1280.0, 720.0, 1.5);
 
-        for (h_a, h_b, h_c) in [
-            (a.root(), b.root(), c.root()),
-        ] {
+        for (h_a, h_b, h_c) in [(a.root(), b.root(), c.root())] {
             assert_eq!(bounds(&a, h_a), bounds(&b, h_b));
             assert_eq!(bounds(&a, h_a), bounds(&c, h_c));
         }
@@ -5314,7 +5402,10 @@ mod dpi_tests {
             logical.x,
             save
         );
-        assert!(ui.hit_test(logical).is_some(), "hit test must land on a widget");
+        assert!(
+            ui.hit_test(logical).is_some(),
+            "hit test must land on a widget"
+        );
     }
 
     #[test]
@@ -5338,7 +5429,11 @@ mod styx_budget_tests {
     fn shell_frame(w: f32, h: f32) -> UserInterface {
         let mut ui = UserInterface::new(w, h);
         let font_id = load_fonts(&mut ui);
-        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let _ = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
         ui.perform_layout();
         ui.draw();
         ui
@@ -5427,7 +5522,9 @@ mod styx_budget_tests {
         // "lit like a toy" failure §5.2 forbids.
         let ground = crate::theme::active().semantic.surface.canvas.bytes();
         assert!(
-            !inst.iter().any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
+            !inst
+                .iter()
+                .any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
             "the canvas ground must never be washed"
         );
     }
@@ -5447,22 +5544,30 @@ mod styx_budget_tests {
                 let x = p.rect[0] + p.rect[2] * 0.5;
                 let y = p.rect[1] + p.rect[3] * 0.5;
                 let opaque = p.fill_a[3] > 0 || p.border_color[3] > 0 || p.shadow_color[3] > 0;
-                opaque
-                    && x >= r.x
-                    && x <= r.x + r.w
-                    && y >= r.y
-                    && y <= r.y + r.h
+                opaque && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
             })
         };
 
         let w = 1920.0;
         let h = 1080.0;
         for (name, region) in [
-            ("application bar", crate::types::Rect::new(0.0, 0.0, w, 36.0)),
+            (
+                "application bar",
+                crate::types::Rect::new(0.0, 0.0, w, 36.0),
+            ),
             ("mode toolbar", crate::types::Rect::new(0.0, 36.0, w, 32.0)),
-            ("left rail", crate::types::Rect::new(0.0, 68.0, 120.0, 400.0)),
-            ("right column", crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0)),
-            ("status bar", crate::types::Rect::new(0.0, h - 26.0, w, 26.0)),
+            (
+                "left rail",
+                crate::types::Rect::new(0.0, 68.0, 120.0, 400.0),
+            ),
+            (
+                "right column",
+                crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0),
+            ),
+            (
+                "status bar",
+                crate::types::Rect::new(0.0, h - 26.0, w, 26.0),
+            ),
         ] {
             assert!(visible_in(region), "{name} paints nothing visible");
         }
@@ -5478,12 +5583,14 @@ mod styx_budget_tests {
         let inst = &ui.draw_ctx.instances;
         let invisible = inst
             .iter()
-            .filter(|p| {
-                p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0
-            })
+            .filter(|p| p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0)
             .count();
         let ratio = invisible as f32 / inst.len() as f32;
-        println!("invisible instances: {invisible}/{} ({:.1}%)", inst.len(), ratio * 100.0);
+        println!(
+            "invisible instances: {invisible}/{} ({:.1}%)",
+            inst.len(),
+            ratio * 100.0
+        );
         assert!(
             ratio < 0.25,
             "{:.0}% of the draw list paints nothing — a surface was likely lost",
@@ -5709,19 +5816,25 @@ mod must_not_break {
             );
         }
 
-        // Menu rows live in popups that are closed at rest, so they have no
-        // arranged size until the menu opens. Their handles must still be
-        // valid: a File menu that lost Import is the §14.5 regression.
-        for (name, handle) in [
-            ("new scene", l.file_new_item),
-            ("save scene", l.file_save_item),
-            ("import model", l.file_import_item),
-            ("undo", l.edit_undo),
-            ("redo", l.edit_redo),
-            ("delete", l.edit_delete),
-            ("duplicate", l.edit_dup),
+        // Menu rows are registry-derived and map back to stable ids.
+        for id in [
+            "editor.scene.new",
+            "editor.scene.save",
+            "editor.asset.import_model",
+            "editor.edit.undo",
+            "editor.edit.redo",
+            "editor.edit.delete",
+            "editor.edit.duplicate",
         ] {
-            assert!(!handle.is_none(), "{name} is missing from its menu");
+            let handle = l
+                .menu_command_items
+                .iter()
+                .find(|(_, command_id)| *command_id == id)
+                .map(|(handle, _)| *handle);
+            assert!(
+                handle.is_some_and(|handle| !handle.is_none()),
+                "{id} is missing from its menu"
+            );
         }
     }
 

@@ -84,7 +84,12 @@ impl Control for Slider {
             None,
         );
         ctx.push_primitive(
-            Primitive::inset_shadow(track, [track_r; 4], t.inset.input.blur, t.inset.input.color.bytes()),
+            Primitive::inset_shadow(
+                track,
+                [track_r; 4],
+                t.inset.input.blur,
+                t.inset.input.color.bytes(),
+            ),
             None,
         );
 
@@ -94,9 +99,12 @@ impl Control for Slider {
         if filled_w > 0.0 {
             let g = t.gradient.rail_accent;
             ctx.push_primitive(
-                Primitive::fill(Rect::new(b.x, mid_y - track_r, filled_w, TRACK_H), g.from.bytes())
-                    .with_radius(track_r)
-                    .with_gradient(g.to.bytes(), g.axis),
+                Primitive::fill(
+                    Rect::new(b.x, mid_y - track_r, filled_w, TRACK_H),
+                    g.from.bytes(),
+                )
+                .with_radius(track_r)
+                .with_gradient(g.to.bytes(), g.axis),
                 None,
             );
         }
@@ -145,7 +153,7 @@ impl Control for Slider {
                 ));
                 msg.handled = true;
             }
-            WidgetMessage::MouseMove { pos } => {
+            WidgetMessage::MouseMove { pos, .. } => {
                 if self.dragging {
                     let v = Self::value_at(bounds, pos.x);
                     if (v - self.value).abs() > f32::EPSILON {

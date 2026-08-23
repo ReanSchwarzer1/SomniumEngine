@@ -68,7 +68,10 @@ impl Control for ToastHost {
                     theme::with_alpha(t.semantic.surface.popup.bytes(), alpha),
                 )
                 .with_radii(radii)
-                .with_border(t.geometry.stroke_hairline, t.semantic.border.default.bytes()),
+                .with_border(
+                    t.geometry.stroke_hairline,
+                    t.semantic.border.default.bytes(),
+                ),
                 None,
             );
             ctx.push_text(

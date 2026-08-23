@@ -399,8 +399,8 @@ pub struct Engine<G: GameApp> {
     scrub_light: Option<(u32, LightComponent)>,
     /// Phase 11.5M: receiver for captured tracing events forwarded to the output log.
     log_rx: Option<std::sync::mpsc::Receiver<crate::log_capture::LogEntry>>,
-    /// Tracks whether Ctrl is currently held (updated via ModifiersChanged).
-    ctrl_held: bool,
+    /// Exact modifier snapshot for registry-backed global shortcuts.
+    shortcut_modifiers: somnium_ui::message::Modifiers,
     /// Cached default material ID for editor-created mesh entities.
     default_material_id: Option<u32>,
     /// Phase 14F: terrain edit mode (F6 or terrain tool button activates).
@@ -511,7 +511,7 @@ impl<G: GameApp + 'static> Engine<G> {
             scrub_transform: None,
             scrub_light: None,
             log_rx: Some(log_rx),
-            ctrl_held: false,
+            shortcut_modifiers: somnium_ui::message::Modifiers::default(),
             default_material_id: None,
             terrain_edit_active: false,
             terrain_brush: TerrainBrush::default(),
@@ -1215,9 +1215,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.cursor_pos = (position.x as f32, position.y as f32);
         }
 
-        // Track modifier key state for shortcut detection.
+        // Track the exact modifier state for registry-backed shortcuts.  Extra
+        // modifiers must not accidentally match a destructive command.
         if let WindowEvent::ModifiersChanged(m) = &event {
-            self.ctrl_held = m.state().control_key();
+            let state = m.state();
+            self.shortcut_modifiers = somnium_ui::message::Modifiers {
+                ctrl: state.control_key(),
+                shift: state.shift_key(),
+                alt: state.alt_key(),
+                logo: state.super_key(),
+            };
         }
 
         // Handle Resizing
@@ -1239,28 +1246,24 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        // ── 1. Handle global Ctrl+ shortcuts FIRST (never for text widgets) ────
+        // ── 1. Registered editor shortcuts FIRST (never array-position dispatch) ──
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = &event {
-            if key_ev.state == winit::event::ElementState::Pressed
-                && !key_ev.repeat
-                && self.ctrl_held
-            {
-                use winit::keyboard::{KeyCode as WKC, PhysicalKey};
+            if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
+                use winit::keyboard::PhysicalKey;
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
-                    match code {
-                        WKC::KeyZ => {
-                            self.handle_editor_event(EditorEvent::Undo);
-                            return;
-                        }
-                        WKC::KeyY => {
-                            self.handle_editor_event(EditorEvent::Redo);
-                            return;
-                        }
-                        WKC::KeyS => {
-                            self.handle_editor_event(EditorEvent::SaveScene);
-                            return;
-                        }
-                        WKC::KeyN => {
+                    let chord = somnium_ui::commands::Chord::from_winit(
+                        code,
+                        self.shortcut_modifiers.command(),
+                        self.shortcut_modifiers.shift,
+                        self.shortcut_modifiers.alt,
+                        false,
+                    );
+                    let action = chord
+                        .and_then(|chord| somnium_ui::commands::registry().binding(chord))
+                        .map(|command| command.action);
+                    use somnium_ui::commands::CommandAction as A;
+                    match action {
+                        Some(A::NewScene) => {
                             if let Some(ui) = &mut self.ui_manager {
                                 ui.set_scene_dirty(self.scene_dirty);
                                 ui.prompt_unsaved_new();
@@ -1269,10 +1272,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             }
                             return;
                         }
-                        WKC::KeyD => {
-                            self.handle_editor_event(EditorEvent::DuplicateSelected);
-                            return;
-                        }
+                        Some(A::SaveScene) => { self.handle_editor_event(EditorEvent::SaveScene); return; }
+                        Some(A::Undo) => { self.handle_editor_event(EditorEvent::Undo); return; }
+                        Some(A::Redo) => { self.handle_editor_event(EditorEvent::Redo); return; }
+                        Some(A::DeleteSelected) => { self.handle_editor_event(EditorEvent::DeleteSelected); return; }
+                        Some(A::DuplicateSelected) => { self.handle_editor_event(EditorEvent::DuplicateSelected); return; }
+                        Some(A::SetGizmoMode(mode)) => { self.handle_editor_event(EditorEvent::SetGizmoMode(mode)); return; }
+                        Some(A::ToggleTerrainEdit) => { self.handle_editor_event(EditorEvent::ToggleTerrainEdit); return; }
+                        Some(A::ToggleFoliage) => { self.handle_editor_event(EditorEvent::ToggleFoliage); return; }
+                        Some(A::ReloadScripts) => { self.handle_editor_event(EditorEvent::ReloadScripts); return; }
                         _ => {}
                     }
                 }
@@ -1285,49 +1293,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 use winit::keyboard::{KeyCode as WKC, PhysicalKey};
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
                     match code {
-                        WKC::Delete => {
-                            self.handle_editor_event(EditorEvent::DeleteSelected);
-                            return;
-                        }
-                        WKC::KeyT => {
-                            if let Some(r) = &mut self.renderer {
-                                r.gizmo_mode = somnium_renderer::pass::gizmo::GizmoMode::Translate;
-                            }
-                        }
-                        WKC::KeyR => {
-                            if let Some(r) = &mut self.renderer {
-                                r.gizmo_mode = somnium_renderer::pass::gizmo::GizmoMode::Rotate;
-                            }
-                        }
-                        WKC::KeyS => {
-                            if let Some(r) = &mut self.renderer {
-                                r.gizmo_mode = somnium_renderer::pass::gizmo::GizmoMode::Scale;
-                            }
-                        }
-                        WKC::F5 => {
-                            self.handle_editor_event(EditorEvent::ToggleShadingMode);
-                        }
-                        // ── Phase 14F: terrain edit mode + brush shortcuts ──
-                        WKC::F6 => {
-                            self.handle_editor_event(EditorEvent::ToggleTerrainEdit);
-                        }
-                        WKC::F8 => {
-                            // Phase 17A: toggle scattered foliage on the
-                            // selected terrain. Inspector controls come with
-                            // the layer UI; until then this is how it is
-                            // switched on.
-                            if let Some(entity) = self.selected_entity {
-                                if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
-                                    f.enabled = !f.enabled;
-                                    let on = f.enabled;
-                                    info!("Foliage: {}", if on { "ON" } else { "off" });
-                                } else {
-                                    info!("Select a terrain entity before pressing F8");
-                                }
-                            } else {
-                                info!("Select a terrain entity before pressing F8");
-                            }
-                        }
                         WKC::BracketLeft if self.terrain_edit_active => {
                             self.terrain_brush.radius = (self.terrain_brush.radius / 1.25).max(0.5);
                             info!("Brush radius: {:.1} m", self.terrain_brush.radius);

@@ -1,0 +1,51 @@
+# somtime v1
+# label	CONTROL-A synchronous terrain thumbnails
+# frames	90 measured after 0 warmup, 88 profiler samples
+# adapter	NVIDIA GeForce RTX 5080 Laptop GPU / Vulkan
+# driver	NVIDIA 610.74
+# render	1280x720
+# columns	kind	name	depth	mean_ms	stddev_ms	min_ms	max_ms	samples
+gpu	Auto exposure	1	0.0181	0.0045	0.0166	0.0596	88
+gpu	Bloom	1	0.0483	0.0358	0.0419	0.3525	88
+gpu	Census	1	0.0020	0.0001	0.0019	0.0026	88
+gpu	Cull (phase 1)	1	0.0159	0.0140	0.0099	0.0656	88
+gpu	Cull (phase 2)	1	0.0126	0.0117	0.0074	0.0636	88
+gpu	DoF	1	0.0023	0.0017	0.0019	0.0184	88
+gpu	Editor overlays	1	0.0129	0.0556	0.0053	0.5296	88
+gpu	FSR	1	0.3105	0.1032	0.2315	0.9501	88
+gpu	Frame	0	1.4905	0.2290	1.3485	2.5600	88
+gpu	GTAO	1	0.0535	0.0013	0.0518	0.0578	88
+gpu	Hi-Z	1	0.0304	0.0132	0.0250	0.0812	88
+gpu	Hi-Z (phase 2)	1	0.0228	0.0038	0.0212	0.0565	88
+gpu	Lighting extra	1	0.0022	0.0003	0.0019	0.0034	88
+gpu	Motion Blur	1	0.0022	0.0017	0.0019	0.0178	88
+gpu	Post + present	1	0.0219	0.0050	0.0193	0.0390	88
+gpu	ReSTIR DI	1	0.1037	0.0023	0.0989	0.1093	88
+gpu	ReSTIR GI	1	0.1852	0.0154	0.1754	0.3258	88
+gpu	ReSTIR clear	1	0.0020	0.0001	0.0019	0.0028	88
+gpu	Shading	1	0.3093	0.0332	0.2977	0.5647	88
+gpu	Shadows	1	0.0200	0.0040	0.0132	0.0338	88
+gpu	TAA	1	0.0022	0.0017	0.0019	0.0179	88
+gpu	TLAS build	1	0.0381	0.0348	0.0332	0.3628	88
+gpu	Terrain clipmap	1	0.0020	0.0001	0.0019	0.0023	88
+gpu	Transparent	1	0.0023	0.0016	0.0019	0.0171	88
+gpu	UI	1	0.0539	0.0193	0.0473	0.2304	88
+gpu	Velocity	1	0.0058	0.0005	0.0054	0.0083	88
+gpu	Visibility (phase 1)	1	0.0326	0.0385	0.0170	0.1681	88
+gpu	Visibility (phase 2)	1	0.0222	0.0263	0.0145	0.1627	88
+gpu	Volumetrics	1	0.0741	0.0017	0.0613	0.0778	88
+cpu	Cluster cull	0	0.0508	0.0067	0.0446	0.0874	88
+cpu	Foliage	0	0.0007	0.0000	0.0006	0.0009	88
+cpu	Instances	0	0.0102	0.0025	0.0083	0.0231	88
+cpu	Lighting extra	0	0.0078	0.0016	0.0060	0.0150	88
+cpu	Terrain	0	0.0086	0.0011	0.0078	0.0134	88
+cpu	Frame wall	0	157.3965	273.1025	13.8120	1085.5605	89
+count	draw_calls	0	1	0	1	1	1
+count	triangles	0	15452	0	15452	15452	1
+count	instances	0	1	0	1	1	1
+count	terrain_chunks	0	0	0	0	0	1
+count	terrain_cpu_culled	0	0	0	0	0	1
+count	tlas_instances	0	1	0	1	1	1
+count	shadow_casters	0	1	0	1	1	1
+stat	Shading.frag	0	921600	0	921600	921600	1
+stat	Shading.prim	0	1	0	1	1	1

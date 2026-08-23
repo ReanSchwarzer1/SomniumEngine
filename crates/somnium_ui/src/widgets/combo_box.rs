@@ -34,6 +34,10 @@ pub struct ComboBox {
 }
 
 impl Control for ComboBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let w = self
             .items

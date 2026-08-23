@@ -42,6 +42,24 @@ pub struct TreeView {
 }
 
 impl Control for TreeView {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
+    fn focus_bounds(&self, widget: &Widget) -> Rect {
+        let b = widget.screen_bounds();
+        let index = self
+            .selected
+            .and_then(|id| self.items.iter().position(|item| item.id == id))
+            .unwrap_or(0);
+        Rect::new(
+            b.x,
+            b.y + index as f32 * theme::TREE_ROW_HEIGHT,
+            b.w,
+            theme::TREE_ROW_HEIGHT,
+        )
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(
             available.x,
@@ -164,7 +182,7 @@ impl Control for TreeView {
             msg.handled = true;
             return;
         }
-        if let Some(WidgetMessage::MouseMove { pos }) = msg.data::<WidgetMessage>() {
+        if let Some(WidgetMessage::MouseMove { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
             let idx = ((pos.y - b.y) / theme::TREE_ROW_HEIGHT).floor();
             self.hovered = if idx >= 0.0 && (idx as usize) < self.items.len() {
@@ -202,6 +220,82 @@ impl Control for TreeView {
                     ));
                 }
                 msg.handled = true;
+            }
+        }
+        if let Some(WidgetMessage::KeyDown(key, _)) = msg.data::<WidgetMessage>() {
+            use crate::message::KeyCode;
+            if self.items.is_empty() {
+                return;
+            }
+            let current = self
+                .selected
+                .and_then(|id| self.items.iter().position(|item| item.id == id));
+            let select = |index: usize, this: &mut Self, emit: &mut Vec<UiMessage>| {
+                let id = this.items[index].id;
+                this.selected = Some(id);
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    TreeViewMessage::Select(id),
+                ));
+            };
+            match key {
+                KeyCode::ArrowDown => {
+                    select(
+                        current.map_or(0, |i| (i + 1).min(self.items.len() - 1)),
+                        self,
+                        emit,
+                    );
+                    msg.handled = true;
+                }
+                KeyCode::ArrowUp => {
+                    select(current.map_or(0, |i| i.saturating_sub(1)), self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::Home => {
+                    select(0, self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::End => {
+                    select(self.items.len() - 1, self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::ArrowRight => {
+                    if let Some(index) = current {
+                        let item = &self.items[index];
+                        if item.has_children && !item.expanded {
+                            emit.push(UiMessage::new(
+                                widget.handle,
+                                MessageDirection::FromWidget,
+                                TreeViewMessage::ToggleExpand(item.id),
+                            ));
+                        } else if item.has_children && index + 1 < self.items.len() {
+                            select(index + 1, self, emit);
+                        }
+                        msg.handled = true;
+                    }
+                }
+                KeyCode::ArrowLeft => {
+                    if let Some(index) = current {
+                        let item = &self.items[index];
+                        if item.has_children && item.expanded {
+                            emit.push(UiMessage::new(
+                                widget.handle,
+                                MessageDirection::FromWidget,
+                                TreeViewMessage::ToggleExpand(item.id),
+                            ));
+                        } else if item.depth > 0 {
+                            if let Some(parent) = (0..index)
+                                .rev()
+                                .find(|candidate| self.items[*candidate].depth < item.depth)
+                            {
+                                select(parent, self, emit);
+                            }
+                        }
+                        msg.handled = true;
+                    }
+                }
+                _ => {}
             }
         }
     }

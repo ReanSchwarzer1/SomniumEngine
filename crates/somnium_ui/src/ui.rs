@@ -14,7 +14,7 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, NodeHandle, UiMessage, WidgetMessage},
+    message::{MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
     pool::Pool,
     types::{HorizontalAlignment, Rect, VerticalAlignment},
@@ -29,6 +29,19 @@ pub type NodePool = Pool<UiNode>;
 
 // Internal concrete handle type (what Pool<UiNode> uses).
 type IH = crate::pool::Handle<UiNode>;
+
+/// Ownership record for the one modal-feeling gesture currently in flight.
+/// Gesture-specific restoration data stays in the owning control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GestureToken {
+    pub owner: NodeHandle,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModalFocus {
+    root: NodeHandle,
+    return_to: NodeHandle,
+}
 
 #[inline]
 fn to_ih(h: NodeHandle) -> IH {
@@ -62,6 +75,9 @@ pub struct UserInterface {
     #[allow(dead_code)]
     captured_ih: IH,
     hovered_ih: IH,
+    modifiers: Modifiers,
+    active_gesture: Option<GestureToken>,
+    modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
 }
@@ -91,6 +107,9 @@ impl UserInterface {
             focused_ih: IH::NONE,
             captured_ih: IH::NONE,
             hovered_ih: IH::NONE,
+            modifiers: Modifiers::default(),
+            active_gesture: None,
+            modal_focus: None,
             viewport_handle: NodeHandle::NONE,
         }
     }
@@ -502,7 +521,190 @@ impl UserInterface {
     }
 
     pub fn set_focus(&mut self, handle: NodeHandle) {
+        if let Some(modal) = self.modal_focus {
+            if handle.is_none() || !self.is_under(handle, modal.root) {
+                return;
+            }
+        }
         self.focused_ih = to_ih(handle);
+        self.bring_focus_into_view(handle);
+    }
+
+    /// Enter a modal focus scope and remember the invoking control. Attempts
+    /// to focus outside `root` are ignored until the matching modal exits.
+    pub fn enter_modal(&mut self, root: NodeHandle, initial_focus: NodeHandle) {
+        let return_to = self.focused();
+        self.modal_focus = Some(ModalFocus { root, return_to });
+        self.focused_ih = to_ih(initial_focus);
+        self.bring_focus_into_view(initial_focus);
+    }
+
+    /// Leave a modal focus scope and return focus to the control which opened
+    /// it, if that control still exists and is visible.
+    pub fn exit_modal(&mut self, root: NodeHandle) -> NodeHandle {
+        let Some(modal) = self.modal_focus.filter(|m| m.root == root) else {
+            return self.focused();
+        };
+        self.modal_focus = None;
+        let target = if modal.return_to.is_some()
+            && self.nodes.try_borrow(to_ih(modal.return_to)).is_ok()
+            && self.is_globally_visible(modal.return_to)
+        {
+            modal.return_to
+        } else {
+            NodeHandle::NONE
+        };
+        self.focused_ih = to_ih(target);
+        self.bring_focus_into_view(target);
+        target
+    }
+
+    pub fn modal_root(&self) -> Option<NodeHandle> {
+        self.modal_focus.map(|m| m.root)
+    }
+
+    /// Current modifiers at the OS boundary. Programmatic input can use this
+    /// to preserve the same self-contained message contract.
+    pub fn modifiers(&self) -> Modifiers {
+        self.modifiers
+    }
+
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+    }
+
+    fn keyboard_message(&self, code: winit::keyboard::KeyCode, pressed: bool) -> WidgetMessage {
+        if pressed {
+            WidgetMessage::KeyDown(code, self.modifiers)
+        } else {
+            WidgetMessage::KeyUp(code, self.modifiers)
+        }
+    }
+
+    pub fn active_gesture(&self) -> Option<GestureToken> {
+        self.active_gesture
+    }
+
+    /// Cancel the active gesture before any overlay is dismissed. Returns true
+    /// only when a control accepted cancellation.
+    pub fn cancel_active_gesture(&mut self) -> bool {
+        let Some(token) = self.active_gesture.take() else {
+            return false;
+        };
+        let mut emit = Vec::new();
+        let cancelled = if let Ok(node) = self.nodes.try_borrow_mut(to_ih(token.owner)) {
+            let (widget, control) = (&mut node.widget, &mut node.control);
+            control.cancel_gesture(widget, &mut emit)
+        } else {
+            false
+        };
+        for message in emit {
+            self.message_queue.push_back(message);
+        }
+        if cancelled {
+            self.captured_ih = IH::NONE;
+            self.invalidate_ancestors(token.owner);
+        }
+        cancelled
+    }
+
+    /// Scroll one target node into a specific ScrollViewer.
+    pub fn scroll_into_view(&mut self, viewer: NodeHandle, target: NodeHandle) -> bool {
+        let target_bounds = self.focus_bounds_of(target);
+        self.scroll_rect_into_view(viewer, target_bounds)
+    }
+
+    fn focus_bounds_of(&self, handle: NodeHandle) -> Rect {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.control.focus_bounds(&n.widget))
+            .unwrap_or(Rect::ZERO)
+    }
+
+    fn scroll_rect_into_view(&mut self, viewer: NodeHandle, target: Rect) -> bool {
+        let changed = if let Ok(node) = self.nodes.try_borrow_mut(to_ih(viewer)) {
+            let (widget, control) = (&mut node.widget, &mut node.control);
+            control.scroll_into_view(widget, target)
+        } else {
+            false
+        };
+        if changed {
+            self.invalidate_ancestors(viewer);
+        }
+        changed
+    }
+
+    /// Bring a node (or a composite control's focused row) into every ancestor
+    /// scroll viewport.
+    pub fn bring_focus_into_view(&mut self, handle: NodeHandle) {
+        if handle.is_none() {
+            return;
+        }
+        let target = self.focus_bounds_of(handle);
+        let mut ancestor = self.parent_of(handle);
+        while let Some(parent) = ancestor {
+            self.scroll_rect_into_view(parent, target);
+            ancestor = self.parent_of(parent);
+        }
+    }
+
+    fn collect_focusable(&self, handle: NodeHandle, out: &mut Vec<NodeHandle>) {
+        let (focusable, children) = {
+            let Ok(node) = self.nodes.try_borrow(to_ih(handle)) else {
+                return;
+            };
+            if !node.widget.global_visibility || !node.widget.enabled {
+                return;
+            }
+            (
+                node.control.is_keyboard_focusable(),
+                node.widget.children.clone(),
+            )
+        };
+        if focusable {
+            out.push(handle);
+        }
+        for child in children {
+            self.collect_focusable(child, out);
+        }
+    }
+
+    /// Arrow traversal for a region whose rows are ordinary child controls.
+    /// TreeView handles the same keys internally because its rows are virtual.
+    pub fn traverse_region(&mut self, region: NodeHandle, key: winit::keyboard::KeyCode) -> bool {
+        use winit::keyboard::KeyCode;
+        let mut stops = Vec::new();
+        self.collect_focusable(region, &mut stops);
+        if stops.is_empty() {
+            return false;
+        }
+        let current = self.focused();
+        let current_index = stops.iter().position(|h| *h == current);
+        let next = match key {
+            KeyCode::ArrowDown => current_index.map_or(0, |i| (i + 1).min(stops.len() - 1)),
+            KeyCode::ArrowUp => current_index.map_or(stops.len() - 1, |i| i.saturating_sub(1)),
+            KeyCode::Home => 0,
+            KeyCode::End => stops.len() - 1,
+            _ => return false,
+        };
+        let target = stops[next];
+        if current != target {
+            if current.is_some() {
+                self.send(UiMessage::new(
+                    current,
+                    MessageDirection::ToWidget,
+                    WidgetMessage::Unfocus,
+                ));
+            }
+            self.focused_ih = to_ih(target);
+            self.send(UiMessage::new(
+                target,
+                MessageDirection::ToWidget,
+                WidgetMessage::Focus,
+            ));
+        }
+        self.bring_focus_into_view(target);
+        true
     }
 
     /// Tooltip string on the widget under `pos`, walking parents if empty.
@@ -569,6 +771,29 @@ impl UserInterface {
                             .unwrap_or(false);
                         if dirty {
                             self.invalidate_ancestors(to_nh(current_ih));
+                        }
+                        let gesture_active = self
+                            .nodes
+                            .try_borrow(current_ih)
+                            .map(|n| n.control.gesture_active())
+                            .unwrap_or(false);
+                        let owner = to_nh(current_ih);
+                        if gesture_active && self.active_gesture.is_none() {
+                            self.active_gesture = Some(GestureToken { owner });
+                        } else if !gesture_active
+                            && self
+                                .active_gesture
+                                .is_some_and(|token| token.owner == owner)
+                        {
+                            self.active_gesture = None;
+                        }
+                        if msg.handled
+                            && matches!(
+                                msg.data::<WidgetMessage>(),
+                                Some(WidgetMessage::KeyDown(..))
+                            )
+                        {
+                            self.bring_focus_into_view(msg.destination);
                         }
                         // If handled or no parent, stop bubbling.
                         if msg.handled || !parent_nh.is_some() {
@@ -798,6 +1023,16 @@ impl UserInterface {
         }
 
         match event {
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.modifiers = Modifiers {
+                    ctrl: state.control_key(),
+                    shift: state.shift_key(),
+                    alt: state.alt_key(),
+                    logo: state.super_key(),
+                };
+                false
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = self.to_logical(position.x, position.y);
                 let captured = to_nh(self.captured_ih);
@@ -806,7 +1041,10 @@ impl UserInterface {
                     self.send(UiMessage::new(
                         captured,
                         MessageDirection::ToWidget,
-                        WidgetMessage::MouseMove { pos },
+                        WidgetMessage::MouseMove {
+                            pos,
+                            mods: self.modifiers,
+                        },
                     ));
                 }
                 let hit = self.hit_test(self.cursor_pos);
@@ -864,6 +1102,12 @@ impl UserInterface {
                 }
 
                 if matches!(state, ElementState::Pressed) {
+                    if self
+                        .modal_focus
+                        .is_some_and(|modal| !self.is_under(hit, modal.root))
+                    {
+                        return true;
+                    }
                     let old = to_nh(self.focused_ih);
                     if old != hit && old.is_some() {
                         self.send(UiMessage::new(
@@ -872,7 +1116,7 @@ impl UserInterface {
                             WidgetMessage::Unfocus,
                         ));
                     }
-                    self.focused_ih = to_ih(hit);
+                    self.set_focus(hit);
                     // Focus is re-sent even when this widget already held it. A
                     // numeric field that was drag-scrubbed drops its edit state
                     // while staying the focused node, so skipping the message
@@ -898,6 +1142,7 @@ impl UserInterface {
                             WidgetMessage::MouseDown {
                                 pos,
                                 button: *button,
+                                mods: self.modifiers,
                             },
                         )
                     }
@@ -910,6 +1155,7 @@ impl UserInterface {
                             WidgetMessage::MouseUp {
                                 pos,
                                 button: *button,
+                                mods: self.modifiers,
                             },
                         )
                     }
@@ -933,7 +1179,11 @@ impl UserInterface {
                     self.send(UiMessage::new(
                         hit,
                         MessageDirection::ToWidget,
-                        WidgetMessage::MouseWheel { pos, delta: d },
+                        WidgetMessage::MouseWheel {
+                            pos,
+                            delta: d,
+                            mods: self.modifiers,
+                        },
                     ));
                     return true;
                 }
@@ -949,11 +1199,8 @@ impl UserInterface {
                 if focused_ih.is_some() {
                     let focused = to_nh(focused_ih);
                     if let PhysicalKey::Code(code) = key_ev.physical_key {
-                        let wmsg = if key_ev.state == ElementState::Pressed {
-                            WidgetMessage::KeyDown(code)
-                        } else {
-                            WidgetMessage::KeyUp(code)
-                        };
+                        let wmsg =
+                            self.keyboard_message(code, key_ev.state == ElementState::Pressed);
                         self.send(UiMessage::new(focused, MessageDirection::ToWidget, wmsg));
                     }
                     if key_ev.state == ElementState::Pressed {
@@ -1051,8 +1298,7 @@ mod overlay_order_tests {
     use super::*;
     use crate::widget::WidgetBuilder;
     use crate::widgets::{
-        border::BorderBuilder, scroll_viewer::ScrollViewerBuilder,
-        stack_panel::StackPanelBuilder,
+        border::BorderBuilder, scroll_viewer::ScrollViewerBuilder, stack_panel::StackPanelBuilder,
     };
 
     /// A container that paints in `draw()` and a marker that paints in
@@ -1077,7 +1323,10 @@ mod overlay_order_tests {
         let root = ui.root();
 
         let probe = UiNode::new(
-            WidgetBuilder::new().with_width(100.0).with_height(100.0).build(),
+            WidgetBuilder::new()
+                .with_width(100.0)
+                .with_height(100.0)
+                .build(),
             Box::new(OrderProbe),
         );
         let probe_h = ui.add_node(probe, root);
@@ -1122,10 +1371,9 @@ mod overlay_order_tests {
         let mut ui = UserInterface::new(300.0, 120.0);
         let root = ui.root();
 
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
         // Content taller than the viewport, so the bar is live.
@@ -1149,10 +1397,7 @@ mod overlay_order_tests {
 
         // The bar track uses the input surface; find it after the content.
         let bar = crate::theme::active().semantic.surface.input.bytes();
-        let bar_after = instances
-            .iter()
-            .skip(last_content)
-            .any(|p| p.fill_a == bar);
+        let bar_after = instances.iter().skip(last_content).any(|p| p.fill_a == bar);
         assert!(
             bar_after,
             "the scrollbar must paint after the content it scrolls"
@@ -1167,12 +1412,31 @@ mod input_contract_tests {
     use crate::widget::WidgetBuilder;
     use crate::widgets::{
         check_box::{CheckBoxBuilder, CheckBoxMessage},
+        numeric_field::{NumericFieldBuilder, NumericFieldMessage},
+        popup::{PopupBuilder, PopupMessage},
         scroll_viewer::ScrollViewerBuilder,
         slider::{SliderBuilder, SliderMessage},
         stack_panel::StackPanelBuilder,
         tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
     };
     use glam::Vec2;
+    use std::sync::{Arc, Mutex};
+
+    struct ModifierProbe(Arc<Mutex<Option<Modifiers>>>);
+
+    impl Control for ModifierProbe {
+        fn handle_routed_message(
+            &mut self,
+            _widget: &mut Widget,
+            msg: &mut UiMessage,
+            _emit: &mut Vec<UiMessage>,
+        ) {
+            if let Some(WidgetMessage::KeyDown(_, modifiers)) = msg.data::<WidgetMessage>() {
+                *self.0.lock().expect("probe mutex") = Some(*modifiers);
+                msg.handled = true;
+            }
+        }
+    }
 
     fn bounds_of(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
         ui.nodes
@@ -1195,15 +1459,13 @@ mod input_contract_tests {
     /// Returns (viewer, content).
     fn scrollable(ui: &mut UserInterface) -> (NodeHandle, NodeHandle) {
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
-        let column = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let column =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let col_h = ui.add_node(column, sv_h);
         ui.perform_layout();
         (sv_h, col_h)
@@ -1216,11 +1478,180 @@ mod input_contract_tests {
             WidgetMessage::MouseWheel {
                 pos: Vec2::new(100.0, 50.0),
                 delta,
+                mods: Modifiers::default(),
             },
         ));
         let out = ui.update();
         ui.perform_layout();
         out
+    }
+
+    #[test]
+    fn shift_held_is_delivered_to_the_focused_widget() {
+        let mut ui = UserInterface::new(200.0, 80.0);
+        let observed = Arc::new(Mutex::new(None));
+        let probe = UiNode::new(
+            WidgetBuilder::new()
+                .with_width(100.0)
+                .with_height(24.0)
+                .build(),
+            Box::new(ModifierProbe(observed.clone())),
+        );
+        let handle = ui.add_node(probe, ui.root());
+        ui.set_focus(handle);
+        ui.set_modifiers(Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        });
+        let key = ui.keyboard_message(crate::message::KeyCode::KeyA, true);
+        ui.send(UiMessage::new(handle, MessageDirection::ToWidget, key));
+        ui.update();
+
+        let delivered = observed
+            .lock()
+            .expect("probe mutex")
+            .expect("key delivered");
+        assert!(delivered.shift);
+        assert!(!delivered.ctrl && !delivered.alt && !delivered.logo);
+    }
+
+    #[test]
+    fn arrow_traversal_in_a_long_tree_scrolls_the_focused_row_into_view() {
+        let mut ui = UserInterface::new(300.0, 120.0);
+        let viewer = ui.add_node(
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build(),
+            ui.root(),
+        );
+        let tree = ui.add_node(
+            TreeViewBuilder::new(WidgetBuilder::new().with_width(280.0)).build(),
+            viewer,
+        );
+        let items: Vec<TreeItem> = (0..30)
+            .map(|id| TreeItem {
+                id,
+                label: format!("Row {id}"),
+                depth: 0,
+                icon: crate::icons::IconId::EmptyEntity,
+                has_children: false,
+                expanded: false,
+            })
+            .collect();
+        ui.send(TreeViewMessage::set_items(tree, items));
+        ui.update();
+        ui.perform_layout();
+        ui.set_focus(tree);
+        ui.send(UiMessage::new(
+            tree,
+            MessageDirection::ToWidget,
+            WidgetMessage::KeyDown(crate::message::KeyCode::End, Modifiers::default()),
+        ));
+        let outgoing = ui.update();
+        ui.perform_layout();
+
+        assert!(outgoing.iter().any(|message| matches!(
+            message.data::<TreeViewMessage>(),
+            Some(TreeViewMessage::Select(29))
+        )));
+        let viewport = bounds_of(&ui, viewer);
+        let tree_bounds = bounds_of(&ui, tree);
+        let focused_bottom = tree_bounds.y + 30.0 * crate::theme::TREE_ROW_HEIGHT;
+        assert!(
+            tree_bounds.y < viewport.y,
+            "the long tree must have scrolled"
+        );
+        assert!(
+            focused_bottom <= viewport.y + viewport.h + 0.5,
+            "focused row bottom {focused_bottom} must be inside viewport {:?}",
+            viewport
+        );
+    }
+
+    #[test]
+    fn cancelling_a_scrub_restores_the_value_without_closing_an_open_popup() {
+        let mut ui = UserInterface::new(320.0, 120.0);
+        let root = ui.root();
+        let field = ui.add_node(
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(24.0))
+                .with_value(10.0)
+                .with_drag_step(1.0)
+                .build(),
+            root,
+        );
+        let popup = ui.add_node(PopupBuilder::new(WidgetBuilder::new()).build(), root);
+        ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        ui.update();
+        ui.perform_layout();
+        let bounds = bounds_of(&ui, field);
+        let start = Vec2::new(bounds.x + bounds.w - 8.0, bounds.y + bounds.h * 0.5);
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseDown {
+                pos: start,
+                button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
+            },
+        ));
+        ui.update();
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseMove {
+                pos: start + Vec2::new(20.0, 0.0),
+                mods: Modifiers::default(),
+            },
+        ));
+        ui.update();
+        assert_ne!(ui.numeric_value_of(field), Some(10.0));
+        assert_eq!(ui.active_gesture(), Some(GestureToken { owner: field }));
+
+        assert!(
+            ui.cancel_active_gesture(),
+            "Esc precedence must find the scrub"
+        );
+        let outgoing = ui.update();
+        assert_eq!(ui.numeric_value_of(field), Some(10.0));
+        assert!(
+            ui.nodes
+                .try_borrow(popup.transmute())
+                .expect("popup exists")
+                .widget
+                .visibility,
+            "cancelling the gesture must not dismiss the popup below it"
+        );
+        assert!(outgoing.iter().any(|message| matches!(
+            message.data::<NumericFieldMessage>(),
+            Some(NumericFieldMessage::ValueChanging(value)) if *value == 10.0
+        )));
+    }
+
+    #[test]
+    fn modal_focus_is_trapped_and_returns_to_its_invoker() {
+        let mut ui = UserInterface::new(300.0, 120.0);
+        let root = ui.root();
+        let invoker = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            root,
+        );
+        let modal = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            root,
+        );
+        let inside = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            modal,
+        );
+        ui.set_focus(invoker);
+        ui.enter_modal(modal, inside);
+        ui.set_focus(invoker);
+        assert_eq!(ui.focused(), inside, "focus cannot escape an active modal");
+        assert_eq!(ui.exit_modal(modal), invoker);
+        assert_eq!(ui.focused(), invoker);
     }
 
     #[test]
@@ -1233,23 +1664,20 @@ mod input_contract_tests {
         // properties than fit.
         let mut ui = UserInterface::new(400.0, 200.0);
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
-        let tall = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let tall =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let tall_h = ui.add_node(tall, sv_h);
 
         // Added *after* the tall child, exactly as the Details empty state is.
-        let short = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(90.0),
-        )
-        .build();
+        let short =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(90.0))
+                .build();
         ui.add_node(short, sv_h);
 
         ui.perform_layout();
@@ -1267,16 +1695,14 @@ mod input_contract_tests {
         // 600 px of content it is not showing.
         let mut ui = UserInterface::new(400.0, 200.0);
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
-        let tall = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let tall =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let tall_h = ui.add_node(tall, sv_h);
         ui.perform_layout();
 
@@ -1323,7 +1749,11 @@ mod input_contract_tests {
         wheel(&mut ui, sv, 100_000.0);
         let at_top = top_of(&ui, content);
         wheel(&mut ui, sv, 100_000.0);
-        assert_eq!(top_of(&ui, content), at_top, "must not scroll above the top");
+        assert_eq!(
+            top_of(&ui, content),
+            at_top,
+            "must not scroll above the top"
+        );
 
         wheel(&mut ui, sv, -100_000.0);
         let at_bottom = top_of(&ui, content);
@@ -1333,7 +1763,10 @@ mod input_contract_tests {
             at_bottom,
             "must not scroll past the end"
         );
-        assert!(at_bottom < at_top, "the content must actually be scrollable");
+        assert!(
+            at_bottom < at_top,
+            "the content must actually be scrollable"
+        );
     }
 
     #[test]
@@ -1352,6 +1785,7 @@ mod input_contract_tests {
             WidgetMessage::MouseDown {
                 pos: point,
                 button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
             },
         ));
         ui.update();
@@ -1366,10 +1800,8 @@ mod input_contract_tests {
     fn a_checkbox_reports_its_new_state_when_set() {
         let mut ui = UserInterface::new(200.0, 60.0);
         let root = ui.root();
-        let cb = CheckBoxBuilder::new(
-            WidgetBuilder::new().with_width(160.0).with_height(24.0),
-        )
-        .build();
+        let cb =
+            CheckBoxBuilder::new(WidgetBuilder::new().with_width(160.0).with_height(24.0)).build();
         let cb_h = ui.add_node(cb, root);
         ui.perform_layout();
 
@@ -1379,8 +1811,8 @@ mod input_contract_tests {
         ui.draw();
 
         // A ticked box paints the Check glyph; an unticked one does not.
-        let (uv, _) = crate::icons::IconId::Check
-            .draw_quad(crate::types::Rect::new(0.0, 0.0, 16.0, 16.0));
+        let (uv, _) =
+            crate::icons::IconId::Check.draw_quad(crate::types::Rect::new(0.0, 0.0, 16.0, 16.0));
         let tick_u0 = uv[0].x;
         let ticked = ui
             .draw_ctx
@@ -1396,10 +1828,8 @@ mod input_contract_tests {
         // rows would simply never highlight, and nothing else would notice.
         let mut ui = UserInterface::new(300.0, 200.0);
         let root = ui.root();
-        let tv = TreeViewBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(180.0),
-        )
-        .build();
+        let tv =
+            TreeViewBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(180.0)).build();
         let tv_h = ui.add_node(tv, root);
         ui.perform_layout();
 
@@ -1441,22 +1871,24 @@ mod input_contract_tests {
                     let b = bounds_of(&ui, tv_h);
                     Vec2::new(b.x + 40.0, b.y + crate::theme::TREE_ROW_HEIGHT * 1.5)
                 },
+                mods: Modifiers::default(),
             },
         ));
         ui.update();
         ui.perform_layout();
         ui.draw();
-        assert!(painted(&ui), "the row under the pointer must paint a hover fill");
+        assert!(
+            painted(&ui),
+            "the row under the pointer must paint a hover fill"
+        );
     }
 
     #[test]
     fn pressing_a_slider_track_emits_a_value_change() {
         let mut ui = UserInterface::new(200.0, 40.0);
         let root = ui.root();
-        let sl = SliderBuilder::new(
-            WidgetBuilder::new().with_width(160.0).with_height(20.0),
-        )
-        .build();
+        let sl =
+            SliderBuilder::new(WidgetBuilder::new().with_width(160.0).with_height(20.0)).build();
         let sl_h = ui.add_node(sl, root);
         ui.perform_layout();
 
@@ -1467,6 +1899,7 @@ mod input_contract_tests {
             WidgetMessage::MouseDown {
                 pos: Vec2::new(b.x + b.w * 0.75, b.y + b.h * 0.5),
                 button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
             },
         ));
         let emitted = ui.update();

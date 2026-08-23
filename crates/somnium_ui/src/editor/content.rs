@@ -144,24 +144,12 @@ pub(crate) fn build_create_popup(
             .build();
     let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
 
-    const KINDS: &[CreateKind] = &[
-        CreateKind::Cube,
-        CreateKind::Sphere,
-        CreateKind::Plane,
-        CreateKind::Cylinder,
-        CreateKind::DirectionalLight,
-        CreateKind::PointLight,
-        CreateKind::SpotLight,
-        CreateKind::RectLight,
-        CreateKind::DiscLight,
-        CreateKind::TubeLight,
-        CreateKind::Particle,
-        CreateKind::Terrain,
-        CreateKind::VoxelTerrain,
-    ];
-
-    let mut items = Vec::with_capacity(KINDS.len());
-    for &kind in KINDS {
+    let commands = crate::commands::registry().menu(crate::commands::Menu::Create);
+    let mut items = Vec::with_capacity(commands.len());
+    for command in commands {
+        let crate::commands::CommandAction::CreateEntity(kind) = command.action else {
+            continue;
+        };
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -176,7 +164,7 @@ pub(crate) fn build_create_popup(
             right: 0.0,
             bottom: 0.0,
         }))
-        .with_text(kind.label())
+        .with_text(command.menu_label())
         .with_font_size(12.0)
         .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)

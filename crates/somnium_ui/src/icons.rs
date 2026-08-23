@@ -1175,8 +1175,14 @@ mod nyx_dpi_tests {
                     s(sy) + a.cell() <= (LARGE_ORIGIN_Y as f32 * scale).round() as u32,
                     "{id:?} small block overruns the large block at {scale}"
                 );
-                assert!(s(lx) + a.cell_large() <= a.width, "{id:?} large x at {scale}");
-                assert!(s(ly) + a.cell_large() <= a.height, "{id:?} large y at {scale}");
+                assert!(
+                    s(lx) + a.cell_large() <= a.width,
+                    "{id:?} large x at {scale}"
+                );
+                assert!(
+                    s(ly) + a.cell_large() <= a.height,
+                    "{id:?} large y at {scale}"
+                );
             }
         }
     }
@@ -1197,7 +1203,11 @@ mod nyx_dpi_tests {
             assert_eq!(atlas.render_scale, scale);
             for &(id, small, large) in &baseline {
                 assert_eq!(id.uv_rect(), small, "{id:?} small uv drifted at {scale}");
-                assert_eq!(id.uv_rect_large(), large, "{id:?} large uv drifted at {scale}");
+                assert_eq!(
+                    id.uv_rect_large(),
+                    large,
+                    "{id:?} large uv drifted at {scale}"
+                );
             }
         }
     }

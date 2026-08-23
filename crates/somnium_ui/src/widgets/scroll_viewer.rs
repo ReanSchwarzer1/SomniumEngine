@@ -47,9 +47,30 @@ impl ScrollViewer {
         let max = self.max_scroll();
         self.scroll_y = self.scroll_y.clamp(0.0, max);
     }
+
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll_y
+    }
 }
 
 impl Control for ScrollViewer {
+    fn scroll_into_view(&mut self, widget: &mut Widget, target: Rect) -> bool {
+        let viewport = widget.screen_bounds();
+        let old = self.scroll_y;
+        if target.y < viewport.y {
+            self.scroll_y -= viewport.y - target.y;
+        } else if target.y + target.h > viewport.y + viewport.h {
+            self.scroll_y += target.y + target.h - (viewport.y + viewport.h);
+        }
+        self.clamp_scroll();
+        if (old - self.scroll_y).abs() > 0.01 {
+            widget.invalidate_layout();
+            true
+        } else {
+            false
+        }
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let inner = Vec2::new((available.x - BAR).max(1.0), f32::INFINITY);
         let mut content_h = 0.0f32;
@@ -184,7 +205,7 @@ impl Control for ScrollViewer {
                         msg.handled = true;
                     }
                 }
-                WidgetMessage::MouseMove { pos } => {
+                WidgetMessage::MouseMove { pos, .. } => {
                     if self.dragging {
                         let max = self.max_scroll();
                         let travel = (b.h - MIN_THUMB).max(1.0);

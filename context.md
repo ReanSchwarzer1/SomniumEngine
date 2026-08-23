@@ -2,12 +2,18 @@
 
 > **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
 >
-> **Last updated:** 2026-08-22  
-> **Current phase:** Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
+> **Last updated:** 2026-08-23
+> **Current phase:** Phase CONTROL (Northlight) — **Track 0 complete 2026-08-23**.
+> CONTROL-A has a regenerable source audit, exact two-width surface captures,
+> a measured terrain-thumbnail baseline, and
+> opt-in red completeness gates; CONTROL-A1 ships the modifier/input, gesture,
+> traversal and modal-focus seam; CONTROL-A2 ships the 52-command registry.
+> **Next: CONTROL-B**, taken alone.
+> Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
 > layer, motion, elevation, the second theme and the first-impression surfaces.
 > Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.
-> See `dev records/phase_27.md` §18. **Phase CONTROL is planned next** and was
-> expanded 2026-08-22; it is re-based on 27, not on 26-Zeta.
+> See `dev records/phase_27.md` §18. CONTROL was expanded 2026-08-22 and is
+> re-based on 27, not on 26-Zeta.
 > Previously: Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
 > D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
 > 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
@@ -39,7 +45,7 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
-> - **Phase CONTROL — Northlight (PLAN ONLY, nothing in tree):**
+> - **Phase CONTROL — Northlight (Track 0 complete):**
 >   `dev records/phase_CONTROL.md` — **expanded and re-audited 2026-08-22**
 >   (880 -> 2,970 lines) against the tree at `209fd07`, after Phase 27 landed.
 >   The editor-reach phase. Premise: the engine is far ahead of the editor, and
@@ -77,8 +83,32 @@
 >   load-then-save in a build missing a component destroys that data).
 >   §16 records source confidence and corrects six claims the 2026-08-17 draft
 >   asserted without verifying.
->   **Start at CONTROL-A** (the reachability audit); do not write a widget
->   first, do not restart at 26-A, and do not repaint anything Phase 27 painted.
+>   **CONTROL-A audit record (2026-08-23):** `tools/reachability/generate.py`
+>   now generates the environment, component, and hand-wiring tables plus the
+>   CONTROL-A census. The current tree measures **100** `SOMNIUM_*` identifiers
+>   (including four diagnostic-only CONTROL-A startup controls),
+>   **18** legacy editor routes, **12** schemas / **76** editable fields / zero
+>   generated rows, and **676** hand-wired identifiers (the historical 675
+>   moved because `IF::` in `app.rs` is now 202). Two opt-in tests preserve the
+>   intended CONTROL-B failures without breaking ordinary CI: all 76 editable
+>   fields lack a generated row, and `FieldType::{Entity, Asset, Array}` lack a
+>   registered editor. An environment-gated diagnostic startup driver produced
+>   14 UI-inclusive states at exact 1280x720 and 1920x1080, including all six
+>   menus, global overlays, the unsaved-scene modal, populated Details, and the
+>   real terrain Drawer. `CONTROL-A_terrain_open.somtime` measures the shipped
+>   synchronous 60-PNG path: wall-frame mean **157.3965 ms**, maximum
+>   **1085.5605 ms** (89 intervals), versus GPU-frame mean **1.4905 ms**.
+>   Target-specific colour/combo/context popups remain explicitly outside the
+>   baseline because they require an active edit target. **CONTROL-A1 completed
+>   2026-08-23:** `WidgetMessage` now carries one platform-aware modifier
+>   snapshot, `UserInterface` owns cancellable gestures and modal focus return,
+>   and focused Tree/Details rows traverse and scroll into view. **CONTROL-A2
+>   completed 2026-08-23:** one 52-command registry now generates the six menus,
+>   Create/context surfaces, toolbar dispatch and tooltips, shortcuts, palette,
+>   persisted recency and the F1 command index; positional palette dispatch and
+>   the four parallel command lists are gone. The registry lives in
+>   `somnium_ui` because `somnium_core` already depends on UI and the Appendix
+>   A suggestion would create a Cargo cycle.
 > - **Phase MORROWIND — NetImmerse (PLAN ONLY, nothing in tree):**
 >   `dev records/phase_MORROWIND.md` — written 2026-08-23 against `7c0b66f`.
 >   **The engine-half phase**, and the one that **retires §17.6's numbering**

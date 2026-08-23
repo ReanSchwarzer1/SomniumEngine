@@ -168,7 +168,7 @@ impl Control for Splitter {
             return;
         };
         match wmsg {
-            WidgetMessage::MouseDown { pos, button } if *button == MouseButton::Left => {
+            WidgetMessage::MouseDown { pos, button, .. } if *button == MouseButton::Left => {
                 if self.hit_rect(widget).contains(*pos) {
                     self.dragging = true;
                     self.drag_origin = Some((
@@ -181,7 +181,7 @@ impl Control for Splitter {
                     msg.handled = true;
                 }
             }
-            WidgetMessage::MouseMove { pos } if self.dragging => {
+            WidgetMessage::MouseMove { pos, .. } if self.dragging => {
                 if let Some((origin, start)) = self.drag_origin {
                     let delta = match self.orientation {
                         SplitterOrientation::Horizontal => pos.x - origin,

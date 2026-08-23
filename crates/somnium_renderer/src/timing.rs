@@ -41,6 +41,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::pass::census::{BIN_NAMES, CensusResult};
 use crate::profiler::{FrameCounters, GpuProfiler, ScopeResult, StatsResult};
@@ -269,6 +270,11 @@ pub struct TimingRun {
     last_serial: u64,
     gpu: BTreeMap<(String, u8), Accum>,
     cpu: BTreeMap<(String, u8), Accum>,
+    /// Wall-clock interval between presented frames. Unlike GPU scopes this
+    /// includes UI-thread work, which is the quantity CONTROL-A/C need for the
+    /// shipped synchronous thumbnail decoder's hitch baseline.
+    wall_frame: Accum,
+    last_tick_at: Option<Instant>,
     counters: FrameCounters,
     stats: Vec<StatsResult>,
     /// Phase DOOM-B pixel counts, zero unless `SOMNIUM_CENSUS=1`.
@@ -298,6 +304,8 @@ impl TimingRun {
             last_serial: 0,
             gpu: BTreeMap::new(),
             cpu: BTreeMap::new(),
+            wall_frame: Accum::default(),
+            last_tick_at: None,
             counters: FrameCounters::default(),
             stats: Vec::new(),
             census: CensusResult::default(),
@@ -324,9 +332,17 @@ impl TimingRun {
         if self.written {
             return;
         }
+        let now = Instant::now();
+        let wall_ms = self
+            .last_tick_at
+            .replace(now)
+            .map(|before| before.elapsed().as_secs_f32() * 1000.0);
         self.rendered += 1;
         if self.rendered <= self.warmup {
             return;
+        }
+        if let Some(ms) = wall_ms {
+            self.wall_frame.push(ms);
         }
 
         let (serial, raw) = profiler.raw_sample();
@@ -452,6 +468,18 @@ impl TimingRun {
             let _ = writeln!(
                 s,
                 "cpu\t{name}\t{depth}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}",
+                a.mean(),
+                a.stddev(),
+                a.min,
+                a.max,
+                a.n
+            );
+        }
+        if self.wall_frame.n > 0 {
+            let a = &self.wall_frame;
+            let _ = writeln!(
+                s,
+                "cpu\tFrame wall\t0\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}",
                 a.mean(),
                 a.stddev(),
                 a.min,
