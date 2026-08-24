@@ -202,7 +202,28 @@
 >   validating with a different front end from the one that compiles them —
 >   which hid a real wgpu 30 incompatibility (`binding_array` now needs an
 >   explicit `enable`) that would have failed on the first frame. Fixed.
->   Track 0 is complete; **next: MORROWIND-D** (the paint layer, Seam 4b).
+>   Track 0 is complete. **Track 1 (VIVEC) is four sub-phases in.**
+>   **MORROWIND-D** added a second UI instance stream — a 2x3 affine, paths and
+>   strokes, radial and angular gradients, masks, and one bindless texture array
+>   replacing the three fixed bindings — without touching the frozen 100-byte
+>   `Primitive`. It also gave `somnium_ui` its first shader validation test,
+>   which immediately caught a WGSL/Rust struct mismatch (`vec4<f32>` aligns to
+>   16, `[f32; 4]` to 4) and a premultiplied-alpha shader under a comment
+>   claiming it matched the straight-alpha pipeline. **MORROWIND-E** added
+>   canvas roots, anchors and safe areas, and recorded the world-space decision:
+>   render-to-texture, because direct 3D submission would re-open the frozen
+>   paint contract. **MORROWIND-F** added directional navigation (authored links
+>   over geometry, off-axis distance weighted ten times on-axis), shaped
+>   hit-testing through the inverse transform, and an `InputSource` that says out
+>   loud that hover is a pointer concept. **MORROWIND-G** added the `StyledRun`
+>   model text never had, BBCode rich text, font fallback, IME composition and
+>   the localisation hook; the shaper is **decided (`cosmic-text`) and
+>   deliberately not adopted**, per Appendix A.5, because GHOSTFENCE has no
+>   golden reference to A/B the block-origin snapping rule against.
+>   **The finding that now blocks Track 1: `EngineContext` has no UI hook.** A
+>   game gets the world, physics, audio and the renderer, and no way to submit a
+>   widget tree — so it can neither draw a HUD nor receive input into one. Found
+>   by E, confirmed by F. **Next: that hook, then MORROWIND-H.**
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.
