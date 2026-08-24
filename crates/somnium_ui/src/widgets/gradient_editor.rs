@@ -220,16 +220,19 @@ impl Control for GradientEditor {
                 strip.h - 2.0,
             );
             ctx.push_primitive(
-                Primitive::fill(rect, to_srgb8([stop.color[0], stop.color[1], stop.color[2], 1.0]))
-                    .with_radius(2.0)
-                    .with_border(
-                        if selected { 2.0 } else { 1.0 },
-                        if selected {
-                            t.semantic.text.primary.bytes()
-                        } else {
-                            t.semantic.border.strong.bytes()
-                        },
-                    ),
+                Primitive::fill(
+                    rect,
+                    to_srgb8([stop.color[0], stop.color[1], stop.color[2], 1.0]),
+                )
+                .with_radius(2.0)
+                .with_border(
+                    if selected { 2.0 } else { 1.0 },
+                    if selected {
+                        t.semantic.text.primary.bytes()
+                    } else {
+                        t.semantic.border.strong.bytes()
+                    },
+                ),
                 None,
             );
         }
@@ -318,7 +321,11 @@ impl Control for GradientEditor {
                     let t = Self::t_at(ramp, pos.x);
                     // Ctrl snaps to twentieths, which is what a "stop at 25%"
                     // needs and what dragging by eye never quite reaches.
-                    let t = if mods.ctrl { (t * 20.0).round() / 20.0 } else { t };
+                    let t = if mods.ctrl {
+                        (t * 20.0).round() / 20.0
+                    } else {
+                        t
+                    };
                     let moved = self.gradient.move_stop(index, t);
                     self.dragging = Some(moved);
                     self.selected = Some(moved);
@@ -410,8 +417,14 @@ mod tests {
     #[test]
     fn stop_positions_and_hit_tests_agree() {
         let e = editor(Gradient::ramp([0.0; 4], [1.0; 4]));
-        assert_eq!(e.stop_at(ramp(), GradientEditor::stop_x(ramp(), 0.0)), Some(0));
-        assert_eq!(e.stop_at(ramp(), GradientEditor::stop_x(ramp(), 1.0)), Some(1));
+        assert_eq!(
+            e.stop_at(ramp(), GradientEditor::stop_x(ramp(), 0.0)),
+            Some(0)
+        );
+        assert_eq!(
+            e.stop_at(ramp(), GradientEditor::stop_x(ramp(), 1.0)),
+            Some(1)
+        );
         assert_eq!(e.stop_at(ramp(), 50.0), None);
     }
 

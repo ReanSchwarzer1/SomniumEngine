@@ -125,7 +125,10 @@ impl ControlPath {
         }
         let mut parts = rest.split('/');
         let control = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let component = parts.next().map(str::to_ascii_lowercase).filter(|s| !s.is_empty());
+        let component = parts
+            .next()
+            .map(str::to_ascii_lowercase)
+            .filter(|s| !s.is_empty());
 
         Ok(Self {
             device,

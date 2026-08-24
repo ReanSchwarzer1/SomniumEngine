@@ -15,9 +15,7 @@ use crate::{
     context::RenderContext,
     geometry::GeometryPool,
     instance::InstancePool,
-    material::{
-        pool::{GpuMaterial, MaterialPool},
-    },
+    material::pool::{GpuMaterial, MaterialPool},
     pass::{
         gizmo::{GizmoMode, GizmoPass},
         grid::GridPass,
@@ -202,6 +200,9 @@ pub struct SomniumRenderer {
     /// their state but suppresses transform/light gizmos, selection outlines,
     /// and the optional editor grid from the player's view.
     editor_overlays_enabled: bool,
+    /// MORROWIND-E2. One warning, not one per frame: a game whose UI hook draws
+    /// nothing has a bug, and sixty log lines a second is not how to say so.
+    game_ui_empty_warned: bool,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -483,11 +484,17 @@ impl SomniumRenderer {
             crate::pass::classify::ClassifyPass::new(&ctx.device, &shaders, &global_pool.layout);
 
         // Phase 11.5H: Editor infinite-grid overlay (renders to HDR target).
-        let grid_pass = GridPass::new(&ctx.device, &shaders, HDR_FORMAT, &global_pool.view_proj_buffer);
+        let grid_pass = GridPass::new(
+            &ctx.device,
+            &shaders,
+            HDR_FORMAT,
+            &global_pool.view_proj_buffer,
+        );
 
         // Phase 24A-3: built before the post-process pass, which binds its
         // result buffer.
-        let mut auto_exposure_pass = crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device, &shaders);
+        let mut auto_exposure_pass =
+            crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device, &shaders);
 
         // Phase 24J: acceleration structures. Constructed even when the device
         // lacks ray query — the pass then does nothing, which keeps the call
@@ -525,12 +532,11 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
-        let clipmap_pass =
-            crate::pass::terrain_clipmap::TerrainClipmapPass::new(
-                &ctx.device,
-                &shaders,
-                &global_pool.layout,
-            );
+        let clipmap_pass = crate::pass::terrain_clipmap::TerrainClipmapPass::new(
+            &ctx.device,
+            &shaders,
+            &global_pool.layout,
+        );
 
         let rt_debug_pass =
             crate::pass::raytrace::RtDebugPass::new(&ctx.device, &shaders, raytrace_pass.layout());
@@ -566,13 +572,12 @@ impl SomniumRenderer {
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
         // Phase 24I: screen-space occlusion, consumed by the shading pass.
-        let gtao_pass =
-            crate::pass::gtao::GtaoPass::new(
-                &ctx.device,
-                &shaders,
-                ctx.config.width,
-                ctx.config.height,
-            );
+        let gtao_pass = crate::pass::gtao::GtaoPass::new(
+            &ctx.device,
+            &shaders,
+            ctx.config.width,
+            ctx.config.height,
+        );
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let taa_pass = crate::pass::taa::TaaPass::new(
@@ -727,7 +732,8 @@ impl SomniumRenderer {
                 &water_pass.tex_bind_group_layout,
                 water_pass.spectrum.views(),
             ));
-        let underwater_pass = crate::pass::underwater::UnderwaterPass::new(&ctx.device, &shaders, HDR_FORMAT);
+        let underwater_pass =
+            crate::pass::underwater::UnderwaterPass::new(&ctx.device, &shaders, HDR_FORMAT);
 
         // Phase 24AD. Built here rather than inside the struct literal because
         // it borrows the visibility pass's depth view, which the literal moves.
@@ -843,6 +849,7 @@ impl SomniumRenderer {
             light_gizmo_queue: Vec::new(),
             light_gizmos_enabled: true,
             editor_overlays_enabled: true,
+            game_ui_empty_warned: false,
             outline_pass,
             outline_entity: None,
             particle_pass,
@@ -2156,6 +2163,26 @@ impl SomniumRenderer {
     }
 
     pub fn render(&mut self, ctx: &RenderContext, ui: &mut UiManager, window: &Window) {
+        self.render_with_game_ui(ctx, ui, window, None);
+    }
+
+    /// The frame, with a game's UI in it.
+    ///
+    /// MORROWIND-E2. `render` is this with `None`, kept so a caller that has no
+    /// game UI — a test, a capture harness — does not have to say so.
+    ///
+    /// The callback runs at pass 9, **before** the editor shell: a HUD belongs
+    /// under the editor's panels, and in a shipped build there is no editor
+    /// shell for it to be under. In immersive mode the editor's `end_frame` is
+    /// skipped entirely and the game's UI is the only UI, which is the same
+    /// code path rather than a second one.
+    pub fn render_with_game_ui(
+        &mut self,
+        ctx: &RenderContext,
+        ui: &mut UiManager,
+        window: &Window,
+        game_ui: Option<&mut dyn somnium_ui::GameUi>,
+    ) {
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
@@ -4004,6 +4031,30 @@ impl SomniumRenderer {
 
         // ── 9. UI Overlay ────────────────────────────────────────────────────
         self.profiler.begin(&mut encoder, "UI");
+        // MORROWIND-E2. The game first, the editor over it. A separate profiler
+        // zone on purpose: a HUD that costs two milliseconds should be visible
+        // as a HUD that costs two milliseconds, not as an editor that got
+        // slower.
+        if let Some(game_ui) = game_ui {
+            self.profiler.begin(&mut encoder, "Game UI");
+            let mut frame = somnium_ui::GameUiFrame::new(
+                window,
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                ctx.config.format,
+            );
+            game_ui.draw_ui(&mut frame);
+            let drawn = frame.drawn();
+            self.profiler.end(&mut encoder); // Game UI
+            if drawn == 0 && !self.game_ui_empty_warned {
+                self.game_ui_empty_warned = true;
+                tracing::warn!(
+                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
+                );
+            }
+        }
         if !ui.is_immersive() {
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
         }

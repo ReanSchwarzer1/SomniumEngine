@@ -228,7 +228,10 @@ mod tests {
         );
 
         ime.handle(ImeEvent::Commit("\u{65E5}\u{672C}".into()));
-        assert!(!ime.swallows_enter(), "composition over, Enter submits again");
+        assert!(
+            !ime.swallows_enter(),
+            "composition over, Enter submits again"
+        );
     }
 
     #[test]
@@ -301,7 +304,10 @@ mod tests {
         let mut ime = Composition::new();
         ime.handle(ImeEvent::Enabled);
         ime.handle(preedit("ni"));
-        assert_eq!(ime.handle(ImeEvent::Commit(String::new())), ImeOutcome::Cancelled);
+        assert_eq!(
+            ime.handle(ImeEvent::Commit(String::new())),
+            ImeOutcome::Cancelled
+        );
         assert!(!ime.is_composing());
     }
 

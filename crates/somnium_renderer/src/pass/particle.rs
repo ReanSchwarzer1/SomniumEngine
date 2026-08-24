@@ -46,7 +46,9 @@ pub struct ParticlePass {
 impl ParticlePass {
     pub fn new(
         device: &wgpu::Device,
-        shaders: &crate::shaders::Shaders, surface_format: wgpu::TextureFormat) -> Self {
+        shaders: &crate::shaders::Shaders,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
             source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("particle.wgsl").into()),

@@ -350,7 +350,6 @@ impl UiPass {
             &[],
         );
 
-
         // ── Instance buffer ───────────────────────────────────────────────────
         let inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("UI Instances"),

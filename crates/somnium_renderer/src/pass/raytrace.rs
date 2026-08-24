@@ -375,7 +375,9 @@ struct RtParams {
 impl RtDebugPass {
     pub fn new(
         device: &wgpu::Device,
-        shaders: &crate::shaders::Shaders, accel_layout: Option<&wgpu::BindGroupLayout>) -> Self {
+        shaders: &crate::shaders::Shaders,
+        accel_layout: Option<&wgpu::BindGroupLayout>,
+    ) -> Self {
         let Some(_) = accel_layout else {
             return Self {
                 pipeline: None,

@@ -149,7 +149,11 @@ pub fn probe(adapter: &wgpu::Adapter) -> CapabilityReport {
     let _ = writeln!(md, "| Name | {} |", info.name);
     let _ = writeln!(md, "| Backend | {:?} |", info.backend);
     let _ = writeln!(md, "| Device type | {:?} |", info.device_type);
-    let _ = writeln!(md, "| Vendor / device | {:#06x} / {:#06x} |", info.vendor, info.device);
+    let _ = writeln!(
+        md,
+        "| Vendor / device | {:#06x} / {:#06x} |",
+        info.vendor, info.device
+    );
     let _ = writeln!(md, "| Driver | {} {} |", info.driver, info.driver_info);
     let _ = writeln!(md);
     let _ = writeln!(
@@ -187,13 +191,37 @@ pub fn probe(adapter: &wgpu::Adapter) -> CapabilityReport {
     let _ = writeln!(md);
     let _ = writeln!(md, "| Limit | Value |");
     let _ = writeln!(md, "|---|---:|");
-    let _ = writeln!(md, "| `max_binding_array_elements_per_shader_stage` | {} |", limits.max_binding_array_elements_per_shader_stage);
-    let _ = writeln!(md, "| `max_storage_buffers_per_shader_stage` | {} |", limits.max_storage_buffers_per_shader_stage);
-    let _ = writeln!(md, "| `max_storage_textures_per_shader_stage` | {} |", limits.max_storage_textures_per_shader_stage);
-    let _ = writeln!(md, "| `max_compute_workgroup_storage_size` | {} |", limits.max_compute_workgroup_storage_size);
-    let _ = writeln!(md, "| `max_compute_invocations_per_workgroup` | {} |", limits.max_compute_invocations_per_workgroup);
+    let _ = writeln!(
+        md,
+        "| `max_binding_array_elements_per_shader_stage` | {} |",
+        limits.max_binding_array_elements_per_shader_stage
+    );
+    let _ = writeln!(
+        md,
+        "| `max_storage_buffers_per_shader_stage` | {} |",
+        limits.max_storage_buffers_per_shader_stage
+    );
+    let _ = writeln!(
+        md,
+        "| `max_storage_textures_per_shader_stage` | {} |",
+        limits.max_storage_textures_per_shader_stage
+    );
+    let _ = writeln!(
+        md,
+        "| `max_compute_workgroup_storage_size` | {} |",
+        limits.max_compute_workgroup_storage_size
+    );
+    let _ = writeln!(
+        md,
+        "| `max_compute_invocations_per_workgroup` | {} |",
+        limits.max_compute_invocations_per_workgroup
+    );
     let _ = writeln!(md, "| `max_buffer_size` | {} |", limits.max_buffer_size);
-    let _ = writeln!(md, "| `max_texture_dimension_2d` | {} |", limits.max_texture_dimension_2d);
+    let _ = writeln!(
+        md,
+        "| `max_texture_dimension_2d` | {} |",
+        limits.max_texture_dimension_2d
+    );
     let _ = writeln!(md);
     let _ = writeln!(
         md,
@@ -270,7 +298,11 @@ mod tests {
         for (i, a) in PROBES.iter().enumerate() {
             for b in &PROBES[i + 1..] {
                 assert_ne!(a.name, b.name, "duplicate probe name");
-                assert_ne!(a.feature, b.feature, "{} and {} probe the same bit", a.name, b.name);
+                assert_ne!(
+                    a.feature, b.feature,
+                    "{} and {} probe the same bit",
+                    a.name, b.name
+                );
             }
         }
     }

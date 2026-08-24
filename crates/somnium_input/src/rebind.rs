@@ -243,13 +243,24 @@ mod tests {
     #[test]
     fn escape_collides_across_maps_and_says_so() {
         let maps = maps();
-        let found = conflicts_for(&maps, "gameplay", "Interact", &ControlPath::keyboard("escape"));
+        let found = conflicts_for(
+            &maps,
+            "gameplay",
+            "Interact",
+            &ControlPath::keyboard("escape"),
+        );
         assert!(!found.is_empty());
         assert!(
-            found.iter().any(|c| c.map == "ui" && c.action == "Cancel" && !c.same_map),
+            found
+                .iter()
+                .any(|c| c.map == "ui" && c.action == "Cancel" && !c.same_map),
             "{found:?}"
         );
-        assert!(found.iter().any(|c| c.map == "gameplay" && c.action == "Pause" && c.same_map));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.map == "gameplay" && c.action == "Pause" && c.same_map)
+        );
     }
 
     /// Rebinding an action to the key it already has is not a conflict.
@@ -298,8 +309,19 @@ mod tests {
     #[test]
     fn unbinding_resolves_the_conflict_the_report_named() {
         let mut maps = maps();
-        rebind(&mut maps, "gameplay", "Interact", ControlPath::keyboard("space")).unwrap();
-        unbind(&mut maps, "gameplay", "Jump", &ControlPath::keyboard("space"));
+        rebind(
+            &mut maps,
+            "gameplay",
+            "Interact",
+            ControlPath::keyboard("space"),
+        )
+        .unwrap();
+        unbind(
+            &mut maps,
+            "gameplay",
+            "Jump",
+            &ControlPath::keyboard("space"),
+        );
 
         let jump = maps[0].find("Jump").expect("still there");
         assert!(
@@ -342,9 +364,13 @@ mod tests {
     /// An unpaired gamepad binding genuinely fights a paired one.
     #[test]
     fn an_unpaired_pad_binding_collides_with_a_paired_one() {
-        let maps = vec![ActionMap::new("m").action(
-            crate::Action::digital("A").bind(Binding::single(ControlPath::gamepad("buttonsouth"))),
-        )];
+        let maps =
+            vec![
+                ActionMap::new("m").action(
+                    crate::Action::digital("A")
+                        .bind(Binding::single(ControlPath::gamepad("buttonsouth"))),
+                ),
+            ];
         let found = conflicts_for(
             &maps,
             "m",
@@ -357,10 +383,12 @@ mod tests {
     /// Two different pads do not collide with each other.
     #[test]
     fn two_paired_pads_do_not_collide() {
-        let maps = vec![ActionMap::new("m").action(
-            crate::Action::digital("A")
-                .bind(Binding::single(ControlPath::gamepad("buttonsouth").on_device(1))),
-        )];
+        let maps =
+            vec![
+                ActionMap::new("m").action(crate::Action::digital("A").bind(Binding::single(
+                    ControlPath::gamepad("buttonsouth").on_device(1),
+                ))),
+            ];
         let found = conflicts_for(
             &maps,
             "m",

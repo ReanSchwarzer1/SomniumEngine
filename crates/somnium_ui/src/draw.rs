@@ -184,7 +184,6 @@ impl DrawingContext {
         }
     }
 
-
     // -- MORROWIND-D: the shaped stream ---------------------------------------
     //
     // Seam 4b's authoring surface. Everything below emits into `self.shaped`,
@@ -275,7 +274,8 @@ impl DrawingContext {
             return std::rc::Rc::clone(hit);
         }
         let contours = std::rc::Rc::new(path.flatten(self.tolerance));
-        self.flatten_cache.insert(key, std::rc::Rc::clone(&contours));
+        self.flatten_cache
+            .insert(key, std::rc::Rc::clone(&contours));
         contours
     }
 
@@ -634,7 +634,6 @@ impl DrawingContext {
         }
     }
 }
-
 
 /// Compose two 2x3 affines: `parent` applied after `child`.
 ///
@@ -1127,8 +1126,14 @@ mod tests {
         c.pop_transform();
         c.push_shaped(ShapedInstance::identity([9; 4]), &tri);
 
-        assert_eq!(c.shaped.instances[0].apply(Vec2::ZERO), Vec2::new(10.0, 5.0));
-        assert_eq!(c.shaped.instances[1].apply(Vec2::ZERO), Vec2::new(10.0, 0.0));
+        assert_eq!(
+            c.shaped.instances[0].apply(Vec2::ZERO),
+            Vec2::new(10.0, 5.0)
+        );
+        assert_eq!(
+            c.shaped.instances[1].apply(Vec2::ZERO),
+            Vec2::new(10.0, 0.0)
+        );
         assert_eq!(c.shaped.instances[2].apply(Vec2::ZERO), Vec2::ZERO);
         // The fill is the child's, not the stack's: a transform carries no colour.
         assert_eq!(c.shaped.instances[0].fill_a, [7; 4]);
@@ -1193,8 +1198,15 @@ mod tests {
             &crate::path::Stroke::new(2.0),
             ShapedInstance::identity([200, 200, 210, 255]),
         );
-        assert!(c.shaped_vertex_count() > 30, "a bowed wire is many triangles");
-        assert_eq!(c.shaped_instance_count(), 1, "one shape, whatever its length");
+        assert!(
+            c.shaped_vertex_count() > 30,
+            "a bowed wire is many triangles"
+        );
+        assert_eq!(
+            c.shaped_instance_count(),
+            1,
+            "one shape, whatever its length"
+        );
         assert_eq!(c.commands.last().unwrap().stream, Stream::Shaped);
         assert!(c.instances.is_empty(), "a stroke emits no quad instances");
     }

@@ -126,6 +126,12 @@ def row_census(args: argparse.Namespace) -> Result:
         [sys.executable, str(ROOT / "tools" / "census" / "generate.py"), "--check"],
         capture_output=True,
         text=True,
+        # MORROWIND-E2. Windows defaults these pipes to the ANSI code page, and
+        # cargo emits UTF-8 - so a single non-ASCII byte anywhere in a test name
+        # or a diagnostic killed the reader thread and took the gate with it.
+        # A gate that cannot run is not a gate.
+        encoding="utf-8",
+        errors="replace",
         cwd=ROOT,
     )
     if proc.returncode == 0:
@@ -145,6 +151,12 @@ def row_shader_budget(args: argparse.Namespace) -> Result:
         [sys.executable, str(ROOT / "tools" / "shadercook" / "generate.py"), "--check"],
         capture_output=True,
         text=True,
+        # MORROWIND-E2. Windows defaults these pipes to the ANSI code page, and
+        # cargo emits UTF-8 - so a single non-ASCII byte anywhere in a test name
+        # or a diagnostic killed the reader thread and took the gate with it.
+        # A gate that cannot run is not a gate.
+        encoding="utf-8",
+        errors="replace",
         cwd=ROOT,
     )
     if proc.returncode == 0:
@@ -316,9 +328,15 @@ def row_tests(args: argparse.Namespace) -> Result:
         ["cargo", "test", "--workspace", "-j", "1"],
         capture_output=True,
         text=True,
+        # MORROWIND-E2. Windows defaults these pipes to the ANSI code page, and
+        # cargo emits UTF-8 - so a single non-ASCII byte anywhere in a test name
+        # or a diagnostic killed the reader thread and took the gate with it.
+        # A gate that cannot run is not a gate.
+        encoding="utf-8",
+        errors="replace",
         cwd=ROOT,
     )
-    output = proc.stdout + proc.stderr
+    output = (proc.stdout or "") + (proc.stderr or "")
     passed = sum(int(m) for m in re.findall(r"test result: ok\. (\d+) passed", output))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", output))
     if proc.returncode != 0:

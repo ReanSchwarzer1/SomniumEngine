@@ -117,12 +117,7 @@ pub fn parse(markup: &str) -> Result<(String, Vec<StyledRun>), MarkupError> {
     let mut i = 0usize;
 
     // Close the current run at the current output position.
-    fn flush(
-        runs: &mut Vec<StyledRun>,
-        start: &mut usize,
-        end: usize,
-        style: &Style,
-    ) {
+    fn flush(runs: &mut Vec<StyledRun>, start: &mut usize, end: usize, style: &Style) {
         if end > *start {
             runs.push(StyledRun {
                 range: *start..end,
@@ -291,7 +286,10 @@ fn apply(style: &mut Style, name: &str, value: Option<&str>) -> bool {
             Some(color) => style.color = Some(color),
             None => return false,
         },
-        "size" => match value.and_then(|v| v.parse::<f32>().ok()).filter(|v| *v > 0.0) {
+        "size" => match value
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+        {
             Some(size) => style.size = Some(size),
             None => return false,
         },
@@ -305,17 +303,21 @@ fn apply(style: &mut Style, name: &str, value: Option<&str>) -> bool {
         },
         "wave" => {
             let mut parts = value.unwrap_or("2,2").split(',');
-            let amplitude = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(2.0);
-            let frequency = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(2.0);
+            let amplitude = parts
+                .next()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(2.0);
+            let frequency = parts
+                .next()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(2.0);
             style.motion = Motion::Wave {
                 amplitude,
                 frequency,
             };
         }
         "shake" => {
-            let amplitude = value
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(1.5);
+            let amplitude = value.and_then(|v| v.trim().parse().ok()).unwrap_or(1.5);
             style.motion = Motion::Shake { amplitude };
         }
         _ => return false,
@@ -401,7 +403,10 @@ mod tests {
         assert_eq!(runs[2].range, 4..6);
         assert_eq!(runs[1].slice(&text), "cd");
         assert!(runs[1].decoration.bold);
-        assert!(!runs[2].decoration.bold, "the close undoes exactly what the open did");
+        assert!(
+            !runs[2].decoration.bold,
+            "the close undoes exactly what the open did"
+        );
     }
 
     #[test]
@@ -419,13 +424,22 @@ mod tests {
 
     #[test]
     fn colours_accept_three_six_and_eight_digits() {
-        assert_eq!(runs_of("[color=#f00]x[/color]").1[0].color, Some([255, 0, 0, 255]));
-        assert_eq!(runs_of("[color=#ff8800]x[/color]").1[0].color, Some([255, 136, 0, 255]));
+        assert_eq!(
+            runs_of("[color=#f00]x[/color]").1[0].color,
+            Some([255, 0, 0, 255])
+        );
+        assert_eq!(
+            runs_of("[color=#ff8800]x[/color]").1[0].color,
+            Some([255, 136, 0, 255])
+        );
         assert_eq!(
             runs_of("[color=#ff880080]x[/color]").1[0].color,
             Some([255, 136, 0, 128])
         );
-        assert_eq!(runs_of("[color=ff0000]x[/color]").1[0].color, Some([255, 0, 0, 255]));
+        assert_eq!(
+            runs_of("[color=ff0000]x[/color]").1[0].color,
+            Some([255, 0, 0, 255])
+        );
     }
 
     /// `#f00` is `#ff0000`, not `#f00000`.
@@ -435,7 +449,10 @@ mod tests {
     /// which is invisible in isolation and obvious beside its long form.
     #[test]
     fn a_three_digit_colour_repeats_its_nibbles() {
-        assert_eq!(runs_of("[color=#abc]x[/color]").1[0].color, Some([170, 187, 204, 255]));
+        assert_eq!(
+            runs_of("[color=#abc]x[/color]").1[0].color,
+            Some([170, 187, 204, 255])
+        );
     }
 
     #[test]
@@ -448,7 +465,10 @@ mod tests {
         }
         assert!(!runs[0].decoration.bold);
         assert!(runs[1].decoration.bold);
-        assert!(!runs[2].decoration.bold, "the inner close restores the outer style");
+        assert!(
+            !runs[2].decoration.bold,
+            "the inner close restores the outer style"
+        );
     }
 
     /// A sprite is one placeholder character, so a caret steps over it as one
@@ -458,7 +478,10 @@ mod tests {
         let (text, runs) = runs_of("press [sprite=key_e] to open");
         assert_eq!(text.chars().filter(|c| *c == SPRITE_PLACEHOLDER).count(), 1);
         assert_eq!(text.chars().count(), "press  to open".chars().count() + 1);
-        let sprite = runs.iter().find(|r| r.sprite.is_some()).expect("a sprite run");
+        let sprite = runs
+            .iter()
+            .find(|r| r.sprite.is_some())
+            .expect("a sprite run");
         assert_eq!(sprite.sprite.as_deref(), Some("key_e"));
         assert_eq!(sprite.slice(&text), "\u{FFFC}");
     }
@@ -483,8 +506,14 @@ mod tests {
 
     #[test]
     fn motion_tags_have_defaults() {
-        assert!(matches!(runs_of("[wave]x[/wave]").1[0].motion, Motion::Wave { .. }));
-        assert!(matches!(runs_of("[shake]x[/shake]").1[0].motion, Motion::Shake { .. }));
+        assert!(matches!(
+            runs_of("[wave]x[/wave]").1[0].motion,
+            Motion::Wave { .. }
+        ));
+        assert!(matches!(
+            runs_of("[shake]x[/shake]").1[0].motion,
+            Motion::Shake { .. }
+        ));
     }
 
     /// **An unknown tag is literal text, not a swallowed span.**
@@ -521,7 +550,11 @@ mod tests {
         // These are known tags with unusable values, so they fall through to
         // the unknown-tag path and stay as text rather than silently applying
         // a default the author did not write.
-        assert!(runs_of("[color=nonsense]x[/color]").0.contains("[color=nonsense]"));
+        assert!(
+            runs_of("[color=nonsense]x[/color]")
+                .0
+                .contains("[color=nonsense]")
+        );
         assert!(runs_of("[size=-4]x[/size]").0.contains("[size=-4]"));
     }
 

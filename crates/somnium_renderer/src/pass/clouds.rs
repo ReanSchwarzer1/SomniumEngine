@@ -391,7 +391,10 @@ impl CloudPass {
             })
         };
         let cloud_params = uniform("Cloud Params", std::mem::size_of::<CloudParams>() as u64);
-        let noise_params = uniform("Cloud Noise Params", std::mem::size_of::<NoiseParams>() as u64);
+        let noise_params = uniform(
+            "Cloud Noise Params",
+            std::mem::size_of::<NoiseParams>() as u64,
+        );
         let composite_params = uniform(
             "Cloud Composite Params",
             std::mem::size_of::<CompositeParams>() as u64,
@@ -726,8 +729,7 @@ impl CloudPass {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
@@ -1129,10 +1131,7 @@ impl CloudPass {
             }),
         );
 
-        let bind_group = self
-            .march_bind_group
-            .as_ref()
-            .expect("checked above");
+        let bind_group = self.march_bind_group.as_ref().expect("checked above");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Cloud March"),
             timestamp_writes: None,
@@ -1250,7 +1249,10 @@ mod tests {
 
         let off = shadow_uniform_for(false, settings, camera);
         assert_eq!(off[3], 0.0, "strength zero is what makes shading ignore it");
-        assert!(off[2] > 0.0, "extent must stay positive or the lookup divides by zero");
+        assert!(
+            off[2] > 0.0,
+            "extent must stay positive or the lookup divides by zero"
+        );
 
         let unshadowed = shadow_uniform_for(
             true,
@@ -1283,7 +1285,13 @@ mod tests {
     /// `paint_weather` needs a queue only for the upload; the arithmetic that
     /// decides *what* it writes is this, and it is the half that can be wrong
     /// in a way a screenshot does not show.
-    fn stamp(map: &mut [[u8; 4]], centre: [u32; 2], radius_texels: f32, channel: usize, delta: f32) -> usize {
+    fn stamp(
+        map: &mut [[u8; 4]],
+        centre: [u32; 2],
+        radius_texels: f32,
+        channel: usize,
+        delta: f32,
+    ) -> usize {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let r = radius_texels.ceil() as i32;
         let mut touched = 0;
@@ -1323,7 +1331,10 @@ mod tests {
 
         let at = |x: u32, y: u32| map[(y as usize) * WEATHER_SIZE as usize + x as usize][0];
         assert_eq!(at(100, 100), 255, "the centre takes the full delta");
-        assert!(at(104, 100) > 0 && at(104, 100) < 255, "the middle is partial");
+        assert!(
+            at(104, 100) > 0 && at(104, 100) < 255,
+            "the middle is partial"
+        );
         // The rim is exactly zero, which is what stops two overlapping strokes
         // showing a ring where their edges meet.
         assert_eq!(at(108, 100), 0);
@@ -1336,7 +1347,11 @@ mod tests {
         stamp(&mut map, [40, 40], 6.0, 0, 1.0);
         stamp(&mut map, [40, 40], 6.0, 0, -1.0);
         let at = |x: u32, y: u32| map[(y as usize) * WEATHER_SIZE as usize + x as usize][0];
-        assert_eq!(at(40, 40), 0, "an equal and opposite stroke returns to zero");
+        assert_eq!(
+            at(40, 40),
+            0,
+            "an equal and opposite stroke returns to zero"
+        );
     }
 
     #[test]

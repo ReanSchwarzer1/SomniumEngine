@@ -189,7 +189,13 @@ fn path_bits(path: &Path) -> impl Iterator<Item = u32> + '_ {
     path.segments.iter().flat_map(|segment| match *segment {
         Segment::MoveTo(p) => vec![0, p.x.to_bits(), p.y.to_bits()],
         Segment::LineTo(p) => vec![1, p.x.to_bits(), p.y.to_bits()],
-        Segment::QuadTo(c, p) => vec![2, c.x.to_bits(), c.y.to_bits(), p.x.to_bits(), p.y.to_bits()],
+        Segment::QuadTo(c, p) => vec![
+            2,
+            c.x.to_bits(),
+            c.y.to_bits(),
+            p.x.to_bits(),
+            p.y.to_bits(),
+        ],
         Segment::CubicTo(c1, c2, p) => vec![
             3,
             c1.x.to_bits(),
@@ -421,9 +427,10 @@ impl Path {
                         // wrap is implied. Repeating it would make every join
                         // loop emit one degenerate joint.
                         if contour.points.len() >= 2
-                            && contour.points.last().is_some_and(|last| {
-                                last.distance_squared(contour.points[0]) < 1e-8
-                            })
+                            && contour
+                                .points
+                                .last()
+                                .is_some_and(|last| last.distance_squared(contour.points[0]) < 1e-8)
                         {
                             contour.points.pop();
                         }
@@ -445,7 +452,10 @@ impl Path {
 /// vertex buffer, and NaN geometry is the kind of bug that renders as "the
 /// whole panel vanished".
 fn push_unique(points: &mut Vec<Vec2>, p: Vec2) {
-    if points.last().is_some_and(|last| last.distance_squared(p) < 1e-8) {
+    if points
+        .last()
+        .is_some_and(|last| last.distance_squared(p) < 1e-8)
+    {
         return;
     }
     points.push(p);
@@ -494,10 +504,8 @@ fn flatten_cubic(p0: Vec2, c1: Vec2, c2: Vec2, p1: Vec2, tolerance: f32, out: &m
     for i in 1..=n {
         let t = i as f32 / n as f32;
         let mt = 1.0 - t;
-        let point = mt * mt * mt * p0
-            + 3.0 * mt * mt * t * c1
-            + 3.0 * mt * t * t * c2
-            + t * t * t * p1;
+        let point =
+            mt * mt * mt * p0 + 3.0 * mt * mt * t * c1 + 3.0 * mt * t * t * c2 + t * t * t * p1;
         push_unique(out, point);
     }
 }
@@ -806,10 +814,9 @@ pub fn fill_contour(contour: &Contour) -> Triangles {
             if cross(b - a, c - b) <= 0.0 {
                 continue; // reflex
             }
-            if indices
-                .iter()
-                .any(|&j| j != prev && j != at && j != next && point_in_triangle(points[j], a, b, c))
-            {
+            if indices.iter().any(|&j| {
+                j != prev && j != at && j != next && point_in_triangle(points[j], a, b, c)
+            }) {
                 continue;
             }
             triangle(a, b, c, &mut out);
@@ -821,7 +828,12 @@ pub fn fill_contour(contour: &Contour) -> Triangles {
             return Triangles::new();
         }
     }
-    triangle(points[indices[0]], points[indices[1]], points[indices[2]], &mut out);
+    triangle(
+        points[indices[0]],
+        points[indices[1]],
+        points[indices[2]],
+        &mut out,
+    );
     out
 }
 
@@ -938,10 +950,8 @@ mod tests {
         for i in 0..64 {
             let t = i as f32 / 63.0;
             let mt = 1.0 - t;
-            let truth = mt * mt * mt * p0
-                + 3.0 * mt * mt * t * c1
-                + 3.0 * mt * t * t * c2
-                + t * t * t * p1;
+            let truth =
+                mt * mt * mt * p0 + 3.0 * mt * mt * t * c1 + 3.0 * mt * t * t * c2 + t * t * t * p1;
             let nearest = points
                 .windows(2)
                 .map(|w| distance_to_segment(truth, w[0], w[1]))
@@ -968,8 +978,11 @@ mod tests {
     #[test]
     fn tolerance_actually_changes_the_segment_count() {
         let mut path = Path::new();
-        path.move_to(Vec2::ZERO)
-            .cubic_to(Vec2::new(0.0, 100.0), Vec2::new(100.0, 100.0), Vec2::new(100.0, 0.0));
+        path.move_to(Vec2::ZERO).cubic_to(
+            Vec2::new(0.0, 100.0),
+            Vec2::new(100.0, 100.0),
+            Vec2::new(100.0, 0.0),
+        );
         let coarse = path.flatten(4.0).remove(0).points.len();
         let fine = path.flatten(0.1).remove(0).points.len();
         assert!(fine > coarse * 4, "coarse {coarse}, fine {fine}");
@@ -1043,10 +1056,7 @@ mod tests {
             closed: false,
         };
         let mitred = stroke_contour(&contour, &Stroke::new(4.0));
-        let far = mitred
-            .iter()
-            .map(|p| p.length())
-            .fold(0.0f32, f32::max);
+        let far = mitred.iter().map(|p| p.length()).fold(0.0f32, f32::max);
         assert!(
             far < 400.0,
             "miter tip reached {far}, which is the spike the limit exists to prevent"
@@ -1061,11 +1071,17 @@ mod tests {
         };
         let bevel = stroke_contour(&corner, &Stroke::new(6.0).with_join(Join::Bevel));
         let round = stroke_contour(&corner, &Stroke::new(6.0).with_join(Join::Round));
-        assert!(round.len() > bevel.len(), "a round join is a fan, not a triangle");
+        assert!(
+            round.len() > bevel.len(),
+            "a round join is a fan, not a triangle"
+        );
 
         let butt = stroke_contour(&corner, &Stroke::new(6.0));
         let square = stroke_contour(&corner, &Stroke::new(6.0).with_cap(Cap::Square));
-        assert!(area(&square) > area(&butt), "a square cap extends past the end");
+        assert!(
+            area(&square) > area(&butt),
+            "a square cap extends past the end"
+        );
     }
 
     #[test]
@@ -1096,7 +1112,11 @@ mod tests {
         // inequality is what makes that difference visible instead of looking
         // like a missing join.
         assert_eq!(closed.len() / 3, 4 * 2 + 4, "4 segment quads + 4 bevels");
-        assert_eq!(open.len() / 3, 4 * 2 + 3, "same segments, one join fewer, no caps");
+        assert_eq!(
+            open.len() / 3,
+            4 * 2 + 3,
+            "same segments, one join fewer, no caps"
+        );
     }
 
     #[test]
@@ -1124,7 +1144,10 @@ mod tests {
         let a = stroke_contour(&contour, &Stroke::new(2.0).with_dash(4.0, 4.0, 0.0));
         let b = stroke_contour(&contour, &Stroke::new(2.0).with_dash(4.0, 4.0, 4.0));
         assert_ne!(a, b, "the phase must move the pattern");
-        assert!((area(&a) - area(&b)).abs() < 12.0, "and not change the ink much");
+        assert!(
+            (area(&a) - area(&b)).abs() < 12.0,
+            "and not change the ink much"
+        );
     }
 
     #[test]
@@ -1181,7 +1204,12 @@ mod tests {
         let points = &path.flatten(0.5).remove(0).points;
         assert!(points.len() > 8, "a wire is a curve, not a line");
         assert_eq!(points[0], Vec2::ZERO);
-        assert!(points.last().unwrap().abs_diff_eq(Vec2::new(200.0, 100.0), 1e-3));
+        assert!(
+            points
+                .last()
+                .unwrap()
+                .abs_diff_eq(Vec2::new(200.0, 100.0), 1e-3)
+        );
     }
 
     /// Two stacked ports still get a visible curve rather than a straight line.

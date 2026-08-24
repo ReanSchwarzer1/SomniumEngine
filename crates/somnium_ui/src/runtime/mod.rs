@@ -108,6 +108,38 @@ impl UiCanvas {
         layout
     }
 
+    /// Put a node exactly where an anchoring says it goes.
+    ///
+    /// MORROWIND-E2, closing a loop MORROWIND-E left open: [`Canvas::place`]
+    /// resolved an [`Anchoring`] into a [`Rect`](crate::types::Rect) and
+    /// *nothing consumed the result*. Anchors that compute a rectangle no
+    /// widget ever reads are a layout system with no output, and the only
+    /// reason it looked finished is that the sub-phase's tests asserted on the
+    /// rectangles rather than on the tree.
+    ///
+    /// Returns the rectangle, because a caller that wants to know where its
+    /// minimap landed should not have to ask twice.
+    pub fn place_anchored(
+        &mut self,
+        handle: NodeHandle,
+        anchoring: &Anchoring,
+    ) -> crate::types::Rect {
+        let layout = self.layout_for(self.ui.screen_size);
+        let rect = self.canvas.place(&layout, anchoring);
+        self.place_node(handle, rect);
+        rect
+    }
+
+    /// Put a node at an explicit rectangle in canvas space.
+    ///
+    /// The primitive under [`Self::place_anchored`], for a game that computes
+    /// its own placement — a health bar that shrinks with the value, a tooltip
+    /// following the cursor. Sets the size *and* the position, because a node
+    /// placed at a rectangle it does not fill is the bug this replaces.
+    pub fn place_node(&mut self, handle: NodeHandle, rect: crate::types::Rect) {
+        self.ui.place_node(handle, rect);
+    }
+
     pub fn ui(&self) -> &UserInterface {
         &self.ui
     }
@@ -206,10 +238,129 @@ impl UiCanvas {
     }
 }
 
+// ── MORROWIND-E2: the hook ───────────────────────────────────────────────────
+//
+// MORROWIND-D, -E, -F and -G built a runtime UI a game could not reach.
+// `UiCanvas::render` needs a window, a device, a queue, an encoder, a swapchain
+// view and a surface format, and `EngineContext` hands a `GameApp` none of
+// them — so `examples/vvardenfell` computed its HUD layout and `println!`d it.
+// Four sub-phases of paint layer, canvas, navigation and text, and not one
+// pixel a game could put on screen.
+//
+// The fix is deliberately not "put a `UiCanvas` in `EngineContext`". A game
+// owns its canvases — a HUD, a pause menu, a world-space name-plate are three
+// of them and the engine has no business knowing how many there are. What the
+// engine owns is the *moment*: the point in the frame after the world and
+// before the editor's chrome. So the engine hands the game that moment, with
+// the GPU state already open, and the game hands back whichever canvases it
+// wants drawn into it.
+
+/// The open frame a game draws its UI into.
+///
+/// Handed to `GameApp::on_render_ui` at pass 9 of the renderer, after the world
+/// and before the editor shell. Holds the encoder, so a canvas drawn through it
+/// lands in the same submission as everything else in the frame rather than in
+/// one of its own.
+///
+/// **Build in `on_render`, draw in `on_render_ui`.** The split is not
+/// bureaucratic: `on_render` has the whole `EngineContext` and is where a
+/// widget tree is mutated, and this type deliberately carries no world, no
+/// physics and no time — a frame that could mutate the world halfway through
+/// recording it is a frame with a hazard in it.
+pub struct GameUiFrame<'a> {
+    window: &'a Window,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    encoder: &'a mut wgpu::CommandEncoder,
+    view: &'a wgpu::TextureView,
+    format: wgpu::TextureFormat,
+    drawn: u32,
+}
+
+impl<'a> GameUiFrame<'a> {
+    /// Open a frame. Called by the renderer, not by a game.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        window: &'a Window,
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        encoder: &'a mut wgpu::CommandEncoder,
+        view: &'a wgpu::TextureView,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        Self {
+            window,
+            device,
+            queue,
+            encoder,
+            view,
+            format,
+            drawn: 0,
+        }
+    }
+
+    /// Lay out and draw one canvas into this frame.
+    ///
+    /// Call it once per canvas, in back-to-front order. Ordering *within* a
+    /// canvas is [`Layer`]'s job; ordering *between* canvases is call order,
+    /// because two canvases are two trees and nothing can sort across trees
+    /// without merging them — which is what a single canvas with layers already
+    /// is, and is the reason to prefer one.
+    pub fn draw(&mut self, canvas: &mut UiCanvas) {
+        canvas.render(
+            self.window,
+            self.device,
+            self.queue,
+            self.encoder,
+            self.view,
+            self.format,
+        );
+        self.drawn += 1;
+    }
+
+    /// How many canvases have been drawn into this frame so far.
+    ///
+    /// Exists so "the hook ran" is a checkable claim rather than an impression
+    /// — the engine logs a one-time warning when a frame closes at zero and the
+    /// game implements `on_render_ui`, which is the shape of the bug this whole
+    /// sub-phase exists to fix.
+    pub fn drawn(&self) -> u32 {
+        self.drawn
+    }
+
+    /// The window, for a game that needs the scale factor or the inner size to
+    /// decide *what* to draw before drawing it.
+    pub fn window(&self) -> &Window {
+        self.window
+    }
+
+    /// The surface format, for a game rendering its own offscreen pass.
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+}
+
+/// The renderer's view of "there is a game with a UI".
+///
+/// `somnium_renderer` cannot depend on `somnium_core`, so the callback that
+/// reaches a `GameApp` cannot be typed as one. This trait is the seam: the
+/// renderer calls it, `somnium_core` implements it with a one-line adapter over
+/// the boxed game, and neither crate learns about the other.
+pub trait GameUi {
+    /// Draw the game's UI into the open frame.
+    fn draw_ui(&mut self, frame: &mut GameUiFrame);
+}
+
+impl<F: FnMut(&mut GameUiFrame)> GameUi for F {
+    fn draw_ui(&mut self, frame: &mut GameUiFrame) {
+        self(frame)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::text::TextBuilder;
+    use crate::widgets::{border::BorderBuilder, text::TextBuilder};
 
     #[test]
     fn canvas_builds_a_widget_tree_without_editor_chrome() {
@@ -222,5 +373,112 @@ mod tests {
         assert!(h.is_some());
         canvas.ui_mut().perform_layout();
         canvas.ui_mut().draw();
+    }
+
+    // ── MORROWIND-E2 ────────────────────────────────────────────────────────
+
+    /// The bug this sub-phase is named after, as a test: an `Anchoring`
+    /// resolved to a rectangle and no widget ever moved.
+    #[test]
+    fn place_anchored_moves_the_widget_and_not_only_the_rectangle() {
+        let mut canvas = UiCanvas::with_canvas(
+            Canvas::screen().on_layer(Layer::HUD),
+            Vec2::new(1280.0, 720.0),
+        );
+        canvas.apply_canvas(Vec2::new(1280.0, 720.0));
+        let root = canvas.ui().root();
+        let node = TextBuilder::new(WidgetBuilder::new())
+            .with_text("minimap")
+            .build();
+        let handle = canvas.ui_mut().add_node(node, root);
+
+        let anchoring = Anchoring::pinned(
+            Anchors::TOP_RIGHT,
+            Vec2::new(-176.0, 16.0),
+            Vec2::splat(160.0),
+        );
+        let rect = canvas.place_anchored(handle, &anchoring);
+        canvas.ui_mut().perform_layout();
+
+        let bounds = canvas.ui().screen_bounds(handle);
+        assert!(
+            (bounds.x - rect.x).abs() < 0.5 && (bounds.y - rect.y).abs() < 0.5,
+            "anchoring resolved to {rect:?} but the widget laid out at {bounds:?}"
+        );
+        assert!(
+            (bounds.w - 160.0).abs() < 0.5,
+            "width not applied: {bounds:?}"
+        );
+        // Top-right on a 1280-wide canvas: 1280 - 176 = 1104.
+        assert!(bounds.x > 1000.0, "not on the right: {bounds:?}");
+    }
+
+    /// A node placed at a rectangle fills it rather than centring inside it.
+    #[test]
+    fn place_node_pins_both_alignments() {
+        let mut canvas = UiCanvas::new(800.0, 600.0);
+        let root = canvas.ui().root();
+        let node = BorderBuilder::new(WidgetBuilder::new()).build();
+        let handle = canvas.ui_mut().add_node(node, root);
+        canvas.place_node(
+            handle,
+            crate::types::Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 300.0,
+                h: 40.0,
+            },
+        );
+        canvas.ui_mut().perform_layout();
+        let b = canvas.ui().screen_bounds(handle);
+        assert!(
+            (b.x - 10.0).abs() < 0.5 && (b.y - 20.0).abs() < 0.5,
+            "{b:?}"
+        );
+        assert!(
+            (b.w - 300.0).abs() < 0.5 && (b.h - 40.0).abs() < 0.5,
+            "{b:?}"
+        );
+    }
+
+    /// Re-placing on a resize keeps the widget on the anchor, which is the
+    /// whole reason anchors exist and the thing absolute pixels get wrong.
+    #[test]
+    fn a_pinned_widget_survives_a_resize() {
+        let anchoring = Anchoring::pinned(
+            Anchors::TOP_RIGHT,
+            Vec2::new(-100.0, 8.0),
+            Vec2::splat(80.0),
+        );
+        let mut right_edges = Vec::new();
+        for viewport in [Vec2::new(1280.0, 720.0), Vec2::new(3840.0, 2160.0)] {
+            let mut canvas = UiCanvas::with_canvas(Canvas::screen().on_layer(Layer::HUD), viewport);
+            canvas.apply_canvas(viewport);
+            let root = canvas.ui().root();
+            let h = canvas
+                .ui_mut()
+                .add_node(BorderBuilder::new(WidgetBuilder::new()).build(), root);
+            canvas.place_anchored(h, &anchoring);
+            canvas.ui_mut().perform_layout();
+            let b = canvas.ui().screen_bounds(h);
+            right_edges.push(canvas.ui().screen_size.x - (b.x + b.w));
+        }
+        assert!(
+            (right_edges[0] - right_edges[1]).abs() < 1.0,
+            "distance from the right edge changed with resolution: {right_edges:?}"
+        );
+    }
+
+    /// `GameUiFrame` counts what it drew, so "the hook ran" is checkable. The
+    /// GPU half needs a device; this is the half that does not.
+    #[test]
+    fn a_game_ui_closure_satisfies_the_seam() {
+        fn takes_a_game_ui(_: &mut dyn GameUi) {}
+        let mut called = false;
+        let mut f = |_: &mut GameUiFrame| called = true;
+        takes_a_game_ui(&mut f);
+        // Not called — nothing opened a frame. The assertion is that a plain
+        // closure *is* a `GameUi`, so a game never writes an adapter type.
+        assert!(!called);
     }
 }

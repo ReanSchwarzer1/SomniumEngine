@@ -127,7 +127,10 @@ impl std::fmt::Display for ComposeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownModule { from, wanted } => {
-                write!(f, "{from}: `//!include \"{wanted}\"` names an unregistered module")
+                write!(
+                    f,
+                    "{from}: `//!include \"{wanted}\"` names an unregistered module"
+                )
             }
             Self::Cycle(path) => write!(f, "include cycle: {}", path.join(" -> ")),
             Self::BadDirective {
@@ -248,7 +251,14 @@ impl Registry {
         // anything.
         let mut enables = BTreeSet::new();
         let mut stack = Vec::new();
-        self.emit(root, defines, &mut out, &mut emitted, &mut enables, &mut stack)?;
+        self.emit(
+            root,
+            defines,
+            &mut out,
+            &mut emitted,
+            &mut enables,
+            &mut stack,
+        )?;
 
         if enables.is_empty() {
             return Ok(out);
@@ -275,7 +285,14 @@ impl Registry {
         let mut emitted = HashSet::new();
         let mut enables = BTreeSet::new();
         let mut stack = Vec::new();
-        self.emit(root, defines, &mut out, &mut emitted, &mut enables, &mut stack)?;
+        self.emit(
+            root,
+            defines,
+            &mut out,
+            &mut emitted,
+            &mut enables,
+            &mut stack,
+        )?;
         let mut ids: Vec<_> = emitted.into_iter().collect();
         ids.sort_unstable();
         Ok(ids)
@@ -323,15 +340,14 @@ impl Registry {
                         if condition == Some(false) {
                             continue;
                         }
-                        let wanted = parse_quoted(argument).ok_or_else(|| {
-                            ComposeError::BadDirective {
+                        let wanted =
+                            parse_quoted(argument).ok_or_else(|| ComposeError::BadDirective {
                                 module: module.name,
                                 line: number,
                                 reason: format!(
                                     "expected `//!include \"name.wgsl\"`, found `{rest}`"
                                 ),
-                            }
-                        })?;
+                            })?;
                         let child = self.by_name.get(wanted.as_str()).copied().ok_or(
                             ComposeError::UnknownModule {
                                 from: module.name,
@@ -496,7 +512,10 @@ mod tests {
         );
         let out = r.resolve(root, Defines::NONE).unwrap();
         assert_eq!(out.matches("struct Brdf").count(), 1);
-        assert_eq!(out, "struct Brdf { x: f32 }\nfn a() {}\nfn b() {}\nfn root() {}\n");
+        assert_eq!(
+            out,
+            "struct Brdf { x: f32 }\nfn a() {}\nfn b() {}\nfn root() {}\n"
+        );
     }
 
     #[test]
@@ -613,7 +632,10 @@ mod tests {
     fn enable_directives_are_hoisted_and_deduplicated() {
         let mut r = registry();
         r.register("a.wgsl", "enable f16;\nfn a() {}\n");
-        r.register("b.wgsl", "enable f16;\nrequires readonly_and_readwrite_storage_textures;\nfn b() {}\n");
+        r.register(
+            "b.wgsl",
+            "enable f16;\nrequires readonly_and_readwrite_storage_textures;\nfn b() {}\n",
+        );
         let root = r.register(
             "root.wgsl",
             "struct Root { x: f32 }\n//!include \"a.wgsl\"\n//!include \"b.wgsl\"\n",
@@ -622,7 +644,10 @@ mod tests {
         let lines: Vec<_> = out.lines().collect();
         assert_eq!(
             &lines[..2],
-            &["enable f16;", "requires readonly_and_readwrite_storage_textures;"],
+            &[
+                "enable f16;",
+                "requires readonly_and_readwrite_storage_textures;"
+            ],
             "every enable must precede every declaration, including the root's own struct"
         );
         assert_eq!(out.matches("enable f16;").count(), 1);
@@ -639,7 +664,11 @@ mod tests {
             "hot reload replaces source in place — every cached key that named \
              this module must still name it"
         );
-        assert!(r.resolve(first, Defines::NONE).unwrap().contains("let x = 1"));
+        assert!(
+            r.resolve(first, Defines::NONE)
+                .unwrap()
+                .contains("let x = 1")
+        );
     }
 
     #[test]

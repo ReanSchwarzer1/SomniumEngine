@@ -236,14 +236,8 @@ impl Control for CurveEditor {
         for i in 1..GRID_DIVS {
             #[allow(clippy::cast_precision_loss)]
             let f = i as f32 / GRID_DIVS as f32;
-            ctx.push_rect_filled(
-                Rect::new(plot.x + plot.w * f, plot.y, 1.0, plot.h),
-                grid,
-            );
-            ctx.push_rect_filled(
-                Rect::new(plot.x, plot.y + plot.h * f, plot.w, 1.0),
-                grid,
-            );
+            ctx.push_rect_filled(Rect::new(plot.x + plot.w * f, plot.y, 1.0, plot.h), grid);
+            ctx.push_rect_filled(Rect::new(plot.x, plot.y + plot.h * f, plot.w, 1.0), grid);
         }
 
         if self.curve.is_empty() {
@@ -507,7 +501,11 @@ impl Control for CurveEditor {
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
                     if let Some(index) = self.selected {
                         let span = (self.view_v.1 - self.view_v.0).abs();
-                        let nudge = if mods.shift { span * 0.002 } else { span * 0.02 };
+                        let nudge = if mods.shift {
+                            span * 0.002
+                        } else {
+                            span * 0.02
+                        };
                         let sign = if *key == KeyCode::ArrowUp { 1.0 } else { -1.0 };
                         if let Some(k) = self.curve.keys().get(index).copied() {
                             self.curve.move_key(index, k.t, k.v + nudge * sign);

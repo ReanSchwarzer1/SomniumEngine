@@ -143,7 +143,10 @@ mod tests {
 
         let mut watcher = SourceWatcher::default();
         watcher.watch(ModuleId(0), path.clone());
-        assert!(watcher.poll().is_empty(), "the first poll must not fire on its own baseline");
+        assert!(
+            watcher.poll().is_empty(),
+            "the first poll must not fire on its own baseline"
+        );
         assert!(watcher.poll().is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -191,7 +194,10 @@ mod tests {
         assert!(watcher.poll().is_empty());
 
         std::fs::remove_file(&path).unwrap();
-        assert!(watcher.poll().is_empty(), "a momentary absence is not an edit");
+        assert!(
+            watcher.poll().is_empty(),
+            "a momentary absence is not an edit"
+        );
 
         bump(&path, "fn a() { let x = 2; }\n");
         let changed = watcher.poll();
@@ -212,7 +218,11 @@ mod tests {
         assert!(watcher.poll().is_empty());
 
         bump(&path, "fn later() {}\n");
-        assert_eq!(watcher.poll().len(), 1, "a new shader must not need a restart");
+        assert_eq!(
+            watcher.poll().len(),
+            1,
+            "a new shader must not need a restart"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

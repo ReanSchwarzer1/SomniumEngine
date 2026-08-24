@@ -26,7 +26,9 @@ pub struct UnderwaterPass {
 impl UnderwaterPass {
     pub fn new(
         device: &wgpu::Device,
-        shaders: &crate::shaders::Shaders, format: wgpu::TextureFormat) -> Self {
+        shaders: &crate::shaders::Shaders,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Underwater bind group layout"),
             entries: &[

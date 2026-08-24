@@ -324,7 +324,10 @@ mod tests {
         let RawValue::Analog2D(out) = zone.apply(v2(0.2, 0.2)) else {
             panic!("2D in, 2D out");
         };
-        assert!(out.length() > 0.0, "a diagonal push past the radius registers");
+        assert!(
+            out.length() > 0.0,
+            "a diagonal push past the radius registers"
+        );
         // Genuinely inside the radius.
         let RawValue::Analog2D(dead) = zone.apply(v2(0.1, 0.1)) else {
             panic!()
@@ -351,7 +354,10 @@ mod tests {
         let RawValue::Analog1D(out) = zone.apply(RawValue::Analog1D(0.9)) else {
             panic!()
         };
-        assert!((out - 1.0).abs() < 1e-4, "a stick at 0.9 must reach full throw");
+        assert!(
+            (out - 1.0).abs() < 1e-4,
+            "a stick at 0.9 must reach full throw"
+        );
     }
 
     #[test]
@@ -405,11 +411,23 @@ mod tests {
     fn a_chain_applies_in_order() {
         // Scale then clamp is not clamp then scale.
         let scale_first = apply_all(
-            &[Processor::Scale(4.0), Processor::Clamp { min: -1.0, max: 1.0 }],
+            &[
+                Processor::Scale(4.0),
+                Processor::Clamp {
+                    min: -1.0,
+                    max: 1.0,
+                },
+            ],
             RawValue::Analog1D(0.5),
         );
         let clamp_first = apply_all(
-            &[Processor::Clamp { min: -1.0, max: 1.0 }, Processor::Scale(4.0)],
+            &[
+                Processor::Clamp {
+                    min: -1.0,
+                    max: 1.0,
+                },
+                Processor::Scale(4.0),
+            ],
             RawValue::Analog1D(0.5),
         );
         assert_eq!(scale_first, RawValue::Analog1D(1.0));
@@ -428,8 +446,14 @@ mod tests {
     #[test]
     fn press_fires_every_frame_it_is_held() {
         let mut state = InteractionState::default();
-        assert_eq!(state.update(Interaction::Press, true, 0.016), Phase::Performed);
-        assert_eq!(state.update(Interaction::Press, true, 0.016), Phase::Performed);
+        assert_eq!(
+            state.update(Interaction::Press, true, 0.016),
+            Phase::Performed
+        );
+        assert_eq!(
+            state.update(Interaction::Press, true, 0.016),
+            Phase::Performed
+        );
         assert_eq!(state.update(Interaction::Press, false, 0.016), Phase::Idle);
     }
 

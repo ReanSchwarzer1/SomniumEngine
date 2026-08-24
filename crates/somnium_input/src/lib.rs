@@ -193,15 +193,13 @@ pub fn default_gameplay_map() -> ActionMap {
     ActionMap::new("gameplay")
         .action(
             Action::vector2("Move")
-                .bind(
-                    Binding::Vector2 {
-                        up: ControlPath::keyboard("w"),
-                        down: ControlPath::keyboard("s"),
-                        left: ControlPath::keyboard("a"),
-                        right: ControlPath::keyboard("d"),
-                        processors: vec![Processor::Normalize],
-                    },
-                )
+                .bind(Binding::Vector2 {
+                    up: ControlPath::keyboard("w"),
+                    down: ControlPath::keyboard("s"),
+                    left: ControlPath::keyboard("a"),
+                    right: ControlPath::keyboard("d"),
+                    processors: vec![Processor::Normalize],
+                })
                 .bind(
                     Binding::single(ControlPath::gamepad("leftstick"))
                         .with(Processor::stick_dead_zone()),
@@ -280,8 +278,7 @@ pub fn default_ui_map() -> ActionMap {
         )
         .action(Action::digital("Next").bind(Binding::single(ControlPath::keyboard("tab"))))
         .action(
-            Action::digital("Previous")
-                .bind(Binding::single(ControlPath::gamepad("leftshoulder"))),
+            Action::digital("Previous").bind(Binding::single(ControlPath::gamepad("leftshoulder"))),
         )
 }
 
@@ -291,7 +288,10 @@ mod tests {
 
     /// Press or release a key by name, through the public device API.
     fn key(input: &mut InputSystem, name: &str, down: bool) {
-        assert!(input.devices_mut().set_key(name, down), "unknown key {name}");
+        assert!(
+            input.devices_mut().set_key(name, down),
+            "unknown key {name}"
+        );
     }
 
     /// End to end: a key press becomes an action value, with no keycode
@@ -316,7 +316,10 @@ mod tests {
         key(&mut input, "d", true);
         input.update(0.016);
         let moved = input.vec2("Move");
-        assert!((moved.length() - 1.0).abs() < 1e-3, "diagonal is not faster");
+        assert!(
+            (moved.length() - 1.0).abs() < 1e-3,
+            "diagonal is not faster"
+        );
         assert!(moved.y < 0.0 && moved.x > 0.0);
     }
 

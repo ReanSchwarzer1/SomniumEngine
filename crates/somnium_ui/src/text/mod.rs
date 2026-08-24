@@ -77,7 +77,7 @@ pub mod ime;
 pub mod localize;
 pub mod markup;
 
-pub use fallback::{FallbackChain, FaceCoverage};
+pub use fallback::{FaceCoverage, FallbackChain};
 pub use ime::{Composition, ImeEvent};
 pub use localize::{LocalizedText, TextKey};
 pub use markup::{MarkupError, parse};
@@ -296,8 +296,14 @@ mod tests {
     /// heuristic exists at all rather than defaulting silently.
     #[test]
     fn an_arabic_paragraph_is_right_to_left() {
-        assert_eq!(Direction::of_paragraph("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"), Direction::Rtl);
-        assert_eq!(Direction::of_paragraph("  (\u{05E9}\u{05DC}\u{05D5}\u{05DD}"), Direction::Rtl);
+        assert_eq!(
+            Direction::of_paragraph("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"),
+            Direction::Rtl
+        );
+        assert_eq!(
+            Direction::of_paragraph("  (\u{05E9}\u{05DC}\u{05D5}\u{05DD}"),
+            Direction::Rtl
+        );
     }
 
     /// The *first strong* character decides, not the majority.

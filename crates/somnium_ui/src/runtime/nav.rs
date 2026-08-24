@@ -528,14 +528,26 @@ mod tests {
         }
         let links = NavLinks::default();
         let top_left = all[0];
-        assert_eq!(navigate(top_left, &all, Direction::Right, &links), Some(all[1].handle));
-        assert_eq!(navigate(top_left, &all, Direction::Down, &links), Some(all[4].handle));
+        assert_eq!(
+            navigate(top_left, &all, Direction::Right, &links),
+            Some(all[1].handle)
+        );
+        assert_eq!(
+            navigate(top_left, &all, Direction::Down, &links),
+            Some(all[4].handle)
+        );
         assert_eq!(navigate(top_left, &all, Direction::Left, &links), None);
         assert_eq!(navigate(top_left, &all, Direction::Up, &links), None);
 
         let middle = all[5];
-        assert_eq!(navigate(middle, &all, Direction::Up, &links), Some(all[1].handle));
-        assert_eq!(navigate(middle, &all, Direction::Left, &links), Some(all[4].handle));
+        assert_eq!(
+            navigate(middle, &all, Direction::Up, &links),
+            Some(all[1].handle)
+        );
+        assert_eq!(
+            navigate(middle, &all, Direction::Left, &links),
+            Some(all[4].handle)
+        );
     }
 
     /// An authored link wins over geometry.
@@ -687,7 +699,10 @@ mod tests {
     #[test]
     fn tab_and_arrows_are_different_verbs() {
         use winit::keyboard::KeyCode;
-        assert_eq!(NavAction::from_key(KeyCode::Tab, false), Some(NavAction::Next));
+        assert_eq!(
+            NavAction::from_key(KeyCode::Tab, false),
+            Some(NavAction::Next)
+        );
         assert_eq!(
             NavAction::from_key(KeyCode::Tab, true),
             Some(NavAction::Previous)
@@ -805,6 +820,9 @@ mod tests {
                 glam::Vec2::new(0.0, 1.0)
             }
         }
-        assert_eq!(NavAction::from_actions(&Both, 0.5), Some(NavAction::Confirm));
+        assert_eq!(
+            NavAction::from_actions(&Both, 0.5),
+            Some(NavAction::Confirm)
+        );
     }
 }

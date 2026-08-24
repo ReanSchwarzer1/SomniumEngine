@@ -14,7 +14,11 @@
 //! settings file is data that outlives the enum: winit adding a variant must not
 //! silently repoint every binding after it.
 
-use crate::{action::ControlSource, path::{ControlPath, DeviceKind}, processor::RawValue};
+use crate::{
+    action::ControlSource,
+    path::{ControlPath, DeviceKind},
+    processor::RawValue,
+};
 use glam::Vec2;
 use std::collections::HashMap;
 use winit::{
@@ -447,13 +451,75 @@ pub fn key_code(name: &str) -> Option<KeyCode> {
 #[must_use]
 pub fn key_name(code: KeyCode) -> Option<&'static str> {
     const NAMES: &[&str] = &[
-        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
-        "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        "space", "enter", "escape", "tab", "backspace", "delete", "shiftleft", "shiftright",
-        "controlleft", "controlright", "altleft", "altright", "arrowup", "arrowdown", "arrowleft",
-        "arrowright", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g",
+        "h",
+        "i",
+        "j",
+        "k",
+        "l",
+        "m",
+        "n",
+        "o",
+        "p",
+        "q",
+        "r",
+        "s",
+        "t",
+        "u",
+        "v",
+        "w",
+        "x",
+        "y",
+        "z",
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "space",
+        "enter",
+        "escape",
+        "tab",
+        "backspace",
+        "delete",
+        "shiftleft",
+        "shiftright",
+        "controlleft",
+        "controlright",
+        "altleft",
+        "altright",
+        "arrowup",
+        "arrowdown",
+        "arrowleft",
+        "arrowright",
+        "f1",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "f9",
+        "f10",
+        "f11",
+        "f12",
     ];
-    NAMES.iter().copied().find(|name| key_code(name) == Some(code))
+    NAMES
+        .iter()
+        .copied()
+        .find(|name| key_code(name) == Some(code))
 }
 
 fn mouse_button(name: &str) -> Option<MouseButton> {
@@ -596,7 +662,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        devices.set_pad(1, PadState { connected: true, ..Default::default() });
+        devices.set_pad(
+            1,
+            PadState {
+                connected: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(
             devices.read(&ControlPath::gamepad("leftstick").on_device(1)),
             RawValue::Analog2D(Vec2::ZERO)

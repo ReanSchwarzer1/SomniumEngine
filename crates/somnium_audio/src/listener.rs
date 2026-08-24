@@ -358,8 +358,14 @@ mod tests {
     #[test]
     fn attenuation_is_full_inside_min_and_silent_past_max() {
         for curve in [
-            Attenuation::Linear { min: 2.0, max: 20.0 },
-            Attenuation::InverseSquare { min: 2.0, max: 20.0 },
+            Attenuation::Linear {
+                min: 2.0,
+                max: 20.0,
+            },
+            Attenuation::InverseSquare {
+                min: 2.0,
+                max: 20.0,
+            },
         ] {
             assert_eq!(curve.gain(0.0), 1.0, "{curve:?}");
             assert_eq!(curve.gain(2.0), 1.0, "{curve:?}");
@@ -374,8 +380,14 @@ mod tests {
     /// source seem to leap in volume as you approach.
     #[test]
     fn inverse_square_falls_off_faster_than_linear() {
-        let linear = Attenuation::Linear { min: 1.0, max: 100.0 };
-        let physical = Attenuation::InverseSquare { min: 1.0, max: 100.0 };
+        let linear = Attenuation::Linear {
+            min: 1.0,
+            max: 100.0,
+        };
+        let physical = Attenuation::InverseSquare {
+            min: 1.0,
+            max: 100.0,
+        };
         assert!(physical.gain(10.0) < linear.gain(10.0));
     }
 
@@ -383,8 +395,14 @@ mod tests {
     #[test]
     fn attenuation_never_increases_with_distance() {
         for curve in [
-            Attenuation::Linear { min: 1.0, max: 50.0 },
-            Attenuation::InverseSquare { min: 1.0, max: 50.0 },
+            Attenuation::Linear {
+                min: 1.0,
+                max: 50.0,
+            },
+            Attenuation::InverseSquare {
+                min: 1.0,
+                max: 50.0,
+            },
         ] {
             let mut previous = 1.0;
             for step in 0..200 {
@@ -401,7 +419,10 @@ mod tests {
     /// negative range and produce gains above one.
     #[test]
     fn an_inverted_range_is_corrected_rather_than_inverting_the_curve() {
-        let curve = Attenuation::Linear { min: 50.0, max: 5.0 };
+        let curve = Attenuation::Linear {
+            min: 50.0,
+            max: 5.0,
+        };
         for d in [0.0, 10.0, 25.0, 60.0] {
             let gain = curve.gain(d);
             assert!((0.0..=1.0).contains(&gain), "gain {gain} at {d}");

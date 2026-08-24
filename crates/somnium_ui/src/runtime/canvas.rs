@@ -338,9 +338,12 @@ impl Canvas {
                     logical_size,
                     // A world canvas has no notch to avoid; the safe area is
                     // still honoured because a caller may use it as padding.
-                    safe_rect: self
-                        .safe_area
-                        .apply(Rect::new(0.0, 0.0, logical_size.x, logical_size.y)),
+                    safe_rect: self.safe_area.apply(Rect::new(
+                        0.0,
+                        0.0,
+                        logical_size.x,
+                        logical_size.y,
+                    )),
                     scale: world_pixels_per_unit.max(1.0),
                 }
             }
@@ -524,7 +527,11 @@ mod tests {
         });
         // At 4K the scale is 2, so an 88 px notch is 44 canvas units.
         let layout = canvas.layout(Vec2::new(3840.0, 2160.0), 1.0);
-        assert!((layout.safe_rect.y - 44.0).abs() < 0.5, "{:?}", layout.safe_rect);
+        assert!(
+            (layout.safe_rect.y - 44.0).abs() < 0.5,
+            "{:?}",
+            layout.safe_rect
+        );
         assert!((layout.safe_rect.h - (1080.0 - 44.0 - 34.0)).abs() < 1.0);
     }
 
@@ -664,7 +671,12 @@ mod tests {
         sort_by_layer(&mut canvases);
         assert_eq!(
             canvases,
-            vec![(Layer::HUD, 1), (Layer::HUD, 2), (Layer::MENU, 3), (Layer::OVERLAY, 0)]
+            vec![
+                (Layer::HUD, 1),
+                (Layer::HUD, 2),
+                (Layer::MENU, 3),
+                (Layer::OVERLAY, 0)
+            ]
         );
     }
 

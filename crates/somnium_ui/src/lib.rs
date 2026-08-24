@@ -16,11 +16,11 @@ pub mod motion;
 pub mod node;
 pub mod outliner_filter;
 pub mod pass;
-pub mod pool;
 pub mod path;
+pub mod pool;
 pub mod primitive;
-pub mod shaped;
 pub mod runtime;
+pub mod shaped;
 pub mod style;
 pub mod text;
 pub mod theme;
@@ -46,7 +46,7 @@ pub use editor_event::{
     ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
 };
 pub use node::CursorKind;
-pub use runtime::UiCanvas;
+pub use runtime::{GameUi, GameUiFrame, UiCanvas};
 
 pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
@@ -61,11 +61,11 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
-        curve_editor::CurveEditorMessage,
-        gradient_editor::GradientEditorMessage,
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
         context_menu::{ContextMenuMessage, MenuItem},
+        curve_editor::CurveEditorMessage,
+        gradient_editor::GradientEditorMessage,
         grid::GridMessage,
         image::ImageBuilder,
         menu::MenuMessage,
@@ -2195,16 +2195,15 @@ impl UiManager {
             return;
         };
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
-        let acceptance =
-            match crate::drag_drop::semantic_request(
-                &self.asset_db,
-                &payload,
-                &candidate,
-                self.native_ui.modifiers(),
-            ) {
-                Ok(_) => candidate,
-                Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
-            };
+        let acceptance = match crate::drag_drop::semantic_request(
+            &self.asset_db,
+            &payload,
+            &candidate,
+            self.native_ui.modifiers(),
+        ) {
+            Ok(_) => candidate,
+            Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
+        };
         self.native_ui.set_drop_highlight(Some(highlight));
         self.native_ui.set_drop_acceptance(Some(acceptance));
     }
@@ -3938,9 +3937,7 @@ impl UiManager {
                 .push_back(EditorEvent::ToggleOrbitSelection),
             // CONTROL-L. The hour comes from the registry's own table, so a
             // preset row and the hour it means cannot disagree.
-            A::SetSkyPreset(id) => self
-                .editor_events
-                .push_back(EditorEvent::SetSkyPreset(id)),
+            A::SetSkyPreset(id) => self.editor_events.push_back(EditorEvent::SetSkyPreset(id)),
             A::SetWeatherPreset(id) => self
                 .editor_events
                 .push_back(EditorEvent::SetWeatherPreset(id)),
@@ -6651,7 +6648,8 @@ impl UiManager {
             // drag coalesces into a single undo entry, and the commit consumes
             // it. Nothing here knows what a keyframe is; the value that
             // travels is the whole `ReflectValue::Curve`.
-            if let Some(CurveEditorMessage::Value { curve, live }) = msg.data::<CurveEditorMessage>()
+            if let Some(CurveEditorMessage::Value { curve, live }) =
+                msg.data::<CurveEditorMessage>()
             {
                 if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
                     let gesture = self.gesture_for(msg.destination, *live);
@@ -6667,7 +6665,8 @@ impl UiManager {
             if let Some(gmsg) = msg.data::<GradientEditorMessage>() {
                 match gmsg {
                     GradientEditorMessage::Value { gradient, live } => {
-                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        if let Some(binding) =
+                            self.generated_bindings.get(&msg.destination).cloned()
                         {
                             let gesture = self.gesture_for(msg.destination, *live);
                             self.queue_generated_binding(
@@ -6679,7 +6678,8 @@ impl UiManager {
                         }
                     }
                     GradientEditorMessage::StopActivated { index, color } => {
-                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        if let Some(binding) =
+                            self.generated_bindings.get(&msg.destination).cloned()
                         {
                             self.color_target = Some(ColorTarget::GradientStop {
                                 component: binding.component,

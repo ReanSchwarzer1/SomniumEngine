@@ -89,8 +89,14 @@ fn queued_work_is_priority_then_fifo() {
         })
         .unwrap();
     release_tx.send(()).unwrap();
-    assert_eq!(order_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "high");
-    assert_eq!(order_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "low");
+    assert_eq!(
+        order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        "high"
+    );
+    assert_eq!(
+        order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        "low"
+    );
 }
 
 #[test]
@@ -235,7 +241,10 @@ fn earlier_deadlines_outrank_later_ones_at_equal_priority() {
         "soon",
         "the earlier deadline must win over FIFO at equal priority"
     );
-    assert_eq!(order_rx.recv_timeout(Duration::from_secs(2)).unwrap(), "late");
+    assert_eq!(
+        order_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "late"
+    );
 }
 
 /// A deadline never outranks a priority.
@@ -366,8 +375,14 @@ fn the_drain_stops_at_its_budget_and_resumes() {
         first.budget_exhausted,
         "20 ready completions at 4 ms each cannot fit in a 1 ms budget"
     );
-    assert!(first.applied >= 1, "the budget is checked between applications, so one always runs");
-    assert!(first.still_pending > 0, "the rest must survive to the next frame");
+    assert!(
+        first.applied >= 1,
+        "the budget is checked between applications, so one always runs"
+    );
+    assert!(
+        first.still_pending > 0,
+        "the rest must survive to the next frame"
+    );
     assert!(
         first.longest_apply >= Duration::from_millis(3),
         "an apply that overruns the budget must be visible in the stats, not hidden"
@@ -376,9 +391,16 @@ fn the_drain_stops_at_its_budget_and_resumes() {
     let stop = Instant::now() + Duration::from_secs(10);
     while applied.load(AtomicOrdering::Acquire) < 20 {
         jobs.drain_completions(Duration::from_millis(50));
-        assert!(Instant::now() < stop, "the drain never finished the backlog");
+        assert!(
+            Instant::now() < stop,
+            "the drain never finished the backlog"
+        );
     }
-    assert_eq!(jobs.drain_completions(Duration::from_millis(1)).still_pending, 0);
+    assert_eq!(
+        jobs.drain_completions(Duration::from_millis(1))
+            .still_pending,
+        0
+    );
 }
 
 #[test]
@@ -454,7 +476,10 @@ fn every_job_reports_a_zone_with_its_queue_wait() {
         waited.queued_for
     );
 
-    assert!(jobs.take_zones().0.is_empty(), "taking zones must consume them");
+    assert!(
+        jobs.take_zones().0.is_empty(),
+        "taking zones must consume them"
+    );
 }
 
 #[test]
@@ -464,9 +489,13 @@ fn a_panicking_job_fails_without_taking_the_worker_with_it() {
     // nowhere near the cause.
     let mut jobs = JobSystem::with_workers_and_capacity(1, 4);
     let bad = jobs
-        .submit("test.panics", JobPriority::Normal, |_| -> Result<(), String> {
-            panic!("deliberate");
-        })
+        .submit(
+            "test.panics",
+            JobPriority::Normal,
+            |_| -> Result<(), String> {
+                panic!("deliberate");
+            },
+        )
         .unwrap();
     let stop = Instant::now() + Duration::from_secs(2);
     loop {
@@ -487,7 +516,10 @@ fn a_panicking_job_fails_without_taking_the_worker_with_it() {
             assert_eq!(result, Ok(9), "the worker survived the panic");
             break;
         }
-        assert!(Instant::now() < stop, "the pool died with the panicking job");
+        assert!(
+            Instant::now() < stop,
+            "the pool died with the panicking job"
+        );
         std::thread::yield_now();
     }
 }

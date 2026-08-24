@@ -174,14 +174,7 @@ impl ShapedInstance {
         // The pivot offset in the *pre-existing* frame.
         let ox = pivot.x - (ra * pivot.x + rc * pivot.y);
         let oy = pivot.y - (rb * pivot.x + rd * pivot.y);
-        self.xform = [
-            na,
-            nb,
-            nc,
-            nd,
-            tx + a * ox + c * oy,
-            ty + b * ox + d * oy,
-        ];
+        self.xform = [na, nb, nc, nd, tx + a * ox + c * oy, ty + b * ox + d * oy];
         self
     }
 
@@ -305,7 +298,8 @@ impl ShapedVertex {
     ];
 
     /// Byte stride of one vertex.
-    pub const STRIDE: wgpu::BufferAddress = std::mem::size_of::<ShapedVertex>() as wgpu::BufferAddress;
+    pub const STRIDE: wgpu::BufferAddress =
+        std::mem::size_of::<ShapedVertex>() as wgpu::BufferAddress;
 }
 
 /// The per-frame shaped geometry: instances, vertices, and the flatten cache.
@@ -488,7 +482,11 @@ mod tests {
     fn a_rotation_about_a_pivot_leaves_the_pivot_alone() {
         let pivot = Vec2::new(50.0, 20.0);
         let inst = ShapedInstance::identity([0; 4]).rotated(std::f32::consts::FRAC_PI_3, pivot);
-        assert!(inst.apply(pivot).abs_diff_eq(pivot, 1e-3), "{:?}", inst.apply(pivot));
+        assert!(
+            inst.apply(pivot).abs_diff_eq(pivot, 1e-3),
+            "{:?}",
+            inst.apply(pivot)
+        );
     }
 
     #[test]
@@ -600,7 +598,10 @@ mod tests {
         buffers.clear();
         assert!(buffers.is_empty());
         assert_eq!(buffers.push_shape(ShapedInstance::default(), &tri, None), 3);
-        assert_eq!(buffers.vertices[0].instance, 0, "indices restart with the frame");
+        assert_eq!(
+            buffers.vertices[0].instance, 0,
+            "indices restart with the frame"
+        );
     }
 
     #[test]

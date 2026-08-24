@@ -278,7 +278,11 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
 /// instead, and this is the check that it does.
 #[test]
 fn enable_directives_are_hoisted_to_the_top_of_a_composed_module() {
-    for root in ["restir_gi.wgsl", "lighting_extra.wgsl", "water_reflection.wgsl"] {
+    for root in [
+        "restir_gi.wgsl",
+        "lighting_extra.wgsl",
+        "water_reflection.wgsl",
+    ] {
         let source = composed(root);
         let first = source
             .lines()

@@ -221,7 +221,11 @@ mod tests {
         chain.push(2, everything());
         assert_eq!(chain.face_for('A'), Some(0));
         assert_eq!(chain.face_for('\u{4F60}'), Some(1));
-        assert_eq!(chain.face_for('\u{1F600}'), Some(2), "the catch-all catches");
+        assert_eq!(
+            chain.face_for('\u{1F600}'),
+            Some(2),
+            "the catch-all catches"
+        );
     }
 
     /// **The reason the chain exists.** A CJK glyph in an English UI finds a

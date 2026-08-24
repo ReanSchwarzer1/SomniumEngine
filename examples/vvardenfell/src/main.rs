@@ -31,21 +31,33 @@
 //!
 //! | Track | What it adds |
 //! |---|---|
-//! | 1 — VIVEC | **a screen-space HUD canvas and a world-space marker — landed, MORROWIND-E** |
+//! | 1 — VIVEC | **a screen-space HUD canvas and a world-space marker — landed, MORROWIND-E; drawn, MORROWIND-E2** |
 //! | 3 — HLAALU | a prefab instanced a few times |
 //! | 4 — SILT STRIDER | the cooked-asset path and a streamed cell |
 //! | 5 — DWEMER | one skinned character with a walk cycle |
 //! | 6 — SIXTH HOUSE | one agent pathing across the slice |
 //! | 8 — ALMSIVI | input actions, a save/reload, and a positional sound |
 //!
-//! Until Track 1 lands there is nothing to draw, and drawing something now with
-//! `hello_engine`'s scaffolding would defeat the purpose — the emptiness is the
-//! measurement.
+//! # What the emptiness measured
+//!
+//! This file said, for four sub-phases: *"Until Track 1 lands there is nothing
+//! to draw."* Track 1 landed — paint layer, canvases, anchors, navigation,
+//! styled text — and there was still nothing to draw, because `EngineContext`
+//! had no way for a game to submit a widget tree. The program computed its HUD
+//! layout and **printed it**, and that stood for a week across three further
+//! sub-phases without anyone noticing that the engine's runtime UI could not
+//! reach a screen.
+//!
+//! **That is the second-example rule working exactly as intended**, and it is
+//! the strongest evidence in the phase that the rule earns its cost: nothing in
+//! `somnium_ui`'s 215 tests failed, nothing in the editor looked different, and
+//! the capability was entirely absent. MORROWIND-E2 is the hook, and the six
+//! lines of `on_render_ui` below are what four sub-phases were for.
 
 mod hud;
 
-use hud::Hud;
-use somnium_core::{Engine, EngineConfig, EngineContext, GameApp};
+use hud::{Hud, HudTree};
+use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
 use somnium_ui::runtime::canvas::SafeArea;
 
 /// The slice's game state.
@@ -59,9 +71,12 @@ struct Vvardenfell {
     /// Frames drawn. The only observable behaviour this program has, and it
     /// exists so "it ran" is a checkable claim rather than an impression.
     frames: u64,
-    /// MORROWIND-E. The HUD's anchoring, resolved per frame against whatever
-    /// the window currently is.
-    hud: Hud,
+    /// MORROWIND-E2. The HUD as a widget tree. Was `Hud` — a table of
+    /// rectangles the program printed — until there was a hook to draw it
+    /// through.
+    hud: Option<HudTree>,
+    /// The world-space name-plate, its own canvas because it is its own space.
+    plate: Option<somnium_core::UiCanvas>,
 }
 
 impl GameApp for Vvardenfell {
@@ -70,7 +85,7 @@ impl GameApp for Vvardenfell {
         // one yet, so the slice hard-codes a phone-shaped inset: the value is a
         // placeholder, the *path* is not, and a HUD that has never been laid
         // out against a notch is a HUD that has not been tested.
-        self.hud = Hud::new(SafeArea {
+        let hud = Hud::new(SafeArea {
             top: 44.0,
             bottom: 34.0,
             left: 0.0,
@@ -78,28 +93,74 @@ impl GameApp for Vvardenfell {
         });
 
         let (w, h) = ctx.config.window_size;
-        let layout = self.hud.layout(glam::Vec2::new(w as f32, h as f32));
+        let viewport = glam::Vec2::new(w as f32, h as f32);
+        let layout = hud.layout(viewport);
         println!(
             "vvardenfell: HUD on a {:.0}x{:.0} canvas at {:.2}x",
             layout.canvas.logical_size.x, layout.canvas.logical_size.y, layout.canvas.scale
         );
-        println!("  health bar {:?}", layout.health_bar);
-        println!("  minimap    {:?}", layout.minimap);
-        println!("  crosshair  {:?}", layout.crosshair);
+
+        let mut tree = HudTree::new(hud);
+        tree.update(viewport);
+        // The claim the `println!` used to make, checked instead of printed:
+        // the widget tree agrees with the anchoring it was built from.
+        let [bar, map, cross] = tree.bounds();
+        println!("  health bar {bar:?}");
+        println!("  minimap    {map:?}");
+        println!("  crosshair  {cross:?}");
+        self.hud = Some(tree);
 
         // A world-space name-plate over a point in the world. Sized in metres,
         // so it shrinks with distance the way a label attached to a thing
         // should — see the world-space decision in `somnium_ui::runtime::canvas`.
         let plate = hud::name_plate(glam::Vec3::new(3.0, 1.8, -12.0), 1.2);
-        let plate_layout = plate.layout(glam::Vec2::new(w as f32, h as f32), 100.0);
+        let plate_layout = plate.layout(viewport, 100.0);
         println!(
             "  name-plate {:.0}x{:.0} px offscreen target",
             plate_layout.logical_size.x, plate_layout.logical_size.y
         );
+        self.plate = Some(somnium_core::UiCanvas::with_canvas(plate, viewport));
     }
 
     fn on_update(&mut self, _ctx: &mut EngineContext) {
         self.frames += 1;
+    }
+
+    /// Build. MORROWIND-E2's rule: the tree is mutated here, where there is a
+    /// whole `EngineContext`, and drawn in `on_render_ui`, where there is a GPU.
+    fn on_render(&mut self, ctx: &mut EngineContext) {
+        let (w, h) = ctx.config.window_size;
+        if let Some(hud) = self.hud.as_mut() {
+            // Drain over two minutes and wrap, so the bar is visibly driven by
+            // something rather than parked at full. The slice has no combat to
+            // take health away and pretending otherwise would be a lie in the
+            // one program whose job is to not contain any.
+            hud.health = 1.0 - ((self.frames % 7200) as f32 / 7200.0);
+            hud.update(glam::Vec2::new(w as f32, h as f32));
+        }
+    }
+
+    /// Draw. Six lines, and the whole of MORROWIND-E2 exists so that they can
+    /// be written at all.
+    fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
+        if let Some(hud) = self.hud.as_mut() {
+            frame.draw(hud.canvas_mut());
+        }
+        if let Some(plate) = self.plate.as_mut() {
+            frame.draw(plate);
+        }
+    }
+
+    /// The other half of the hook: a HUD that cannot be clicked is a picture.
+    ///
+    /// MORROWIND-F built hit-testing through the inverse transform and
+    /// directional navigation, and a game had no way to feed either an event.
+    /// Returning `true` consumes it, which is how a game says *"that click was
+    /// mine"* before the editor's viewport tools see it.
+    fn on_os_event(&mut self, _ctx: &mut EngineContext, event: &somnium_core::WindowEvent) -> bool {
+        self.hud
+            .as_mut()
+            .is_some_and(|hud| hud.canvas_mut().process_os_event(event))
     }
 
     fn on_shutdown(&mut self) {

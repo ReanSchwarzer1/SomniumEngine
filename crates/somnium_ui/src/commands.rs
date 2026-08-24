@@ -531,9 +531,7 @@ fn sky_commands() -> Vec<Command> {
             label: Box::leak(format!("Sky: {label}").into_boxed_str()),
             category: "Environment",
             default_binding: None,
-            help: Box::leak(
-                format!("Set the scene's cloud layer to {label}.").into_boxed_str(),
-            ),
+            help: Box::leak(format!("Set the scene's cloud layer to {label}.").into_boxed_str()),
             action: CommandAction::SetSkyPreset(id),
             surfaces: VIEW_MENU,
             enabled: always,
@@ -550,9 +548,7 @@ fn weather_commands() -> Vec<Command> {
             label: Box::leak(format!("Weather: {label}").into_boxed_str()),
             category: "Environment",
             default_binding: None,
-            help: Box::leak(
-                format!("Transition the scene's weather to {label}.").into_boxed_str(),
-            ),
+            help: Box::leak(format!("Transition the scene's weather to {label}.").into_boxed_str()),
             action: CommandAction::SetWeatherPreset(id),
             surfaces: VIEW_MENU,
             enabled: always,

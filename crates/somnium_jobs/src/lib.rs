@@ -467,11 +467,7 @@ impl JobSystem {
     }
 
     /// Submit work with a full [`JobDesc`] — the form that can carry a deadline.
-    pub fn submit_with<T, F>(
-        &mut self,
-        desc: JobDesc,
-        task: F,
-    ) -> Result<JobHandle<T>, JobError>
+    pub fn submit_with<T, F>(&mut self, desc: JobDesc, task: F) -> Result<JobHandle<T>, JobError>
     where
         T: Send + 'static,
         F: FnOnce(JobContext) -> Result<T, String> + Send + 'static,
@@ -538,7 +534,14 @@ impl JobSystem {
                     outcome: JobStatus::Expired,
                 });
             } else {
-                worker::run_task(context, Arc::clone(&state), sender, task, submitted, &self.shared);
+                worker::run_task(
+                    context,
+                    Arc::clone(&state),
+                    sender,
+                    task,
+                    submitted,
+                    &self.shared,
+                );
             }
             self.states.insert(id, Arc::clone(&state));
             return Ok((state, receiver));

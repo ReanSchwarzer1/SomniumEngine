@@ -181,7 +181,9 @@ pub struct BudgetRow {
 pub fn budget(cache: &VariantCache, name_of: impl Fn(ModuleId) -> &'static str) -> Vec<BudgetRow> {
     let mut by_module: HashMap<ModuleId, (Defines, usize, usize, usize)> = HashMap::new();
     for (key, record) in &cache.records {
-        let entry = by_module.entry(key.module).or_insert((Defines::NONE, 0, 0, 0));
+        let entry = by_module
+            .entry(key.module)
+            .or_insert((Defines::NONE, 0, 0, 0));
         entry.0 = entry.0.with(key.defines);
         entry.1 += 1;
         entry.2 += usize::from(record.hits == 0);
@@ -216,7 +218,12 @@ pub fn budget(cache: &VariantCache, name_of: impl Fn(ModuleId) -> &'static str) 
 /// Render [`budget`] as the plain-text table the plan sketches.
 #[must_use]
 pub fn budget_table(rows: &[BudgetRow]) -> String {
-    let width = rows.iter().map(|r| r.module.len()).max().unwrap_or(6).max(6);
+    let width = rows
+        .iter()
+        .map(|r| r.module.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
     let mut out = format!(
         "{:<width$}  defines  possible  compiled  unused  largest\n",
         "module",
@@ -282,12 +289,22 @@ mod tests {
         let mut cache = VariantCache::default();
         cache.insert(ShaderKey::new(A), vec![A, SHARED], 100);
         cache.insert(ShaderKey::new(B), vec![B], 100);
-        cache.insert(ShaderKey::new(B).with(Defines::bit(0)), vec![B, SHARED], 100);
+        cache.insert(
+            ShaderKey::new(B).with(Defines::bit(0)),
+            vec![B, SHARED],
+            100,
+        );
 
         let dirty = cache.invalidate(SHARED);
-        assert_eq!(dirty, vec![ShaderKey::new(A), ShaderKey::new(B).with(Defines::bit(0))]);
+        assert_eq!(
+            dirty,
+            vec![ShaderKey::new(A), ShaderKey::new(B).with(Defines::bit(0))]
+        );
         assert_eq!(cache.len(), 1);
-        assert!(cache.record(ShaderKey::new(B)).is_some(), "b.wgsl never used shared.wgsl");
+        assert!(
+            cache.record(ShaderKey::new(B)).is_some(),
+            "b.wgsl never used shared.wgsl"
+        );
     }
 
     /// Two variants of one module can have different dependencies.
@@ -299,7 +316,11 @@ mod tests {
     fn dependencies_are_tracked_per_variant_not_per_module() {
         let mut cache = VariantCache::default();
         cache.insert(ShaderKey::new(A), vec![A], 100);
-        cache.insert(ShaderKey::new(A).with(Defines::bit(0)), vec![A, SHARED], 160);
+        cache.insert(
+            ShaderKey::new(A).with(Defines::bit(0)),
+            vec![A, SHARED],
+            160,
+        );
         let dirty = cache.invalidate(SHARED);
         assert_eq!(dirty, vec![ShaderKey::new(A).with(Defines::bit(0))]);
         assert!(cache.record(ShaderKey::new(A)).is_some());
@@ -310,7 +331,14 @@ mod tests {
         let mut cache = VariantCache::default();
         // Three independent defines seen across four compiled variants.
         for bits in [0b000u64, 0b001, 0b010, 0b101] {
-            cache.insert(ShaderKey { module: A, defines: Defines(bits) }, vec![A], 2048);
+            cache.insert(
+                ShaderKey {
+                    module: A,
+                    defines: Defines(bits),
+                },
+                vec![A],
+                2048,
+            );
         }
         cache.insert(ShaderKey::new(B), vec![B], 512);
         cache.lookup(ShaderKey::new(B));

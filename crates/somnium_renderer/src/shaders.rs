@@ -265,7 +265,11 @@ mod tests {
         let system = shaders.system.lock().unwrap();
         let ids: Vec<_> = system.registry().ids().collect();
         drop(system);
-        assert!(ids.len() >= 50, "expected the whole shader set, got {}", ids.len());
+        assert!(
+            ids.len() >= 50,
+            "expected the whole shader set, got {}",
+            ids.len()
+        );
 
         for id in ids {
             let name = {
@@ -321,18 +325,34 @@ mod tests {
     fn the_ray_query_roots_compose_the_same_modules_they_used_to() {
         let shaders = Shaders::new();
         let mut gi = vec![
-            "restir_gi.wgsl", "rt_hit.wgsl", "global_pool.wgsl", "brdf.wgsl",
-            "sampling.wgsl", "atmosphere.wgsl", "hextile.wgsl", "terrain_material.wgsl",
+            "restir_gi.wgsl",
+            "rt_hit.wgsl",
+            "global_pool.wgsl",
+            "brdf.wgsl",
+            "sampling.wgsl",
+            "atmosphere.wgsl",
+            "hextile.wgsl",
+            "terrain_material.wgsl",
         ];
         gi.sort_unstable();
-        assert_eq!(shaders.dependency_names("restir_gi.wgsl", Defines::NONE), gi);
+        assert_eq!(
+            shaders.dependency_names("restir_gi.wgsl", Defines::NONE),
+            gi
+        );
 
         let mut water = vec![
-            "water_reflection.wgsl", "rt_hit.wgsl", "global_pool.wgsl",
-            "brdf.wgsl", "hextile.wgsl", "terrain_material.wgsl",
+            "water_reflection.wgsl",
+            "rt_hit.wgsl",
+            "global_pool.wgsl",
+            "brdf.wgsl",
+            "hextile.wgsl",
+            "terrain_material.wgsl",
         ];
         water.sort_unstable();
-        assert_eq!(shaders.dependency_names("water_reflection.wgsl", Defines::NONE), water);
+        assert_eq!(
+            shaders.dependency_names("water_reflection.wgsl", Defines::NONE),
+            water
+        );
     }
 
     /// A composed module contains each shared dependency exactly once.

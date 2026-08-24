@@ -181,11 +181,17 @@ fn a_reload_only_touches_variants_that_used_the_changed_module() {
     let brdf = s.register("brdf.wgsl", "fn brdf() {}\n");
     s.register("water_only.wgsl", "fn wat() {}\n");
     let shading = s.register("shading.wgsl", "//!include \"brdf.wgsl\"\nfn shade() {}\n");
-    let water = s.register("water.wgsl", "//!include \"water_only.wgsl\"\nfn water() {}\n");
+    let water = s.register(
+        "water.wgsl",
+        "//!include \"water_only.wgsl\"\nfn water() {}\n",
+    );
     s.source(ShaderKey::new(shading)).unwrap();
     s.source(ShaderKey::new(water)).unwrap();
 
-    let outcome = s.apply_reload(vec![(brdf, "fn brdf() { let x = 1; }\n".to_string())], accept);
+    let outcome = s.apply_reload(
+        vec![(brdf, "fn brdf() { let x = 1; }\n".to_string())],
+        accept,
+    );
     assert_eq!(
         outcome.invalidated,
         vec![ShaderKey::new(shading)],
@@ -214,7 +220,8 @@ fn the_budget_names_modules_and_counts_their_space() {
         "//!if SKINNED\nlet a = 1;\n//!endif\nfn shade() {}\n",
     );
     s.source(ShaderKey::new(root)).unwrap();
-    s.source(ShaderKey::new(root).with(Defines::bit(SKINNED))).unwrap();
+    s.source(ShaderKey::new(root).with(Defines::bit(SKINNED)))
+        .unwrap();
 
     let rows = s.budget();
     assert_eq!(rows.len(), 1);

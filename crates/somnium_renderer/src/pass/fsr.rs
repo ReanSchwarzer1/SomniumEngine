@@ -70,8 +70,11 @@ impl FsrPass {
                 "FSR 3 skipped: device lacks FSR_FEATURES (storage formats, passthrough, r16snorm, filterable r32, clear_texture)"
             );
         }
-        let gpu =
-            supported.then(|| alloc_gpu(device, shaders, queue, render_w, render_h, display_w, display_h));
+        let gpu = supported.then(|| {
+            alloc_gpu(
+                device, shaders, queue, render_w, render_h, display_w, display_h,
+            )
+        });
         Self {
             gpu,
             enabled: want && supported,
@@ -407,7 +410,7 @@ fn storage_tex(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayo
 
 fn alloc_sanitize_pipeline(
     device: &wgpu::Device,
-        shaders: &crate::shaders::Shaders,
+    shaders: &crate::shaders::Shaders,
 ) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FSR Sanitize BGL"),
@@ -459,7 +462,7 @@ fn alloc_sanitize_pipeline(
 
 fn alloc_untonemap_pipeline(
     device: &wgpu::Device,
-        shaders: &crate::shaders::Shaders,
+    shaders: &crate::shaders::Shaders,
 ) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FSR Untonemap BGL"),

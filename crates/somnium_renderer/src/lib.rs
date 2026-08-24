@@ -15,7 +15,6 @@
 
 pub mod bindless;
 pub mod capability;
-pub mod shaders;
 pub mod capture;
 pub mod cluster;
 pub mod command;
@@ -30,6 +29,7 @@ pub mod meshlet;
 pub mod pass;
 pub mod profiler;
 pub mod renderer;
+pub mod shaders;
 pub mod shadow;
 pub mod terrain;
 pub mod texture_pool;

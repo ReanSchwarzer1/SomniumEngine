@@ -1346,7 +1346,13 @@ impl ShadingPass {
     /// Publish this frame's wetness. All zero leaves shading bit-identical to
     /// what it was before CONTROL-N, which is what "off by default" has to
     /// mean for a surface property.
-    pub fn set_weather(&self, queue: &wgpu::Queue, wet_diffuse: f32, wet_specular: f32, puddles: f32) {
+    pub fn set_weather(
+        &self,
+        queue: &wgpu::Queue,
+        wet_diffuse: f32,
+        wet_specular: f32,
+        puddles: f32,
+    ) {
         queue.write_buffer(
             &self.weather,
             0,

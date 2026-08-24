@@ -239,7 +239,11 @@ impl DecalGrid {
         #[allow(clippy::cast_possible_truncation)]
         let count = self.sorted.len() as u32;
         if count != self.last_count || count > 0 {
-            queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&[count, 0, 0, 0]));
+            queue.write_buffer(
+                &self.params_buffer,
+                0,
+                bytemuck::bytes_of(&[count, 0, 0, 0]),
+            );
             self.last_count = count;
         }
         if count == 0 {
@@ -343,7 +347,10 @@ mod tests {
         assert!((face.x - 0.5).abs() < 1e-4, "face mapped to {face}");
 
         let outside = inv.transform_point3(glam::Vec3::new(13.0, 0.0, 0.0));
-        assert!(outside.x > 0.5, "a point past the face must read as outside");
+        assert!(
+            outside.x > 0.5,
+            "a point past the face must read as outside"
+        );
     }
 
     /// Angle fade is stored as a cosine so the shader compares without a
@@ -355,6 +362,9 @@ mod tests {
 
         let wide = GpuDecal::new(glam::Mat4::IDENTITY, probe_look(89.0));
         assert!(wide.angle_fade_cos < 0.05, "{}", wide.angle_fade_cos);
-        assert!(wide.angle_fade_cos > 0.0, "a fade of 90 degrees is degenerate");
+        assert!(
+            wide.angle_fade_cos > 0.0,
+            "a fade of 90 degrees is degenerate"
+        );
     }
 }

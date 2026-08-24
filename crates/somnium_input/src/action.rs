@@ -370,7 +370,9 @@ impl ActionStates {
         for map in maps.iter().filter(|m| m.enabled) {
             for action in &map.actions {
                 let entry = self.states.entry(action.name.clone()).or_default();
-                entry.interactions.resize(action.bindings.len(), InteractionState::default());
+                entry
+                    .interactions
+                    .resize(action.bindings.len(), InteractionState::default());
 
                 let mut best = ActionValue::zero(action.kind);
                 let mut best_magnitude = 0.0f32;
@@ -383,13 +385,13 @@ impl ActionStates {
                         _ => Interaction::Press,
                     };
                     let pressed = raw.is_pressed(PRESS_THRESHOLD);
-                    let binding_phase =
-                        entry.interactions[index].update(interaction, pressed, dt);
+                    let binding_phase = entry.interactions[index].update(interaction, pressed, dt);
 
                     // A non-`Press` interaction gates the value: a hold that has
                     // not fired yet contributes nothing, or "hold to sprint"
                     // would sprint from the first frame.
-                    let gated = matches!(interaction, Interaction::Press) || binding_phase.performed();
+                    let gated =
+                        matches!(interaction, Interaction::Press) || binding_phase.performed();
                     if !gated {
                         if binding_phase != Phase::Idle && phase == Phase::Idle {
                             phase = binding_phase;
@@ -459,7 +461,9 @@ impl ActionStates {
     /// Convenience: the action as a 2D vector.
     #[must_use]
     pub fn vec2(&self, action: &str) -> Vec2 {
-        self.value(action).map(ActionValue::as_vec2).unwrap_or(Vec2::ZERO)
+        self.value(action)
+            .map(ActionValue::as_vec2)
+            .unwrap_or(Vec2::ZERO)
     }
 
     /// Convenience: the action as one axis.
@@ -531,11 +535,9 @@ mod tests {
     }
 
     fn move_map() -> ActionMap {
-        ActionMap::new("gameplay").action(
-            Action::vector2("Move")
-                .bind(wasd())
-                .bind(Binding::single(ControlPath::gamepad("leftstick")).with(Processor::stick_dead_zone())),
-        )
+        ActionMap::new("gameplay").action(Action::vector2("Move").bind(wasd()).bind(
+            Binding::single(ControlPath::gamepad("leftstick")).with(Processor::stick_dead_zone()),
+        ))
     }
 
     /// **The point of the whole seam.** Movement code reads one vector and
@@ -554,7 +556,10 @@ mod tests {
         pad.analog("<Gamepad>/leftstick", Vec2::new(0.0, -0.8));
         states.update(&maps, &pad, 0.016);
         let moved = states.vec2("Move");
-        assert!(moved.y < -0.5, "the stick drives the same action: {moved:?}");
+        assert!(
+            moved.y < -0.5,
+            "the stick drives the same action: {moved:?}"
+        );
     }
 
     /// W is negative y, or the player walks backwards.
@@ -617,8 +622,9 @@ mod tests {
     /// Two maps binding the same key do not collide when one is disabled.
     #[test]
     fn maps_are_how_a_menu_and_gameplay_share_escape() {
-        let gameplay = ActionMap::new("gameplay")
-            .action(Action::digital("Pause").bind(Binding::single(ControlPath::keyboard("escape"))));
+        let gameplay = ActionMap::new("gameplay").action(
+            Action::digital("Pause").bind(Binding::single(ControlPath::keyboard("escape"))),
+        );
         let mut menu = ActionMap::new("menu")
             .action(Action::digital("Back").bind(Binding::single(ControlPath::keyboard("escape"))));
         menu.enabled = false;
@@ -682,11 +688,13 @@ mod tests {
     /// An axis composite subtracts one control from the other.
     #[test]
     fn an_axis_binding_is_two_controls() {
-        let maps = [ActionMap::new("m").action(Action::axis("Throttle").bind(Binding::Axis {
-            negative: ControlPath::keyboard("s"),
-            positive: ControlPath::keyboard("w"),
-            processors: vec![],
-        }))];
+        let maps = [
+            ActionMap::new("m").action(Action::axis("Throttle").bind(Binding::Axis {
+                negative: ControlPath::keyboard("s"),
+                positive: ControlPath::keyboard("w"),
+                processors: vec![],
+            })),
+        ];
         let mut states = ActionStates::default();
 
         let mut forward = Fake::default();

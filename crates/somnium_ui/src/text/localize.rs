@@ -249,8 +249,14 @@ mod tests {
     #[test]
     fn the_translation_decides_where_the_argument_goes() {
         let text = LocalizedText::key("inventory.potions").arg("n", 3i64);
-        assert_eq!(text.resolve(&Table("You have {n} potions")), "You have 3 potions");
-        assert_eq!(text.resolve(&Table("{n} potions remain")), "3 potions remain");
+        assert_eq!(
+            text.resolve(&Table("You have {n} potions")),
+            "You have 3 potions"
+        );
+        assert_eq!(
+            text.resolve(&Table("{n} potions remain")),
+            "3 potions remain"
+        );
         assert_eq!(text.resolve(&Table("Potions: {n}")), "Potions: 3");
     }
 

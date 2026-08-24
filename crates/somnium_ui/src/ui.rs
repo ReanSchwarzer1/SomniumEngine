@@ -244,6 +244,24 @@ impl UserInterface {
             .unwrap_or(Rect::ZERO)
     }
 
+    /// Put a node at an explicit rectangle, overriding alignment.
+    ///
+    /// MORROWIND-E2. The write half of [`Self::screen_bounds`], and the thing
+    /// MORROWIND-E's anchoring had no way to reach: `Canvas::place` resolved an
+    /// `Anchoring` into a `Rect` and nothing applied it to a widget. Sets
+    /// position *and* size, and pins both alignments, because a node given a
+    /// rectangle it then centres itself inside of is not placed.
+    pub fn place_node(&mut self, handle: NodeHandle, rect: Rect) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            node.widget.desired_local_position = Vec2::new(rect.x, rect.y);
+            node.widget.width = rect.w;
+            node.widget.height = rect.h;
+            node.widget.horizontal_alignment = crate::types::HorizontalAlignment::Left;
+            node.widget.vertical_alignment = crate::types::VerticalAlignment::Top;
+        }
+        self.invalidate_ancestors(handle);
+    }
+
     /// Set the viewport handle so mouse events in the viewport area pass through to the game.
     pub fn set_viewport_handle(&mut self, handle: NodeHandle) {
         self.viewport_handle = handle;

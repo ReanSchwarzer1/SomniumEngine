@@ -263,7 +263,11 @@ mod tests {
 
     #[test]
     fn a_top_left_pin_reproduces_a_plain_position() {
-        let a = Anchoring::pinned(Anchors::TOP_LEFT, Vec2::new(10.0, 20.0), Vec2::new(100.0, 40.0));
+        let a = Anchoring::pinned(
+            Anchors::TOP_LEFT,
+            Vec2::new(10.0, 20.0),
+            Vec2::new(100.0, 40.0),
+        );
         assert_eq!(a.resolve(PARENT), Rect::new(10.0, 20.0, 100.0, 40.0));
     }
 
@@ -289,11 +293,18 @@ mod tests {
         let top_left = Anchoring::pinned(Anchors::CENTRE, Vec2::ZERO, size);
         let centred = Anchoring::centred(Anchors::CENTRE, size);
 
-        assert_eq!(top_left.resolve(PARENT), Rect::new(400.0, 300.0, 64.0, 64.0));
+        assert_eq!(
+            top_left.resolve(PARENT),
+            Rect::new(400.0, 300.0, 64.0, 64.0)
+        );
         assert_eq!(centred.resolve(PARENT), Rect::new(368.0, 268.0, 64.0, 64.0));
 
         let r = centred.resolve(PARENT);
-        assert_eq!(r.x + r.w * 0.5, 400.0, "the centre of the child is the centre");
+        assert_eq!(
+            r.x + r.w * 0.5,
+            400.0,
+            "the centre of the child is the centre"
+        );
         assert_eq!(r.y + r.h * 0.5, 300.0);
     }
 
@@ -343,7 +354,11 @@ mod tests {
     #[test]
     fn anchoring_is_relative_to_the_parent_rect_not_the_screen() {
         let panel = Rect::new(100.0, 50.0, 200.0, 100.0);
-        let a = Anchoring::pinned(Anchors::TOP_RIGHT, Vec2::new(-10.0, 10.0), Vec2::splat(20.0));
+        let a = Anchoring::pinned(
+            Anchors::TOP_RIGHT,
+            Vec2::new(-10.0, 10.0),
+            Vec2::splat(20.0),
+        );
         assert_eq!(a.resolve(panel), Rect::new(290.0, 60.0, 20.0, 20.0));
     }
 

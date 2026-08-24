@@ -557,7 +557,12 @@ mod tests {
         let entity = world.spawn((Marker,));
         let drop = |payload: DragPayload, target: DropTarget| {
             let acceptance = acceptance_for(&db, &payload, target);
-            semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default())
+            semantic_request(
+                &db,
+                &payload,
+                &acceptance,
+                crate::message::Modifiers::default(),
+            )
         };
 
         // .glb into the viewport, at the terrain hit.
@@ -599,7 +604,12 @@ mod tests {
         // Without `Alt` the very same drop is the ordinary assignment, which is
         // the half that would break silently if the modifier leaked.
         assert_eq!(
-            semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default()),
+            semantic_request(
+                &db,
+                &payload,
+                &acceptance,
+                crate::message::Modifiers::default()
+            ),
             Ok(DropRequest::AssignMaterial {
                 asset: id("scorch.sommat"),
                 entities: vec![entity],
@@ -743,7 +753,13 @@ mod tests {
         assert_eq!(acceptance.accepted, vec![0, 1]);
         assert_eq!(acceptance.effect, DropEffect::Copy);
         assert_eq!(acceptance.reason.as_deref(), Some("2 of 5 \u{b7} Copy"));
-        let request = semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default()).unwrap();
+        let request = semantic_request(
+            &db,
+            &payload,
+            &acceptance,
+            crate::message::Modifiers::default(),
+        )
+        .unwrap();
         let DropRequest::SpawnModels { assets, .. } = request else {
             panic!("a mesh drop must spawn models");
         };

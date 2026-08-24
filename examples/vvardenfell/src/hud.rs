@@ -20,6 +20,7 @@
 //!   invisible on the hardware somebody actually plays on, and on no developer
 //!   monitor.
 
+use glam::{Mat4, Vec2, Vec3};
 use somnium_ui::{
     runtime::{
         anchor::{Anchoring, Anchors, Offsets},
@@ -27,7 +28,6 @@ use somnium_ui::{
     },
     types::Rect,
 };
-use glam::{Mat4, Vec2, Vec3};
 
 /// The HUD's parts, each with the anchoring that survives a resize.
 ///
@@ -168,7 +168,10 @@ mod tests {
             layout.canvas.safe_rect.x + layout.canvas.safe_rect.w * 0.5,
             layout.canvas.safe_rect.y + layout.canvas.safe_rect.h * 0.5,
         );
-        assert!(centre.abs_diff_eq(expected, 0.01), "{centre:?} vs {expected:?}");
+        assert!(
+            centre.abs_diff_eq(expected, 0.01),
+            "{centre:?} vs {expected:?}"
+        );
     }
 
     /// The health bar spans the width whatever the width is.
@@ -255,5 +258,265 @@ mod tests {
         assert!(layout.health_bar.w > 0.0);
         assert!(layout.minimap.w > 0.0);
         assert!(layout.crosshair.w > 0.0);
+    }
+}
+
+// ── MORROWIND-E2: the HUD as a widget tree, not as a table of rectangles ─────
+//
+// Everything above resolves anchoring into rectangles and, until MORROWIND-E2,
+// that is all it did — `main.rs` printed them. Three sub-phases of paint layer
+// and canvas, and the slice's evidence that any of it worked was a `println!`.
+//
+// `HudTree` is the part that makes the rectangles into pixels. It is
+// deliberately built from the same `Anchoring` values above rather than from a
+// second set of numbers, so the layout tests keep testing what is on screen.
+
+use somnium_ui::{
+    UiCanvas,
+    message::NodeHandle,
+    theme,
+    widget::WidgetBuilder,
+    widgets::{border::BorderBuilder, text::TextBuilder},
+};
+
+/// The HUD's widget tree, and the handles needed to re-place it on a resize.
+pub struct HudTree {
+    canvas: UiCanvas,
+    hud: Hud,
+    health_bar: NodeHandle,
+    health_fill: NodeHandle,
+    minimap: NodeHandle,
+    crosshair: NodeHandle,
+    /// Last viewport the tree was placed against. A HUD is re-anchored when the
+    /// window changes and not once per frame: `place_anchored` invalidates the
+    /// layout of every ancestor, and doing that sixty times a second to answer
+    /// "no, nothing moved" is how a HUD becomes a frame cost.
+    placed_for: Vec2,
+    /// 0..=1. The only piece of game state the slice has, and it exists so the
+    /// health bar is observably *driven* rather than observably drawn.
+    pub health: f32,
+}
+
+impl HudTree {
+    /// Build the tree. One canvas, four nodes, no editor chrome.
+    #[must_use]
+    pub fn new(hud: Hud) -> Self {
+        let mut canvas = UiCanvas::with_canvas(hud.canvas, Vec2::new(1920.0, 1080.0));
+        let root = canvas.ui().root();
+
+        // The bar is two nodes: a track and a fill. One node with a background
+        // cannot show a value, and a HUD whose health bar cannot show a value
+        // is a rectangle with a name.
+        let fill = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_background(theme::ACCENT)
+                .with_name("health-fill"),
+        )
+        .build();
+        let fill = canvas.ui_mut().add_node(fill, root);
+
+        let track = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_background(theme::ACCENT_DIM)
+                .with_name("health-track"),
+        )
+        .build();
+        let track = canvas.ui_mut().add_node(track, root);
+
+        let minimap = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_background(theme::ACCENT_DIM)
+                .with_name("minimap")
+                .with_children([canvas.ui_mut().add_node(
+                    TextBuilder::new(WidgetBuilder::new())
+                        .with_text("Seyda Neen")
+                        .with_color(theme::TEXT_PRIMARY)
+                        .build(),
+                    root,
+                )]),
+        )
+        .build();
+        let minimap = canvas.ui_mut().add_node(minimap, root);
+
+        let crosshair = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_background(theme::TEXT_PRIMARY)
+                .with_name("crosshair"),
+        )
+        .build();
+        let crosshair = canvas.ui_mut().add_node(crosshair, root);
+
+        Self {
+            canvas,
+            hud,
+            health_bar: track,
+            health_fill: fill,
+            minimap,
+            crosshair,
+            placed_for: Vec2::ZERO,
+            health: 1.0,
+        }
+    }
+
+    /// Re-anchor against `viewport` if it changed, then size the fill to
+    /// `health`. Call from `on_render`; draw from `on_render_ui`.
+    pub fn update(&mut self, viewport: Vec2) {
+        let resized = (viewport - self.placed_for).abs().max_element() > 0.5;
+        if resized {
+            self.canvas.apply_canvas(viewport);
+            self.canvas
+                .place_anchored(self.health_bar, &self.hud.health_bar);
+            self.canvas.place_anchored(self.minimap, &self.hud.minimap);
+            self.canvas
+                .place_anchored(self.crosshair, &self.hud.crosshair);
+            self.placed_for = viewport;
+        }
+        // The fill is placed every frame, because the value moves even when the
+        // window does not.
+        let track = self.canvas.place(viewport, &self.hud.health_bar);
+        self.canvas.place_node(
+            self.health_fill,
+            Rect {
+                w: track.w * self.health.clamp(0.0, 1.0),
+                ..track
+            },
+        );
+    }
+
+    /// The canvas, for `GameUiFrame::draw`.
+    pub fn canvas_mut(&mut self) -> &mut UiCanvas {
+        &mut self.canvas
+    }
+
+    /// How wide the health fill actually drew.
+    ///
+    /// `cfg(test)`-only for now: nothing in the slice reads its own HUD back
+    /// yet. When something does — a tutorial that points at the health bar, a
+    /// screenshot annotator — the gate comes off and the accessor is already
+    /// the right shape. The value the bar claims to
+    /// show, read back from the tree that shows it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn fill_width(&self) -> f32 {
+        self.canvas.ui().screen_bounds(self.health_fill).w
+    }
+
+    /// The canvas's logical size after its scaler ran.
+    #[cfg(test)]
+    #[must_use]
+    pub fn logical_size(&self) -> Vec2 {
+        self.canvas.ui().screen_size
+    }
+
+    /// Lay out, without needing a GPU. `render` does this too; a test does not
+    /// have a window to hang one off.
+    #[cfg(test)]
+    pub fn layout_now(&mut self) {
+        self.canvas.ui_mut().perform_layout();
+    }
+
+    /// Where the parts landed. Used by the tests, and by anything that wants to
+    /// assert the tree agrees with the anchoring rather than assume it.
+    #[must_use]
+    pub fn bounds(&self) -> [Rect; 3] {
+        [
+            self.canvas.ui().screen_bounds(self.health_bar),
+            self.canvas.ui().screen_bounds(self.minimap),
+            self.canvas.ui().screen_bounds(self.crosshair),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    /// MORROWIND-E2's acceptance test, stated as the thing that was false for
+    /// four sub-phases: the HUD is a tree of widgets that land where the
+    /// anchoring says, not a table of rectangles a `println!` reports.
+    #[test]
+    fn the_tree_lands_where_the_anchoring_says() {
+        let hud = Hud::new(SafeArea::NONE);
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let expected = hud.layout(viewport);
+        let mut tree = HudTree::new(hud);
+        tree.update(viewport);
+        tree.layout_now();
+
+        let [bar, map, cross] = tree.bounds();
+        for (got, want, name) in [
+            (bar, expected.health_bar, "health bar"),
+            (map, expected.minimap, "minimap"),
+            (cross, expected.crosshair, "crosshair"),
+        ] {
+            assert!(
+                (got.x - want.x).abs() < 1.0
+                    && (got.y - want.y).abs() < 1.0
+                    && (got.w - want.w).abs() < 1.0
+                    && (got.h - want.h).abs() < 1.0,
+                "{name}: anchoring says {want:?}, the widget is at {got:?}"
+            );
+        }
+    }
+
+    /// The fill tracks the value. A health bar that does not is a rectangle.
+    #[test]
+    fn the_fill_follows_the_value() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.health = 1.0;
+        tree.update(viewport);
+        tree.layout_now();
+        let full = tree.fill_width();
+
+        tree.health = 0.25;
+        tree.update(viewport);
+        tree.layout_now();
+        let quarter = tree.fill_width();
+
+        assert!(full > 0.0, "the bar has no width at all");
+        assert!(
+            (quarter - full * 0.25).abs() < 2.0,
+            "quarter health drew {quarter} of a {full}-wide bar"
+        );
+    }
+
+    /// A value outside 0..=1 clamps rather than drawing past the track — the
+    /// bug every health bar has once, when a heal overshoots the maximum.
+    #[test]
+    fn an_overfull_bar_clamps() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.health = 1.0;
+        tree.update(viewport);
+        tree.layout_now();
+        let full = tree.fill_width();
+
+        tree.health = 3.0;
+        tree.update(viewport);
+        tree.layout_now();
+        let over = tree.fill_width();
+        assert!(
+            (over - full).abs() < 1.0,
+            "{over} exceeded the track's {full}"
+        );
+    }
+
+    /// The tree survives a resize with its anchors intact, at 1080p and 4K.
+    #[test]
+    fn the_tree_re_anchors_on_a_resize() {
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        let mut insets = Vec::new();
+        for viewport in [Vec2::new(1920.0, 1080.0), Vec2::new(3840.0, 2160.0)] {
+            tree.update(viewport);
+            tree.layout_now();
+            let [_, map, _] = tree.bounds();
+            let logical = tree.logical_size();
+            insets.push(logical.x - (map.x + map.w));
+        }
+        assert!(
+            (insets[0] - insets[1]).abs() < 2.0,
+            "the minimap left the top-right corner on resize: {insets:?}"
+        );
     }
 }

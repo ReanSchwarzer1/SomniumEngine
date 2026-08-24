@@ -95,9 +95,13 @@ pub(crate) fn run_task<T, F>(
         // is discarded: the caller asked for it to stop, and handing back a
         // result it no longer wants is how a cancelled thumbnail decode ends up
         // installed over the one the user actually scrolled to.
-        Ok(Ok(_value)) if context.is_cancelled() => (JobStatus::Cancelled, Err(JobError::Cancelled)),
+        Ok(Ok(_value)) if context.is_cancelled() => {
+            (JobStatus::Cancelled, Err(JobError::Cancelled))
+        }
         Ok(Ok(value)) => {
-            state.progress.store(10_000, std::sync::atomic::Ordering::Release);
+            state
+                .progress
+                .store(10_000, std::sync::atomic::Ordering::Release);
             (JobStatus::Completed, Ok(value))
         }
         Ok(Err(error)) => (JobStatus::Failed, Err(JobError::Failed(error))),

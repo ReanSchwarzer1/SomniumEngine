@@ -313,7 +313,10 @@ impl ShaderSystem {
                 match self.registry.resolve(key.module, key.defines) {
                     Ok(text) => {
                         if let Err(diagnostic) = validate(name, &text) {
-                            failure = Some(ShaderError::Validation { module: name, diagnostic });
+                            failure = Some(ShaderError::Validation {
+                                module: name,
+                                diagnostic,
+                            });
                             break;
                         }
                         recompiled.push((*key, text));
@@ -369,7 +372,9 @@ impl ShaderSystem {
     #[must_use]
     pub fn budget(&self) -> Vec<BudgetRow> {
         let registry = &self.registry;
-        budget(&self.variants, |id| registry.name(id).unwrap_or("<unknown>"))
+        budget(&self.variants, |id| {
+            registry.name(id).unwrap_or("<unknown>")
+        })
     }
 
     /// The budget as a plain-text table.

@@ -191,7 +191,9 @@ impl Mixer {
         // and a cycle is reachable by editing a settings file.
         for _ in 0..32 {
             let Some(key) = current else { break };
-            let Some(bus) = self.buses.get(&key) else { break };
+            let Some(bus) = self.buses.get(&key) else {
+                break;
+            };
             if bus.muted {
                 return 0.0;
             }
@@ -234,7 +236,11 @@ mod tests {
         assert!(mixer.set_volume(Mixer::MASTER, 0.5));
         assert!(mixer.set_volume(Mixer::MUSIC, 0.5));
         assert_eq!(mixer.gain(Mixer::MUSIC), 0.25);
-        assert_eq!(mixer.gain(Mixer::SFX), 0.5, "sfx is only affected by master");
+        assert_eq!(
+            mixer.gain(Mixer::SFX),
+            0.5,
+            "sfx is only affected by master"
+        );
     }
 
     /// Quieter music does not mean quieter dialogue.
@@ -268,7 +274,11 @@ mod tests {
         assert_eq!(mixer.gain(Mixer::DIALOGUE), 0.0);
 
         mixer.set_soloed(Mixer::MUSIC, false);
-        assert_eq!(mixer.gain(Mixer::SFX), 1.0, "un-soloing restores everything");
+        assert_eq!(
+            mixer.gain(Mixer::SFX),
+            1.0,
+            "un-soloing restores everything"
+        );
     }
 
     /// A soloed ancestor keeps its children audible.

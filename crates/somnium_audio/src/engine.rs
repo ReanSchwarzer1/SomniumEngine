@@ -278,7 +278,10 @@ mod tests {
             a.volume, b.volume,
             "the volume argument must reach the sound"
         );
-        assert_eq!(a.volume, kira::tween::Value::Fixed(kira::Volume::Amplitude(0.25)));
+        assert_eq!(
+            a.volume,
+            kira::tween::Value::Fixed(kira::Volume::Amplitude(0.25))
+        );
     }
 
     /// The bus gain multiplies the sound's own volume.

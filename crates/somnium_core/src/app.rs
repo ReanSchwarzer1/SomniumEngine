@@ -442,13 +442,77 @@ pub trait GameApp {
     fn on_fixed_update(&mut self, _ctx: &mut EngineContext) {}
 
     /// Called every frame for UI and debug rendering.
+    ///
+    /// This is where a game **builds** its widget trees, because it is the last
+    /// callback that carries the whole [`EngineContext`]. Drawing them is
+    /// [`Self::on_render_ui`], which runs later in the frame with the GPU open.
     fn on_render(&mut self, _ctx: &mut EngineContext) {}
+
+    /// Called inside the frame, after the world and before the editor shell,
+    /// with the encoder open. **Draw here; build in [`Self::on_render`].**
+    ///
+    /// MORROWIND-E2, and the sub-phase exists because this method did not:
+    /// MORROWIND-D through -G built a paint layer, canvases, anchors,
+    /// directional navigation and styled text, and a `GameApp` had no way to
+    /// put any of it on screen. `examples/vvardenfell` printed its HUD layout
+    /// to stdout for want of these six lines.
+    ///
+    /// ```ignore
+    /// fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
+    ///     frame.draw(&mut self.hud);
+    ///     frame.draw(&mut self.name_plate);
+    /// }
+    /// ```
+    ///
+    /// Deliberately carries no world, no physics and no time. A game that finds
+    /// it needs one of those here has found that it is building rather than
+    /// drawing, and the build belongs one callback earlier.
+    fn on_render_ui(&mut self, _frame: &mut somnium_ui::GameUiFrame) {}
+
+    /// Called for every raw OS window event the editor shell did not consume.
+    /// Return `true` to consume it before the editor's own viewport handling.
+    ///
+    /// MORROWIND-E2's other half. [`EngineEvent`](crate::EngineEvent) is a
+    /// translated, engine-shaped event and stays the thing most games want;
+    /// this is the untranslated one, because
+    /// [`UiCanvas::process_os_event`](somnium_ui::UiCanvas::process_os_event)
+    /// takes a `winit::event::WindowEvent` and a translation layer in front of
+    /// it would be a second event vocabulary for the runtime UI to disagree
+    /// with the editor UI in.
+    ///
+    /// **Ordering is the editor's, and that is a temporary answer.** The editor
+    /// shell gets first refusal today, which is right while the game is a thing
+    /// inside a viewport and wrong once there is a play mode with input focus
+    /// of its own. That is MORROWIND-N's call and it is named here so N does
+    /// not have to rediscover it.
+    fn on_os_event(
+        &mut self,
+        _ctx: &mut EngineContext,
+        _event: &winit::event::WindowEvent,
+    ) -> bool {
+        false
+    }
 
     /// Called just before the engine shuts down.
     fn on_shutdown(&mut self) {}
 
     /// Called after a version-2 map factory finishes (drawer double-click or tests).
     fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
+}
+
+/// Joins a boxed [`GameApp`] to the renderer's [`somnium_ui::GameUi`] seam.
+///
+/// MORROWIND-E2. `somnium_renderer` cannot name a `GameApp` — `somnium_core`
+/// depends on the renderer and not the other way round — so the renderer takes
+/// a trait object it *can* name and this is the six lines that satisfy it.
+struct GameUiAdapter<'g, G: GameApp + ?Sized> {
+    game: &'g mut G,
+}
+
+impl<G: GameApp + ?Sized> somnium_ui::GameUi for GameUiAdapter<'_, G> {
+    fn draw_ui(&mut self, frame: &mut somnium_ui::GameUiFrame) {
+        self.game.on_render_ui(frame);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2397,6 +2461,32 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        // ── 3.2 Route to the game (MORROWIND-E2) ─────────────────────────────
+        //
+        // After the editor shell and before the editor's own viewport tools, so
+        // a game's HUD can take a click the shell did not want but the sculpt
+        // brush would have. See `GameApp::on_os_event` for why the order is
+        // MORROWIND-N's to revisit.
+        {
+            let mut ctx = EngineContext::new(
+                &self.time,
+                &self.config,
+                &mut self.world,
+                self.physics.as_mut().unwrap(),
+                self.audio.as_mut().unwrap(),
+                self.render_ctx.as_ref(),
+                self.renderer.as_mut(),
+                &mut self.selection.primary,
+                self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
+                &mut self.scripts,
+            );
+            if self.game.on_os_event(&mut ctx, &event) {
+                return;
+            }
+        }
+
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
         if !self.play_session_active && self.foliage_paint_active {
             if let WindowEvent::MouseInput {
@@ -3460,7 +3550,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         ) {
             r.set_editor_overlays_enabled(!self.play_session_active);
             r.time = self.simulation_clock.elapsed_seconds;
-            r.render(c, ui, window);
+            // MORROWIND-E2. `self.game` is a disjoint field from the four
+            // borrowed above, so the game can be handed to the renderer as a
+            // callback without any of this becoming a `RefCell`.
+            let mut adapter = GameUiAdapter {
+                game: self.game.as_mut(),
+            };
+            r.render_with_game_ui(c, ui, window, Some(&mut adapter));
         }
 
         // ── Drain editor events and apply to ECS ──────────────────────────────
