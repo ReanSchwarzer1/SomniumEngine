@@ -139,3 +139,27 @@ What Track 2 and Track 3 owe is **evidence, not implementation**: every capture
 and every `.somtime` row needs a windowed GPU run. Until those rows exist the
 cloud pass, the weather driver and the day cycle all ship **off**, which is the
 arrangement §12 asks for and the reason no existing scene changes.
+
+## Live-session defect pass
+
+Five defects reported from a running editor, all with green tests over them.
+Record: `CONTROL-P_live_session_fixes.md`.
+
+| Defect | Cause | Fix |
+|---|---|---|
+| Fly-cam ignored WASD | a right-press over the viewport never cleared UI keyboard focus, and the CONTROL-K editors claimed the keyboard unconditionally | `release_keyboard()` on viewport right-press (modals exempt); the curve/gradient editors claim keys only while something is selected |
+| Snap controls did nothing | `attach_combo_popup` was never called on the two snap combos, so no dropdown existed to emit `SelectionChanged` — the handlers were correct and unreachable | attach both, widen `combo_entries()`; also send the "snap" query to the Preferences search box |
+| Cancel chip blinked at ~3 Hz | the asset inventory job resubmitted on a 350 ms timer whether or not anything changed | gate on a content-root stamp (as a guard, not an early return); `JobSnapshot` carries priority and the chip skips `Background`; `update_jobs` is idempotent and restores "Ready" |
+| Clouds blocky | the march divided the *whole ray* by `max_steps`, so a shallow ray took kilometre-long steps through a 2 km slab | the step is a distance in metres from the layer thickness; cost bounded by an iteration cap and the early-out |
+| Clouds shimmered | temporal jitter with nothing to average it — TAA has no motion vector for a sky pixel | frame-stable jitter by default; `temporal_jitter` is opt-in |
+
+Plus `Sky ▸ Clouds ▸ Cloud Quality` (Quarter / Half / Full resolution), because
+step counts cannot buy pixels the buffer does not have; and the vestigial
+`post_tonemap_combo`/`post_tonemap_popup` pair removed.
+
+New tests: `a_right_press_on_the_viewport_releases_the_keyboard`,
+`a_modal_keeps_the_keyboard_through_a_right_press`,
+`a_snapshot_reports_the_priority_it_was_submitted_with`,
+`quality_selects_the_march_resolution`,
+`quality_reaches_details_as_a_named_choice`,
+`temporal_jitter_is_off_by_default`.
