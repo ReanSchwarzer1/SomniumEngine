@@ -148,6 +148,7 @@ Record: `CONTROL-P_live_session_fixes.md`.
 | Defect | Cause | Fix |
 |---|---|---|
 | Fly-cam ignored WASD | a right-press over the viewport never cleared UI keyboard focus, and the CONTROL-K editors claimed the keyboard unconditionally | `release_keyboard()` on viewport right-press (modals exempt); the curve/gradient editors claim keys only while something is selected |
+| …and `S` still lagged 2–3 s | bare `S` is bound to the Scale tool, so the shortcut dispatcher ate the press; the `!repeat` guard meant OS key-repeat then fell through, which is why it started moving exactly when auto-repeat did | `viewport_camera_active` latch from right-press to release; the dispatcher stands down while the fly-cam is driving. Cleared on a release anywhere, and on window focus loss |
 | Snap controls did nothing | `attach_combo_popup` was never called on the two snap combos, so no dropdown existed to emit `SelectionChanged` — the handlers were correct and unreachable | attach both, widen `combo_entries()`; also send the "snap" query to the Preferences search box |
 | Cancel chip blinked at ~3 Hz | the asset inventory job resubmitted on a 350 ms timer whether or not anything changed | gate on a content-root stamp (as a guard, not an early return); `JobSnapshot` carries priority and the chip skips `Background`; `update_jobs` is idempotent and restores "Ready" |
 | Clouds blocky | the march divided the *whole ray* by `max_steps`, so a shallow ray took kilometre-long steps through a 2 km slab | the step is a distance in metres from the layer thickness; cost bounded by an iteration cap and the early-out |
@@ -162,4 +163,7 @@ New tests: `a_right_press_on_the_viewport_releases_the_keyboard`,
 `a_snapshot_reports_the_priority_it_was_submitted_with`,
 `quality_selects_the_march_resolution`,
 `quality_reaches_details_as_a_named_choice`,
-`temporal_jitter_is_off_by_default`.
+`temporal_jitter_is_off_by_default`,
+`the_fly_cam_owns_the_keyboard_while_right_mouse_is_held`,
+`a_release_outside_the_viewport_still_ends_the_fly_cam`,
+`losing_window_focus_ends_the_fly_cam`.

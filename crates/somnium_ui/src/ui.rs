@@ -72,6 +72,9 @@ pub struct UserInterface {
     /// at half its intended apparent size.
     ui_scale: f32,
     focused_ih: IH,
+    /// Set while a right-drag over the viewport is flying the camera. See
+    /// [`Self::viewport_camera_active`].
+    viewport_camera_active: bool,
     #[allow(dead_code)]
     captured_ih: IH,
     hovered_ih: IH,
@@ -120,6 +123,7 @@ impl UserInterface {
             cursor_pos: Vec2::ZERO,
             ui_scale: 1.0,
             focused_ih: IH::NONE,
+            viewport_camera_active: false,
             captured_ih: IH::NONE,
             hovered_ih: IH::NONE,
             modifiers: Modifiers::default(),
@@ -692,6 +696,23 @@ impl UserInterface {
 
     pub fn modal_root(&self) -> Option<NodeHandle> {
         self.modal_focus.map(|m| m.root)
+    }
+
+    /// Whether the fly-cam currently owns the keyboard.
+    ///
+    /// True from a right-press over the viewport until the matching release.
+    /// Single-key shortcuts must stand down while this holds: `S` is bound to
+    /// the Scale tool and is also "move backward", and a dispatcher that does
+    /// not know the camera is driving eats the press.
+    #[must_use]
+    pub fn viewport_camera_active(&self) -> bool {
+        self.viewport_camera_active
+    }
+
+    /// Drop the fly-cam latch — for a focus-loss or capture-loss event, where
+    /// no release will ever arrive.
+    pub fn end_viewport_camera(&mut self) {
+        self.viewport_camera_active = false;
     }
 
     /// Hand the keyboard back to the game.
@@ -1365,6 +1386,13 @@ impl UserInterface {
         }
 
         match event {
+            // Alt-tabbing away mid-drag means no release will ever arrive, and
+            // a stuck fly-cam latch would disable every single-key shortcut
+            // for the rest of the session.
+            WindowEvent::Focused(false) => {
+                self.viewport_camera_active = false;
+                false
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 self.modifiers = Modifiers {
@@ -1432,6 +1460,12 @@ impl UserInterface {
                 // context menus (Phase 26-B).
                 if *button == winit::event::MouseButton::Right {
                     let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                    // The release clears the latch wherever it lands. A drag
+                    // that started in the viewport and ended over the chrome
+                    // must not leave the camera holding the keyboard for ever.
+                    if matches!(state, ElementState::Released) {
+                        self.viewport_camera_active = false;
+                    }
                     if over_viewport {
                         // Right-press over the viewport starts the fly-cam, and
                         // the fly-cam needs WASD. Whatever in the chrome held
@@ -1443,6 +1477,7 @@ impl UserInterface {
                         // that actually takes the camera.
                         if matches!(state, ElementState::Pressed) {
                             self.release_keyboard();
+                            self.viewport_camera_active = true;
                         }
                         return false;
                     }
@@ -1823,6 +1858,82 @@ mod input_contract_tests {
             !ui.has_text_focus(),
             "starting the fly-cam must release the keyboard"
         );
+    }
+
+    /// The fly-cam owns the keyboard for as long as right-mouse is held.
+    ///
+    /// Reported from a live session: holding right-mouse and pressing `S`
+    /// moved the camera backward only after two or three seconds. `S` is bound
+    /// to the Scale tool, so the shortcut dispatcher consumed the press and the
+    /// game never saw it; movement began exactly when OS key-repeat started,
+    /// because repeats skip the chord path. The latch below is what lets the
+    /// dispatcher stand down.
+    #[test]
+    fn the_fly_cam_owns_the_keyboard_while_right_mouse_is_held() {
+        let mut ui = viewport_ui();
+        assert!(!ui.viewport_camera_active());
+
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(
+            ui.viewport_camera_active(),
+            "a right-press in the viewport starts the fly-cam"
+        );
+
+        ui.process_os_event(&right_button(winit::event::ElementState::Released));
+        assert!(!ui.viewport_camera_active(), "and the release ends it");
+    }
+
+    /// A drag that began in the viewport and ended over the chrome must not
+    /// leave the latch set — that would silently kill every single-key
+    /// shortcut for the rest of the session.
+    #[test]
+    fn a_release_outside_the_viewport_still_ends_the_fly_cam() {
+        let mut ui = viewport_ui();
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(ui.viewport_camera_active());
+
+        // Released with the pointer nowhere near the viewport.
+        ui.cursor_pos = glam::Vec2::new(-50.0, -50.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Released));
+        assert!(!ui.viewport_camera_active());
+    }
+
+    /// Alt-tabbing mid-drag means no release ever arrives.
+    #[test]
+    fn losing_window_focus_ends_the_fly_cam() {
+        let mut ui = viewport_ui();
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(ui.viewport_camera_active());
+
+        ui.process_os_event(&winit::event::WindowEvent::Focused(false));
+        assert!(!ui.viewport_camera_active());
+    }
+
+    fn viewport_ui() -> UserInterface {
+        use crate::widget::WidgetBuilder;
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let viewport = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(
+                WidgetBuilder::new().with_width(800.0).with_height(600.0),
+            )
+            .build(),
+            root,
+        );
+        ui.set_viewport_handle(viewport);
+        ui.perform_layout();
+        ui
+    }
+
+    fn right_button(state: winit::event::ElementState) -> winit::event::WindowEvent {
+        winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Right,
+        }
     }
 
     /// A modal has trapped focus deliberately; a stray right-press must not

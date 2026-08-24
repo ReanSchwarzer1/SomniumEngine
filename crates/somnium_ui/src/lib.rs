@@ -1835,7 +1835,27 @@ impl UiManager {
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
-                if pressed && !key_ev.repeat && !self.native_ui.has_text_focus() {
+                // Two guards, and the second one was missing.
+                //
+                // `has_text_focus` keeps a shortcut out of a text field. The
+                // fly-cam needs the same protection and did not have it: `S`
+                // is bound to the Scale tool *and* is "move backward", so
+                // holding right-mouse and pressing `S` ran the command and the
+                // press never reached the game. It appeared to work a couple of
+                // seconds later only because OS key-repeat sets `repeat`, which
+                // skips this branch — so the camera started moving exactly when
+                // the keyboard began auto-repeating.
+                //
+                // The game layer already guards its own `W`/`E` gizmo
+                // shortcuts on `!is_rmb_down`; that guard was dead for any key
+                // the registry claimed first, because the registry intercepts a
+                // layer above it. This is the same rule applied where the
+                // interception actually happens.
+                if pressed
+                    && !key_ev.repeat
+                    && !self.native_ui.has_text_focus()
+                    && !self.native_ui.viewport_camera_active()
+                {
                     if let Some(chord) = crate::commands::Chord::from_winit(
                         code,
                         self.native_ui.modifiers().command(),
