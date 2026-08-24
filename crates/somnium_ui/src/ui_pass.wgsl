@@ -21,6 +21,9 @@
 // Group 1 binding 0/1: texture2d + sampler — white 1x1 for solid shapes,
 //   font/icon atlas for coverage masks (RGB = 255, A = coverage).
 
+// wgpu 30 requires an explicit enable for `binding_array`.
+enable wgpu_binding_array;
+
 // UiPass replaces this declaration with `false` only for a non-sRGB surface.
 const OUTPUT_IS_SRGB: bool = true;
 
@@ -43,10 +46,14 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
-@group(1) @binding(0) var t_font: texture_2d<f32>;
-@group(1) @binding(1) var t_icon: texture_2d<f32>;
 @group(1) @binding(2) var s_tex: sampler;
-@group(1) @binding(3) var t_thumb: texture_2d<f32>;
+// MORROWIND-D: the three fixed bindings became one bindless array, with the
+// font, icon and thumbnail atlases at slots 0, 1 and 2 -- the exact indices
+// `texture_layer` already used, so every existing call site keeps its meaning
+// and slots 3.. are what a game registers. `push_nine_slice` has had a
+// `texture_id` parameter and nothing to point it at since Phase 12; this is
+// what it was waiting for.
+@group(1) @binding(4) var ui_textures: binding_array<texture_2d<f32>, 64>;
 
 // Texture-layer selector, matching `primitive::TEX_SHIFT` / `TEX_MASK` and the
 // historical texture_id constants: 0 = font atlas, 1 = icon atlas. Carrying it
@@ -54,16 +61,13 @@ struct Globals {
 const TEX_SHIFT: u32 = 8u;
 const TEX_MASK:  u32 = 255u;
 
+// Layer 0 is the font atlas and layer 1 the icon atlas -- both coverage masks,
+// RGB 255 with meaning in alpha. Layer 2 is the thumbnail atlas, the one atlas
+// whose RGB carries colour. 3.. are registered by a game and are ordinary
+// textures. The three-way `if` this replaced said the same thing and could not
+// be extended past its third case.
 fn sample_atlas(layer: u32, uv: vec2<f32>) -> vec4<f32> {
-    if layer == 1u {
-        return textureSample(t_icon, s_tex, uv);
-    }
-    // Layer 2 is the thumbnail atlas: real colour, not a coverage mask, so it
-    // is the one atlas whose RGB carries meaning.
-    if layer == 2u {
-        return textureSample(t_thumb, s_tex, uv);
-    }
-    return textureSample(t_font, s_tex, uv);
+    return textureSample(ui_textures[layer], s_tex, uv);
 }
 
 struct InstanceIn {

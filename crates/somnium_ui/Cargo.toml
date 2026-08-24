@@ -19,3 +19,17 @@ fontdue    = { workspace = true }
 resvg      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# wgpu's own front end, already in the graph through wgpu. `somnium_renderer`
+# has validated its shaders in `cargo test` since Phase 25; `somnium_ui` did
+# not, so its two shaders were only ever compiled at device-creation time --
+# on a machine with a GPU, at startup, as a first-frame crash. MORROWIND-D adds
+# a binding array to both of them, which is exactly the construct that broke
+# between wgpu 29 and 30.
+#
+# Pinned to the same major as the workspace `wgpu`. MORROWIND-C found that a
+# stale copy of this dependency validates with a different front end from the
+# one that compiles the shaders, and hid a real incompatibility for a whole
+# sub-phase.
+naga = { version = "30", features = ["wgsl-in"] }

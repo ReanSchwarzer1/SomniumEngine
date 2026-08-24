@@ -3765,6 +3765,7 @@ dependencies = [
  "bytemuck",
  "fontdue",
  "glam 0.29.3",
+ "naga",
  "resvg",
  "serde",
  "serde_json",

@@ -24,7 +24,19 @@ use glam::Vec2;
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawCommand {
     pub clip_rect: Rect,
+    /// Which stream the run comes from (MORROWIND-D).
+    ///
+    /// **This is what lets `draw_over` survive two pipelines.** The command
+    /// list stays in paint order and the pass switches pipeline when the stream
+    /// changes; it does not bucket all quads and then all shapes, which would
+    /// reorder the shell.
+    pub stream: crate::shaped::Stream,
+    /// For [`Stream::Quad`](crate::shaped::Stream::Quad), the first instance.
+    /// For [`Stream::Shaped`](crate::shaped::Stream::Shaped), the first
+    /// *vertex* — shaped geometry is per-vertex, because a stroked bezier has
+    /// no analytic form to expand from one instance.
     pub instance_offset: u32,
+    /// Instances for `Quad`, vertices for `Shaped`. See `instance_offset`.
     pub instance_count: u32,
 }
 
@@ -49,6 +61,37 @@ pub struct DrawingContext {
     /// Asset previews for the Content Drawer. Lives beside the atlases because
     /// it *is* one, and because widgets reach it the same way.
     pub thumbnails: crate::thumbnail::ThumbnailCache,
+    /// MORROWIND-D. The second stream: transforms, paths, strokes, masks.
+    pub shaped: crate::shaped::ShapedBuffers,
+    /// Transform stack applied to shaped pushes.
+    ///
+    /// Quad primitives are **not** transformed: the frozen 100-byte instance
+    /// has no transform field, which is §4.5's finding restated. A widget that
+    /// wants to rotate emits shaped geometry, and that is the whole reason this
+    /// stream exists.
+    transform_stack: Vec<crate::shaped::ShapedInstance>,
+    /// Flattened contours, keyed by path and tolerance.
+    ///
+    /// A node graph's wires do not change shape while the user pans, and
+    /// re-flattening them every frame is the obvious performance mistake. The
+    /// cache survives `clear()`; the geometry it produced does not.
+    flatten_cache: std::collections::HashMap<FlattenKey, std::rc::Rc<Vec<crate::path::Contour>>>,
+    /// How many textures a game has registered, beyond the three atlases.
+    registered_textures: u32,
+    /// Device-pixel flattening tolerance. Recomputed on a DPI change.
+    tolerance: f32,
+}
+
+/// Cache key for a flattened path.
+///
+/// The tolerance is quantised to a hundredth of a pixel and stored as an
+/// integer, because `f32` is not `Hash` and because a tolerance that differs in
+/// the seventh decimal is the same flattening. Rounding it into the key is what
+/// stops a DPI scale that wobbles by a rounding error from missing every frame.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FlattenKey {
+    path: crate::path::Path,
+    tolerance_centi: u32,
 }
 
 impl DrawingContext {
@@ -63,6 +106,11 @@ impl DrawingContext {
             icon_atlas: IconAtlas::new(),
             motion: crate::motion::Animator::new(),
             thumbnails: crate::thumbnail::ThumbnailCache::new(),
+            shaped: crate::shaped::ShapedBuffers::default(),
+            transform_stack: Vec::new(),
+            flatten_cache: std::collections::HashMap::new(),
+            registered_textures: 0,
+            tolerance: crate::path::DEFAULT_TOLERANCE,
         }
     }
 
@@ -73,6 +121,8 @@ impl DrawingContext {
         self.commands.clear();
         self.clip_stack.clear();
         self.current_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
+        self.shaped.clear();
+        self.transform_stack.clear();
     }
 
     pub fn push_clip_rect(&mut self, rect: Rect) {
@@ -91,15 +141,29 @@ impl DrawingContext {
     }
 
     fn begin_command(&mut self) {
-        // Merge with the previous command whenever the clip region matches.
-        if let Some(last) = self.commands.last() {
-            if last.clip_rect == self.current_clip {
-                return;
-            }
+        self.begin_command_in(crate::shaped::Stream::Quad);
+    }
+
+    /// Open or extend a command in `stream`.
+    ///
+    /// Merges with the previous command only when **both** the clip region and
+    /// the stream match. Merging across streams would put shaped vertices and
+    /// quad instances in one run, and the pass has no way to draw that.
+    fn begin_command_in(&mut self, stream: crate::shaped::Stream) {
+        if let Some(last) = self.commands.last()
+            && last.clip_rect == self.current_clip
+            && last.stream == stream
+        {
+            return;
         }
+        let offset = match stream {
+            crate::shaped::Stream::Quad => self.instances.len() as u32,
+            crate::shaped::Stream::Shaped => self.shaped.vertices.len() as u32,
+        };
         self.commands.push(DrawCommand {
             clip_rect: self.current_clip,
-            instance_offset: self.instances.len() as u32,
+            stream,
+            instance_offset: offset,
             instance_count: 0,
         });
     }
@@ -118,6 +182,190 @@ impl DrawingContext {
         if let Some(cmd) = self.commands.last_mut() {
             cmd.instance_count += 1;
         }
+    }
+
+
+    // -- MORROWIND-D: the shaped stream ---------------------------------------
+    //
+    // Seam 4b's authoring surface. Everything below emits into `self.shaped`,
+    // in paint order, interleaved with the quad stream.
+
+    /// Set the flattening tolerance, in **device** pixels.
+    ///
+    /// Call this when DPI changes. Phase 27 already fixed a DPI correctness bug
+    /// and the plan is explicit that it must not be reintroduced; the flatten
+    /// cache is keyed by tolerance, so changing it invalidates exactly the
+    /// entries that need it and keeps the rest.
+    pub fn set_tolerance(&mut self, device_pixels: f32) {
+        self.tolerance = device_pixels.clamp(0.05, 8.0);
+    }
+
+    /// The current flattening tolerance, in device pixels.
+    #[must_use]
+    pub fn tolerance(&self) -> f32 {
+        self.tolerance
+    }
+
+    /// Register a texture and get the slot a shaped instance names.
+    ///
+    /// Slots 0, 1 and 2 are the font, icon and thumbnail atlases -- the three
+    /// fixed bindings this replaces -- so existing call sites keep their
+    /// meaning. Games get 3 and up.
+    ///
+    /// Returns `None` when the array is full rather than wrapping to a slot
+    /// somebody else owns: a silently reused slot renders one game's sprite
+    /// where another expects its own, which is a bug nobody would look for in
+    /// the UI layer.
+    pub fn register_texture(&mut self) -> Option<u32> {
+        let slot = crate::shaped::RESERVED_TEXTURE_SLOTS + self.registered_textures;
+        if slot >= crate::shaped::MAX_TEXTURE_SLOTS {
+            return None;
+        }
+        self.registered_textures += 1;
+        Some(slot)
+    }
+
+    /// How many texture slots a game has taken.
+    #[must_use]
+    pub fn registered_texture_count(&self) -> u32 {
+        self.registered_textures
+    }
+
+    /// Push a transform, applying to every shaped push until [`Self::pop_transform`].
+    ///
+    /// Composes with whatever is already on the stack, so nesting works the way
+    /// a scene graph does: a rotated panel containing a scaled icon gets both.
+    ///
+    /// **Quad primitives are unaffected.** The frozen 100-byte instance has no
+    /// transform field, which is exactly the plan's §4.5 finding; a widget that
+    /// wants to rotate emits shaped geometry, and that is why this stream exists.
+    pub fn push_transformed(&mut self, transform: crate::shaped::ShapedInstance) {
+        let composed = match self.transform_stack.last() {
+            Some(parent) => compose(parent, &transform),
+            None => transform,
+        };
+        self.transform_stack.push(composed);
+    }
+
+    /// Pop the innermost transform.
+    pub fn pop_transform(&mut self) {
+        self.transform_stack.pop();
+    }
+
+    /// The transform a shaped push would currently receive.
+    #[must_use]
+    pub fn current_transform(&self) -> crate::shaped::ShapedInstance {
+        self.transform_stack
+            .last()
+            .copied()
+            .unwrap_or_else(|| crate::shaped::ShapedInstance::identity([255, 255, 255, 255]))
+    }
+
+    /// Flatten `path` at the current tolerance, reusing a cached result.
+    ///
+    /// Public because MORROWIND-F hit-tests against the same contours it draws,
+    /// and re-flattening for the hit test would be both wasteful and a source of
+    /// disagreement between what is drawn and what is clickable.
+    pub fn flatten(&mut self, path: &crate::path::Path) -> std::rc::Rc<Vec<crate::path::Contour>> {
+        let key = FlattenKey {
+            path: path.clone(),
+            tolerance_centi: (self.tolerance * 100.0).round() as u32,
+        };
+        if let Some(hit) = self.flatten_cache.get(&key) {
+            return std::rc::Rc::clone(hit);
+        }
+        let contours = std::rc::Rc::new(path.flatten(self.tolerance));
+        self.flatten_cache.insert(key, std::rc::Rc::clone(&contours));
+        contours
+    }
+
+    /// Stroke a path.
+    ///
+    /// The node graph's wires, the timeline's curves, the spline editor's
+    /// handles and every dashed selection outline are this call.
+    pub fn push_stroke(
+        &mut self,
+        path: &crate::path::Path,
+        stroke: &crate::path::Stroke,
+        style: crate::shaped::ShapedInstance,
+    ) {
+        let contours = self.flatten(path);
+        let mut triangles = crate::path::Triangles::new();
+        for contour in contours.iter() {
+            triangles.extend(crate::path::stroke_contour(contour, stroke));
+        }
+        self.push_shaped(style, &triangles);
+    }
+
+    /// Fill a path's closed contours.
+    ///
+    /// A self-intersecting contour draws nothing rather than overlapping
+    /// triangles -- see [`crate::path::fill_contour`].
+    pub fn push_path(&mut self, path: &crate::path::Path, style: crate::shaped::ShapedInstance) {
+        let contours = self.flatten(path);
+        let mut triangles = crate::path::Triangles::new();
+        for contour in contours.iter() {
+            triangles.extend(crate::path::fill_contour(contour));
+        }
+        self.push_shaped(style, &triangles);
+    }
+
+    /// Draw an already-tessellated shape.
+    ///
+    /// The primitive every other shaped entry point builds on, exposed because
+    /// a caller that already has triangles -- a chart, a mesh preview, a
+    /// generated gizmo -- should not have to round-trip through a `Path`.
+    ///
+    /// UVs are normalised over the geometry's own bounds, and only computed
+    /// when the shape actually samples something, so an untextured stroke pays
+    /// nothing for the convenience.
+    pub fn push_shaped(&mut self, style: crate::shaped::ShapedInstance, triangles: &[Vec2]) {
+        if triangles.len() < 3 {
+            return;
+        }
+        let style = match self.transform_stack.last() {
+            Some(parent) => compose(parent, &style),
+            None => style,
+        };
+        let samples = style.flags & crate::shaped::SHAPED_TEXTURED != 0
+            || style.mask != crate::shaped::NO_MASK;
+        let uv_from = samples.then(|| crate::path::bounds(triangles));
+        self.begin_command_in(crate::shaped::Stream::Shaped);
+        let count = self.shaped.push_shape(style, triangles, uv_from);
+        if let Some(cmd) = self.commands.last_mut() {
+            cmd.instance_count += count;
+        }
+    }
+
+    /// Clip a shaped style to a mask texture.
+    ///
+    /// The rectangular clip stack still applies and is still the cheap path;
+    /// this is the circular-avatar, rounded-panel and masked-reveal case that
+    /// `push_clip_rect` cannot express (plan §4.5).
+    ///
+    /// Returns the style rather than pushing a stack entry, because a mask
+    /// belongs to a *shape*, not to a region: two shapes under one clip rect
+    /// routinely want different masks, and a stack would make that the awkward
+    /// case.
+    #[must_use]
+    pub fn push_mask(
+        &self,
+        style: crate::shaped::ShapedInstance,
+        mask_slot: u32,
+    ) -> crate::shaped::ShapedInstance {
+        style.with_mask(mask_slot)
+    }
+
+    /// Shaped vertices emitted this frame.
+    #[must_use]
+    pub fn shaped_vertex_count(&self) -> usize {
+        self.shaped.vertices.len()
+    }
+
+    /// Shaped instances emitted this frame.
+    #[must_use]
+    pub fn shaped_instance_count(&self) -> usize {
+        self.shaped.instances.len()
     }
 
     /// Solid-colour filled rectangle.
@@ -385,6 +633,30 @@ impl DrawingContext {
             }
         }
     }
+}
+
+
+/// Compose two 2x3 affines: `parent` applied after `child`.
+///
+/// Style fields come from `child`. A transform pushed onto the stack carries no
+/// colour of its own, and inheriting one would make a nested shape silently
+/// take its parent's fill.
+fn compose(
+    parent: &crate::shaped::ShapedInstance,
+    child: &crate::shaped::ShapedInstance,
+) -> crate::shaped::ShapedInstance {
+    let [pa, pb, pc, pd, ptx, pty] = parent.xform;
+    let [ca, cb, cc, cd, cx, cy] = child.xform;
+    let mut out = *child;
+    out.xform = [
+        pa * ca + pc * cb,
+        pb * ca + pd * cb,
+        pa * cc + pc * cd,
+        pb * cc + pd * cd,
+        pa * cx + pc * cy + ptx,
+        pb * cx + pd * cy + pty,
+    ];
+    out
 }
 
 #[cfg(test)]
@@ -759,6 +1031,230 @@ mod tests {
             (pen_x - pen_x.round()).abs() < 0.001,
             "the pen origin must be whole-pixel, got {pen_x}"
         );
+    }
+
+    // -- MORROWIND-D: the two streams, and the ordering between them ---------
+
+    /// **GHOSTFENCE's first row, in miniature.** A frame that draws no paths
+    /// emits exactly the bytes it emitted before the shaped stream existed.
+    ///
+    /// The whole premise of a second stream is that the first is untouched. If
+    /// this fails, the extension became a widening and Phase 27's 646-instance
+    /// measurement no longer describes the shell.
+    #[test]
+    fn a_frame_with_no_shapes_is_unchanged() {
+        let mut c = ctx();
+        c.push_rect_filled(Rect::new(4.0, 4.0, 100.0, 24.0), [28, 30, 38, 255]);
+        c.push_rect_border(Rect::new(4.0, 4.0, 100.0, 24.0), 1.0, [49, 53, 67, 255]);
+        assert_eq!(c.instances.len(), 2);
+        assert!(c.shaped.is_empty(), "no shapes, no shaped geometry");
+        assert!(
+            c.commands
+                .iter()
+                .all(|cmd| cmd.stream == crate::shaped::Stream::Quad),
+            "every command from a quad-only frame is a quad command"
+        );
+    }
+
+    /// Paint order survives two pipelines.
+    ///
+    /// The specific mistake Appendix A.3.3 warns about is bucketing -- all
+    /// quads then all shapes -- which draws every panel over every wire and
+    /// looks like a z-order bug in the widget tree rather than in the pass.
+    #[test]
+    fn interleaving_streams_preserves_paint_order() {
+        use crate::shaped::{ShapedInstance, Stream};
+        let mut c = ctx();
+        let tri = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 10.0)];
+
+        c.push_rect_filled(Rect::new(0.0, 0.0, 10.0, 10.0), [1, 1, 1, 255]);
+        c.push_shaped(ShapedInstance::identity([2, 2, 2, 255]), &tri);
+        c.push_rect_filled(Rect::new(0.0, 0.0, 10.0, 10.0), [3, 3, 3, 255]);
+
+        let streams: Vec<_> = c.commands.iter().map(|cmd| cmd.stream).collect();
+        assert_eq!(
+            streams,
+            vec![Stream::Quad, Stream::Shaped, Stream::Quad],
+            "the command list is in paint order, not bucketed by pipeline"
+        );
+        // The second quad run starts where the first left off, so the instance
+        // buffer is still one contiguous array.
+        assert_eq!(c.commands[0].instance_offset, 0);
+        assert_eq!(c.commands[2].instance_offset, 1);
+    }
+
+    /// Consecutive shapes under one clip merge into one draw.
+    #[test]
+    fn consecutive_shapes_share_a_command() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        let tri = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 10.0)];
+        c.push_shaped(ShapedInstance::identity([1; 4]), &tri);
+        c.push_shaped(ShapedInstance::identity([2; 4]), &tri);
+        assert_eq!(c.commands.len(), 1);
+        assert_eq!(c.commands[0].instance_count, 6, "six vertices, one draw");
+        assert_eq!(c.shaped.instances.len(), 2, "two shapes, two styles");
+    }
+
+    /// A clip change breaks the run even within one stream.
+    #[test]
+    fn a_clip_change_breaks_a_shaped_run() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        let tri = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 10.0)];
+        c.push_shaped(ShapedInstance::identity([1; 4]), &tri);
+        c.push_clip_rect(Rect::new(0.0, 0.0, 5.0, 5.0));
+        c.push_shaped(ShapedInstance::identity([2; 4]), &tri);
+        assert_eq!(c.commands.len(), 2);
+        assert_eq!(
+            c.commands[1].instance_offset, 3,
+            "the second run starts at vertex 3"
+        );
+    }
+
+    /// The transform stack composes and applies to shaped pushes.
+    #[test]
+    fn a_pushed_transform_applies_and_nests() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        let tri = [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
+
+        c.push_transformed(ShapedInstance::identity([0; 4]).translated(Vec2::new(10.0, 0.0)));
+        c.push_transformed(ShapedInstance::identity([0; 4]).translated(Vec2::new(0.0, 5.0)));
+        c.push_shaped(ShapedInstance::identity([7; 4]), &tri);
+        c.pop_transform();
+        c.push_shaped(ShapedInstance::identity([8; 4]), &tri);
+        c.pop_transform();
+        c.push_shaped(ShapedInstance::identity([9; 4]), &tri);
+
+        assert_eq!(c.shaped.instances[0].apply(Vec2::ZERO), Vec2::new(10.0, 5.0));
+        assert_eq!(c.shaped.instances[1].apply(Vec2::ZERO), Vec2::new(10.0, 0.0));
+        assert_eq!(c.shaped.instances[2].apply(Vec2::ZERO), Vec2::ZERO);
+        // The fill is the child's, not the stack's: a transform carries no colour.
+        assert_eq!(c.shaped.instances[0].fill_a, [7; 4]);
+    }
+
+    /// Flattening the same path twice hits the cache.
+    #[test]
+    fn the_flatten_cache_returns_the_same_allocation() {
+        let mut c = ctx();
+        let path = crate::path::Path::wire(Vec2::ZERO, Vec2::new(200.0, 40.0));
+        let first = c.flatten(&path);
+        let second = c.flatten(&path);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "a wire does not change shape while the user pans"
+        );
+    }
+
+    /// Changing the tolerance re-flattens rather than serving a stale result.
+    ///
+    /// This is the DPI case Phase 27 already fixed once. A cache keyed only by
+    /// path would hand a 96-DPI flattening to a 192-DPI frame, and the curve
+    /// would be visibly faceted on the display that needs it least.
+    #[test]
+    fn changing_the_tolerance_invalidates_the_cache() {
+        let mut c = ctx();
+        let path = crate::path::Path::wire(Vec2::ZERO, Vec2::new(200.0, 40.0));
+        let coarse = c.flatten(&path);
+        c.set_tolerance(0.1);
+        let fine = c.flatten(&path);
+        assert!(!std::rc::Rc::ptr_eq(&coarse, &fine));
+        assert!(fine[0].points.len() > coarse[0].points.len());
+    }
+
+    /// Texture slots start after the engine's own atlases and run out honestly.
+    #[test]
+    fn registering_textures_starts_after_the_atlases() {
+        let mut c = ctx();
+        assert_eq!(c.register_texture(), Some(3));
+        assert_eq!(c.register_texture(), Some(4));
+        for _ in 0..crate::shaped::MAX_TEXTURE_SLOTS {
+            if c.register_texture().is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            c.register_texture(),
+            None,
+            "wrapping to a slot somebody else owns renders one texture where \
+             another was expected"
+        );
+    }
+
+    /// A stroke reaches the shaped stream through the public API.
+    #[test]
+    fn stroking_a_path_emits_shaped_geometry() {
+        use crate::shaped::{ShapedInstance, Stream};
+        let mut c = ctx();
+        let path = crate::path::Path::wire(Vec2::ZERO, Vec2::new(120.0, 60.0));
+        c.push_stroke(
+            &path,
+            &crate::path::Stroke::new(2.0),
+            ShapedInstance::identity([200, 200, 210, 255]),
+        );
+        assert!(c.shaped_vertex_count() > 30, "a bowed wire is many triangles");
+        assert_eq!(c.shaped_instance_count(), 1, "one shape, whatever its length");
+        assert_eq!(c.commands.last().unwrap().stream, Stream::Shaped);
+        assert!(c.instances.is_empty(), "a stroke emits no quad instances");
+    }
+
+    /// Filling a closed path emits geometry; an open one emits none.
+    #[test]
+    fn filling_needs_a_closed_contour() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        c.push_path(
+            &crate::path::Path::circle(Vec2::splat(20.0), 10.0),
+            ShapedInstance::identity([255; 4]),
+        );
+        let closed = c.shaped_vertex_count();
+        assert!(closed > 0);
+
+        c.push_path(
+            &crate::path::Path::wire(Vec2::ZERO, Vec2::new(50.0, 0.0)),
+            ShapedInstance::identity([255; 4]),
+        );
+        assert_eq!(
+            c.shaped_vertex_count(),
+            closed,
+            "an open contour has no interior to fill"
+        );
+    }
+
+    /// UVs are only computed for shapes that actually sample something.
+    #[test]
+    fn an_untextured_shape_pays_nothing_for_uvs() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        let tri = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 10.0)];
+        c.push_shaped(ShapedInstance::identity([1; 4]), &tri);
+        assert!(c.shaped.vertices.iter().all(|v| v.uv == [0.0, 0.0]));
+
+        c.push_shaped(ShapedInstance::identity([1; 4]).with_texture(3), &tri);
+        assert!(
+            c.shaped.vertices[3..].iter().any(|v| v.uv != [0.0, 0.0]),
+            "a textured shape gets UVs over its own bounds"
+        );
+    }
+
+    /// Clearing a frame resets the shaped stream and the transform stack.
+    ///
+    /// An unpopped transform leaking into the next frame would rotate the whole
+    /// UI by a little more every frame -- a spectacular bug, and an easy one to
+    /// write.
+    #[test]
+    fn clearing_resets_both_streams() {
+        use crate::shaped::ShapedInstance;
+        let mut c = ctx();
+        c.push_transformed(ShapedInstance::identity([0; 4]).rotated(0.3, Vec2::ZERO));
+        c.push_shaped(
+            ShapedInstance::identity([1; 4]),
+            &[Vec2::ZERO, Vec2::X, Vec2::Y],
+        );
+        c.clear(100.0, 100.0);
+        assert!(c.shaped.is_empty());
+        assert_eq!(c.current_transform().xform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]
