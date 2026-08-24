@@ -4830,19 +4830,21 @@ impl<G: GameApp> Engine<G> {
             );
             renderer.decals.push(somnium_renderer::pass::decal::GpuDecal::new(
                 transform,
-                [
-                    base[0],
-                    base[1],
-                    base[2],
-                    base[3] * decal.opacity.clamp(0.0, 1.0),
-                ],
-                albedo,
-                normal,
-                orm,
-                decal.priority,
-                decal.angle_fade_degrees,
-                decal.normal_strength,
-                decal.roughness,
+                somnium_renderer::pass::decal::DecalLook {
+                    base_color: [
+                        base[0],
+                        base[1],
+                        base[2],
+                        base[3] * decal.opacity.clamp(0.0, 1.0),
+                    ],
+                    albedo_map: albedo,
+                    normal_map: normal,
+                    orm_map: orm,
+                    priority: decal.priority,
+                    angle_fade_degrees: decal.angle_fade_degrees,
+                    normal_strength: decal.normal_strength,
+                    roughness: decal.roughness,
+                },
             ));
         }
     }

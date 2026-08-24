@@ -76,6 +76,32 @@ pub struct GpuDecal {
     pub _pad: f32,
 }
 
+/// Everything about a decal that is not its box.
+///
+/// A struct rather than nine positional parameters: three of them are `i32`
+/// texture indices and three are `f32` in `0..1`, so a transposed pair would
+/// compile and render wrong. Named fields make that a type error at the call
+/// site instead of a screenshot somebody has to notice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecalLook {
+    /// Tint multiplied into the albedo; alpha is the decal's opacity.
+    pub base_color: [f32; 4],
+    /// Bindless albedo index, or `-1`.
+    pub albedo_map: i32,
+    /// Bindless normal-map index, or `-1`.
+    pub normal_map: i32,
+    /// Bindless metallic-roughness index, or `-1`.
+    pub orm_map: i32,
+    /// Draw order; higher wins where two decals overlap.
+    pub priority: i32,
+    /// How far a surface may tip from the projection axis before fading out.
+    pub angle_fade_degrees: f32,
+    /// Strength of the normal-map contribution, `0..1`.
+    pub normal_strength: f32,
+    /// Roughness written where the decal is fully opaque.
+    pub roughness: f32,
+}
+
 impl ClusterVolume for GpuDecal {
     fn centre_ws(&self) -> [f32; 3] {
         self.position_ws
@@ -94,17 +120,17 @@ impl GpuDecal {
     /// still applies, and it is what stops a decal on a wall appearing on the
     /// floor two metres below it.
     #[must_use]
-    pub fn new(
-        transform: glam::Mat4,
-        base_color: [f32; 4],
-        albedo_map: i32,
-        normal_map: i32,
-        orm_map: i32,
-        priority: i32,
-        angle_fade_degrees: f32,
-        normal_strength: f32,
-        roughness: f32,
-    ) -> Self {
+    pub fn new(transform: glam::Mat4, look: DecalLook) -> Self {
+        let DecalLook {
+            base_color,
+            albedo_map,
+            normal_map,
+            orm_map,
+            priority,
+            angle_fade_degrees,
+            normal_strength,
+            roughness,
+        } = look;
         let (scale, _, translation) = transform.to_scale_rotation_translation();
         // The bounding sphere has to contain the box at any rotation, so it is
         // the half-diagonal and not the largest half-extent. Getting this
@@ -260,6 +286,21 @@ impl DecalGrid {
 mod tests {
     use super::*;
 
+    /// A plain look with only the angle fade varied, which is the one field
+    /// these tests care about.
+    fn probe_look(angle_fade_degrees: f32) -> DecalLook {
+        DecalLook {
+            base_color: [1.0; 4],
+            albedo_map: -1,
+            normal_map: -1,
+            orm_map: -1,
+            priority: 0,
+            angle_fade_degrees,
+            normal_strength: 1.0,
+            roughness: 0.5,
+        }
+    }
+
     #[test]
     fn the_gpu_decal_is_the_size_the_shader_expects() {
         assert_eq!(std::mem::size_of::<GpuDecal>(), 128);
@@ -277,7 +318,7 @@ mod tests {
             glam::Quat::from_rotation_y(0.7),
             glam::Vec3::new(3.0, 1.0, -2.0),
         );
-        let decal = GpuDecal::new(transform, [1.0; 4], -1, -1, -1, 0, 30.0, 1.0, 0.5);
+        let decal = GpuDecal::new(transform, probe_look(30.0));
         let half_diagonal = scale.length() * 0.5;
         assert!(decal.radius >= half_diagonal - 1e-4, "{}", decal.radius);
         assert_eq!(decal.position_ws, [3.0, 1.0, -2.0]);
@@ -292,7 +333,7 @@ mod tests {
             glam::Quat::IDENTITY,
             glam::Vec3::new(10.0, 0.0, 0.0),
         );
-        let decal = GpuDecal::new(transform, [1.0; 4], -1, -1, -1, 0, 30.0, 1.0, 0.5);
+        let decal = GpuDecal::new(transform, probe_look(30.0));
         let inv = glam::Mat4::from_cols_array_2d(&decal.inv_transform);
 
         let centre = inv.transform_point3(glam::Vec3::new(10.0, 0.0, 0.0));
@@ -309,10 +350,10 @@ mod tests {
     /// trigonometric call; the conversion has to be the right way round.
     #[test]
     fn angle_fade_is_stored_as_a_cosine() {
-        let flat = GpuDecal::new(glam::Mat4::IDENTITY, [1.0; 4], -1, -1, -1, 0, 0.0, 1.0, 0.5);
+        let flat = GpuDecal::new(glam::Mat4::IDENTITY, probe_look(0.0));
         assert!((flat.angle_fade_cos - 1.0).abs() < 1e-5);
 
-        let wide = GpuDecal::new(glam::Mat4::IDENTITY, [1.0; 4], -1, -1, -1, 0, 89.0, 1.0, 0.5);
+        let wide = GpuDecal::new(glam::Mat4::IDENTITY, probe_look(89.0));
         assert!(wide.angle_fade_cos < 0.05, "{}", wide.angle_fade_cos);
         assert!(wide.angle_fade_cos > 0.0, "a fade of 90 degrees is degenerate");
     }

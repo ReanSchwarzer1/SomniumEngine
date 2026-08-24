@@ -686,7 +686,14 @@ mod tests {
         assert!((a.mean() - 10.0).abs() < 1e-5);
         assert!((a.min - 8.0).abs() < 1e-5);
         assert!((a.max - 12.0).abs() < 1e-5);
-        assert!((a.stddev() - 1.4142).abs() < 1e-3, "{}", a.stddev());
+        // Exactly root two, not an approximation of it: the deviations are
+        // 0, 2, -2, 0, so the population variance is 2. Written as the
+        // constant because `1.4142` is both less precise and a denied lint.
+        assert!(
+            (a.stddev() - std::f32::consts::SQRT_2).abs() < 1e-5,
+            "{}",
+            a.stddev()
+        );
     }
 
     #[test]

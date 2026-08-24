@@ -320,18 +320,25 @@ impl Curve {
                 // index of the first key strictly after `t`, so `i - 1` is
                 // the segment's left key and the range check above guarantees
                 // `i` is in `1..len`.
-                let i = self.keys.partition_point(|k| k.t <= t);
-                let a = &self.keys[i - 1];
-                let b = &self.keys[i];
-                let span = b.t - a.t;
+                let index = self.keys.partition_point(|key| key.t <= t);
+                let left = &self.keys[index - 1];
+                let right = &self.keys[index];
+                let span = right.t - left.t;
                 if span <= f32::EPSILON {
-                    return b.v;
+                    return right.v;
                 }
-                let u = (t - a.t) / span;
-                match a.interpolation {
-                    Interpolation::Step => a.v,
-                    Interpolation::Linear => a.v + (b.v - a.v) * u,
-                    Interpolation::Smooth => hermite(a.v, b.v, a.out_tangent, b.in_tangent, span, u),
+                let along = (t - left.t) / span;
+                match left.interpolation {
+                    Interpolation::Step => left.v,
+                    Interpolation::Linear => left.v + (right.v - left.v) * along,
+                    Interpolation::Smooth => hermite(
+                        left.v,
+                        right.v,
+                        left.out_tangent,
+                        right.in_tangent,
+                        span,
+                        along,
+                    ),
                 }
             }
         }
@@ -566,17 +573,19 @@ impl Gradient {
                 if t >= last.t {
                     return last.color;
                 }
-                let i = self.stops.partition_point(|s| s.t <= t);
-                let a = &self.stops[i - 1];
-                let b = &self.stops[i];
-                let span = b.t - a.t;
+                let index = self.stops.partition_point(|stop| stop.t <= t);
+                let left = &self.stops[index - 1];
+                let right = &self.stops[index];
+                let span = right.t - left.t;
                 if span <= f32::EPSILON {
-                    return b.color;
+                    return right.color;
                 }
-                let u = (t - a.t) / span;
+                let along = (t - left.t) / span;
                 let mut out = [0.0_f32; 4];
-                for (slot, (lo, hi)) in out.iter_mut().zip(a.color.iter().zip(b.color.iter())) {
-                    *slot = lo + (hi - lo) * u;
+                for (slot, (lo, hi)) in
+                    out.iter_mut().zip(left.color.iter().zip(right.color.iter()))
+                {
+                    *slot = lo + (hi - lo) * along;
                 }
                 out
             }
