@@ -1,9 +1,86 @@
 # Somnium Engine — Project Context
 
-> **NEXT:** make a saved `scene.somnium` loadable from the editor. `EditorEvent::LoadScene` still routes to `map::load_map`, which only accepts version-2 map recipes; `scene_schema::load_scene_schema` already restores every registered component, so what is missing is routing by version plus GPU-side reconstruction (meshes from `MeshKind`, terrain sidecars, renderer uploads). See §17.18.6.
+> **Last updated:** 2026-08-23
+> **Current phase:** Phase CONTROL (Northlight) — **COMPLETE 2026-08-23.
+> CONTROL-A through CONTROL-O are in tree; every track is finished, including
+> CONTROL-O's declared stretch.**
 >
-> **Last updated:** 2026-08-17  
-> **Current phase:** Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
+> CONTROL-A has a regenerable source audit, exact two-width surface captures,
+> a measured terrain-thumbnail baseline, and opt-in completeness gates;
+> CONTROL-A1 ships the modifier/input, gesture, traversal and modal-focus seam;
+> CONTROL-A2 ships the command registry.
+> CONTROL-B ships the schema-generated production Details path for all editable
+> fields across every registered schema, generic scoped undo/coalescing, and a
+> zero legacy hand-wiring census. CONTROL-C ships the immutable queried asset
+> database, bounded cancellable jobs, visible-first off-thread cached previews,
+> drawer workflows and the schema Asset picker. CONTROL-D ships the native
+> `.sommat` format and embedded preview header, generated material Details with
+> a live shared sphere, `MaterialComponent` authored `AssetId`/derived renderer
+> slot separation, job-decoded five-slot textures, registry-backed creation,
+> glTF material/embedded-texture siblings, vector assignment and Make Unique.
+> CONTROL-E ships one semantic drop seam covering all seven routes, each
+> exactly one undo step, with acceptance computed before the button comes up.
+> CONTROL-F ships multi-selection as an ordered set with a primary, multi-edit
+> in Details as a schema intersection with mixed rows, the entity clipboard,
+> hide/lock as a real component, typed Outliner filters and a registry-derived
+> context menu. CONTROL-G ships the generated view-mode menu — every one of the
+> 34 shader debug codes and 18 pipeline switches is a named command — plus
+> snapping from settings, gizmo local/pivot/multi-entity transforms, the
+> piercing menu, camera bookmarks and presets, and the statistics overlay.
+> CONTROL-H ships Seam 4: preferences as schema-backed properties with the
+> `default → project.toml → editor.toml → SOMNIUM_*` order, the generated
+> Preferences window, a sparse keybinding override store, recent scenes and the
+> unblocked project picker. At CONTROL-H all 106 `SOMNIUM_*` variables had a
+> verified route; the count is now **108** — 25 schema, 6 setting, 24 command,
+> 53 harness-with-a-reason, **zero unexplained** — still enforced by the same
+> gate, and the two CONTROL-M added went in as routes rather than as
+> exceptions. CONTROL-I ships the Output Log's
+> severity chips, category filter, search, pins, jump-to-source and job panel,
+> with persistent error toasts. CONTROL-J ships scene lifecycle: `LoadScene`
+> routes by format at last, unknown components and fields are retained verbatim
+> instead of being destroyed on the next save, the `.somnium` container carries
+> a header thumbnail the drawer reads without parsing the body, autosave and
+> crash recovery are in, and the undo history is a list you can click into.
+>
+> CONTROL-K makes curves and colour gradients **reflected values** —
+> `FieldType::{Curve, Gradient}` in Seam 1's vocabulary — so a curve gets the
+> generated Details row, the scoped undo entry, the drag-scrub coalescing and
+> the scene round trip for free. Two editor widgets, five presets, an
+> exponential slider response declared per field, and three live consumers: the
+> post-process tone response (into a shader uniform, re-sampled every frame, no
+> refresh button), the particle colour ramp and foliage LOD falloff.
+> CONTROL-L makes the sun analytic (NOAA solar position, Unreal's SunSky
+> choice), the day a cycle of five curve tracks, and the clock reachable from
+> Details, a viewport-context-bar scrub and six preset commands; the sun env
+> vars become Seam 4 overrides of a real system. CONTROL-M ships volumetric
+> clouds whose **entire** authoring surface is one 21-field schema block:
+> Perlin–Worley shape, a paintable weather map, a quarter-res adaptive march
+> with jitter behind a measurable switch, aerial perspective applied to the
+> cloud layer at its own transmittance-weighted depth, a bilateral upsample, and
+> world-XZ cloud shadows folded into `shadow_factor` so terrain, water and
+> meshes read one source. CONTROL-N ships the coverage → precipitation →
+> wetness chain on Lagarde's two time constants, with porosity as a material
+> channel, one global wind vector, rain ripples on water, and precipitation
+> through the existing particle emitter; **one preset takes the scene from clear
+> to storm, sky included, in one undo step.** CONTROL-O ships deferred decals
+> through the *same* froxel binning as the local lights — `cluster.rs` grew a
+> `ClusterVolume` trait rather than a copy — with the `Alt`-drag gesture its
+> exit criterion demanded.
+>
+> **Owed, and stated in each record:** the captures and `.somtime` rows for
+> Tracks 2 and 3 need a windowed GPU run. Until the cloud pass's row exists it
+> ships **off**, and so do the weather driver and the sky — §3 forbids changing
+> what an existing scene draws.
+>
+> **Next: [Phase MORROWIND](dev%20records/phase_MORROWIND.md)** (NetImmerse).
+> §9.1 of the CONTROL plan records the three seam signatures that shipped
+> differently from its §7, which is MORROWIND-A's first reconciliation job.
+> Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
+> layer, motion, elevation, the second theme and the first-impression surfaces.
+> Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.
+> See `dev records/phase_27.md` §18. CONTROL was expanded 2026-08-22 and is
+> re-based on 27, not on 26-Zeta.
+> Previously: Phase DOOM (id Tech) — **A, B, C, E, F in tree** (2026-08-16);
 > D and G–M deferred. Dynamic resolution is opt-in and takes Coastal ground from
 > 38.4 to 19.9 ms; tile binning and the aerial terrain pipeline are built and
 > default **off**. Terrain hex/parallax now default **off** on both maps.
@@ -34,20 +111,205 @@
 > `dev records/phase XV/XV-Zeta_plan.md`.
 >
 > Remaining work (independent tracks):
-> - **Phase CONTROL — Northlight (PLAN ONLY, nothing in tree):**
->   `dev records/phase_CONTROL.md`. The editor-reach phase. Premise: the engine
->   is far ahead of the editor — **96** `SOMNIUM_*` variables with ~18 controls,
->   **106** hand-wired `InspectorField` variants, **12** registered component
->   schemas driving **0** generated inspector rows, and `FieldFlags::EDIT` is
->   defined, documented as "shown in the inspector", and read by no code in the
->   repository. CONTROL-B makes that flag true and 26-J finally lands; C–J add
->   an asset database with thumbnails, material authoring, drag and drop,
->   multi-select, viewport snapping and a view-mode menu, preferences over the
->   env vars, clickable diagnostics, and the **scene-load fix** (the `NEXT:`
->   line above). Tracks 2–3 then add curve editing, time of day, volumetric
->   clouds and weather — each gated on its authoring surface shipping with it.
->   **Start at CONTROL-A** (the reachability audit); do not write a widget
->   first, and do not restart at 26-A.
+> - **Phase CONTROL — Northlight (Track 0 complete):**
+>   `dev records/phase_CONTROL.md` — **expanded and re-audited 2026-08-22**
+>   (880 -> 2,970 lines) against the tree at `209fd07`, after Phase 27 landed.
+>   The editor-reach phase. Premise: the engine is far ahead of the editor, and
+>   the property surface is maintained by hand at a cost of **675 identifiers** —
+>   106 `InspectorField` + 9 `ColorField` + 27 `PostFxToggle` variants, **226
+>   `InspectorHandles` fields** (a 245-line struct of bare `NodeHandle`s), 106
+>   `field_bindings` rows and 201 `IF::` arms in `app.rs`. Against that: **97**
+>   `SOMNIUM_*` variables of which **exactly 18** have a control (79 have none),
+>   **12** registered component schemas driving **0** generated inspector rows,
+>   and `FieldFlags::EDIT` still read by no code in the repository.
+>   **Six seams now, not four** — the 2026-08-22 pass added Seam 5 (`WidgetMessage`
+>   carries no modifier state, so Ctrl+click, Shift-range, precision-scrub and
+>   Alt-drag are *inexpressible*, blocking E/F/G) and Seam 6 (menus, palette,
+>   keybindings and context menus are four unconnected hand-written lists; the
+>   palette is 15 entries dispatched by array index).
+>   **Measured defect:** `thumbnail.rs` claims a 4096^2 source downscales in
+>   single-digit ms and decodes two per frame on the UI thread;
+>   `assets/terrain/` is 60 PNGs / 1.17 GB, and zlib inflate *alone* on the
+>   largest measures **232-260 ms**. Opening that folder is a multi-second freeze
+>   today. §4.2 has the numbers; CONTROL-C has the fix (Fyrox's thread split +
+>   Stride's visible-tile prioritisation + Godot's two-stage cache invalidation).
+>   **New §5.2 lists eleven craft defects** — existing controls behaving worse
+>   than their counterpart in Godot/Unreal/Unity/Blender, each cited to that
+>   tool's source or docs and each assigned to a sub-phase. That is the
+>   "make the current UX professional" half of the phase, made falsifiable.
+>   Sub-phases: **Track 0** A (audit) / A1 (input seam) / A2 (command registry);
+>   **Track 1** B (property seam, 26-J) through J (scene lifecycle, which
+>   closed the long-standing "a saved scene cannot be reopened" gap);
+>   **Track 2** K/L (curves, time of day); **Track 3** M/N/O
+>   (clouds, weather, decals) — each gated on its authoring surface shipping
+>   with it. §6.2 surveys 15 previously undocumented engines; four ideas changed
+>   the plan (rbfx `AttributeScopeHint` for undo granularity, Wicked's
+>   thumbnail-in-the-file-header, Esoterica's `TypeEditingRules`, and
+>   Stride's `IUnloadable` — which exposed a **silent data-loss path**:
+>   `scene_from_json` drops unknown components and fields with a warning, so
+>   load-then-save in a build missing a component destroys that data).
+>   §16 records source confidence and corrects six claims the 2026-08-17 draft
+>   asserted without verifying.
+>   **CONTROL-A audit record (2026-08-23):** `tools/reachability/generate.py`
+>   now generates the environment, component, and hand-wiring tables plus the
+>   CONTROL-A census. The current tree measures **100** `SOMNIUM_*` identifiers
+>   (including four diagnostic-only CONTROL-A startup controls),
+>   **18** legacy editor routes, **12** schemas / **76** editable fields / zero
+>   generated rows, and **676** hand-wired identifiers (the historical 675
+>   moved because `IF::` in `app.rs` is now 202). Two opt-in tests preserve the
+>   intended CONTROL-B failures without breaking ordinary CI: all 76 editable
+>   fields lack a generated row, and `FieldType::{Entity, Asset, Array}` lack a
+>   registered editor. An environment-gated diagnostic startup driver produced
+>   14 UI-inclusive states at exact 1280x720 and 1920x1080, including all six
+>   menus, global overlays, the unsaved-scene modal, populated Details, and the
+>   real terrain Drawer. `CONTROL-A_terrain_open.somtime` measures the shipped
+>   synchronous 60-PNG path: wall-frame mean **157.3965 ms**, maximum
+>   **1085.5605 ms** (89 intervals), versus GPU-frame mean **1.4905 ms**.
+>   Target-specific colour/combo/context popups remain explicitly outside the
+>   baseline because they require an active edit target. **CONTROL-A1 completed
+>   2026-08-23:** `WidgetMessage` now carries one platform-aware modifier
+>   snapshot, `UserInterface` owns cancellable gestures and modal focus return,
+>   and focused Tree/Details rows traverse and scroll into view. **CONTROL-A2
+>   completed 2026-08-23:** one 52-command registry now generates the six menus,
+>   Create/context surfaces, toolbar dispatch and tooltips, shortcuts, palette,
+>   persisted recency and the F1 command index; positional palette dispatch and
+>   the four parallel command lists are gone. The registry lives in
+>   `somnium_ui` because `somnium_core` already depends on UI and the Appendix
+>   A suggestion would create a Cargo cycle.
+> - **Phase MORROWIND — NetImmerse (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_MORROWIND.md` — written 2026-08-23 against `7c0b66f`.
+>   **The engine-half phase**, and the one that **retires §17.6's numbering**
+>   (see §1.3 there: Phase 26 shipped as the editor's IA and Phase 27 as its
+>   paint layer, so the numbers 26/27 are spent and 30–38 are absorbed into
+>   eight codenamed tracks). Premise, measured: Somnium is **113,892 lines over
+>   eleven crates and 85.1% of it is three of them** — renderer 50,206, UI
+>   27,530, core 19,220. Against that, `somnium_audio` is **93 lines** with
+>   `bus.rs`/`listener.rs`/`error.rs` as one-line stubs and `AudioEngine::play`
+>   silently discarding its volume argument; `material/hlms.rs` is a **29-line
+>   stub** under a doc comment describing Ogre's HLMS, so 48 WGSL files /
+>   12,079 lines have **no permutation system and no hot reload**;
+>   `renderer/jobs.rs` is **75 lines** of one rayon helper, so there is **no job
+>   system** with priorities, deadlines or cancellation; and the UI `Primitive`
+>   is **axis-aligned-rect-only with three fixed textures**, so a game cannot
+>   draw a rotated bar, a bezier wire, or its own sprite *at all*.
+>   Zero occurrences of `bone`, `armature`, `navmesh`, `pathfind`, `gamepad`,
+>   `action_map`, `localiz` or `state_machine`.
+>   **Eight tracks / 36 sub-phases:** BALMORA (census, jobs, shaders), VIVEC
+>   (the runtime UI), CONSTRUCTION SET (docking, one graph surface, one
+>   timeline, virtualisation, play-in-editor), HLAALU (prefabs, splines,
+>   rule-driven scattering), SILT STRIDER (cook, residency, world partition,
+>   HLOD/impostors/floating origin), DWEMER (skinning into the visibility
+>   buffer, blend trees, IK), SIXTH HOUSE (navmesh, behaviour trees), RED
+>   MOUNTAIN (virtual shadow maps, GPU particles, a GI tier below ray query,
+>   OIT/SMAA, virtual texturing), ALMSIVI (input actions, save games, audio,
+>   localisation).
+>   **Order is decided (2026-08-23): CONTROL runs first and completes in full —
+>   Tracks 2 and 3 included — then MORROWIND.** Recorded in both documents
+>   (`phase_CONTROL.md` §9.1 and this phase's preamble), which closes CONTROL's
+>   "reasonable stopping point after J" as an exit: **CONTROL-K's curve and
+>   gradient editors are a hard dependency of MORROWIND-H, -L and -AG** and sit
+>   past that point. Six of eight tracks consume CONTROL's seams, and §6.7 is
+>   the explicit non-overlap
+>   table (**this phase builds no curve editor, no gradient editor, no
+>   preferences window, no time of day, no clouds, no weather** — all of those
+>   are CONTROL). MORROWIND-A reconciles §7's seams against what CONTROL
+>   actually shipped, since they were written against CONTROL's plan.
+>   **§6.8 is a second reconnaissance pass over the ~25 repositories in
+>   `example_repo` nobody had opened** — note that several nest one level
+>   (`ogre-next-master/ogre-next-master/`, `fyrox/Fyrox-master/`,
+>   `bevy/bevy-main/`, …), which is why the first pass under-reported the tree.
+>   Seven findings changed the plan: **Stride's `Stride.Graphics.Regression`
+>   golden-image testing** (Somnium has 945 tests and **zero image assertions** —
+>   now GHOSTFENCE's first row), Panda3D's **pipeline cycling** (recorded as the
+>   design for multi-threaded recording, §14.8, deliberately not adopted),
+>   **Babylon's six node editors on one substrate** (a stronger §6.2, and it adds
+>   node-geometry and node-particle graphs), **Babylon's `guiEditor` + Fyrox's
+>   `ui_scene`** (which forced a 35th sub-phase, **MORROWIND-M2 — the GUI layout
+>   editor**, because a UI framework with no layout editor is half-shipped),
+>   `bevy_terrain/big_space.rs` vs `terra/softdouble.glsl` (the floating-origin
+>   decision, two Rust references that disagree), `terra/rshader`'s
+>   dynamic/static shader split (MORROWIND-C, already working in Rust), and
+>   **Luanti's `staticobject`** (entities serialise into their cell on unload —
+>   the streaming question the plan had left implicit). Ren'Py's `rollback.py`
+>   informs play-in-editor state restore; Defold's four standalone cookers and
+>   `liveupdate` inform the cook.
+>   **§6.9 is a third pass — Korge, s&box, and the web research that had failed.
+>   It changed a frozen constraint: wgpu 30.0.0 released 2026-07-01** and adds
+>   `EXPERIMENTAL_MESH_SHADER` (fully supported on Vulkan — and Somnium's
+>   visibility buffer is *already* meshlet-based), `MULTI_DRAW_INDIRECT_COUNT`,
+>   `ACCELERATION_STRUCTURE_BINDING_ARRAY`, WGSL `enable` extensions, and two
+>   breaking changes (`push_constant` → **`immediate`** across 48 shaders;
+>   subgroup sizes move from `Limits` to `AdapterInfo`). **MORROWIND-A2 is the
+>   bump, taken alone**, and it probes every flag on real hardware because a
+>   changelog is not a measurement. Ray tracing stays `EXPERIMENTAL_RAY_QUERY`
+>   only — naga has ray *queries*, not RT pipelines — which confirms Somnium's
+>   existing choice. Also from the web pass, each a lead to confirm rather than
+>   a fact: `oxidized_navigation`/`polyanya`/`landmass` for navmesh (**caveat:
+>   `oxidized_navigation` wants `parry3d` colliders and Somnium uses Jolt**),
+>   `cosmic-text` now shaping via `harfrust` (so Phase 27's deferred
+>   `cosmic-text` question has moved), `vk-video` decoding straight into a
+>   `wgpu::Texture`, and **Godot 4.5 shipping AccessKit screen-reader support**,
+>   which makes MORROWIND-I precedented rather than speculative. Korge's
+>   `korge-ipc` (a memory-mapped shared framebuffer plus an event socket, six
+>   files) gives MORROWIND-N a third design — out-of-process play — beside
+>   snapshotting and mutation logging. s&box's `Sandbox.Hotload/`
+>   (`InstanceUpgrader.cs`, `UpdateReferences.cs`) is why **§14.11 now warns that
+>   shader and asset hot reload are easy only because their live state is a
+>   handle table**, and code reload is a different, much harder feature.
+>   **Both `phase_CONTROL.md` and `phase_MORROWIND.md` gained an Appendix A
+>   (2026-08-23) so either can be handed to a cold session or a different
+>   model.** Each carries a code-reading order over the real tree with line
+>   counts, Rust and WGSL sketches written against the *actual* types in
+>   `reflect.rs` / `primitive.rs`, a file-by-file change map, and a
+>   "how to tell this is genuinely finished" table. CONTROL's A.2 walks
+>   `WaterComponent::roughness` end to end — schema → generated panel →
+>   one `EditorEvent` → one `app.rs` handler → scope-aware undo → disk — which is
+>   the fastest way to understand Seam 1. MORROWIND's A.5 names the three
+>   integrations that carry real risk (skinning vs the visibility buffer, the
+>   shaper vs Phase 27's frozen snapping rule, prefabs vs `scene_schema`).
+>   **One cross-document conflict is resolved in both files:** CONTROL Seam 2's
+>   `JobRegistry` in `somnium_core` and MORROWIND-B's `somnium_jobs` are the
+>   same system — MORROWIND **promotes** CONTROL's rather than writing a second,
+>   and CONTROL should keep its surface narrow and name every job at the call
+>   site to make that a rename rather than a rewrite.
+>   §9.3 names the honest cut if the whole thing cannot be run: **eleven
+>   sub-phases** (Track 0, then D+E+G, U+V, Q+R, AE+AG), which closes seven of
+>   the nine rows in §5.1's capability table. §16 records source confidence and
+>   states plainly that **the web-research pass did not complete**, so the
+>   document contains no third-party version claims and every wgpu-dependent
+>   sub-phase opens with a capability probe instead. **Start at MORROWIND-A.**
+> - **Phase KENSHI — OGRE (PLAN ONLY, nothing in tree):**
+>   `dev records/phase_KENSHI.md` — written 2026-08-23. **The scale phase, and
+>   it is third: CONTROL → MORROWIND → KENSHI.** Premise: after MORROWIND every
+>   feature will have been accepted on a *single-feature* `.somtime` row on the
+>   two shipped maps, and **nobody will ever have run the frame that has skinned
+>   crowds, streaming cells, GPU particles and navmesh agents in it at once.**
+>   Four tracks: **THE HUB** (fixed-timestep determinism with seeded RNG and
+>   replayable input traces; **`.somtime` v2**, which adds a scale axis and a
+>   computed shape classification while still parsing every v1 file — the DOOM-A
+>   baselines stay byte-identical; the sweep harness; a seeded scale rig),
+>   **BEEP** (the profiler finished — §4.2 measures what it lacks today: **no
+>   memory accounting at all**, no real CPU depth, no job-queue visibility, no
+>   capture-to-file, no per-system attribution, no remote client; Panda3D's
+>   `pstatclient` is the model for the last), **WORLD'S END** (the sweep, whose
+>   deliverable is a publishable `limits.md` naming, per axis, the number, the
+>   subsystem that broke first, and which of three shapes — cliff, slope or
+>   curve — it was), and **SKELETON** (the fixes: multi-threaded recording via
+>   Panda3D pipeline cycling — MORROWIND §14.8 parked it as "a phase of its
+>   own", this is it — plus MORROWIND-W2's pose task graph and MORROWIND-AD's
+>   virtual texturing).
+>   **Judging rule: no optimisation is authorized until a measurement names it.**
+>   Every Track 3 sub-phase is marked `BLOCKED` until the sweep indicts it, on
+>   the DOOM precedent that shipping tile binning and aerial terrain **default
+>   off** because they measured slower was worth more than either feature.
+>   **Structural caveat, stated in the document rather than hidden:** unlike
+>   CONTROL and MORROWIND it cannot open with a measured audit, because the tree
+>   it measures does not exist yet — half of §4 is tagged `[P]` (predicted) and
+>   KENSHI-A's entire job is to replace those with `[M]`. Grounded on what *is*
+>   measured today: `profiler.rs`'s API, `timing.rs`'s v1 format and env vars,
+>   and `jobs.rs:3`'s own admission that **"record still happens on the render
+>   thread."** **Successor named in §14.1: packaging and distribution** — no
+>   plan in this repository yet produces a distributable artifact.
 > - **Phase DOOM — id Tech (A, B, C, E, F in tree 2026-08-16):**
 >   `dev records/phase_DOOM.md` §15 for status, `dev records/phase DOOM/README.md`
 >   for every number. **Shipped:** the profiler clock + `.somtime` timing harness

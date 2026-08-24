@@ -22,10 +22,11 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet, Engine,
-    EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState, KeyCode, LightComponent,
-    LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
-    SimulationState, Transform, WorldTransform, camera_view_from_world, propagate_transforms,
+    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
+    EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState,
+    KeyCode, LightComponent, LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent,
+    MeshKind, Name, Parent, SimulationState, Transform, WorldTransform, camera_view_from_world,
+    propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -502,7 +503,8 @@ impl VoxelTerrain {
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: -1,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         );
 
@@ -826,7 +828,7 @@ impl HelloGame {
                     render_ctx,
                     ctx.world,
                     ctx.physics,
-                    result.preset,
+                    result.preset.clone(),
                     water_component,
                 );
             }
@@ -919,7 +921,8 @@ impl GameApp for HelloGame {
                                     index_count: node.index_count,
                                 },
                                 MaterialComponent {
-                                    id: node.material_id,
+                                    asset: somnium_asset::database::AssetId::NONE,
+                                    runtime_id: node.material_id,
                                 },
                                 Name::new(&node.entity_name),
                                 WorldTransform::identity(),
@@ -1316,7 +1319,10 @@ impl GameApp for HelloGame {
                                     index_offset: n.index_offset,
                                     index_count: n.index_count,
                                 },
-                                MaterialComponent { id: n.material_id },
+                                MaterialComponent {
+                                    asset: somnium_asset::database::AssetId::NONE,
+                                    runtime_id: n.material_id,
+                                },
                             ));
                         }
                     }
@@ -1357,6 +1363,20 @@ impl GameApp for HelloGame {
                 "entries": list_assets_dir(),
             }),
         );
+
+        // CONTROL-A capture harness: select one real, already-spawned entity
+        // by its displayed name so the populated Details surface is captured
+        // without inventing fixture data or synthesising an Outliner click.
+        if let Ok(name) = std::env::var("SOMNIUM_AUDIT_SELECT_ENTITY") {
+            *ctx.selected_entity = ctx.world.entities().find(|&entity| {
+                ctx.world
+                    .get::<Name>(entity)
+                    .is_some_and(|n| n.as_str() == name)
+            });
+            if ctx.selected_entity.is_none() {
+                tracing::warn!("SOMNIUM_AUDIT_SELECT_ENTITY={name} did not match an entity");
+            }
+        }
     }
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
@@ -1574,6 +1594,34 @@ impl GameApp for HelloGame {
 
     fn on_update(&mut self, ctx: &mut EngineContext) {
         let dt = ctx.dt();
+
+        // CONTROL-F: the editor asked to frame something. The camera lives
+        // here, so the engine hands over a centre and a radius and this is
+        // where it becomes a pose — keeping the current viewing direction so
+        // `F` reframes rather than reorienting.
+        // CONTROL-G: an exact pose — a view preset or a recalled bookmark —
+        // is applied before a focus request, because it says *both* where to
+        // be and which way to look, so a focus in the same frame would only
+        // half-overwrite it.
+        if let Some((position, yaw, pitch)) = ctx.take_camera_pose() {
+            self.camera.position = position;
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch;
+        }
+        if let Some((centre, radius)) = ctx.take_camera_focus() {
+            let direction = (self.camera.position - centre).normalize_or_zero();
+            let direction = if direction == Vec3::ZERO {
+                Vec3::new(0.0, 0.4, 1.0).normalize()
+            } else {
+                direction
+            };
+            self.camera.position = centre + direction * (radius * 3.0);
+            let look = (centre - self.camera.position).normalize_or_zero();
+            if look != Vec3::ZERO {
+                self.camera.yaw = look.z.atan2(look.x).to_degrees();
+                self.camera.pitch = look.y.clamp(-1.0, 1.0).asin().to_degrees();
+            }
+        }
 
         // Stop rolls the shared simulation clock back to zero. Restore the
         // demonstrator vessel at that point, while ordinary editor preview
@@ -1834,7 +1882,8 @@ impl GameApp for HelloGame {
                         emissive: [0.0; 3],
                         emissive_map: -1,
                         terrain_index: -1,
-                        _pad: [0.0; 2],
+                        porosity: 0.5,
+                        _pad: 0.0,
                     },
                 );
 
@@ -1881,7 +1930,10 @@ impl GameApp for HelloGame {
                             index_offset: alloc.index_offset,
                             index_count: alloc.index_count,
                         },
-                        MaterialComponent { id: default_mat },
+                        MaterialComponent {
+                            asset: somnium_asset::database::AssetId::NONE,
+                            runtime_id: default_mat,
+                        },
                     ));
 
                     if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
@@ -1921,7 +1973,18 @@ impl GameApp for HelloGame {
                 let mat_col = archetype
                     .column_index(ComponentId::of::<MaterialComponent>())
                     .unwrap();
+                // CONTROL-F: hidden entities are skipped here rather than in
+                // the renderer, because "hidden" is an authoring state and the
+                // renderer has no business knowing about the Outliner. Most
+                // archetypes carry no flags column at all, so this costs one
+                // lookup per archetype, not per entity.
+                let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
                 for row in 0..archetype.len() {
+                    if let Some(col) = flags_col
+                        && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
+                    {
+                        continue;
+                    }
                     let wt = unsafe { archetype.column(wt_col).get::<WorldTransform>(row) };
                     let mesh = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
                     let material =
@@ -1931,13 +1994,13 @@ impl GameApp for HelloGame {
                         casts_shadow: true,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,
-                            material.id as u16,
+                            material.runtime_id as u16,
                             entity.index(),
                         ),
                         vertex_offset: mesh.vertex_offset,
                         index_offset: mesh.index_offset,
                         index_count: mesh.index_count,
-                        material_id: material.id,
+                        material_id: material.runtime_id,
                         transform: wt.0,
                     });
                 }
@@ -2307,7 +2370,9 @@ fn spawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
     });
 
     let mut player_scripts = somnium_script::attachment::ScriptSet::new();
-    player_scripts.attach(somnium_script::attachment::ScriptAttachment::new(controller));
+    player_scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+        controller,
+    ));
     let player = ctx.world.spawn((
         Transform::from_translation(centre),
         WorldTransform::identity(),
@@ -2318,7 +2383,9 @@ fn spawn_player(game: &mut HelloGame, ctx: &mut EngineContext) {
     ));
 
     let mut camera_scripts = somnium_script::attachment::ScriptSet::new();
-    camera_scripts.attach(somnium_script::attachment::ScriptAttachment::new(camera_script));
+    camera_scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+        camera_script,
+    ));
     let camera = ctx.world.spawn((
         Transform::from_translation(Vec3::Y * PLAYER_EYE_HEIGHT),
         WorldTransform::identity(),
@@ -2396,10 +2463,7 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
     //
     // Imported from disk so the file watcher picks up edits: change the
     // walk speed in the `.luau` and it takes effect without a restart.
-    for (path, slot) in [
-        (CONTROLLER_SCRIPT_PATH, 0),
-        (CAMERA_SCRIPT_PATH, 1),
-    ] {
+    for (path, slot) in [(CONTROLLER_SCRIPT_PATH, 0), (CAMERA_SCRIPT_PATH, 1)] {
         match ctx.scripts.import_script_file(std::path::Path::new(path)) {
             Ok(id) => {
                 if slot == 0 {
@@ -2434,7 +2498,10 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
                 index_offset: alloc.index_offset,
                 index_count: alloc.index_count,
             },
-            MaterialComponent { id: material },
+            MaterialComponent {
+                asset: somnium_asset::database::AssetId::NONE,
+                runtime_id: material,
+            },
             Name::new("Scripted Rotator"),
             WorldTransform::identity(),
             MeshKind::Cube,
@@ -2452,9 +2519,10 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
     };
 
     let mut attachment = somnium_script::attachment::ScriptAttachment::new(asset);
-    attachment
-        .properties
-        .insert("spinSpeed".into(), somnium_script::value::ScriptValue::F64(2.0));
+    attachment.properties.insert(
+        "spinSpeed".into(),
+        somnium_script::value::ScriptValue::F64(2.0),
+    );
     if let Some(set) = ctx
         .world
         .get_mut::<somnium_script::attachment::ScriptSet>(entity)
@@ -2491,7 +2559,8 @@ fn spawn_procedural_scene(
             emissive: [0.0; 3],
             emissive_map: -1,
             terrain_index: -1,
-            _pad: [0.0; 2],
+            porosity: 0.5,
+            _pad: 0.0,
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -2510,7 +2579,8 @@ fn spawn_procedural_scene(
             emissive: [0.0; 3],
             emissive_map: -1,
             terrain_index: -1,
-            _pad: [0.0; 2],
+            porosity: 0.5,
+            _pad: 0.0,
         },
     );
 
@@ -2538,7 +2608,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: mat_blue },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: mat_blue,
+        },
         Name::new("Floor"),
         WorldTransform::identity(),
         MeshKind::Cube,
@@ -2562,7 +2635,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: mat_red },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: mat_red,
+        },
         Name::new("Player"),
         WorldTransform::identity(),
         MeshKind::Cube,
@@ -2588,7 +2664,8 @@ fn spawn_procedural_scene(
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: -1,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         )
     };
@@ -2599,7 +2676,10 @@ fn spawn_procedural_scene(
             index_offset: cube_alloc.index_offset,
             index_count: cube_alloc.index_count,
         },
-        MaterialComponent { id: pbr_mat },
+        MaterialComponent {
+            asset: somnium_asset::database::AssetId::NONE,
+            runtime_id: pbr_mat,
+        },
         Name::new("MetalCube"),
         WorldTransform::identity(),
         MeshKind::Cube,
@@ -2635,12 +2715,44 @@ fn list_assets_dir() -> Vec<serde_json::Value> {
 // Entry point
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
+/// Exact logical window extent for deterministic UI evidence.
+///
+/// Ordinary runs never consult a second configuration source. The override is
+/// audit-only, explicit, and intentionally refuses zero or malformed extents.
+fn audit_window_size() -> Option<(u32, u32)> {
+    let raw = std::env::var("SOMNIUM_AUDIT_WINDOW_SIZE").ok()?;
+    let (width, height) = raw.split_once(['x', 'X'])?;
+    let size = (width.trim().parse().ok()?, height.trim().parse().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
 fn main() -> Result<(), somnium_core::EngineError> {
     let config = EngineConfig {
         window_title: "Somnium Engine".into(),
-        window_size: (1280, 720),
+        window_size: audit_window_size().unwrap_or((1280, 720)),
         target_fps: Some(60),
         ..Default::default()
     };
     Engine::run(config, HelloGame::new())
+}
+
+#[cfg(test)]
+mod audit_harness_tests {
+    #[test]
+    fn audit_window_extent_parser_accepts_the_evidence_sizes() {
+        // Keep environment mutation out of a parallel test: this verifies the
+        // same grammar without setting a process-global variable.
+        let parse = |raw: &str| {
+            let (width, height) = raw.split_once(['x', 'X'])?;
+            let size = (
+                width.trim().parse::<u32>().ok()?,
+                height.trim().parse::<u32>().ok()?,
+            );
+            (size.0 > 0 && size.1 > 0).then_some(size)
+        };
+        assert_eq!(parse("1280x720"), Some((1280, 720)));
+        assert_eq!(parse("1920X1080"), Some((1920, 1080)));
+        assert_eq!(parse("0x1080"), None);
+        assert_eq!(parse("wide"), None);
+    }
 }

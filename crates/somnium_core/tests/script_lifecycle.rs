@@ -108,10 +108,18 @@ impl Harness {
         self.sync();
         let time = self.time();
         let mut services = HostServices::default();
-        self.host
-            .fixed_update(&mut self.world, time, &InputSnapshot::default(), &mut services);
-        self.host
-            .update(&mut self.world, time, &InputSnapshot::default(), &mut services);
+        self.host.fixed_update(
+            &mut self.world,
+            time,
+            &InputSnapshot::default(),
+            &mut services,
+        );
+        self.host.update(
+            &mut self.world,
+            time,
+            &InputSnapshot::default(),
+            &mut services,
+        );
         self.step += 1;
     }
 
@@ -347,12 +355,10 @@ fn execution_order_decides_who_writes_last() {
         let mut set = harness.world.get::<ScriptSet>(entity).cloned().unwrap();
         let a = set.get_mut(first).unwrap();
         a.execution_order = 10;
-        a.properties
-            .insert("speed".into(), ScriptValue::F64(60.0));
+        a.properties.insert("speed".into(), ScriptValue::F64(60.0));
         let b = set.get_mut(second).unwrap();
         b.execution_order = -10;
-        b.properties
-            .insert("speed".into(), ScriptValue::F64(600.0));
+        b.properties.insert("speed".into(), ScriptValue::F64(600.0));
         harness.world.insert_component(entity, set).unwrap();
     }
 
@@ -615,7 +621,9 @@ fn a_reload_that_does_not_compile_leaves_the_old_instance_running() {
         harness.frame();
     }
 
-    let broken = harness.host.reload_script(asset, "test.luau", "return Script.define({");
+    let broken = harness
+        .host
+        .reload_script(asset, "test.luau", "return Script.define({");
     assert!(broken.is_err(), "a syntax error must not be accepted");
     assert!(broken.unwrap_err().has_errors());
 
@@ -646,8 +654,15 @@ fn a_hundred_reload_cycles_do_not_grow_the_instance_count() {
     harness.frame();
 
     for cycle in 0..100 {
-        let text = if cycle % 2 == 0 { COUNTER_V2 } else { COUNTER_V1 };
-        harness.host.reload_script(asset, "test.luau", text).unwrap();
+        let text = if cycle % 2 == 0 {
+            COUNTER_V2
+        } else {
+            COUNTER_V1
+        };
+        harness
+            .host
+            .reload_script(asset, "test.luau", text)
+            .unwrap();
         harness.frame();
         assert_eq!(
             harness.host.runtime().live_instances(),
@@ -690,7 +705,10 @@ fn an_attachment_whose_asset_is_not_loaded_is_reported_and_retried() {
     assert_eq!(harness.host.runtime().live_instances(), 0);
 
     // Importing the script later is all it takes; the attachment was kept.
-    harness.host.load_script(ghost, "late.luau", CHATTY).unwrap();
+    harness
+        .host
+        .load_script(ghost, "late.luau", CHATTY)
+        .unwrap();
     harness.frame();
     assert_eq!(harness.host.runtime().live_instances(), 1);
     assert!(harness.world.is_alive(entity));

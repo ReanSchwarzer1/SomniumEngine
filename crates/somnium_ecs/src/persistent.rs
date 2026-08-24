@@ -145,11 +145,7 @@ impl World {
     /// # Errors
     ///
     /// [`EcsError::DeadEntity`] if the handle is stale.
-    pub fn set_persistent_id(
-        &mut self,
-        entity: Entity,
-        id: PersistentId,
-    ) -> Result<(), EcsError> {
+    pub fn set_persistent_id(&mut self, entity: Entity, id: PersistentId) -> Result<(), EcsError> {
         self.insert_component(entity, id)
     }
 
@@ -206,7 +202,11 @@ mod tests {
         let second = world.ensure_persistent_id(e).unwrap();
         assert_eq!(first, second, "ensure must not re-mint");
         assert_eq!(world.persistent_id(e), Some(first));
-        assert_eq!(world.get::<Marker>(e), Some(&Marker), "migration kept Marker");
+        assert_eq!(
+            world.get::<Marker>(e),
+            Some(&Marker),
+            "migration kept Marker"
+        );
     }
 
     #[test]

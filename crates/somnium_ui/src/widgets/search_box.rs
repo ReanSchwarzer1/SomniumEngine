@@ -28,15 +28,17 @@ pub struct SearchBox {
 }
 
 impl Control for SearchBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(available.x.max(80.0), theme::ROW_HEIGHT)
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        let paint = crate::style::input(
-            crate::style::VisualState::rest().focused(self.focused),
-        );
+        let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
         ctx.push_paint(b, &paint);
         let ic = Rect::new(b.x + 4.0, b.y + 3.0, 16.0, 16.0);
         let (uv, tex) = IconId::Search.draw_quad(ic);
@@ -103,7 +105,7 @@ impl Control for SearchBox {
                     ));
                     msg.handled = true;
                 }
-                WidgetMessage::KeyDown(crate::message::KeyCode::Backspace) => {
+                WidgetMessage::KeyDown(crate::message::KeyCode::Backspace, _) => {
                     self.query.pop();
                     emit.push(UiMessage::new(
                         widget.handle,
@@ -112,7 +114,7 @@ impl Control for SearchBox {
                     ));
                     msg.handled = true;
                 }
-                WidgetMessage::KeyDown(crate::message::KeyCode::Escape) => {
+                WidgetMessage::KeyDown(crate::message::KeyCode::Escape, _) => {
                     self.query.clear();
                     self.focused = false;
                     emit.push(UiMessage::new(

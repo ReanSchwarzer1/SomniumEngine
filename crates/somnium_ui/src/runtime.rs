@@ -80,10 +80,7 @@ impl UiCanvas {
         let logical_w = self.ui.screen_size.x.max(1.0);
         let logical_h = self.ui.screen_size.y.max(1.0);
         let physical = window.inner_size();
-        let (phys_w, phys_h) = (
-            physical.width.max(1),
-            physical.height.max(1),
-        );
+        let (phys_w, phys_h) = (physical.width.max(1), physical.height.max(1));
 
         let pass = self
             .pass

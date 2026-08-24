@@ -14,6 +14,11 @@ pub enum CreateKind {
     Particle,
     Terrain,
     VoxelTerrain,
+    /// CONTROL-L/M/N. One entity carrying the scene's day cycle, sky and
+    /// weather. One row rather than three because they are one authored
+    /// object: coverage drives precipitation drives wetness, and splitting
+    /// them across three entities would make that chain a wiring exercise.
+    Environment,
 }
 
 impl CreateKind {
@@ -32,252 +37,33 @@ impl CreateKind {
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
+            Self::Environment => "Environment",
         }
     }
 }
 
-/// Which TRS component a NumericField targets (for SetInspectorValue).
-///
-/// `Hash` so Phase 26-Zeta-G can key the per-field revert baseline by it. The
-/// variant set and its meaning are unchanged; this is not a contract change.
+/// Renderer-owned terrain controls which cannot be represented as ECS fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InspectorField {
-    PosX,
-    PosY,
-    PosZ,
-    RotX,
-    RotY,
-    RotZ,
-    ScaleX,
-    ScaleY,
-    ScaleZ,
-    // Light properties (Phase 13E) — only meaningful when the selected entity
-    // has a `LightComponent`. Angles are edited in degrees.
-    LightIntensity,
-    LightRange,
-    LightInnerAngle,
-    LightOuterAngle,
-    // Light colour (Phase 22C). Linear RGB, edited per channel — the sun's
-    // colour is the main lever on the mood of a scene and was not reachable
-    // from the editor at all.
-    LightColorR,
-    LightColorG,
-    LightColorB,
-    /// Colour temperature in Kelvin (Phase 24E). Drives the light's hue.
-    LightColorTemperature,
-    /// Directional moonlight illuminance in lux (Phase 25M-2).
-    LightMoonIntensity,
-    LightSourceRadius,
-    LightAreaWidth,
-    LightAreaHeight,
-    /// Phase DOOM-E: camera distance past which terrain takes the aerial
-    /// pipeline, in metres.
-    TerrainAerialDistance,
-    // Camera (Phase DOOM-F) — only for the Camera singleton.
-    /// Frame time the dynamic-resolution controller aims at, in milliseconds.
-    CameraDynResTargetMs,
-    /// Lowest resolution scale it may choose, entered as a **percentage**.
-    CameraDynResFloor,
-    // Post-processing (Phase 15A1) — only for entities with a
-    // `PostProcessComponent`.
-    /// Manual exposure value at ISO 100 (Phase 24A). Only used when auto
-    /// exposure is off.
-    PostExposure,
-    /// Stops added on top of the metered exposure. Negative darkens — this is
-    /// the control for "auto-exposure is right but I want it a stop down".
-    PostExposureCompensation,
-    /// Bloom strength (Phase 24T).
-    PostBloomIntensity,
-    /// Focus distance in metres (Phase 24Z).
-    PostFocusDistance,
-    /// Colour grading (Phase 24Y).
-    PostTemperature,
-    /// Green/magenta axis, the other half of a white balance.
-    PostTint,
-    PostContrast,
-    PostSaturation,
-    /// Lift/gamma/gain (Phase 24Y): shadows, midtones and highlights. These
-    /// are the three handles a colourist actually reaches for, and until now
-    /// they existed in the component with no way to touch them.
-    PostLift,
-    PostGamma,
-    PostGain,
-    /// Film grain (Phase 24Z).
-    PostGrain,
-    PostVignetteStrength,
-    PostCaStrength,
-    /// Scene-wide indirect-light strength (Phase 22C).
-    PostIblIntensity,
-    /// Fog extinction per metre (Phase 24U). 0 leaves aerial perspective only.
-    PostFogDensity,
-    /// Metres over which fog density falls to 1/e, so it pools in valleys.
-    PostFogHeight,
-    /// Henyey-Greenstein asymmetry; positive scatters forward toward the sun.
-    PostFogAsymmetry,
-    /// CAS (Phase 24AC): 0 = least ringing, 1 = maximum.
-    PostCasSharpness,
-    /// How far the sharpened image is blended in. 0 is off.
-    PostCasStrength,
-    /// Shutter fraction for motion blur (Phase 24Z). 0.5 is a 180 degree
-    /// shutter, the film default.
-    PostMotionBlurShutter,
-    /// Strength of the traced indirect diffuse (Phase 24L). Every other effect
-    /// has an amount dial; this one was the odd toggle out.
-    PostGiIntensity,
-    PostCacheIntensity,
-    PostCacheCell,
-    PostSpecRough,
-    PostPathBounces,
-    PostProbeIntensity,
-    PostShaftIntensity,
-    /// Physical camera (Phase 24A). Only meaningful with
-    /// [`PostFxToggle::PhysicalCamera`] on; they also set the DoF blur, which
-    /// is why aperture matters even when exposure is manual.
-    PostAperture,
-    /// Shutter speed as its denominator: 100 means 1/100 s.
-    PostShutter,
-    PostIso,
-    /// GTAO (Phase 24I): sampling radius in metres, and how hard the occlusion
-    /// is applied. Radius is the one that decides whether AO reads as contact
-    /// darkening or as a broad dirty smear.
-    PostAoRadius,
-    PostAoIntensity,
-    /// FSR RCAS sharpness, 0..=1.
-    PostFsrSharpness,
-    // Terrain layers (Phase 17C) — only for entities with a `TerrainComponent`.
-    /// Which splat layer the paint brush writes, 0..=31.
-    TerrainPaintLayer,
-    /// World-space tiling of the currently selected paint layer.
-    TerrainTile0,
-    /// Phase 25H: multiplies every layer's authored relief depth. 0 switches
-    /// parallax occlusion off.
-    TerrainRelief,
-    /// Global wetness 0..1 (XV-H).
-    TerrainWetness,
-    /// Unique-colour / macro blend strength 0..1 (XV-Zeta).
-    TerrainMacroStrength,
-    /// Debug visualisation code (same numbers as `SOMNIUM_SHADOW_DEBUG`).
-    TerrainDebugView,
-    /// CDLOD morph start as a 0..1 fraction of the LOD range (Phase 25C).
-    TerrainMorphStart,
-    // First-class lake body settings (Phase IV-C).
-    WaterSurface,
-    WaterMaxDepth,
-    WaterClarity,
-    WaterAmplitude,
-    WaterRoughness,
-    WaterSsrStrength,
-    WaterRtReflect,
-    WaterReflectDebug,
-    WaterWaveLengthA,
-    WaterWaveLengthB,
-    WaterWaveSpeed,
-    WaterWaveSteepness,
-    WaterWindSpeed,
-    WaterFoamDecay,
-    WaterFoamThreshold,
-    WaterSpectrumBlend,
-    WaterEdgeScale,
-    WaterAnisotropy,
-    WaterCausticStrength,
-    // Vessel buoyancy (Phase IV). Visible when the selected entity has a
-    // `BuoyantVessel`.
-    VesselBuoyancy,
-    VesselDrag,
-    VesselAngularDrag,
-    VesselThrust,
-    VesselDraft,
-    VesselRighting,
-    // Foliage (Phase 17C) — only for entities with a `FoliageComponent`.
-    FoliageDensity,
-    FoliageSeed,
-    FoliageSlope,
-    FoliageLayer,
-    FoliageScaleMin,
-    FoliageScaleMax,
-    /// Metres from the camera past which foliage stops casting shadows
-    /// (Phase 24AE). Nearer than the draw distance on purpose.
-    FoliageShadowDistance,
-    FoliageCullDistance,
-    FoliageLodDistance,
-    FoliageImpostorDistance,
-    WaterWaveDirAX,
-    WaterWaveDirAZ,
-    WaterWaveDirBX,
-    WaterWaveDirBZ,
-    WaterAbsorptionMag,
-    WaterScatteringMag,
+pub enum TerrainToolField {
+    AerialDistance,
+    PaintLayer,
+    TileScale,
+    Relief,
+    Wetness,
+    MacroStrength,
+    DebugView,
+    MorphStart,
 }
 
-/// Colour property a swatch / picker writes (Phase 26-F Iris).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorField {
-    Light,
-    WaterDeep,
-    WaterShallow,
-    WaterEdge,
-    WaterAbsorption,
-    WaterScattering,
-    ParticleStart,
-    ParticleEnd,
-    MaterialBase,
-}
-
-/// Which post-processing effect a toggle click targets (Phase 15A1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PostFxToggle {
-    Vignette,
-    ChromaticAberration,
-    Fxaa,
-    /// Meter the scene each frame instead of using a fixed EV100.
-    AutoExposure,
-    /// Banded cel shading in place of PBR.
-    CelShading,
-    /// Bloom (Phase 24T).
-    Bloom,
-    /// Screen-space ambient occlusion (Phase 24I).
-    Gtao,
-    /// Depth of field (Phase 24Z).
-    DepthOfField,
-    /// Temporal anti-aliasing (Phase 24F).
-    Taa,
-    /// Ray-traced direct lighting (Phase 24K).
-    Restir,
-    /// Ray-traced indirect diffuse (Phase 24L).
-    RestirGi,
-    /// Contrast adaptive sharpening (Phase 24AC).
-    Cas,
-    /// Motion blur (Phase 24Z, on 24AD's velocity).
-    MotionBlur,
-    /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
-    Volumetrics,
-    /// Shadow-test the fog per froxel, which is what draws light shafts.
-    LightShafts,
-    /// Drive exposure from aperture/shutter/ISO instead of a raw EV100
-    /// (Phase 24A). With this off the three camera rows do nothing.
-    PhysicalCamera,
-    /// Percentage-closer soft shadows in the shading pass. Default on.
-    Pcss,
-    /// Screen-space contact shadows. Default on.
-    ContactShadows,
-    /// Ray-traced water reflections (Phase VV — Halcyon).
-    RtReflect,
-    /// Ray-traced water refraction (Phase VV+1). Default off.
-    RtRefract,
-    /// World-space radiance cache (Phase 24M). Default off.
-    WorldCache,
-    /// Scene-wide ray-traced specular (Phase 24N). Default off.
-    SpecularGi,
-    /// Offline path tracer (Phase 24O). Default off.
-    PathTracer,
-    /// Mesh-SDF cone trace (Phase 24P). Default off.
-    MeshSdf,
-    /// Probe/env fallback into the world cache (Phase 24Q). Default off.
-    Probes,
-    /// Analytic UV gradients (Phase 25N). Default on.
-    AnalyticGrad,
-    /// AMD FSR 3 temporal upscale. Default on; owns AA while enabled.
-    Fsr,
+/// Brush/runtime controls which deliberately remain outside component schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FoliageBrushField {
+    Density,
+    Radius,
+    MaxSlope,
+    Kind,
+    ScaleMin,
+    ScaleMax,
 }
 
 // ── Phase 16-D: scripting ───────────────────────────────────────────────────
@@ -349,13 +135,150 @@ pub struct ScriptInspectorState {
 }
 
 /// High-level editor commands produced by the native UI layer.
+/// How a click combines with what is already selected.
+///
+/// Named rather than passed as two booleans because the three cases are
+/// mutually exclusive and the two-boolean form makes `command()+Shift`
+/// look like a fourth state that nothing implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// A plain click. Replaces the selection.
+    Replace,
+    /// `command()`-click. Adds or removes one entity.
+    Toggle,
+    /// `Shift`-click. Selects the inclusive range from the anchor.
+    Range,
+}
+
+/// One Outliner row, as core sees it.
+///
+/// Replaced the four-tuple in CONTROL-F. Typed filters, badges and the
+/// script-error dot all need facts the tuple had nowhere to put, and adding a
+/// fifth and sixth positional field would have made the call site unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlinerRow {
+    /// Entity index.
+    pub id: u32,
+    /// Display name.
+    pub name: String,
+    /// Depth in the hierarchy, for indentation.
+    pub depth: u8,
+    /// Whether this row has children to expand.
+    pub has_children: bool,
+    /// `EditorFlags::hidden`.
+    pub hidden: bool,
+    /// `EditorFlags::locked`.
+    pub locked: bool,
+    /// Any attached script failed to compile.
+    pub script_error: bool,
+    /// Lowercase component tags — `light`, `mesh`, `terrain`, `script`, … —
+    /// which is what makes `type:light` a filter rather than a name search.
+    pub tags: Vec<&'static str>,
+}
+
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
+    /// One completed editor drop. The core maps this semantic operation to
+    /// exactly one command/undo record.
+    CompleteDrop(crate::drag_drop::DropRequest),
     SelectEntity(Option<u32>),
+    /// A modifier-aware Outliner or viewport click. The core owns the row
+    /// order, so it — not the widget — resolves what a `Shift` range means.
+    ModifySelection {
+        id: u32,
+        mode: SelectionMode,
+    },
+    /// Replace the whole selection at once: marquee, paste, "select children".
+    SelectEntities(Vec<u32>),
     CreateEntity(CreateKind),
     DeleteSelected,
     DuplicateSelected,
+    /// Copy the selection and everything beneath it into the entity clipboard.
+    CopySelected,
+    /// Paste the entity clipboard under the primary selection.
+    PasteClipboard,
+    /// Select every entity in the scene.
+    SelectAll,
+    /// Write one Seam-4 setting. Core refuses it if the environment has taken
+    /// the field over, and says which variable did.
+    SetSetting {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        value: somnium_ecs::reflect::ReflectValue,
+    },
+    /// Restore every setting to its declared default.
+    ResetAllSettings,
+    /// Open a source file at a line in the configured external editor, or
+    /// reveal it in the OS file browser when none is configured.
+    OpenSource {
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    /// Put text on the system clipboard.
+    CopyText(String),
+    /// Move to a position in the undo history. `0` is the state before
+    /// anything happened.
+    JumpToHistory(usize),
+    /// Publish the undo history so the panel can draw it.
+    RequestHistory,
+    /// Write a setting addressed by field *name*.
+    ///
+    /// The by-`FieldId` form is what a generated row emits, because it already
+    /// holds the schema address. A hand-built control like the snap cluster
+    /// knows the name and not the id, and resolving the name in core is
+    /// cheaper than making every such control carry a schema lookup.
+    SetSettingByName {
+        component: somnium_ecs::reflect::StableId,
+        field_name: &'static str,
+        value: somnium_ecs::reflect::ReflectValue,
+    },
+    /// Flip a boolean setting addressed by field name.
+    ToggleSetting {
+        component: somnium_ecs::reflect::StableId,
+        field_name: &'static str,
+    },
+    /// Ask for a different project folder — the 27-G picker, unblocked.
+    OpenProjectPicker,
+    /// Select a named debug visualisation. `"lit"` returns to the ordinary
+    /// image, which is why the code that used to mean "off" needs no special
+    /// case.
+    SetDebugView(&'static str),
+    /// Flip one named renderer pipeline switch.
+    ToggleRenderSwitch(&'static str),
+    /// Point the editor camera down a world axis: 0 top, 1 front, 2 side,
+    /// 3 back to a perspective three-quarter view.
+    ViewPreset(u8),
+    /// Store the current camera pose in slot 1..=9.
+    SetCameraBookmark(u8),
+    /// Recall slot 1..=9.
+    RecallCameraBookmark(u8),
+    /// Orbit around the selection rather than around the camera itself.
+    ToggleOrbitSelection,
+    /// `command()`+right-click: list everything selectable under the cursor.
+    OpenPiercingMenu,
+    /// Choose one entity from the piercing menu.
+    PickPierced(u32),
+    /// `Esc` during a viewport rubber-band: drop it, change nothing.
+    CancelMarquee,
+    /// Toggle one Outliner badge. `lock` picks the column; `value` is `None`
+    /// for a plain toggle and `Some` for a drag that is setting a whole run.
+    ToggleEntityFlag {
+        entity: u32,
+        lock: bool,
+        value: Option<bool>,
+    },
+    /// Frame the selection with the editor camera.
+    FocusSelection,
+    /// Begin an in-place rename of the primary selection.
+    RenameSelected,
+    /// Commit a rename. `entity` is an entity index, as everywhere else in
+    /// this enum.
+    RenameEntity {
+        entity: u32,
+        name: String,
+    },
     Undo,
     Redo,
     ToggleShadingMode,
@@ -374,11 +297,45 @@ pub enum EditorEvent {
     SaveScene,
     NewScene,
     LoadScene(String),
+    /// The one schema-driven component property write path.
+    SetComponentField {
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+        value: ReflectValue,
+        gesture: GestureId,
+        live: bool,
+    },
+    /// CONTROL-L: scrub the day cycle's clock from the viewport context bar.
+    ///
+    /// Addressed by *hour* rather than by `(entity, component, field)` because
+    /// the context bar has no selection to address through — the day cycle is a
+    /// scene singleton and the core is the only thing that knows which entity
+    /// carries it. The core still routes this through the one generic field
+    /// write, so it undoes exactly like a Details edit of the same field.
+    SetTimeOfDayHour {
+        hour: f32,
+        live: bool,
+    },
+    /// CONTROL-M: apply a named sky preset to the scene's Sky component.
+    ///
+    /// One event carrying an id rather than one per preset: the core owns what
+    /// the name means, and adding a fifth sky must not add a fifth variant
+    /// here, a fifth arm in the dispatcher and a fifth row in the menu.
+    SetSkyPreset(&'static str),
+    /// CONTROL-N: apply a named weather state to the scene's Weather
+    /// component. The transition itself is the driver's job, not this event's.
+    SetWeatherPreset(&'static str),
     /// `live` marks an in-progress drag-scrub: apply it to the scene, but do
     /// not record an undo entry yet. The gesture ends with one non-live event
     /// carrying the final value, and that is what becomes a single undo step.
-    SetInspectorValue {
-        field: InspectorField,
+    SetTerrainToolValue {
+        field: TerrainToolField,
+        value: f32,
+        live: bool,
+    },
+    SetFoliageBrushValue {
+        field: FoliageBrushField,
         value: f32,
         live: bool,
     },
@@ -428,7 +385,6 @@ pub enum EditorEvent {
     SelectFoliageKind(u8),
     /// Set a post-processing effect on the selected Post Processing entity.
     /// Carrying the checkbox value makes UI synchronization idempotent.
-    SetPostFx(PostFxToggle, bool),
     /// Cycle the tone-mapping curve (AgX → ACES → Reinhard).
     CycleTonemapper,
     /// Set the tone-mapping curve by index (0 AgX, 1 ACES, 2 Reinhard).
@@ -447,17 +403,8 @@ pub enum EditorEvent {
     /// File > Import Model — opens a native file picker and imports a glTF/GLB
     /// model into the scene at the world origin (Phase 19B).
     ImportModel,
-    /// Live vs commit matches [`SetInspectorValue`]. `rgba` is linear.
-    SetInspectorColor {
-        field: ColorField,
-        rgba: [f32; 4],
-        live: bool,
-    },
-    /// Restore the colour captured when the picker opened; no undo entry.
-    CancelInspectorColor {
-        field: ColorField,
-        rgba: [f32; 4],
-    },
+    /// Cancel a job advertised by the status bar.
+    CancelJob(u64),
     ToggleWaterUnderwater,
     /// Title-bar close — same path as the native window X.
     CloseWindow,
@@ -489,7 +436,7 @@ pub enum EditorEvent {
         enabled: bool,
     },
     /// Edit one exported number. `live` follows the same convention as
-    /// [`EditorEvent::SetInspectorValue`]: a drag is applied but not
+    /// Reflected property scrubs apply live but do not
     /// recorded, and the gesture's final value is one undo step.
     SetScriptNumber {
         /// Position in the authored list.
@@ -532,6 +479,11 @@ pub enum EditorEvent {
         /// Leaf name, as typed. A missing `.luau` extension is added.
         name: String,
     },
+    /// Create an editable `.sommat` asset in `parent`.
+    CreateContentMaterial {
+        parent: String,
+        name: String,
+    },
     /// Rename a file or folder. `path` is absolute.
     RenameContentItem {
         /// What to rename.
@@ -546,4 +498,25 @@ pub enum EditorEvent {
     /// launching whatever is associated with the extension would be a
     /// worse experience than saying where the file is.
     ShowContentItemInFolder(String),
+    /// Open an asset in its configured OS editor.
+    EditContentAsset(String),
+    /// Copy an asset beside itself and commit the new reference through the
+    /// same reflected undo path.
+    MakeAssetUnique {
+        source: String,
+        entity: Entity,
+        component: StableId,
+        field: FieldId,
+    },
+    /// Assign one material to a whole selection as one undo step.
+    AssignMaterial {
+        entities: Vec<Entity>,
+        asset: somnium_asset::database::AssetId,
+    },
 }
+use somnium_ecs::Entity;
+use somnium_ecs::reflect::{FieldId, ReflectValue, StableId};
+
+/// Identity shared by all live updates and the final commit of one gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GestureId(pub u64);

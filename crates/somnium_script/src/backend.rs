@@ -408,7 +408,10 @@ impl fmt::Display for ScriptError {
                 Ok(())
             }
             Self::Deadline { budget } => {
-                write!(f, "script exceeded its {budget:?} budget and was interrupted")
+                write!(
+                    f,
+                    "script exceeded its {budget:?} budget and was interrupted"
+                )
             }
             Self::OutOfMemory { limit } => {
                 write!(f, "script exceeded its {limit} byte memory ceiling")
@@ -418,7 +421,9 @@ impl fmt::Display for ScriptError {
             Self::NoSuchCallback(callback) => {
                 write!(f, "module defines no `{}`", callback.script_name())
             }
-            Self::HostPanic { message } => write!(f, "engine panic inside a script call: {message}"),
+            Self::HostPanic { message } => {
+                write!(f, "engine panic inside a script call: {message}")
+            }
         }
     }
 }
@@ -717,11 +722,8 @@ pub trait ScriptBackend: Send {
     /// # Errors
     ///
     /// Whatever the script raised.
-    fn import_state(
-        &mut self,
-        id: ScriptInstanceId,
-        state: ScriptValue,
-    ) -> Result<(), ScriptError>;
+    fn import_state(&mut self, id: ScriptInstanceId, state: ScriptValue)
+    -> Result<(), ScriptError>;
 
     /// Destroy an instance and release everything it owns.
     fn unload(&mut self, id: ScriptInstanceId);
@@ -813,7 +815,11 @@ mod tests {
         let (resolved, dropped) = schema().resolve_properties(&authored);
 
         assert_eq!(resolved["speed"], ScriptValue::F64(11.0));
-        assert_eq!(resolved["target"], ScriptValue::Entity(None), "default fills in");
+        assert_eq!(
+            resolved["target"],
+            ScriptValue::Entity(None),
+            "default fills in"
+        );
         assert!(dropped.is_empty());
     }
 
@@ -855,7 +861,10 @@ mod tests {
             column: 7,
             message: "unused local".into(),
         });
-        assert!(!diagnostics.has_errors(), "a warning must not block a reload");
+        assert!(
+            !diagnostics.has_errors(),
+            "a warning must not block a reload"
+        );
 
         diagnostics.push(Diagnostic {
             severity: Severity::Error,
@@ -866,7 +875,11 @@ mod tests {
             message: "expected `end`".into(),
         });
         assert!(diagnostics.has_errors());
-        assert!(diagnostics.to_string().contains("a.luau:9:1: expected `end`"));
+        assert!(
+            diagnostics
+                .to_string()
+                .contains("a.luau:9:1: expected `end`")
+        );
     }
 
     #[test]
@@ -885,8 +898,14 @@ mod tests {
     #[test]
     fn the_default_budget_is_stated_in_frame_terms() {
         let budget = Budget::default();
-        assert!(budget.per_call < budget.per_phase, "one call cannot own the phase");
-        assert!(budget.per_phase < Duration::from_millis(17), "must fit inside 60 Hz");
+        assert!(
+            budget.per_call < budget.per_phase,
+            "one call cannot own the phase"
+        );
+        assert!(
+            budget.per_phase < Duration::from_millis(17),
+            "must fit inside 60 Hz"
+        );
         assert!(budget.max_commands > 0);
         assert!(budget.memory_bytes > 0);
     }

@@ -39,6 +39,9 @@ const UNDERWATER: &str = include_str!("../src/shaders/underwater.wgsl");
 const CENSUS: &str = include_str!("../src/shaders/census.wgsl");
 const PIXEL_CLASS: &str = include_str!("../src/shaders/pixel_class.wgsl");
 const CLASSIFY: &str = include_str!("../src/shaders/classify.wgsl");
+const CLOUDS: &str = include_str!("../src/shaders/clouds.wgsl");
+const CLOUDS_NOISE: &str = include_str!("../src/shaders/clouds_noise.wgsl");
+const CLOUDS_COMPOSITE: &str = include_str!("../src/shaders/clouds_composite.wgsl");
 
 /// Parse and validate one module, panicking with naga's own diagnostic.
 fn check(label: &str, source: &str) {
@@ -70,6 +73,20 @@ fn the_shading_module_validates() {
     );
 }
 
+/// Phase CONTROL-M. Three modules: the noise generators stand alone, the
+/// march is concatenated after the atmosphere exactly as `CloudPass::new`
+/// builds it, and the composite stands alone. The march is the one that
+/// matters — it reuses `sample_transmittance`, `sample_multiscatter` and
+/// `ray_hits_ground`, and this is what proves the clouds and the sky read the
+/// same atmosphere rather than each carrying a copy.
+#[test]
+fn the_cloud_modules_validate() {
+    check("clouds_noise", CLOUDS_NOISE);
+    check("clouds", &format!("{ATMOSPHERE}
+{CLOUDS}"));
+    check("clouds_composite", CLOUDS_COMPOSITE);
+}
+
 #[test]
 fn the_census_module_validates() {
     // Phase DOOM-B. Also the check that the census reads `instances`,
@@ -84,7 +101,10 @@ fn the_classify_module_validates() {
     // Phase DOOM-C. Shares `pixel_class.wgsl` with the census above, which is
     // the structural guarantee that a tile is routed by the same test that
     // counted it.
-    check("classify", &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"));
+    check(
+        "classify",
+        &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"),
+    );
 }
 
 #[test]

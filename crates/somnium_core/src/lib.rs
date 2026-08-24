@@ -46,35 +46,57 @@
 
 /// Core application lifecycle and event loop management.
 pub mod app;
+pub mod autosave;
 pub mod character;
+pub mod clipboard;
+/// Phase CONTROL-O: deferred decals.
+pub mod decal;
 pub mod config;
 pub mod context;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod jobs;
 pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
 pub mod map;
 pub mod reflect_registry;
-pub mod scene_serial;
+/// The `.somnium` container: a framed header the Content Drawer can read
+/// without parsing the scene, and the three-format routing that goes with it.
+///
+/// Re-exported rather than defined here — it lives in `somnium_asset` because
+/// that crate owns file containers and because the drawer's preview generator
+/// needs it, and the dependency edge runs this way.
+pub use somnium_asset::scene_file;
+
 pub mod scene_schema;
+pub mod scene_serial;
 pub mod script_bridge;
 pub mod script_cook;
 pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
+/// Phase CONTROL-M: the sky and its cloud layer.
+pub mod sky;
+/// Phase CONTROL-N: weather and the wetness it leaves.
+pub mod weather;
+pub mod selection;
+pub mod settings;
 pub mod sun;
 pub mod time;
+/// Phase CONTROL-L: the day cycle.
+pub mod time_of_day;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
 pub use app::{Engine, GameApp};
+pub use character::RigidBodyComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
-    CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand, EntitySnapshot,
-    ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
+    AssignMaterialCmd, CreateEntityCmd, CreateLandscapeCmd, DeleteEntityCmd, EditorCommand,
+    EntitySnapshot, ReparentCmd, SetLightCmd, SetNameCmd, SetTransformCmd, UndoStack,
 };
 pub use error::EngineError;
 pub use event::{EngineEvent, InputState};
@@ -87,7 +109,6 @@ pub use map::{
     spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
-pub use character::RigidBodyComponent;
 pub use script_host::{HostServices, ScriptHost, ScriptLogLine, SyncReport};
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;
@@ -115,8 +136,10 @@ impl somnium_ecs::Component for MeshComponent {}
 /// ECS Component for a material.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MaterialComponent {
-    /// Index into the renderer's material pool.
-    pub id: u32,
+    /// Durable authored reference written to the scene.
+    pub asset: somnium_asset::database::AssetId,
+    /// Renderer pool slot reconstructed from `asset`; never serialized.
+    pub runtime_id: u32,
 }
 impl somnium_ecs::Component for MaterialComponent {}
 
@@ -467,7 +490,7 @@ impl somnium_ecs::Component for TerrainComponent {}
 /// which would flood the outliner and the undo stack — the same reason voxel
 /// chunks stay out of the world. They are submitted as draw commands instead,
 /// which also means they inherit the Phase 15 culling pipeline for free.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FoliageComponent {
     /// Off by default: an empty terrain is the neutral thing to create, and
     /// scattering is a deliberate act.
@@ -498,6 +521,14 @@ pub struct FoliageComponent {
     /// the indirect arguments entirely, which the GPU cull cannot do since the
     /// draw has to exist before it can be rejected.
     pub cull_distance: f32,
+    /// CONTROL-K: instance scale as a function of normalised distance from the
+    /// camera, where `0` is the camera and `1` is [`Self::cull_distance`].
+    ///
+    /// Empty — the default — means no falloff at all, which is exactly the
+    /// behaviour before this field existed. A curve ending at zero shrinks
+    /// ground cover out instead of popping it, which is the whole reason
+    /// `cull_distance` is a hard edge worth softening.
+    pub lod_falloff: somnium_ecs::curve::Curve,
     /// Phase 24AE: painted instances beyond this distance from the camera are
     /// still drawn, but stop casting shadows.
     ///
@@ -537,6 +568,7 @@ impl Default for FoliageComponent {
             scale_max: 1.5,
             radius: 45.0,
             cull_distance: 120.0,
+            lod_falloff: somnium_ecs::curve::Curve::empty(),
             // A third of the draw distance. Grass shadows stop reading as
             // individual blades within a few metres and as texture within a
             // few tens; past that they are noise that costs four cascades.
@@ -547,6 +579,82 @@ impl Default for FoliageComponent {
         }
     }
 }
+/// Per-entity editor state: hidden in the viewport, locked against selection.
+///
+/// A component rather than a side table, so it serialises with the scene, undoes
+/// through the ordinary reflected path, and survives a copy/paste — all three of
+/// which a `HashSet<Entity>` on the editor would have got wrong. Absent means
+/// "visible and unlocked", which is why the overwhelming majority of entities
+/// carry no such component at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditorFlags {
+    /// Not submitted for drawing. Purely an authoring state: play and the
+    /// runtime ignore it.
+    pub hidden: bool,
+    /// Cannot be picked, dragged or transformed in the viewport. The Outliner
+    /// still selects it, because otherwise a locked object becomes unreachable.
+    pub locked: bool,
+}
+
+/// Scene data this build does not understand, kept verbatim so saving cannot
+/// destroy it — CONTROL-J, following Stride's `IUnloadable`.
+///
+/// Before this, `scene_from_json` skipped an unregistered component with a
+/// warning and dropped an unknown field with a warning. A load-then-save in a
+/// build missing a component therefore **destroyed that component's data
+/// permanently**, and the only sign was a line in a log nobody was reading.
+///
+/// The rule is simple and total: anything the registry cannot name is stored
+/// as opaque JSON on the entity it came from, and written back byte-for-byte
+/// on the next save. A build that gains the component later reads its own data
+/// again; a build that never gains it still does not corrupt anybody else's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RetainedUnknowns {
+    /// Whole components, keyed by their stable id: the untouched
+    /// `{ "version": …, "fields": … }` body exactly as it was read.
+    pub components: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Fields of *known* components that the schema no longer declares, keyed
+    /// `component.field`. A renamed field survives a round trip through the
+    /// build that renamed it.
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl somnium_ecs::Component for RetainedUnknowns {}
+
+impl RetainedUnknowns {
+    /// Whether anything is being carried.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty() && self.fields.is_empty()
+    }
+
+    /// Record a whole component this build cannot name.
+    pub fn keep_component(&mut self, name: &str, body: serde_json::Value) {
+        self.components.insert(name.to_owned(), body);
+    }
+
+    /// Record one field of a component this build *can* name.
+    pub fn keep_field(&mut self, component: &str, field: &str, value: serde_json::Value) {
+        self.fields.insert(format!("{component}.{field}"), value);
+    }
+
+    /// The retained fields belonging to `component`, as `(field, value)`.
+    pub fn fields_of<'a>(
+        &'a self,
+        component: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a serde_json::Value)> + 'a {
+        self.fields.iter().filter_map(move |(key, value)| {
+            // Split at the *last* dot: a stable id is dotted
+            // (`somnium.Name`) and a field name is not, so splitting at the
+            // first one would read the owner as `somnium`.
+            let (owner, field) = key.rsplit_once('.')?;
+            (owner == component).then_some((field, value))
+        })
+    }
+}
+
+impl somnium_ecs::Component for EditorFlags {}
+
 impl somnium_ecs::Component for FoliageComponent {}
 
 /// Marks an entity as a voxel-terrain world (Phase 14 / 13E follow-up).
@@ -618,7 +726,13 @@ pub fn normalized_from_camera_speed(speed: f32) -> f32 {
 ///
 /// The engine pushes these to the renderer each frame; if no such entity
 /// exists, the renderer's own defaults (everything off) apply.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// No longer `Copy`: CONTROL-K's [`response_curve`] is a heap-backed
+/// [`Curve`](somnium_ecs::curve::Curve). The two call sites that copied this
+/// component now clone it, once per frame, which is a `Vec` of at most a few
+/// keys — measurably nothing against a pass that reads it into a uniform.
+///
+/// [`response_curve`]: PostProcessComponent::response_curve
+#[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessComponent {
     /// Manual exposure value at ISO 100 (Phase 24A).
     ///
@@ -662,6 +776,14 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
+    /// CONTROL-K: authored tone response, applied per channel after the fixed
+    /// grade. An empty curve — the default — leaves grading exactly as Phase
+    /// 24Y left it, so this field costs nothing until somebody uses it.
+    ///
+    /// The domain and the range are both `0..=1`: the input is the graded LDR
+    /// channel and the output is what replaces it. An identity ramp is a
+    /// no-op, which is what makes "reset" and "off" the same gesture.
+    pub response_curve: somnium_ecs::curve::Curve,
     /// Bloom (Phase 24T).
     pub bloom_enabled: bool,
     /// Strength of the bloom contribution; zero disables its visible effect.
@@ -826,6 +948,7 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            response_curve: somnium_ecs::curve::Curve::empty(),
             // Deterministic audit switch; the editor checkbox remains the
             // runtime source of truth after startup.
             bloom_enabled: std::env::var("SOMNIUM_BLOOM").as_deref() != Ok("0"),
@@ -1416,12 +1539,30 @@ pub struct ParticleEmitter {
     pub size_start: f32,
     /// Particle size at end of life.
     pub size_end: f32,
-    /// Linear RGBA color at birth.
-    pub color_start: [f32; 4],
-    /// Linear RGBA color at end of life.
-    pub color_end: [f32; 4],
+    /// CONTROL-K: linear RGBA over the particle's life, `0` at birth and `1`
+    /// at death.
+    ///
+    /// Replaces the `color_start`/`color_end` pair, which could express a
+    /// straight line between two colours and nothing else — no flash, no
+    /// fade-in-then-out, no hold. A two-stop ramp reproduces the old pair
+    /// exactly, so the default is that pair.
+    pub color_over_life: somnium_ecs::curve::Gradient,
     /// Downward gravity acceleration (m/s²).
     pub gravity: f32,
+    /// Phase CONTROL-N: a constant velocity added to every particle at birth.
+    ///
+    /// The cone spawn is right for a fountain and useless for rain, which
+    /// falls in one direction and is *sheared* by wind. One vector turns the
+    /// same emitter into both, which is the plan's "precipitation through the
+    /// existing particle emitter" rather than a second particle system.
+    pub velocity_bias: [f32; 3],
+    /// Phase CONTROL-N: half-extents of a box particles spawn in, around the
+    /// emitter's origin.
+    ///
+    /// Zero is the point emitter every existing scene has. Non-zero makes the
+    /// emitter a volume, which is what rain needs: a camera-anchored box
+    /// overhead, so precipitation exists where the player is and nowhere else.
+    pub spawn_extents: [f32; 3],
 
     // ── Runtime state (not user-facing) ──────────────────────────────────────
     /// Live particles owned by this emitter.
@@ -1440,8 +1581,12 @@ impl Default for ParticleEmitter {
             spread_angle: 0.8,
             size_start: 1.0,
             size_end: 0.2,
-            color_start: [1.0, 0.4, 0.1, 1.0],
-            color_end: [0.2, 0.0, 0.0, 0.0],
+            color_over_life: somnium_ecs::curve::Gradient::ramp(
+                [1.0, 0.4, 0.1, 1.0],
+                [0.2, 0.0, 0.0, 0.0],
+            ),
+            velocity_bias: [0.0; 3],
+            spawn_extents: [0.0; 3],
             gravity: 1.0,
             particles: Vec::new(),
             spawn_accum: 0.0,
@@ -1511,9 +1656,20 @@ pub fn simulate_particles(
             let r2 = ((seed >> 17) & 0xFFFF) as f32 / 65535.0 * 2.0 * std::f32::consts::PI;
             let theta = r1 * spread;
             let dir = glam::Vec3::new(theta.sin() * r2.cos(), theta.cos(), theta.sin() * r2.sin());
+            // CONTROL-N: a spawn volume and a constant velocity, both zero for
+            // every emitter authored before this existed.
+            let extents = glam::Vec3::from(emitter.spawn_extents);
+            let jitter = if extents == glam::Vec3::ZERO {
+                glam::Vec3::ZERO
+            } else {
+                let r3 = ((seed >> 5) & 0xFFFF) as f32 / 65535.0;
+                let r4 = ((seed >> 41) & 0xFFFF) as f32 / 65535.0;
+                let r5 = ((seed >> 23) & 0xFFFF) as f32 / 65535.0;
+                (glam::Vec3::new(r3, r4, r5) * 2.0 - glam::Vec3::ONE) * extents
+            };
             emitter.particles.push(ParticleState {
-                position: origin,
-                velocity: dir * speed,
+                position: origin + jitter,
+                velocity: dir * speed + glam::Vec3::from(emitter.velocity_bias),
                 age: 0.0,
                 lifetime,
             });
@@ -1522,18 +1678,16 @@ pub fn simulate_particles(
         // ── 3. Emit GPU instances ─────────────────────────────────────────────
         let size_start = emitter.size_start;
         let size_end = emitter.size_end;
-        let color_start = emitter.color_start;
-        let color_end = emitter.color_end;
+        // CONTROL-K: the ramp is sampled per particle rather than baked into a
+        // table, because an emitter's particle count is the small number here
+        // and a table would need invalidating whenever the ramp was edited —
+        // which is every frame of a drag.
+        let ramp = &emitter.color_over_life;
 
         for p in &emitter.particles {
             let frac = (p.age / p.lifetime).clamp(0.0, 1.0);
             let size = size_start + (size_end - size_start) * frac;
-            let color = [
-                color_start[0] + (color_end[0] - color_start[0]) * frac,
-                color_start[1] + (color_end[1] - color_start[1]) * frac,
-                color_start[2] + (color_end[2] - color_start[2]) * frac,
-                color_start[3] + (color_end[3] - color_start[3]) * frac,
-            ];
+            let color = ramp.evaluate(frac);
             gpu_particles.push(GpuParticle {
                 position: p.position.to_array(),
                 size,

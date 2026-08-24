@@ -25,6 +25,14 @@ use glam::Vec2;
 pub enum SliderMessage {
     /// Emitted while dragging and on click-to-set. Value is in `0..=1`.
     Value(f32),
+    /// Emitted once when a drag ends, so a consumer that needs one undo entry
+    /// per gesture can tell the difference between "still moving" and "done".
+    ///
+    /// Added by CONTROL-L: the context bar's time scrub is the first slider
+    /// whose every intermediate value is applied but only whose final value
+    /// should be recorded. `Value` keeps its old meaning exactly, so existing
+    /// consumers are unaffected.
+    Committed(f32),
     /// Sent to the widget to update its position without emitting.
     SetValue(f32),
 }
@@ -84,7 +92,12 @@ impl Control for Slider {
             None,
         );
         ctx.push_primitive(
-            Primitive::inset_shadow(track, [track_r; 4], t.inset.input.blur, t.inset.input.color.bytes()),
+            Primitive::inset_shadow(
+                track,
+                [track_r; 4],
+                t.inset.input.blur,
+                t.inset.input.color.bytes(),
+            ),
             None,
         );
 
@@ -94,9 +107,12 @@ impl Control for Slider {
         if filled_w > 0.0 {
             let g = t.gradient.rail_accent;
             ctx.push_primitive(
-                Primitive::fill(Rect::new(b.x, mid_y - track_r, filled_w, TRACK_H), g.from.bytes())
-                    .with_radius(track_r)
-                    .with_gradient(g.to.bytes(), g.axis),
+                Primitive::fill(
+                    Rect::new(b.x, mid_y - track_r, filled_w, TRACK_H),
+                    g.from.bytes(),
+                )
+                .with_radius(track_r)
+                .with_gradient(g.to.bytes(), g.axis),
                 None,
             );
         }
@@ -145,7 +161,7 @@ impl Control for Slider {
                 ));
                 msg.handled = true;
             }
-            WidgetMessage::MouseMove { pos } => {
+            WidgetMessage::MouseMove { pos, .. } => {
                 if self.dragging {
                     let v = Self::value_at(bounds, pos.x);
                     if (v - self.value).abs() > f32::EPSILON {
@@ -160,6 +176,13 @@ impl Control for Slider {
                 }
             }
             WidgetMessage::MouseUp { .. } => {
+                if self.dragging {
+                    emit.push(UiMessage::new(
+                        widget.handle,
+                        MessageDirection::FromWidget,
+                        SliderMessage::Committed(self.value),
+                    ));
+                }
                 self.dragging = false;
                 msg.handled = true;
             }

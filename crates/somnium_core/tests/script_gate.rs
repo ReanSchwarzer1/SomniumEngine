@@ -10,8 +10,8 @@
 //! Running it in `hello_engine` proves it renders. Running it here proves
 //! it is correct, on every commit, without a window.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use somnium_core::script_host::{HostServices, ScriptHost};
 use somnium_core::{Name, Transform};
@@ -60,7 +60,10 @@ impl Gate {
         let forces = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&forces);
         host.set_force_router(Box::new(move |_world, _physics, _entity, force, _mode| {
-            assert!(force.is_finite(), "a non-finite force must never get this far");
+            assert!(
+                force.is_finite(),
+                "a non-finite force must never get this far"
+            );
             counter.fetch_add(1, Ordering::Relaxed);
         }));
 
@@ -72,7 +75,10 @@ impl Gate {
         ));
         let attachment = ScriptAttachment::new(asset);
         let instance = attachment.instance;
-        world.get_mut::<ScriptSet>(entity).unwrap().attach(attachment);
+        world
+            .get_mut::<ScriptSet>(entity)
+            .unwrap()
+            .attach(attachment);
 
         Self {
             host,
@@ -184,11 +190,7 @@ fn the_gate_script_applies_a_force_only_while_the_key_is_held() {
     for _ in 0..5 {
         gate.frame(&InputSnapshot::default());
     }
-    assert_eq!(
-        gate.forces.load(Ordering::Relaxed),
-        0,
-        "no key, no force"
-    );
+    assert_eq!(gate.forces.load(Ordering::Relaxed), 0, "no key, no force");
 
     let held = InputSnapshot {
         keys_down: vec![u32::from(b'W')],
@@ -247,7 +249,9 @@ fn the_gate_script_emits_an_event_and_hears_it() {
 
     let lines = gate.log();
     assert!(
-        lines.iter().any(|line| line.starts_with("heard rotator.started #")),
+        lines
+            .iter()
+            .any(|line| line.starts_with("heard rotator.started #")),
         "the event a script emits must come back to it with a sequence number: {lines:?}"
     );
 }
@@ -308,7 +312,10 @@ fn the_gate_scripts_declared_properties_are_readable_without_running_it() {
     assert_eq!(spin.default, ScriptValue::F64(1.5));
     assert_eq!(spin.min, Some(0.0));
     assert_eq!(spin.max, Some(20.0));
-    assert!(spin.description.is_some(), "the editor draws this as a tooltip");
+    assert!(
+        spin.description.is_some(),
+        "the editor draws this as a tooltip"
+    );
 }
 
 #[test]
@@ -316,10 +323,10 @@ fn an_authored_property_overrides_the_scripts_own_default() {
     let mut gate = Gate::new();
     {
         let mut set = gate.world.get::<ScriptSet>(gate.entity).cloned().unwrap();
-        set.get_mut(gate.instance).unwrap().properties.insert(
-            "spinSpeed".into(),
-            ScriptValue::F64(0.0),
-        );
+        set.get_mut(gate.instance)
+            .unwrap()
+            .properties
+            .insert("spinSpeed".into(), ScriptValue::F64(0.0));
         gate.world.insert_component(gate.entity, set).unwrap();
     }
 

@@ -71,6 +71,20 @@ export type Vec3 = vector
 --- Linear RGB.
 export type Color = vector
 
+--- CONTROL-K. One key of an authored curve. Read-only from a script: the
+--- editor authors curves, and a script that assigned a table back would be
+--- rejected by the field's declared type rather than silently accepted.
+export type CurveKey = {
+    t: number,
+    v: number,
+    inTangent: number,
+    outTangent: number,
+    interpolation: string,
+}
+
+--- CONTROL-K. One stop of an authored colour ramp. Read-only, as above.
+export type GradientStop = { t: number, color: Color, alpha: number }
+
 ";
 
 /// `ctx`, the input helpers and the command surface.
@@ -190,7 +204,11 @@ fn write_components(out: &mut String, registry: &TypeRegistry) {
             schema.stable_id.as_str(),
             schema.version
         );
-        let _ = writeln!(out, "export type {} = {{", luau_type_name(schema.stable_id.as_str()));
+        let _ = writeln!(
+            out,
+            "export type {} = {{",
+            luau_type_name(schema.stable_id.as_str())
+        );
         for field in &schema.fields {
             if !field.flags.contains(FieldFlags::SCRIPT_READ) {
                 continue;
@@ -267,6 +285,11 @@ fn luau_field_type(ty: &FieldType) -> String {
         // engine accepts any integer in range, not only the spellings.
         FieldType::Enum(names) => format!("number --[[ {} ]]", names.join(" | ")),
         FieldType::Array(inner) => format!("{{ {} }}", luau_field_type(inner)),
+        // CONTROL-K. Curves and gradients cross as read-only arrays of key
+        // tables; see `convert.rs`. The declaration says so in the type so a
+        // script author is not led into trying to assign one back.
+        FieldType::Curve => "{ CurveKey }".into(),
+        FieldType::Gradient => "{ GradientStop }".into(),
     }
 }
 

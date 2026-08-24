@@ -51,7 +51,12 @@ struct WaterFrameData {
     current_time: f32,
     previous_time: f32,
     history_valid: f32,
-    _pad: f32,
+    /// Phase CONTROL-N: rain-ripple strength, `0..1`.
+    ///
+    /// A per-frame global rather than a per-body value, because rain falls on
+    /// the whole scene. It lands in what was padding, so the uniform's size and
+    /// every offset in it are unchanged.
+    rain_ripple: f32,
 }
 
 pub struct WaterPass {
@@ -73,6 +78,9 @@ pub struct WaterPass {
     history_valid: bool,
     pending_view_proj: Option<(glam::Mat4, f32)>,
     last_simulation: [f32; 4],
+    /// Phase CONTROL-N: rain-ripple strength for this frame, `0..1`. Zero
+    /// leaves the surface exactly as Phase IV left it.
+    pub rain_ripple: f32,
     pub spectrum: crate::pass::water_spectrum::WaterSpectrumPass,
 }
 
@@ -653,6 +661,7 @@ impl WaterPass {
             history_valid: false,
             pending_view_proj: None,
             last_simulation: [0.0; 4],
+            rain_ripple: 0.0,
             spectrum,
         }
     }
@@ -795,7 +804,7 @@ impl WaterPass {
                 current_time,
                 previous_time: self.previous_time,
                 history_valid: f32::from(u8::from(self.history_valid)),
-                _pad: 0.0,
+                rain_ripple: self.rain_ripple,
             }),
         );
 

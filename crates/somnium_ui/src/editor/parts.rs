@@ -20,7 +20,6 @@ use crate::{
     widgets::{
         border::BorderBuilder,
         button::ButtonBuilder,
-        check_box::CheckBoxBuilder,
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         image::ImageBuilder,
         menu::MenuBuilder,
@@ -33,79 +32,6 @@ use crate::{
 // Glob the crate root for the shared handle bundles and name tables, and the
 // sibling `parts` module for the small builders. Explicit imports above shadow
 // the globs, so this cannot silently change which `TextBuilder` is in scope.
-
-pub(crate) fn make_palette_button(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-) -> (NodeHandle, NodeHandle) {
-    let btn = ButtonBuilder::new(
-        WidgetBuilder::new()
-            .with_height(20.0)
-            .with_width(52.0)
-            .with_margin(Thickness {
-                left: 2.0,
-                top: 1.0,
-                right: 2.0,
-                bottom: 1.0,
-            })
-            .with_background(theme::BG_DARK),
-    )
-    .build();
-    let btn_h = ui.add_node(btn, parent);
-    let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 3.0,
-        top: 3.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_text(&format!(" {text}"))
-    .with_font_size(10.0)
-    .with_font_id(font_id)
-    .with_color(theme::TEXT_PRIMARY)
-    .build();
-    let lbl_h = ui.add_node(lbl, btn_h);
-    (btn_h, lbl_h)
-}
-
-/// Build a checkbox toggle row (Phase 26-B). Both handles are the CheckBox
-/// so existing inspector fields that stored a separate label still compile.
-pub(crate) fn make_toggle(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-) -> (NodeHandle, NodeHandle) {
-    make_toggle_checked(ui, text, font_id, parent, false)
-}
-
-pub(crate) fn make_toggle_checked(
-    ui: &mut UserInterface,
-    text: &str,
-    font_id: u8,
-    parent: NodeHandle,
-    checked: bool,
-) -> (NodeHandle, NodeHandle) {
-    let cb = CheckBoxBuilder::new(
-        WidgetBuilder::new()
-            .with_height(22.0)
-            .with_margin(Thickness {
-                left: 6.0,
-                top: 2.0,
-                right: 6.0,
-                bottom: 0.0,
-            })
-            .with_background(theme::TRANSPARENT),
-    )
-    .with_checked(checked)
-    .with_label(text)
-    .with_font_id(font_id)
-    .with_font_size(11.0)
-    .build();
-    let h = ui.add_node(cb, parent);
-    (h, h)
-}
 
 pub(crate) fn attach_combo_popup(
     ui: &mut UserInterface,
@@ -150,12 +76,13 @@ pub(crate) fn menu_button(
     h
 }
 
-pub(crate) fn popup_items(
+pub(crate) fn command_popup_items(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-    items: &[&str],
-) -> (NodeHandle, Vec<NodeHandle>) {
+    menu: crate::commands::Menu,
+) -> (NodeHandle, NodeHandle, Vec<(NodeHandle, &'static str)>) {
+    let commands = crate::commands::registry().menu(menu);
     let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let popup_h = ui.add_node(popup, root);
     let border = BorderBuilder::new(
@@ -173,8 +100,8 @@ pub(crate) fn popup_items(
         .with_orientation(Orientation::Vertical)
         .build();
     let stack_h = ui.add_node(stack, border_h);
-    let mut handles = Vec::with_capacity(items.len());
-    for item in items {
+    let mut handles = Vec::with_capacity(commands.len());
+    for command in commands {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -183,15 +110,15 @@ pub(crate) fn popup_items(
         .build();
         let bh = ui.add_node(btn, stack_h);
         let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-            .with_text(*item)
+            .with_text(command.menu_label())
             .with_font_size(12.0)
             .with_font_id(font_id)
             .with_color(theme::TEXT_PRIMARY)
             .build();
         ui.add_node(lbl, bh);
-        handles.push(bh);
+        handles.push((bh, command.id));
     }
-    (popup_h, handles)
+    (popup_h, stack_h, handles)
 }
 
 /// A hairline between two groups inside one command scope.
@@ -424,4 +351,40 @@ pub(crate) fn build_empty_state(
     ui.add_node(action, column_h);
 
     column_h
+}
+
+/// One extra menu row that is not a registry command.
+///
+/// The recent-scenes tail is the only caller, and it is deliberately narrow:
+/// everything else in a menu comes from CONTROL-A2's registry, and a general
+/// "add an arbitrary row" helper would be an invitation to bypass it.
+pub(crate) fn menu_entry(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    font_id: u8,
+    label: &str,
+    tooltip: &str,
+    enabled: bool,
+) -> NodeHandle {
+    let button = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(22.0)
+            .with_enabled(enabled)
+            .with_tooltip(tooltip)
+            .with_background(theme::TRANSPARENT),
+    )
+    .build();
+    let button = ui.add_node(button, parent);
+    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
+        .with_text(label)
+        .with_font_size(12.0)
+        .with_font_id(font_id)
+        .with_color(if enabled {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_DISABLED
+        })
+        .build();
+    ui.add_node(text, button);
+    button
 }

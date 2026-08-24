@@ -273,10 +273,15 @@ pub fn tree_row(state: VisualState) -> Paint {
     let s = &t.semantic;
     let base = match state.interaction {
         Interaction::Rest => Paint::flat(theme::TRANSPARENT, s.text.primary.bytes()),
-        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), t.semantic.text.emphasis.bytes()),
+        Interaction::Hover => {
+            Paint::flat(s.surface.hover.bytes(), t.semantic.text.emphasis.bytes())
+        }
         Interaction::Pressed | Interaction::Selected => Paint {
             rail: Some(s.accent.selected_rail.bytes()),
-            ..Paint::flat(s.accent.selected_bg.bytes(), t.semantic.text.emphasis.bytes())
+            ..Paint::flat(
+                s.accent.selected_bg.bytes(),
+                t.semantic.text.emphasis.bytes(),
+            )
         },
         // "Hidden" and "locked" both arrive here: dimmed, never removed.
         Interaction::Disabled => Paint::flat(theme::TRANSPARENT, s.text.disabled.bytes()),
@@ -330,17 +335,15 @@ pub fn asset_tile(state: VisualState) -> Paint {
 
 /// Drop-target feedback for a drag in flight. Valid outlines indigo over an
 /// 18 % fill; invalid outlines rose and the reason goes to the status bar.
-pub fn drop_target(valid: bool) -> Paint {
+pub fn drop_target(effect: crate::drag_drop::DropEffect) -> Paint {
     let t = theme::active();
-    let accent = if valid {
-        t.semantic.accent.default.bytes()
-    } else {
-        t.semantic.status.error.bytes()
+    let accent = match effect {
+        crate::drag_drop::DropEffect::Move => t.semantic.accent.default.bytes(),
+        crate::drag_drop::DropEffect::Copy => t.semantic.status.success.bytes(),
+        crate::drag_drop::DropEffect::Link => t.semantic.status.info.bytes(),
+        crate::drag_drop::DropEffect::Forbidden => t.semantic.status.error.bytes(),
     };
-    let fill = theme::with_alpha(
-        accent,
-        (255.0f32 * t.opacity.drop_valid).round() as u8,
-    );
+    let fill = theme::with_alpha(accent, (255.0f32 * t.opacity.drop_valid).round() as u8);
     Paint {
         border: accent,
         border_thickness: t.geometry.stroke_rail,
@@ -449,11 +452,17 @@ mod tests {
     fn drop_targets_separate_valid_from_invalid_by_hue_and_by_reason() {
         let t = theme::active();
         assert_eq!(
-            drop_target(true).border,
+            drop_target(crate::drag_drop::DropEffect::Move).border,
             t.semantic.accent.default.bytes()
         );
-        assert_eq!(drop_target(false).border, t.semantic.status.error.bytes());
-        assert_eq!(drop_target(true).border_thickness, 2.0);
+        assert_eq!(
+            drop_target(crate::drag_drop::DropEffect::Forbidden).border,
+            t.semantic.status.error.bytes()
+        );
+        assert_eq!(
+            drop_target(crate::drag_drop::DropEffect::Move).border_thickness,
+            2.0
+        );
     }
 
     #[test]

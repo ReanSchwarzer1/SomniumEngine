@@ -13,6 +13,12 @@ use crate::{
 };
 use glam::Vec2;
 
+/// Width reserved on the right of every row for the lock and hide badges.
+/// A constant rather than a layout pass because the Outliner's rows are a
+/// fixed-height list and the column has to line up perfectly for the
+/// drag-down bulk toggle to work.
+pub const BADGE_COLUMN: f32 = 34.0;
+
 #[derive(Clone, Debug)]
 pub struct TreeItem {
     pub id: u32,
@@ -21,27 +27,66 @@ pub struct TreeItem {
     pub icon: IconId,
     pub has_children: bool,
     pub expanded: bool,
+    /// Hidden in the viewport. Drawn dimmed, with the eye badge struck out.
+    pub hidden: bool,
+    /// Locked against viewport picking and transforms.
+    pub locked: bool,
+    /// This entity's scripts failed to compile.
+    pub script_error: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum TreeViewMessage {
     Select(u32),
+    /// A click in the badge gutter. `lock` distinguishes the two columns.
+    ToggleBadge {
+        id: u32,
+        lock: bool,
+    },
     ToggleExpand(u32),
     SetItems(Vec<TreeItem>),
     SetSelected(Option<u32>),
+    /// CONTROL-F: everything selected, primary included. The widget paints the
+    /// set and reports clicks; it does not decide what a selection is.
+    SetSelectedSet(Vec<u32>),
 }
 
 pub struct TreeView {
     pub items: Vec<TreeItem>,
+    /// The primary. It alone carries the strong text cut and the focus ring,
+    /// because it is the gizmo pivot and the Details subject.
     pub selected: Option<u32>,
+    /// Every selected row. Contains the primary once the host has published a
+    /// set; empty means "primary only", which is what a fresh tree shows.
+    pub selected_set: Vec<u32>,
     pub font_id: u8,
     pub px: f32,
     /// Index of the row under the cursor, so hover is a row wash rather than a
     /// whole-widget one. `None` while the pointer is outside.
     hovered: Option<usize>,
+    /// A badge-column drag is in flight; the flag says which column.
+    badge_drag: Option<bool>,
 }
 
 impl Control for TreeView {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
+    fn focus_bounds(&self, widget: &Widget) -> Rect {
+        let b = widget.screen_bounds();
+        let index = self
+            .selected
+            .and_then(|id| self.items.iter().position(|item| item.id == id))
+            .unwrap_or(0);
+        Rect::new(
+            b.x,
+            b.y + index as f32 * theme::TREE_ROW_HEIGHT,
+            b.w,
+            theme::TREE_ROW_HEIGHT,
+        )
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(
             available.x,
@@ -58,7 +103,8 @@ impl Control for TreeView {
         for (i, item) in self.items.iter().enumerate() {
             let y = b.y + i as f32 * theme::TREE_ROW_HEIGHT;
             let row = Rect::new(b.x, y, b.w, theme::TREE_ROW_HEIGHT);
-            let selected = self.selected == Some(item.id);
+            let primary = self.selected == Some(item.id);
+            let selected = primary || self.selected_set.contains(&item.id);
             let interaction = if selected {
                 Interaction::Selected
             } else if self.hovered == Some(i) {
@@ -105,8 +151,38 @@ impl Control for TreeView {
             if paint.background[3] != 0 || paint.rail.is_some() {
                 ctx.push_paint(row, &paint);
             }
-            let style = if selected { selected_style } else { rest_style };
+            let mut style = if primary { selected_style } else { rest_style };
+            if item.hidden {
+                style = style.with_color(theme::TEXT_DISABLED);
+            }
+            // Badges live in a fixed right-hand gutter so the eye is always in
+            // the same place, which is what makes click-and-drag down the
+            // column a usable bulk toggle rather than a game of hit the target.
+            let badge_x = b.x + b.w - BADGE_COLUMN;
+            let mid = y + theme::TREE_ROW_HEIGHT * 0.5;
+            let t = theme::active();
+            if item.script_error {
+                let dot = Rect::new(badge_x - 14.0, mid - 3.0, 6.0, 6.0);
+                ctx.push_round_rect(dot, 3.0, t.semantic.status.error.bytes());
+            }
+            if item.locked {
+                let bar = Rect::new(badge_x + 2.0, mid - 5.0, 8.0, 10.0);
+                ctx.push_round_rect_border(bar, 2.0, 1.0, t.semantic.text.secondary.bytes());
+            }
+            if item.hidden {
+                let bar = Rect::new(badge_x + 14.0, mid - 1.0, 12.0, 2.0);
+                ctx.push_rect_filled(bar, t.semantic.text.secondary.bytes());
+            }
             let indent = 8.0 + item.depth as f32 * 14.0;
+            // Hierarchy guides: one hairline per ancestor level, so a deep
+            // tree reads as a tree rather than as a list of varying margins.
+            for level in 0..item.depth {
+                let x = b.x + 8.0 + level as f32 * 14.0 + 7.0;
+                ctx.push_rect_filled(
+                    Rect::new(x, y, 1.0, theme::TREE_ROW_HEIGHT),
+                    theme::active().semantic.border.subtle.bytes(),
+                );
+            }
             if item.has_children {
                 let chev = Rect::new(b.x + indent, y + 6.0, 16.0, 16.0);
                 let icon = if item.expanded {
@@ -164,14 +240,36 @@ impl Control for TreeView {
             msg.handled = true;
             return;
         }
-        if let Some(WidgetMessage::MouseMove { pos }) = msg.data::<WidgetMessage>() {
+        if let Some(TreeViewMessage::SetSelectedSet(ids)) = msg.data::<TreeViewMessage>() {
+            self.selected_set = ids.clone();
+            msg.handled = true;
+            return;
+        }
+        if let Some(WidgetMessage::MouseMove { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
             let idx = ((pos.y - b.y) / theme::TREE_ROW_HEIGHT).floor();
-            self.hovered = if idx >= 0.0 && (idx as usize) < self.items.len() {
-                Some(idx as usize)
-            } else {
-                None
-            };
+            let row = (idx >= 0.0 && (idx as usize) < self.items.len()).then(|| idx as usize);
+            // Godot 4.8's bulk toggle: press in the badge column and drag down
+            // to set a run of rows. Each row is reported once, when the drag
+            // first reaches it.
+            if let Some(lock) = self.badge_drag
+                && let Some(row) = row
+                && self.hovered != Some(row)
+            {
+                let id = self.items[row].id;
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    TreeViewMessage::ToggleBadge { id, lock },
+                ));
+            }
+            self.hovered = row;
+        }
+        if msg
+            .data::<WidgetMessage>()
+            .is_some_and(|m| matches!(m, WidgetMessage::MouseUp { .. }))
+        {
+            self.badge_drag = None;
         }
         if msg
             .data::<WidgetMessage>()
@@ -185,6 +283,20 @@ impl Control for TreeView {
             if idx >= 0 && (idx as usize) < self.items.len() {
                 let item = &self.items[idx as usize];
                 let indent = 8.0 + item.depth as f32 * 12.0;
+                let badge_x = b.x + b.w - BADGE_COLUMN;
+                if pos.x >= badge_x {
+                    // The badge gutter. `lock` is the left of the two columns.
+                    let id = item.id;
+                    let lock = pos.x < badge_x + 12.0;
+                    self.badge_drag = Some(lock);
+                    emit.push(UiMessage::new(
+                        widget.handle,
+                        MessageDirection::FromWidget,
+                        TreeViewMessage::ToggleBadge { id, lock },
+                    ));
+                    msg.handled = true;
+                    return;
+                }
                 if item.has_children && pos.x < b.x + indent + 14.0 {
                     let id = item.id;
                     emit.push(UiMessage::new(
@@ -202,6 +314,82 @@ impl Control for TreeView {
                     ));
                 }
                 msg.handled = true;
+            }
+        }
+        if let Some(WidgetMessage::KeyDown(key, _)) = msg.data::<WidgetMessage>() {
+            use crate::message::KeyCode;
+            if self.items.is_empty() {
+                return;
+            }
+            let current = self
+                .selected
+                .and_then(|id| self.items.iter().position(|item| item.id == id));
+            let select = |index: usize, this: &mut Self, emit: &mut Vec<UiMessage>| {
+                let id = this.items[index].id;
+                this.selected = Some(id);
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    TreeViewMessage::Select(id),
+                ));
+            };
+            match key {
+                KeyCode::ArrowDown => {
+                    select(
+                        current.map_or(0, |i| (i + 1).min(self.items.len() - 1)),
+                        self,
+                        emit,
+                    );
+                    msg.handled = true;
+                }
+                KeyCode::ArrowUp => {
+                    select(current.map_or(0, |i| i.saturating_sub(1)), self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::Home => {
+                    select(0, self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::End => {
+                    select(self.items.len() - 1, self, emit);
+                    msg.handled = true;
+                }
+                KeyCode::ArrowRight => {
+                    if let Some(index) = current {
+                        let item = &self.items[index];
+                        if item.has_children && !item.expanded {
+                            emit.push(UiMessage::new(
+                                widget.handle,
+                                MessageDirection::FromWidget,
+                                TreeViewMessage::ToggleExpand(item.id),
+                            ));
+                        } else if item.has_children && index + 1 < self.items.len() {
+                            select(index + 1, self, emit);
+                        }
+                        msg.handled = true;
+                    }
+                }
+                KeyCode::ArrowLeft => {
+                    if let Some(index) = current {
+                        let item = &self.items[index];
+                        if item.has_children && item.expanded {
+                            emit.push(UiMessage::new(
+                                widget.handle,
+                                MessageDirection::FromWidget,
+                                TreeViewMessage::ToggleExpand(item.id),
+                            ));
+                        } else if item.depth > 0 {
+                            if let Some(parent) = (0..index)
+                                .rev()
+                                .find(|candidate| self.items[*candidate].depth < item.depth)
+                            {
+                                select(parent, self, emit);
+                            }
+                        }
+                        msg.handled = true;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -231,9 +419,11 @@ impl TreeViewBuilder {
             Box::new(TreeView {
                 items: Vec::new(),
                 selected: None,
+                selected_set: Vec::new(),
                 font_id: self.font_id,
                 px: self.px,
                 hovered: None,
+                badge_drag: None,
             }),
         )
     }
@@ -254,9 +444,11 @@ mod tests {
         let t = TreeView {
             items: Vec::new(),
             selected: None,
+            selected_set: Vec::new(),
             font_id: 0,
             px: 12.0,
             hovered: None,
+            badge_drag: None,
         };
         assert!(t.selected.is_none());
     }

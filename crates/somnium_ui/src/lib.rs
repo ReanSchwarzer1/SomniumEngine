@@ -1,4 +1,7 @@
 pub mod color;
+pub mod commands;
+pub mod debug;
+pub mod drag_drop;
 pub mod draw;
 pub mod editor;
 pub mod editor_event;
@@ -6,13 +9,15 @@ pub mod font;
 pub mod icon_svg;
 pub mod icons;
 pub mod layout_persist;
+pub mod log;
 pub mod message;
 pub mod metaphor;
 pub mod motion;
 pub mod node;
+pub mod outliner_filter;
 pub mod pass;
-pub mod primitive;
 pub mod pool;
+pub mod primitive;
 pub mod runtime;
 pub mod style;
 pub mod theme;
@@ -24,15 +29,18 @@ pub mod widget;
 pub mod widgets;
 pub mod workspace;
 
+use crate::editor::inspector_gen::GeneratedComponentPanel;
+use crate::editor::property_editors::PropertyEditorKind;
 use crate::editor::{
     content::{build_content_drawer, build_create_popup},
     help::{build_help_overlay, fill_help_body},
-    inspector::build_inspector,
+    inspector::{build_generated_details, build_inspector},
     shell::build_editor_layout,
 };
+pub use drag_drop::{DragPayload, DropAcceptance, DropEffect, DropRequest, DropTarget};
 pub use editor_event::{
-    ColorField, CreateKind, EditorEvent, InspectorField, PostFxToggle, ScriptAttachmentRow,
-    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState,
+    CreateKind, EditorEvent, FoliageBrushField, GestureId, OutlinerRow, ScriptAttachmentRow,
+    ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
 };
 pub use node::CursorKind;
 pub use runtime::UiCanvas;
@@ -41,8 +49,7 @@ pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
 
 use crate::{
-    editor_event::InspectorField as IF,
-    message::{MessageDirection, NodeHandle, TextMessage, UiMessage, WidgetMessage},
+    message::{MessageDirection, Modifiers, NodeHandle, TextMessage, UiMessage, WidgetMessage},
     pass::UiPass,
     types::Thickness,
     ui::UserInterface,
@@ -51,9 +58,11 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
-        context_menu::{ContextMenuMessage, MenuItem},
+        curve_editor::CurveEditorMessage,
+        gradient_editor::GradientEditorMessage,
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
+        context_menu::{ContextMenuMessage, MenuItem},
         grid::GridMessage,
         image::ImageBuilder,
         menu::MenuMessage,
@@ -64,33 +73,19 @@ use crate::{
         slider::SliderMessage,
         splitter::SplitterMessage,
         stack_panel::{Orientation, StackPanelBuilder},
-        text_box::TextBoxMessage,
         text::TextBuilder,
+        text_box::{TextBoxBuilder, TextBoxMessage},
         toast::ToastMessage,
         tree_view::{TreeItem, TreeViewMessage},
     },
 };
 use glam::Vec2;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window};
-
-/// Items the Content Drawer's right-click menu can offer.
-///
-/// Numbered rather than positional, because which items appear depends on
-/// what was clicked — a file gets Rename, empty space does not — and a
-/// menu that reported "the third one" would mean something different in
-/// each case.
-mod content_menu_id {
-    pub const NEW_FOLDER: u32 = 1;
-    pub const NEW_SCRIPT: u32 = 2;
-    pub const RENAME: u32 = 3;
-    pub const SHOW_IN_FOLDER: u32 = 4;
-    pub const REFRESH: u32 = 5;
-}
 
 /// What confirming the name prompt will do.
 ///
@@ -102,8 +97,12 @@ enum NamePrompt {
     NewFolder { parent: String },
     /// Create a script in this content-relative directory.
     NewScript { parent: String },
-    /// Rename this absolute path.
-    Rename { path: String },
+    /// Create a material in this content-relative directory.
+    NewMaterial { parent: String },
+    /// Rename an entity. CONTROL-F's `F2`: the same modal the three creating
+    /// flows already share, because a rename is a name prompt and building a
+    /// second one would only give the two a chance to disagree.
+    RenameEntity { entity: u32 },
 }
 
 /// What one generated widget in the Scripts section does.
@@ -125,92 +124,82 @@ enum ScriptWidgetAction {
     Bool(usize, String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorTarget {
+    Reflected {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        vec4: bool,
+    },
+    /// CONTROL-K. One stop of an authored gradient. The picker path is shared
+    /// with every other swatch; only the write-back differs, because the value
+    /// that travels is the whole gradient with one stop replaced.
+    GradientStop {
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedEdit {
+    Whole,
+    Lane(u8),
+    Euler(u8),
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedBinding {
+    component: somnium_ecs::reflect::StableId,
+    field: somnium_ecs::reflect::FieldId,
+    value: somnium_ecs::reflect::ReflectValue,
+    default: somnium_ecs::reflect::ReflectValue,
+    edit: GeneratedEdit,
+    asset_kind_mask: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AssetPickerAction {
+    Edit,
+    Locate,
+    MakeUnique,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ContentToolbarAction {
+    Back,
+    Forward,
+    Up,
+    Kind(crate::metaphor::ContentFilterKind),
+    Sort,
+    Density,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GeneratedAssetPicker {
+    pub combo: NodeHandle,
+    pub list: NodeHandle,
+    pub kind_mask: u64,
+}
+
 // ── Inspector field handle bundle ────────────────────────────────────────────
 
 #[allow(dead_code)]
-struct InspectorHandles {
-    pos_x: NodeHandle,
-    pos_y: NodeHandle,
-    pos_z: NodeHandle,
-    rot_x: NodeHandle,
-    rot_y: NodeHandle,
-    rot_z: NodeHandle,
-    sc_x: NodeHandle,
-    sc_y: NodeHandle,
-    sc_z: NodeHandle,
-    // Light section (Phase 13E) — hidden unless a light is selected.
-    light_section: NodeHandle,
-    light_intensity: NodeHandle,
-    light_range: NodeHandle,
-    light_inner: NodeHandle,
-    light_outer: NodeHandle,
-    /// Linear-RGB colour rows (Phase 22C) — kept for event compatibility; hidden.
-    light_col_r: NodeHandle,
-    light_col_g: NodeHandle,
-    light_col_b: NodeHandle,
-    light_color: NodeHandle,
-    light_temp_k: NodeHandle,
-    /// Row containers for the point/spot-only fields, so they can be hidden
-    /// wholesale (label included) when a directional light is selected — range
-    /// and cone angles mean nothing for a sun.
-    light_range_row: NodeHandle,
-    light_inner_row: NodeHandle,
-    light_outer_row: NodeHandle,
-    /// Row container for directional-only moonlight intensity field (Phase 25M-2).
-    light_moon_row: NodeHandle,
-    light_moon_int: NodeHandle,
-    light_radius: NodeHandle,
-    light_width_row: NodeHandle,
-    light_width: NodeHandle,
-    light_height_row: NodeHandle,
-    light_height: NodeHandle,
-    // Camera section (Phase CR-C) — hidden unless a Camera entity is selected.
-    camera_section: NodeHandle,
-    camera_frustum_toggle: NodeHandle,
-    camera_frustum_label: NodeHandle,
-    /// Phase DOOM-F.
-    camera_dynres_toggle: NodeHandle,
-    camera_dynres_label: NodeHandle,
-    camera_dynres_target: NodeHandle,
-    camera_dynres_floor: NodeHandle,
-    /// Phase DOOM-E (terrain) and DOOM-B/C (post FX diagnostics).
+#[derive(Default)]
+struct ToolHandles {
+    post_section: NodeHandle,
+    post_census_toggle: NodeHandle,
+    post_bins_toggle: NodeHandle,
+
+    terrain_section: NodeHandle,
+    terrain_paint_toggle: NodeHandle,
+    terrain_hex_toggle: NodeHandle,
+    terrain_parallax_toggle: NodeHandle,
+    terrain_clipmap_toggle: NodeHandle,
     terrain_aerial_toggle: NodeHandle,
-    terrain_aerial_label: NodeHandle,
     terrain_aerial_dist: NodeHandle,
     terrain_aerial_hero_toggle: NodeHandle,
-    terrain_aerial_hero_label: NodeHandle,
-    post_census_toggle: NodeHandle,
-    post_census_label: NodeHandle,
-    post_bins_toggle: NodeHandle,
-    post_bins_label: NodeHandle,
-    // Post-processing section (Phase 15A1) — hidden unless a Post Processing
-    // entity is selected.
-    post_section: NodeHandle,
-    post_exposure: NodeHandle,
-    post_exp_comp: NodeHandle,
-    post_auto_exp_toggle: NodeHandle,
-    post_auto_exp_label: NodeHandle,
-    post_tonemap_button: NodeHandle,
-    post_tonemap_label: NodeHandle,
-    post_vig_toggle: NodeHandle,
-    post_vig_str: NodeHandle,
-    post_ca_toggle: NodeHandle,
-    post_ca_str: NodeHandle,
-    /// Scene-wide indirect-light strength (Phase 22C).
-    post_ibl: NodeHandle,
-    // Terrain + foliage sections (Phase 17C), hidden unless a terrain is picked.
-    terrain_section: NodeHandle,
-    terrain_mode_label: NodeHandle,
-    terrain_paint_toggle: NodeHandle,
-    terrain_paint_label: NodeHandle,
-    terrain_hex_toggle: NodeHandle,
-    terrain_hex_label: NodeHandle,
-    terrain_parallax_toggle: NodeHandle,
-    terrain_parallax_label: NodeHandle,
-    terrain_clipmap_toggle: NodeHandle,
-    terrain_clipmap_label: NodeHandle,
     terrain_morph_toggle: NodeHandle,
-    terrain_morph_label: NodeHandle,
     terrain_morph_start: NodeHandle,
     terrain_brush_items: Vec<(NodeHandle, NodeHandle, u8)>,
     terrain_layer: NodeHandle,
@@ -221,158 +210,23 @@ struct InspectorHandles {
     terrain_wetness: NodeHandle,
     terrain_macro: NodeHandle,
     terrain_debug: NodeHandle,
-    water_section: NodeHandle,
-    water_surface: NodeHandle,
-    water_depth: NodeHandle,
-    water_clarity: NodeHandle,
-    water_amplitude: NodeHandle,
-    water_roughness: NodeHandle,
-    water_ssr: NodeHandle,
-    water_rt_reflect: NodeHandle,
-    water_reflect_debug: NodeHandle,
-    water_wave_a: NodeHandle,
-    water_wave_b: NodeHandle,
-    water_speed: NodeHandle,
-    water_steepness: NodeHandle,
-    water_wind_speed: NodeHandle,
-    water_foam_decay: NodeHandle,
-    water_foam_threshold: NodeHandle,
-    water_spectrum_blend: NodeHandle,
-    water_edge_scale: NodeHandle,
-    water_anisotropy: NodeHandle,
-    water_caustic: NodeHandle,
-    water_deep: NodeHandle,
-    water_shallow: NodeHandle,
-    water_edge: NodeHandle,
-    water_abs: NodeHandle,
-    water_scatter: NodeHandle,
-    water_abs_mag: NodeHandle,
-    water_scatter_mag: NodeHandle,
-    water_underwater: NodeHandle,
-    water_dir_ax: NodeHandle,
-    water_dir_az: NodeHandle,
-    water_dir_bx: NodeHandle,
-    water_dir_bz: NodeHandle,
-    particle_section: NodeHandle,
-    particle_start: NodeHandle,
-    particle_end: NodeHandle,
-    material_section: NodeHandle,
-    material_base: NodeHandle,
-    /// Phase 16-D. The Scripts section holds a header, a "New Script"
-    /// button and `script_list`; every row inside the list is built from a
-    /// script's declared schema at refresh time, not here.
-    script_section: NodeHandle,
-    script_add: NodeHandle,
-    script_list: NodeHandle,
-    vessel_section: NodeHandle,
-    vessel_buoyancy: NodeHandle,
-    vessel_drag: NodeHandle,
-    vessel_angular_drag: NodeHandle,
-    vessel_thrust: NodeHandle,
-    vessel_draft: NodeHandle,
-    vessel_righting: NodeHandle,
+
     foliage_section: NodeHandle,
     foliage_toggle: NodeHandle,
-    foliage_label: NodeHandle,
     foliage_paint_toggle: NodeHandle,
-    foliage_paint_label: NodeHandle,
     foliage_erase_toggle: NodeHandle,
-    foliage_erase_label: NodeHandle,
     foliage_single_toggle: NodeHandle,
-    foliage_single_label: NodeHandle,
-    /// Button that opens the picker; its label shows the current entry.
     foliage_kind_button: NodeHandle,
-    foliage_kind_label: NodeHandle,
     foliage_density: NodeHandle,
     foliage_seed: NodeHandle,
     foliage_slope: NodeHandle,
     foliage_layer: NodeHandle,
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
-    foliage_shadow: NodeHandle,
-    foliage_cull: NodeHandle,
-    foliage_lod: NodeHandle,
-    foliage_impostor: NodeHandle,
-    /// Text label inside each toggle button, so the tick can be redrawn.
-    post_vig_label: NodeHandle,
-    post_ca_label: NodeHandle,
-    post_fxaa_toggle: NodeHandle,
-    post_fxaa_label: NodeHandle,
-    post_cel_toggle: NodeHandle,
-    post_cel_label: NodeHandle,
-    post_fsr_toggle: NodeHandle,
-    post_fsr_label: NodeHandle,
-    post_fsr_sharp: NodeHandle,
-    post_taa_toggle: NodeHandle,
-    post_taa_label: NodeHandle,
-    post_gtao_toggle: NodeHandle,
-    post_gtao_label: NodeHandle,
-    post_restir_toggle: NodeHandle,
-    post_restir_gi_toggle: NodeHandle,
-    post_rt_reflect_toggle: NodeHandle,
-    post_rt_reflect_label: NodeHandle,
-    post_rt_refract_toggle: NodeHandle,
-    post_rt_refract_label: NodeHandle,
-    post_cas_toggle: NodeHandle,
-    post_mb_toggle: NodeHandle,
-    post_mb_label: NodeHandle,
-    post_mb_shutter: NodeHandle,
-    post_gi_intensity: NodeHandle,
-    post_cas_label: NodeHandle,
-    post_cas_sharp: NodeHandle,
-    post_cas_strength: NodeHandle,
-    post_restir_gi_label: NodeHandle,
-    post_restir_label: NodeHandle,
-    post_pcss_toggle: NodeHandle,
-    post_pcss_label: NodeHandle,
-    post_contact_toggle: NodeHandle,
-    post_contact_label: NodeHandle,
-    post_bloom_toggle: NodeHandle,
-    post_bloom_label: NodeHandle,
-    post_bloom_amt: NodeHandle,
-    post_dof_toggle: NodeHandle,
-    post_dof_label: NodeHandle,
-    post_dof_focus: NodeHandle,
-    post_temperature: NodeHandle,
-    post_contrast: NodeHandle,
-    post_saturation: NodeHandle,
-    post_grain: NodeHandle,
-    post_vol_toggle: NodeHandle,
-    post_vol_label: NodeHandle,
-    post_shafts_toggle: NodeHandle,
-    post_shafts_label: NodeHandle,
-    post_phys_toggle: NodeHandle,
-    post_phys_label: NodeHandle,
-    post_aperture: NodeHandle,
-    post_shutter: NodeHandle,
-    post_iso: NodeHandle,
-    post_tint: NodeHandle,
-    post_lift: NodeHandle,
-    post_gamma: NodeHandle,
-    post_gain: NodeHandle,
-    post_ao_radius: NodeHandle,
-    post_ao_intensity: NodeHandle,
-    post_fog_density: NodeHandle,
-    post_fog_height: NodeHandle,
-    post_fog_asym: NodeHandle,
-    post_world_cache_toggle: NodeHandle,
-    post_world_cache_label: NodeHandle,
-    post_cache_intensity: NodeHandle,
-    post_cache_cell: NodeHandle,
-    post_specular_toggle: NodeHandle,
-    post_specular_label: NodeHandle,
-    post_spec_rough: NodeHandle,
-    post_path_toggle: NodeHandle,
-    post_path_label: NodeHandle,
-    post_path_bounces: NodeHandle,
-    post_sdf_toggle: NodeHandle,
-    post_sdf_label: NodeHandle,
-    post_probes_toggle: NodeHandle,
-    post_probes_label: NodeHandle,
-    post_probe_intensity: NodeHandle,
-    post_analytic_toggle: NodeHandle,
-    post_analytic_label: NodeHandle,
-    post_shaft_amt: NodeHandle,
+
+    script_section: NodeHandle,
+    script_add: NodeHandle,
+    script_list: NodeHandle,
 }
 
 /// Everything the Post FX inspector section displays.
@@ -465,6 +319,14 @@ pub struct ProfilerRow {
     pub depth: u8,
 }
 
+/// Engine-neutral status-bar projection of an active background job.
+#[derive(Debug, Clone)]
+pub struct UiJobStatus {
+    pub id: u64,
+    pub name: &'static str,
+    pub progress: f32,
+}
+
 /// Rows the overlay can show before it starts dropping them.
 pub const PROFILER_ROWS: usize = 40;
 
@@ -481,7 +343,27 @@ pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
     "Island Tree",
 ];
 
-const TONEMAP_NAMES: [&str; 3] = ["AgX", "ACES", "Reinhard"];
+/// The table entry closest to a value, so a settings file holding `0.3` shows
+/// the nearest offered step rather than an empty combo.
+fn nearest_index(table: &[f32], value: f32) -> usize {
+    table
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - value).abs().total_cmp(&(*b - value).abs()))
+        .map_or(0, |(index, _)| index)
+}
+
+/// CONTROL-G's translate grid steps. The values the phase names, plus "Off",
+/// because a grid you cannot leave is worse than no grid.
+pub(crate) const SNAP_GRID_NAMES: [&str; 6] = ["Off", "0.1 m", "0.25 m", "0.5 m", "1 m", "5 m"];
+/// The metres each entry means. Index 0 is off.
+pub(crate) const SNAP_GRID_VALUES: [f32; 6] = [0.0, 0.1, 0.25, 0.5, 1.0, 5.0];
+/// CONTROL-G's rotate increments.
+pub(crate) const SNAP_ANGLE_NAMES: [&str; 5] =
+    ["Off", "1\u{b0}", "5\u{b0}", "15\u{b0}", "45\u{b0}"];
+/// The degrees each entry means. Index 0 is off.
+pub(crate) const SNAP_ANGLE_VALUES: [f32; 5] = [0.0, 1.0, 5.0, 15.0, 45.0];
+
 const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
     ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
@@ -518,15 +400,21 @@ struct EditorLayout {
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
     log_stack: NodeHandle,
+    log_severity_chips: Vec<(NodeHandle, crate::log::LogSeverity)>,
+    log_search: NodeHandle,
+    log_pin_only: NodeHandle,
+    log_copy: NodeHandle,
+    log_clear: NodeHandle,
+    log_jobs_toggle: NodeHandle,
+    log_history_toggle: NodeHandle,
     log_empty: NodeHandle,
     create_button: NodeHandle,
     create_popup: NodeHandle,
-    create_popup_items: Vec<(NodeHandle, CreateKind)>,
+    create_popup_items: Vec<(NodeHandle, &'static str)>,
     file_button: NodeHandle,
     file_popup: NodeHandle,
-    file_import_item: NodeHandle,
-    file_new_item: NodeHandle,
-    file_save_item: NodeHandle,
+    file_menu_stack: NodeHandle,
+    menu_command_items: Vec<(NodeHandle, &'static str)>,
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
     viewport_res_combo: NodeHandle,
@@ -541,7 +429,7 @@ struct EditorLayout {
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
-    inspector_handles: InspectorHandles,
+    inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
     /// Selection readout floating over the render, bottom-left.
     vp_overlay: NodeHandle,
@@ -557,10 +445,23 @@ struct EditorLayout {
     status_dirty: NodeHandle,
     status_selection: NodeHandle,
     status_stats: NodeHandle,
+    status_stats_button: NodeHandle,
     /// Floating viewport-context scope; a child of the viewport, not a grid row.
     /// Held for the layout regression test that pins the 68 px scene budget.
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
+    snap_cluster: NodeHandle,
+    snap_grid_combo: NodeHandle,
+    snap_angle_combo: NodeHandle,
+    snap_surface_toggle: NodeHandle,
+    gizmo_space_toggle: NodeHandle,
+    gizmo_space_label: NodeHandle,
+    select_only_toggle: NodeHandle,
+    snap_overflow: NodeHandle,
+    /// CONTROL-L: the day-cycle scrub cluster, hidden when the scene has none.
+    time_cluster: NodeHandle,
+    time_label: NodeHandle,
+    time_slider: NodeHandle,
     /// Mode-scope command labels. Collapse to icon-only under 1400 px.
     mode_labels: [NodeHandle; 4],
     inner_h: NodeHandle,
@@ -582,34 +483,28 @@ struct EditorLayout {
     view_popup: NodeHandle,
     window_popup: NodeHandle,
     help_menu_popup: NodeHandle,
-    edit_undo: NodeHandle,
-    edit_redo: NodeHandle,
-    edit_delete: NodeHandle,
-    edit_dup: NodeHandle,
-    view_profiler: NodeHandle,
-    view_content: NodeHandle,
-    window_dock_content: NodeHandle,
-    window_workspace_items: Vec<NodeHandle>,
-    window_reset_item: NodeHandle,
-    help_open_item: NodeHandle,
-    help_shortcuts: NodeHandle,
-    help_about: NodeHandle,
     status_text: NodeHandle,
+    status_cancel: NodeHandle,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
     content_drawer: NodeHandle,
     content_search: NodeHandle,
     content_breadcrumb: NodeHandle,
     content_engine_toggle: NodeHandle,
+    content_scroll: NodeHandle,
     content_list: NodeHandle,
+    content_toolbar_actions: Vec<(NodeHandle, ContentToolbarAction)>,
     outliner_tree: NodeHandle,
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
-    post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
+    /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
+    /// the others — a dropdown nothing knows about stays open behind the next
+    /// one.
+    snap_grid_popup: NodeHandle,
+    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -621,6 +516,9 @@ struct EditorLayout {
     unsaved_cancel: NodeHandle,
     content_menu_popup: NodeHandle,
     content_menu: NodeHandle,
+    outliner_menu_popup: NodeHandle,
+    outliner_menu: NodeHandle,
+    preferences: crate::editor::preferences::PreferencesHandles,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -629,6 +527,7 @@ struct EditorLayout {
     color_popup: NodeHandle,
     color_picker: NodeHandle,
     title_drag: NodeHandle,
+    title_label: NodeHandle,
     win_min: NodeHandle,
     win_max: NodeHandle,
     win_close: NodeHandle,
@@ -640,6 +539,21 @@ struct EditorLayout {
 // ── UiManager ────────────────────────────────────────────────────────────────
 
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
+/// Which list the bottom panel is showing.
+///
+/// One enum rather than two booleans: the three are mutually exclusive and a
+/// pair of flags would make "jobs and history at once" a representable state
+/// that nothing implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogView {
+    /// The Output Log.
+    Log,
+    /// Background jobs, CONTROL-C's, including failed and cancelled ones.
+    Jobs,
+    /// The undo history, CONTROL-J's.
+    History,
+}
+
 pub struct UiManager {
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
@@ -671,23 +585,29 @@ pub struct UiManager {
     vp_overlay: NodeHandle,
     vp_overlay_text: NodeHandle,
     log_stack: NodeHandle,
-    log_entry_count: usize,
+    log_severity_chips: Vec<(NodeHandle, crate::log::LogSeverity)>,
+    log_search: NodeHandle,
+    log_pin_only: NodeHandle,
+    log_copy: NodeHandle,
+    log_clear: NodeHandle,
+    log_jobs_toggle: NodeHandle,
+    log_history_toggle: NodeHandle,
     // Create menu
     create_button: NodeHandle,
     create_popup: NodeHandle,
     create_popup_open: bool,
-    create_popup_items: Vec<(NodeHandle, CreateKind)>,
+    create_popup_items: Vec<(NodeHandle, &'static str)>,
     /// Palette entry currently shown on the picker button, so a click can
     /// advance to the next one.
     foliage_kind_shown: u8,
     // File menu (Phase 19B): Import
     file_button: NodeHandle,
     file_popup: NodeHandle,
+    file_menu_stack: NodeHandle,
     file_popup_open: bool,
     open_combo_popup: NodeHandle,
-    file_import_item: NodeHandle,
-    file_new_item: NodeHandle,
-    file_save_item: NodeHandle,
+    /// Application menu handles mapped back to stable registry ids.
+    menu_command_items: Vec<(NodeHandle, &'static str)>,
     // Viewport toolbar (Phase 20B): camera speed
     camera_speed_slider: NodeHandle,
     camera_speed_label: NodeHandle,
@@ -710,12 +630,16 @@ pub struct UiManager {
     outliner_rows: Vec<(NodeHandle, u32)>,
     /// Entities the palette can jump to, mirrored from the Outliner.
     palette_entities: Vec<(u32, String)>,
-    /// What each *dynamic* palette row does, in append order.
-    palette_targets: Vec<PaletteTarget>,
+    /// Stable dynamic palette ids mapped to their current targets.
+    palette_targets: std::collections::HashMap<String, PaletteTarget>,
+    /// Persisted palette learning state.
+    command_history: crate::commands::CommandHistory,
     // Inspector field handles
-    inspector_handles: InspectorHandles,
+    inspector_handles: ToolHandles,
     // Editor event queue drained by app.rs each frame
     editor_events: VecDeque<EditorEvent>,
+    selected_entity: Option<somnium_ecs::Entity>,
+    next_property_gesture: u64,
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
@@ -724,7 +648,7 @@ pub struct UiManager {
     profiler_toggle_lbl: NodeHandle,
     profiler_names: Vec<NodeHandle>,
     profiler_values: Vec<NodeHandle>,
-    last_outliner_state: Option<(Vec<(u32, String)>, Option<u32>)>,
+    last_outliner_state: Option<(Vec<OutlinerRow>, Option<u32>)>,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
     /// Mode-scope command labels. Held so a future rule can address them; the
@@ -737,6 +661,7 @@ pub struct UiManager {
     status_dirty: NodeHandle,
     status_selection: NodeHandle,
     status_stats: NodeHandle,
+    status_stats_button: NodeHandle,
     /// Value each inspector field held at the last baseline reset — a scene
     /// load, a save, or a change of selection. The modified dot lights when the
     /// live value differs from this, and reverting writes it back.
@@ -745,7 +670,19 @@ pub struct UiManager {
     /// layer does not know component defaults, and inventing them would make
     /// the dot lie. "Unsaved edit to this property" is the honest reading, and
     /// it is the one that pairs with the status bar's save state.
-    inspector_baseline: std::collections::HashMap<IF, f32>,
+    generated_root: NodeHandle,
+    generated_entity: Option<somnium_ecs::Entity>,
+    generated_signature: Vec<(
+        somnium_ecs::reflect::StableId,
+        somnium_ecs::reflect::FieldId,
+        GeneratedEdit,
+    )>,
+    generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    generated_rows: HashMap<NodeHandle, GeneratedBinding>,
+    generated_gestures: HashMap<NodeHandle, GestureId>,
+    generated_asset_choices: HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
+    generated_asset_searches: HashMap<NodeHandle, GeneratedAssetPicker>,
+    generated_asset_actions: HashMap<NodeHandle, (NodeHandle, AssetPickerAction)>,
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -765,40 +702,35 @@ pub struct UiManager {
     view_popup: NodeHandle,
     window_popup: NodeHandle,
     help_menu_popup: NodeHandle,
-    edit_undo: NodeHandle,
-    edit_redo: NodeHandle,
-    edit_delete: NodeHandle,
-    edit_dup: NodeHandle,
-    view_profiler: NodeHandle,
-    view_content: NodeHandle,
-    window_dock_content: NodeHandle,
-    window_workspace_items: Vec<NodeHandle>,
-    window_reset_item: NodeHandle,
     /// Workspace the shell is currently arranged for; Reset returns to its
     /// shipped preset rather than to a global default.
     active_workspace: crate::workspace::Workspace,
     /// Height of the shared bottom row when it is open. Set by the active
     /// workspace preset and persisted with it.
     drawer_height: f32,
-    help_open_item: NodeHandle,
-    help_shortcuts: NodeHandle,
-    help_about: NodeHandle,
     status_text: NodeHandle,
+    status_cancel: NodeHandle,
+    status_cancel_job: Option<u64>,
     drawer_button: NodeHandle,
     log_button: NodeHandle,
     content_drawer: NodeHandle,
     content_search: NodeHandle,
     content_breadcrumb: NodeHandle,
     content_engine_toggle: NodeHandle,
+    content_scroll: NodeHandle,
     content_list: NodeHandle,
+    content_toolbar_actions: Vec<(NodeHandle, ContentToolbarAction)>,
     outliner_tree: NodeHandle,
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
-    post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
+    /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
+    /// the others — a dropdown nothing knows about stays open behind the next
+    /// one.
+    snap_grid_popup: NodeHandle,
+    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -810,6 +742,27 @@ pub struct UiManager {
     unsaved_cancel: NodeHandle,
     content_menu_popup: NodeHandle,
     content_menu: NodeHandle,
+    outliner_menu_popup: NodeHandle,
+    outliner_menu: NodeHandle,
+    preferences: crate::editor::preferences::PreferencesHandles,
+    snap_cluster: NodeHandle,
+    snap_grid_combo: NodeHandle,
+    snap_angle_combo: NodeHandle,
+    snap_surface_toggle: NodeHandle,
+    gizmo_space_toggle: NodeHandle,
+    gizmo_space_label: NodeHandle,
+    select_only_toggle: NodeHandle,
+    snap_overflow: NodeHandle,
+    time_cluster: NodeHandle,
+    time_label: NodeHandle,
+    time_slider: NodeHandle,
+    /// CONTROL-L: the hour the context bar last displayed, so the label is
+    /// rewritten only when it changes rather than sixty times a second.
+    time_shown: Option<f32>,
+    /// True while a play session exists — playing or paused. Set from
+    /// [`Self::update_simulation_controls`], the one place every transport
+    /// transition passes through.
+    play_session_active: bool,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -822,9 +775,6 @@ pub struct UiManager {
     #[allow(dead_code)]
     drawer_docked: bool,
     show_engine_content: bool,
-    ctrl_held: bool,
-    /// Shift state, so Shift+Tab can walk the focus ring backwards.
-    shift_held: bool,
     inspector_filter: String,
     content_filter: String,
     content_path: String,
@@ -832,12 +782,37 @@ pub struct UiManager {
     content_history: crate::metaphor::ContentHistory,
     content_kind: crate::metaphor::ContentFilterKind,
     content_density: crate::metaphor::ContentDensity,
+    /// Published immutable asset inventory; drawer queries never walk disk.
+    asset_db: somnium_asset::database::AssetDbSnapshot,
+    content_sort: somnium_asset::database::AssetSort,
+    content_sort_descending: bool,
     /// Paths selected in the drawer. Multi-select is a set rather than a range
     /// because the tiles wrap, so "everything between A and B" has no stable
     /// meaning once the panel is resized.
     content_selection: std::collections::HashSet<std::path::PathBuf>,
     outliner_expanded: std::collections::HashSet<u32>,
-    log_lines: VecDeque<String>,
+    /// The structured log. Replaced the flat `VecDeque<String>` in CONTROL-I:
+    /// a severity chip, a category filter and a clickable `file:line` all need
+    /// facts a string does not carry. The policy lives in `crate::log` so it
+    /// is testable without a GPU device; this holds only the widget side.
+    log: crate::log::OutputLog,
+    /// `(row, entry id)` for the rows currently mounted.
+    log_rows: Vec<(NodeHandle, u64)>,
+    /// Which of the three lists the bottom panel is showing.
+    log_view: LogView,
+    /// How many error toasts are waiting to be dismissed. Mirrored here
+    /// because the host owns them and `Esc` needs the answer synchronously.
+    sticky_toasts: usize,
+    /// Seconds since the editor started, for timestamps.
+    log_clock: std::time::Instant,
+    /// Background jobs, as the status surface last reported them.
+    job_rows: Vec<(u64, String, f32, bool)>,
+    /// The scene the title bar names.
+    scene_name: Option<String>,
+    /// Undo history entry names, oldest first.
+    history_rows: Vec<String>,
+    /// How many history entries have been applied.
+    history_position: usize,
     edit_popup_open: bool,
     view_popup_open: bool,
     window_popup_open: bool,
@@ -845,11 +820,56 @@ pub struct UiManager {
     tooltip_since: Option<(NodeHandle, std::time::Instant)>,
     help_page: u8,
     content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
+    outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
+    outliner_selection: Vec<u32>,
+    clipboard_filled: bool,
+    /// User keybinding overrides. Dispatch reads this, not the declarations.
+    keybindings: crate::commands::KeyBindings,
+    /// The command whose binding is being captured, if the Preferences window
+    /// is waiting for a keystroke.
+    rebinding: Option<&'static str>,
+    preferences_open: bool,
+    /// Which Preferences tab is showing.
+    preferences_bindings_tab: bool,
+    preferences_query: String,
+    preferences_modified_only: bool,
+    /// Generated settings rows, mounted in the Preferences window. A separate
+    /// map from Details' because the two panels are alive at the same time and
+    /// address different objects.
+    settings_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    settings_rows: HashMap<NodeHandle, GeneratedBinding>,
+    settings_root: NodeHandle,
+    settings_signature: Vec<(
+        somnium_ecs::reflect::StableId,
+        somnium_ecs::reflect::FieldId,
+        GeneratedEdit,
+    )>,
+    settings_panels: Vec<crate::editor::inspector_gen::GeneratedComponentPanel>,
+    /// `(command id, capture button, reset button)` for the keyboard tab.
+    binding_rows: Vec<(&'static str, NodeHandle, NodeHandle)>,
+    recent_scenes: Vec<(String, bool)>,
+    /// `(button, path)` for the File menu's recent tail. The separator carries
+    /// an empty path and is never clickable.
+    recent_menu_items: Vec<(NodeHandle, String)>,
+    active_debug_view: &'static str,
+    render_toggles: crate::debug::DebugToggles,
+    /// `(entity index, name)` for the open piercing menu.
+    piercing_rows: Vec<(u32, String)>,
+    tooltip_delay_ms: f32,
+    /// The value a badge-column drag is painting, so the run stays uniform.
+    badge_drag_value: Option<bool>,
+    /// Mirror of core's live rubber-band, so `Esc` can cancel it before the
+    /// overlay stack gets a look in.
+    marquee_active: bool,
+    viewport_drop_probe: (Option<somnium_ecs::Entity>, Option<[f32; 3]>),
+    external_drag_files: Vec<std::path::PathBuf>,
     outliner_filter: String,
     palette_open: bool,
     unsaved_open: bool,
+    pending_scene_action: Option<EditorEvent>,
     color_open: bool,
-    color_target: Option<crate::ColorField>,
+    color_target: Option<ColorTarget>,
+    color_gesture: Option<GestureId>,
     color_original: [f32; 4],
     color_live: [f32; 4],
     /// What the Content Drawer's right-click menu is currently about.
@@ -861,6 +881,7 @@ pub struct UiManager {
     /// Which folder a right-click happened in, so a "New Folder" from
     /// inside `scripts/` lands in `scripts/` and not at the root.
     content_menu_folder: String,
+    content_inline_rename: Option<(NodeHandle, std::path::PathBuf)>,
     /// What confirming the name prompt will do.
     name_prompt: Option<NamePrompt>,
     /// What is currently typed in the name prompt.
@@ -887,6 +908,7 @@ pub struct UiManager {
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
     title_drag: NodeHandle,
+    title_label: NodeHandle,
     win_min: NodeHandle,
     win_max: NodeHandle,
     win_close: NodeHandle,
@@ -999,12 +1021,8 @@ fn load_fonts(ui: &mut UserInterface) -> u8 {
 /// mangle when this file is edited programmatically.
 const SEP: [char; 2] = ['/', '\\'];
 
-/// What a *dynamic* palette row resolves to.
-///
-/// Phase 27-G. Static commands stay positional (see
-/// `UiManager::STATIC_PALETTE_COMMANDS`); everything appended after them
-/// carries its target here instead, so adding a category cannot rebind a
-/// command.
+/// What a dynamic palette row resolves to. Registered commands use stable ids
+/// directly; entities/assets use namespaced ids in this map.
 #[derive(Clone, Debug, PartialEq)]
 enum PaletteTarget {
     Entity(u32),
@@ -1015,6 +1033,160 @@ enum PaletteTarget {
 }
 
 impl UiManager {
+    fn allocate_property_gesture(&mut self) -> GestureId {
+        let gesture = GestureId(self.next_property_gesture);
+        self.next_property_gesture = self.next_property_gesture.wrapping_add(1).max(1);
+        gesture
+    }
+
+    fn queue_generated_binding(
+        &mut self,
+        binding: &GeneratedBinding,
+        value: somnium_ecs::reflect::ReflectValue,
+        gesture: GestureId,
+        live: bool,
+    ) {
+        self.queue_generated_address(binding.component, binding.field, value, gesture, live);
+    }
+
+    fn queue_generated_address(
+        &mut self,
+        component: somnium_ecs::reflect::StableId,
+        field: somnium_ecs::reflect::FieldId,
+        value: somnium_ecs::reflect::ReflectValue,
+        gesture: GestureId,
+        live: bool,
+    ) {
+        let Some(entity) = self.selected_entity else {
+            return;
+        };
+        self.editor_events
+            .push_back(EditorEvent::SetComponentField {
+                entity,
+                component,
+                field,
+                value,
+                gesture,
+                live,
+            });
+    }
+
+    /// The gesture id a widget's edit belongs to.
+    ///
+    /// A live edit reuses (or opens) one id for the whole drag; a commit
+    /// consumes it, so the coalescing window closes exactly when the gesture
+    /// does. Extracted in CONTROL-K because three widgets now need it.
+    fn gesture_for(&mut self, handle: NodeHandle, live: bool) -> GestureId {
+        if live {
+            if let Some(gesture) = self.generated_gestures.get(&handle).copied() {
+                return gesture;
+            }
+            let gesture = self.allocate_property_gesture();
+            self.generated_gestures.insert(handle, gesture);
+            return gesture;
+        }
+        self.generated_gestures
+            .remove(&handle)
+            .unwrap_or_else(|| self.allocate_property_gesture())
+    }
+
+    /// Write a colour the picker produced back to whatever it was opened for.
+    ///
+    /// One place rather than three identical `match`es, and the reason it is
+    /// worth extracting: CONTROL-K added a fourth destination shape, and three
+    /// copies is where the fourth one gets missed.
+    fn write_color_target(
+        &mut self,
+        target: ColorTarget,
+        rgba: [f32; 4],
+        gesture: GestureId,
+        live: bool,
+    ) {
+        match target {
+            ColorTarget::Reflected {
+                component,
+                field,
+                vec4,
+            } => {
+                let value = if vec4 {
+                    somnium_ecs::reflect::ReflectValue::Vec4(rgba)
+                } else {
+                    somnium_ecs::reflect::ReflectValue::Vec3([rgba[0], rgba[1], rgba[2]])
+                };
+                self.queue_generated_address(component, field, value, gesture, live);
+            }
+            ColorTarget::GradientStop {
+                component,
+                field,
+                index,
+            } => {
+                // The value that travels is the whole gradient. A stop is not
+                // separately addressable by `(StableId, FieldId)`, and
+                // inventing a sub-field address for it would be a second
+                // property vocabulary — exactly what Seam 1 forbids.
+                let Some(binding) = self
+                    .generated_bindings
+                    .values()
+                    .find(|b| b.component == component && b.field == field)
+                    .cloned()
+                else {
+                    return;
+                };
+                let somnium_ecs::reflect::ReflectValue::Gradient(gradient) = &binding.value else {
+                    return;
+                };
+                let mut gradient = gradient.clone();
+                let Some(stop) = gradient.stop_mut(index) else {
+                    return;
+                };
+                stop.color = rgba;
+                self.queue_generated_address(
+                    component,
+                    field,
+                    somnium_ecs::reflect::ReflectValue::Gradient(gradient),
+                    gesture,
+                    live,
+                );
+            }
+        }
+    }
+
+    fn numeric_reflect_value(
+        binding: &GeneratedBinding,
+        edited: f32,
+    ) -> Option<somnium_ecs::reflect::ReflectValue> {
+        use somnium_ecs::reflect::ReflectValue as RV;
+        Some(match (&binding.value, binding.edit) {
+            (RV::I64(_), GeneratedEdit::Whole) => RV::I64(edited.round() as i64),
+            (RV::F64(_), GeneratedEdit::Whole) => RV::F64(f64::from(edited)),
+            (RV::Vec2(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec2(v)
+            }
+            (RV::Vec3(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec3(v)
+            }
+            (RV::Vec4(current), GeneratedEdit::Lane(lane)) => {
+                let mut v = *current;
+                v[lane as usize] = edited;
+                RV::Vec4(v)
+            }
+            (RV::Quat(current), GeneratedEdit::Euler(lane)) => {
+                let (x, y, z) = glam::Quat::from_array(*current).to_euler(glam::EulerRot::XYZ);
+                let mut euler = [x, y, z];
+                euler[lane as usize] = edited.to_radians();
+                RV::Quat(
+                    glam::Quat::from_euler(glam::EulerRot::XYZ, euler[0], euler[1], euler[2])
+                        .to_array(),
+                )
+            }
+            _ => return None,
+        })
+    }
+
     pub fn new(
         device: &wgpu::Device,
         output_format: wgpu::TextureFormat,
@@ -1028,10 +1200,7 @@ impl UiManager {
         // The tree lays out in logical units so every density token keeps its
         // apparent size at any DPI. `inner_size()` is device pixels.
         let ui_scale = window.scale_factor() as f32;
-        let (sw, sh) = (
-            size.width as f32 / ui_scale,
-            size.height as f32 / ui_scale,
-        );
+        let (sw, sh) = (size.width as f32 / ui_scale, size.height as f32 / ui_scale);
         let mut native_ui = UserInterface::new(sw, sh);
         native_ui.set_ui_scale(ui_scale);
         // Now that one layout unit is one *logical* pixel, the atlas can finally
@@ -1068,7 +1237,13 @@ impl UiManager {
             vp_overlay: layout.vp_overlay,
             vp_overlay_text: layout.vp_overlay_text,
             log_stack: layout.log_stack,
-            log_entry_count: 0,
+            log_severity_chips: layout.log_severity_chips,
+            log_search: layout.log_search,
+            log_pin_only: layout.log_pin_only,
+            log_copy: layout.log_copy,
+            log_clear: layout.log_clear,
+            log_jobs_toggle: layout.log_jobs_toggle,
+            log_history_toggle: layout.log_history_toggle,
             create_button: layout.create_button,
             create_popup: layout.create_popup,
             create_popup_open: false,
@@ -1076,11 +1251,10 @@ impl UiManager {
             foliage_kind_shown: 0,
             file_button: layout.file_button,
             file_popup: layout.file_popup,
+            file_menu_stack: layout.file_menu_stack,
             file_popup_open: false,
             open_combo_popup: NodeHandle::NONE,
-            file_import_item: layout.file_import_item,
-            file_new_item: layout.file_new_item,
-            file_save_item: layout.file_save_item,
+            menu_command_items: layout.menu_command_items,
             camera_speed_slider: layout.camera_speed_slider,
             camera_speed_label: layout.camera_speed_label,
             viewport_res_combo: layout.viewport_res_combo,
@@ -1097,9 +1271,12 @@ impl UiManager {
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             palette_entities: Vec::new(),
-            palette_targets: Vec::new(),
+            palette_targets: std::collections::HashMap::new(),
+            command_history: crate::commands::CommandHistory::load(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
+            selected_entity: None,
+            next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
@@ -1114,7 +1291,16 @@ impl UiManager {
             status_dirty: layout.status_dirty,
             status_selection: layout.status_selection,
             status_stats: layout.status_stats,
-            inspector_baseline: std::collections::HashMap::new(),
+            status_stats_button: layout.status_stats_button,
+            generated_root: NodeHandle::NONE,
+            generated_entity: None,
+            generated_signature: Vec::new(),
+            generated_bindings: HashMap::new(),
+            generated_rows: HashMap::new(),
+            generated_gestures: HashMap::new(),
+            generated_asset_choices: HashMap::new(),
+            generated_asset_searches: HashMap::new(),
+            generated_asset_actions: HashMap::new(),
             inner_h: layout.inner_h,
             content_split_h: layout.content_split_h,
             right_split_h: layout.right_split_h,
@@ -1134,36 +1320,28 @@ impl UiManager {
             view_popup: layout.view_popup,
             window_popup: layout.window_popup,
             help_menu_popup: layout.help_menu_popup,
-            edit_undo: layout.edit_undo,
-            edit_redo: layout.edit_redo,
-            edit_delete: layout.edit_delete,
-            edit_dup: layout.edit_dup,
-            view_profiler: layout.view_profiler,
-            view_content: layout.view_content,
-            window_dock_content: layout.window_dock_content,
-            window_workspace_items: layout.window_workspace_items,
-            window_reset_item: layout.window_reset_item,
             active_workspace: crate::workspace::Workspace::Layout,
             drawer_height: theme::BOTTOM_DRAWER_HEIGHT,
-            help_open_item: layout.help_open_item,
-            help_shortcuts: layout.help_shortcuts,
-            help_about: layout.help_about,
             status_text: layout.status_text,
+            status_cancel: layout.status_cancel,
+            status_cancel_job: None,
             drawer_button: layout.drawer_button,
             log_button: layout.log_button,
             content_drawer: layout.content_drawer,
             content_search: layout.content_search,
             content_breadcrumb: layout.content_breadcrumb,
             content_engine_toggle: layout.content_engine_toggle,
+            content_scroll: layout.content_scroll,
             content_list: layout.content_list,
+            content_toolbar_actions: layout.content_toolbar_actions,
             outliner_tree: layout.outliner_tree,
             outliner_search: layout.outliner_search,
             inspector_search: layout.inspector_search,
             foliage_kind_combo: layout.foliage_kind_combo,
-            post_tonemap_combo: layout.post_tonemap_combo,
             foliage_kind_popup: layout.foliage_kind_popup,
-            post_tonemap_popup: layout.post_tonemap_popup,
             viewport_res_popup: layout.viewport_res_popup,
+            snap_grid_popup: layout.snap_grid_popup,
+            snap_angle_popup: layout.snap_angle_popup,
             save_button: layout.save_button,
             palette_button: layout.palette_button,
             palette_popup: layout.palette_popup,
@@ -1175,6 +1353,22 @@ impl UiManager {
             unsaved_cancel: layout.unsaved_cancel,
             content_menu_popup: layout.content_menu_popup,
             content_menu: layout.content_menu,
+            outliner_menu_popup: layout.outliner_menu_popup,
+            outliner_menu: layout.outliner_menu,
+            preferences: layout.preferences,
+            snap_cluster: layout.snap_cluster,
+            snap_grid_combo: layout.snap_grid_combo,
+            snap_angle_combo: layout.snap_angle_combo,
+            snap_surface_toggle: layout.snap_surface_toggle,
+            gizmo_space_toggle: layout.gizmo_space_toggle,
+            gizmo_space_label: layout.gizmo_space_label,
+            select_only_toggle: layout.select_only_toggle,
+            snap_overflow: layout.snap_overflow,
+            time_cluster: layout.time_cluster,
+            time_label: layout.time_label,
+            time_slider: layout.time_slider,
+            time_shown: None,
+            play_session_active: false,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -1186,17 +1380,26 @@ impl UiManager {
             drawer_open: true,
             drawer_docked: true,
             show_engine_content: false,
-            ctrl_held: false,
-            shift_held: false,
             inspector_filter: String::new(),
             content_filter: String::new(),
             content_path: String::new(),
             content_history: crate::metaphor::ContentHistory::new(String::new()),
             content_kind: crate::metaphor::ContentFilterKind::All,
             content_density: crate::metaphor::ContentDensity::Comfortable,
+            asset_db: somnium_asset::database::AssetDbSnapshot::default(),
+            content_sort: somnium_asset::database::AssetSort::Name,
+            content_sort_descending: false,
             content_selection: std::collections::HashSet::new(),
             outliner_expanded: std::collections::HashSet::new(),
-            log_lines: VecDeque::new(),
+            log: crate::log::OutputLog::default(),
+            log_rows: Vec::new(),
+            log_view: LogView::Log,
+            sticky_toasts: 0,
+            log_clock: std::time::Instant::now(),
+            job_rows: Vec::new(),
+            scene_name: None,
+            history_rows: Vec::new(),
+            history_position: 0,
             edit_popup_open: false,
             view_popup_open: false,
             window_popup_open: false,
@@ -1204,15 +1407,43 @@ impl UiManager {
             tooltip_since: None,
             help_page: 0,
             content_entries: Vec::new(),
+            outliner_entity_handles: HashMap::new(),
+            outliner_selection: Vec::new(),
+            clipboard_filled: false,
+            keybindings: crate::commands::KeyBindings::load(),
+            rebinding: None,
+            preferences_open: false,
+            preferences_bindings_tab: false,
+            preferences_query: String::new(),
+            preferences_modified_only: false,
+            settings_bindings: HashMap::new(),
+            settings_rows: HashMap::new(),
+            settings_root: NodeHandle::NONE,
+            settings_signature: Vec::new(),
+            settings_panels: Vec::new(),
+            binding_rows: Vec::new(),
+            recent_scenes: Vec::new(),
+            recent_menu_items: Vec::new(),
+            active_debug_view: "lit",
+            render_toggles: crate::debug::DebugToggles::default(),
+            piercing_rows: Vec::new(),
+            tooltip_delay_ms: 500.0,
+            badge_drag_value: None,
+            marquee_active: false,
+            viewport_drop_probe: (None, None),
+            external_drag_files: Vec::new(),
             outliner_filter: String::new(),
             palette_open: false,
             unsaved_open: false,
+            pending_scene_action: None,
             color_open: false,
             color_target: None,
+            color_gesture: None,
             color_original: [1.0, 1.0, 1.0, 1.0],
             color_live: [1.0, 1.0, 1.0, 1.0],
             content_menu_target: None,
             content_menu_folder: String::new(),
+            content_inline_rename: None,
             name_prompt: None,
             name_text: String::new(),
             script_state: ScriptInspectorState::default(),
@@ -1222,6 +1453,7 @@ impl UiManager {
             chrome_layout: layout_sizes,
             log_open: false,
             title_drag: layout.title_drag,
+            title_label: layout.title_label,
             win_min: layout.win_min,
             win_max: layout.win_max,
             win_close: layout.win_close,
@@ -1233,6 +1465,27 @@ impl UiManager {
             immersive_restore_fullscreen: None,
             immersive_restore_maximized: false,
         };
+        // CONTROL-A evidence harness. A relative drawer path lets a timing run
+        // queue the real `assets/terrain/` workload before frame one, without
+        // synthesising mouse input. Parent/root/prefix components are refused:
+        // this diagnostic may inspect the assets tree and nothing outside it.
+        if let Ok(raw) = std::env::var("SOMNIUM_AUDIT_CONTENT_PATH") {
+            let relative = std::path::Path::new(raw.trim());
+            let safe = !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+            let root = std::env::current_dir().unwrap_or_default().join("assets");
+            if safe && root.join(relative).is_dir() {
+                let path = relative.to_string_lossy().replace('\\', "/");
+                this.content_path.clone_from(&path);
+                this.content_history = crate::metaphor::ContentHistory::new(path);
+            } else {
+                warn!(
+                    "SOMNIUM_AUDIT_CONTENT_PATH ignored: expected an existing relative assets folder"
+                );
+            }
+        }
         this.refresh_content_list();
         // Nothing is selected at startup and `update_inspector` has not run
         // yet, so the two Details states would otherwise both be visible and
@@ -1246,7 +1499,39 @@ impl UiManager {
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
         this.apply_collapse_rules(this.window_size.0);
+        this.apply_audit_startup_state();
         this
+    }
+
+    /// Put one existing editor surface into a deterministic startup state for
+    /// CONTROL-A captures. This is inert unless the audit variable is present;
+    /// it calls the same paths as clicks/shortcuts and owns no parallel UI.
+    fn apply_audit_startup_state(&mut self) {
+        let Ok(raw) = std::env::var("SOMNIUM_AUDIT_UI_STATE") else {
+            return;
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "shell" => {}
+            "menu-file" => self.open_menu(0),
+            "menu-create" => self.open_menu(1),
+            "menu-edit" => self.open_menu(2),
+            "menu-view" => self.open_menu(3),
+            "menu-window" => self.open_menu(4),
+            "menu-help" => self.open_menu(5),
+            "palette" => self.toggle_palette(),
+            "help" => self.toggle_help(Some(0)),
+            "log" => self.toggle_log_panel(),
+            // Goes through the command/event boundary, exactly like the
+            // viewport button. The host applies it on the first frame.
+            "profiler" => {
+                self.run_command_id("editor.view.profiler");
+            }
+            "modal-unsaved" => {
+                self.scene_dirty = true;
+                self.prompt_unsaved_new();
+            }
+            other => warn!("SOMNIUM_AUDIT_UI_STATE={other} ignored: unknown audit surface"),
+        }
     }
 
     // ── Window integration ────────────────────────────────────────────────────
@@ -1448,6 +1733,7 @@ impl UiManager {
         let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
+        self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
         self.native_ui.perform_layout();
@@ -1480,11 +1766,45 @@ impl UiManager {
             return false;
         }
         if let WindowEvent::ModifiersChanged(m) = event {
-            self.ctrl_held = m.state().control_key();
-            self.shift_held = m.state().shift_key();
+            let state = m.state();
+            self.native_ui.set_modifiers(Modifiers {
+                ctrl: state.control_key(),
+                shift: state.shift_key(),
+                alt: state.alt_key(),
+                logo: state.super_key(),
+            });
         }
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.native_ui.cursor_pos = self.native_ui.to_logical(position.x, position.y);
+        }
+        if let WindowEvent::HoveredFile(path) = event {
+            if !self.external_drag_files.contains(path) {
+                self.external_drag_files.push(path.clone());
+            }
+            self.native_ui
+                .begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(
+                    self.external_drag_files.clone(),
+                ));
+            self.refresh_drop_acceptance();
+            return true;
+        }
+        if matches!(event, WindowEvent::HoveredFileCancelled) {
+            self.external_drag_files.clear();
+            self.native_ui.cancel_active_gesture();
+            return true;
+        }
+        if let WindowEvent::DroppedFile(path) = event {
+            if !self.external_drag_files.contains(path) {
+                self.external_drag_files.push(path.clone());
+            }
+            self.native_ui
+                .begin_external_drag(crate::drag_drop::DragPayload::ExternalFiles(
+                    self.external_drag_files.clone(),
+                ));
+            self.refresh_drop_acceptance();
+            self.complete_drop();
+            self.external_drag_files.clear();
+            return true;
         }
         // Phase 16-D: the Content Drawer's right-click menu.
         //
@@ -1498,38 +1818,120 @@ impl UiManager {
             ..
         } = event
         {
+            if self.native_ui.cancel_active_gesture() {
+                return true;
+            }
+            if self.native_ui.modifiers().command()
+                && self.native_ui.is_under(
+                    self.native_ui.hit_test(self.native_ui.cursor_pos),
+                    self.viewport_handle,
+                )
+            {
+                self.editor_events.push_back(EditorEvent::OpenPiercingMenu);
+                return true;
+            }
             if self.open_content_menu(self.native_ui.cursor_pos) {
+                return true;
+            }
+            if self.open_outliner_menu(self.native_ui.cursor_pos) {
                 return true;
             }
         }
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
             let pressed = key_ev.state == ElementState::Pressed;
             if let PhysicalKey::Code(code) = key_ev.physical_key {
+                // Two guards, and the second one was missing.
+                //
+                // `has_text_focus` keeps a shortcut out of a text field. The
+                // fly-cam needs the same protection and did not have it: `S`
+                // is bound to the Scale tool *and* is "move backward", so
+                // holding right-mouse and pressing `S` ran the command and the
+                // press never reached the game. It appeared to work a couple of
+                // seconds later only because OS key-repeat sets `repeat`, which
+                // skips this branch — so the camera started moving exactly when
+                // the keyboard began auto-repeating.
+                //
+                // The game layer already guards its own `W`/`E` gizmo
+                // shortcuts on `!is_rmb_down`; that guard was dead for any key
+                // the registry claimed first, because the registry intercepts a
+                // layer above it. This is the same rule applied where the
+                // interception actually happens.
+                if pressed && !key_ev.repeat && !self.native_ui.has_text_focus() {
+                    let chord = crate::commands::Chord::from_winit(
+                        code,
+                        self.native_ui.modifiers().command(),
+                        self.native_ui.modifiers().shift,
+                        self.native_ui.modifiers().alt,
+                        false,
+                    )
+                    // Same rule as the engine's dispatcher, and it has to be
+                    // here too: the *rebindable* lookup lives on this side, so
+                    // a user-rebound bare key would otherwise still be eaten
+                    // while the game has the keyboard.
+                    .filter(|chord| !self.game_owns_keyboard() || chord.has_modifier());
+                    if let Some(chord) = chord {
+                        // CONTROL-H: a rebinding editor is only real if the
+                        // override is what dispatch consults. The registry's
+                        // declared chord is the fallback, not the authority.
+                        if self.rebinding.is_some() {
+                            self.capture_rebind(chord);
+                            return true;
+                        }
+                        if let Some(id) = self.keybindings.command_for(chord)
+                            && self.run_command_id(id)
+                        {
+                            return true;
+                        }
+                    }
+                }
                 match code {
                     KeyCode::ControlLeft | KeyCode::ControlRight => {
-                        self.ctrl_held = pressed;
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.ctrl = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    KeyCode::F1 if pressed => {
-                        self.toggle_help(None);
-                        return true;
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.shift = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    // Phase 16-D. Safe to lean on: a script that no longer
-                    // compiles leaves its live instances running and only
-                    // publishes diagnostics, so a reload can never be the
-                    // thing that breaks a play session.
-                    KeyCode::F5 if pressed => {
-                        self.editor_events.push_back(EditorEvent::ReloadScripts);
-                        return true;
+                    KeyCode::AltLeft | KeyCode::AltRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.alt = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
-                    KeyCode::Space if pressed && self.ctrl_held => {
-                        self.toggle_drawer();
-                        return true;
-                    }
-                    KeyCode::KeyP if pressed && self.ctrl_held => {
-                        self.toggle_palette();
-                        return true;
+                    KeyCode::SuperLeft | KeyCode::SuperRight => {
+                        let mut modifiers = self.native_ui.modifiers();
+                        modifiers.logo = pressed;
+                        self.native_ui.set_modifiers(modifiers);
                     }
                     KeyCode::Escape if pressed => {
+                        // `Esc` runs outermost-first, which is the precedence
+                        // CONTROL-A1 established and every sub-phase since has
+                        // extended rather than rearranged:
+                        //
+                        //   a pending rebind · a persistent error toast ·
+                        //   a viewport rubber-band · a drag or control gesture ·
+                        //   the overlay stack.
+                        //
+                        // A rebind is first because it is *listening* — every
+                        // other key would be swallowed by it. An error toast is
+                        // next because it is the one overlay that outlives the
+                        // action that raised it, so nothing else will remove it.
+                        if self.rebinding.take().is_some() {
+                            return true;
+                        }
+                        if self.dismiss_toast() {
+                            return true;
+                        }
+                        if self.marquee_active {
+                            self.marquee_active = false;
+                            self.editor_events.push_back(EditorEvent::CancelMarquee);
+                            return true;
+                        }
+                        if self.native_ui.cancel_active_gesture() {
+                            return true;
+                        }
                         if self.close_top_overlay() {
                             return true;
                         }
@@ -1543,8 +1945,45 @@ impl UiManager {
                     //
                     // A focused text field keeps Tab for itself, so typing in
                     // the search box is not interrupted.
+                    KeyCode::Tab if pressed && self.native_ui.modal_root().is_some() => {
+                        self.advance_focus(if self.native_ui.modifiers().shift {
+                            -1
+                        } else {
+                            1
+                        });
+                        return true;
+                    }
                     KeyCode::Tab if pressed && !self.native_ui.has_text_focus() => {
-                        self.advance_focus(if self.shift_held { -1 } else { 1 });
+                        self.advance_focus(if self.native_ui.modifiers().shift {
+                            -1
+                        } else {
+                            1
+                        });
+                        return true;
+                    }
+                    KeyCode::ArrowUp
+                    | KeyCode::ArrowDown
+                    | KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::Home
+                    | KeyCode::End
+                        if pressed && self.native_ui.focused() == self.outliner_tree =>
+                    {
+                        self.native_ui.send(UiMessage::new(
+                            self.outliner_tree,
+                            MessageDirection::ToWidget,
+                            WidgetMessage::KeyDown(code, self.native_ui.modifiers()),
+                        ));
+                        return true;
+                    }
+                    KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Home | KeyCode::End
+                        if pressed
+                            && (self.native_ui.focused() == self.inspector_search
+                                || self
+                                    .native_ui
+                                    .is_under(self.native_ui.focused(), self.inspector_stack)) =>
+                    {
+                        self.native_ui.traverse_region(self.inspector_stack, code);
                         return true;
                     }
                     _ => {}
@@ -1557,6 +1996,22 @@ impl UiManager {
             ..
         } = event
         {
+            if let Some((axis, positive)) =
+                self.native_ui.axis_widget_hit(self.native_ui.cursor_pos)
+            {
+                // The widget's ends map onto the view presets: clicking +Y is
+                // Top, and the negative ends are the same presets from the
+                // other side, which is why the preset carries the sign.
+                let preset = match (axis, positive) {
+                    (1, _) => 0,
+                    (2, _) => 1,
+                    _ => 2,
+                };
+                self.editor_events
+                    .push_back(EditorEvent::ViewPreset(preset));
+                return true;
+            }
+            self.arm_internal_drag();
             let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
             if self.is_title_chrome_hit(hit) {
                 if hit == self.win_min || hit == self.win_max || hit == self.win_close {
@@ -1600,17 +2055,317 @@ impl UiManager {
                 }
             }
         }
-        self.native_ui.process_os_event(event)
+        let consumed = self.native_ui.process_os_event(event);
+        if matches!(event, WindowEvent::CursorMoved { .. }) && self.native_ui.is_dragging() {
+            self.refresh_drop_acceptance();
+            return true;
+        }
+        if matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            }
+        ) {
+            self.badge_drag_value = None;
+            self.complete_drop();
+        }
+        consumed
     }
 
+    fn arm_internal_drag(&mut self) {
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        if let Some(entry) = self
+            .content_entries
+            .iter()
+            .find_map(|(handle, entry)| self.native_ui.is_under(hit, *handle).then_some(entry))
+        {
+            let mut ids: Vec<_> = if self.content_selection.contains(&entry.path) {
+                self.content_entries
+                    .iter()
+                    .filter(|(_, e)| self.content_selection.contains(&e.path))
+                    .filter_map(|(_, e)| e.asset_id)
+                    .collect()
+            } else {
+                entry.asset_id.into_iter().collect()
+            };
+            ids.sort_by_key(|id| id.raw());
+            ids.dedup();
+            if !ids.is_empty() {
+                self.native_ui
+                    .arm_drag(crate::drag_drop::DragPayload::Assets(ids));
+            }
+            return;
+        }
+        if self.native_ui.is_under(hit, self.outliner_tree) {
+            let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT)
+                .floor() as usize;
+            if let Some((_, id)) = self.outliner_rows.get(row)
+                && let Some(entity) = self.outliner_entity_handles.get(id).copied()
+            {
+                // Dragging a row that is part of the selection drags the whole
+                // selection; dragging an unselected row drags just that row,
+                // which is the convention every file manager shares.
+                let entities = if self.outliner_selection.contains(id) {
+                    self.outliner_selection
+                        .iter()
+                        .filter_map(|id| self.outliner_entity_handles.get(id).copied())
+                        .collect()
+                } else {
+                    vec![entity]
+                };
+                self.native_ui
+                    .arm_drag(crate::drag_drop::DragPayload::Entities(entities));
+            }
+        }
+    }
+
+    fn refresh_drop_acceptance(&mut self) {
+        let Some(payload) = self.native_ui.drag_payload().cloned() else {
+            return;
+        };
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        // Resolution order is the ancestor walk in practice: the innermost
+        // registered surface under the pointer wins, and each branch reports
+        // the exact rectangle it will highlight so the adorner cannot claim a
+        // target the release would not use.
+        let resolved = if self.native_ui.is_under(hit, self.viewport_handle)
+            || hit == self.viewport_handle
+        {
+            Some((
+                crate::drag_drop::DropTarget::Viewport {
+                    entity: self.viewport_drop_probe.0,
+                    terrain_hit: self.viewport_drop_probe.1,
+                },
+                self.native_ui.screen_bounds(self.viewport_handle),
+            ))
+        } else if let Some((row, binding)) = self.generated_rows.iter().find(|(row, binding)| {
+            self.native_ui.is_under(hit, **row)
+                && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_))
+        }) {
+            self.generated_entity.map(|entity| {
+                (
+                    crate::drag_drop::DropTarget::AssetField {
+                        entity,
+                        component: binding.component,
+                        field: binding.field,
+                        kind_mask: binding.asset_kind_mask,
+                    },
+                    self.native_ui.screen_bounds(*row),
+                )
+            })
+        } else if self.native_ui.is_under(hit, self.outliner_tree) {
+            let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+            let row = ((self.native_ui.cursor_pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT)
+                .floor() as usize;
+            let entity = self
+                .outliner_rows
+                .get(row)
+                .and_then(|(_, id)| self.outliner_entity_handles.get(id))
+                .copied();
+            let highlight = if entity.is_some() {
+                types::Rect::new(
+                    bounds.x,
+                    bounds.y + row as f32 * crate::theme::TREE_ROW_HEIGHT,
+                    bounds.w,
+                    crate::theme::TREE_ROW_HEIGHT,
+                )
+            } else {
+                bounds
+            };
+            Some((crate::drag_drop::DropTarget::Outliner(entity), highlight))
+        } else if self.native_ui.is_under(hit, self.content_drawer) {
+            Some((
+                crate::drag_drop::DropTarget::DrawerFolder(std::path::PathBuf::from(
+                    &self.content_path,
+                )),
+                self.native_ui.screen_bounds(self.content_drawer),
+            ))
+        } else {
+            None
+        };
+        let Some((target, highlight)) = resolved else {
+            self.native_ui.set_drop_acceptance(None);
+            self.native_ui.set_drop_highlight(None);
+            return;
+        };
+        let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
+        let acceptance =
+            match crate::drag_drop::semantic_request(
+                &self.asset_db,
+                &payload,
+                &candidate,
+                self.native_ui.modifiers(),
+            ) {
+                Ok(_) => candidate,
+                Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
+            };
+        self.native_ui.set_drop_highlight(Some(highlight));
+        self.native_ui.set_drop_acceptance(Some(acceptance));
+    }
+
+    fn complete_drop(&mut self) {
+        self.native_ui.set_drop_highlight(None);
+        let Some(drop) = self.native_ui.take_completed_drop() else {
+            return;
+        };
+        match crate::drag_drop::semantic_request(
+            &self.asset_db,
+            &drop.payload,
+            &drop.acceptance,
+            self.native_ui.modifiers(),
+        ) {
+            Ok(request @ crate::drag_drop::DropRequest::LoadScene { .. }) => {
+                self.prompt_unsaved_action(EditorEvent::CompleteDrop(request));
+            }
+            Ok(request) => self
+                .editor_events
+                .push_back(EditorEvent::CompleteDrop(request)),
+            Err(reason) => self.push_toast(&reason),
+        }
+    }
+
+    /// Translate the live modifier state into a selection combinator. Reading
+    /// it here rather than inside `TreeView` keeps the widget ignorant of what
+    /// a selection *is*, which is the same reason Details never learns about
+    /// multi-selection.
+    fn selection_mode(&self) -> SelectionMode {
+        let modifiers = self.native_ui.modifiers();
+        if modifiers.shift {
+            SelectionMode::Range
+        } else if modifiers.command() {
+            SelectionMode::Toggle
+        } else {
+            SelectionMode::Replace
+        }
+    }
+
+    /// Publish the whole selection to the Outliner. The primary still arrives
+    /// through `update_outliner_tree`; this is the rest of the set, and it is
+    /// sent every frame because it is cheap and because a stale multi-select
+    /// highlight is worse than a redundant message.
+    pub fn set_outliner_selection(&mut self, ids: Vec<u32>) {
+        if self.outliner_selection == ids {
+            return;
+        }
+        self.outliner_selection = ids.clone();
+        self.native_ui.send(UiMessage::new(
+            self.outliner_tree,
+            MessageDirection::ToWidget,
+            crate::widgets::tree_view::TreeViewMessage::SetSelectedSet(ids),
+        ));
+    }
+
+    /// Publish the live viewport rubber-band, in logical pixels, for painting.
+    pub fn set_marquee(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        self.marquee_active = rect.is_some();
+        self.native_ui
+            .set_marquee(rect.map(|(x, y, w, h)| types::Rect::new(x, y, w, h)));
+    }
+
+    /// Whether the platform's primary shortcut modifier is held. Core reads
+    /// it for the additive marquee; the UI already owns the modifier state.
+    #[must_use]
+    pub fn command_modifier_held(&self) -> bool {
+        self.native_ui.modifiers().command()
+    }
+
+    /// Everything currently selected, in selection order.
+    #[must_use]
+    pub fn outliner_selection(&self) -> &[u32] {
+        &self.outliner_selection
+    }
+
+    pub fn set_outliner_entity_handles(
+        &mut self,
+        entities: impl IntoIterator<Item = somnium_ecs::Entity>,
+    ) {
+        self.outliner_entity_handles = entities
+            .into_iter()
+            .map(|entity| (entity.index(), entity))
+            .collect();
+    }
+
+    pub fn set_viewport_drop_probe(
+        &mut self,
+        entity: Option<somnium_ecs::Entity>,
+        terrain_hit: Option<[f32; 3]>,
+    ) {
+        self.viewport_drop_probe = (entity, terrain_hit);
+    }
+
+    /// Raise a transient toast, and mirror it into the status text.
+    ///
+    /// A toast whose text reads as a failure becomes a *sticky* one, which is
+    /// CONTROL-I's rule: errors persist until dismissed. Inferring it from the
+    /// text rather than adding a severity argument keeps the seventy-odd
+    /// existing call sites correct without touching one of them, and uses the
+    /// same `LogSeverity::infer` the Output Log already trusts.
     pub fn push_toast(&mut self, text: &str) {
+        let error = crate::log::LogSeverity::infer(text) == crate::log::LogSeverity::Error;
         self.native_ui.send(UiMessage::new(
             self.toast_host,
             MessageDirection::ToWidget,
-            ToastMessage::Push(text.to_string()),
+            if error {
+                self.sticky_toasts += 1;
+                ToastMessage::PushError(text.to_string())
+            } else {
+                ToastMessage::Push(text.to_string())
+            },
         ));
         self.native_ui
             .send(TextMessage::set_text(self.status_text, text.to_string()));
+    }
+
+    /// Dismiss the oldest sticky toast, reporting whether there was one.
+    ///
+    /// The boolean matters: `Esc` must fall through to the rest of the chain
+    /// when there is no error to dismiss, or it would stop closing popups.
+    pub fn dismiss_toast(&mut self) -> bool {
+        if self.sticky_toasts == 0 {
+            return false;
+        }
+        self.sticky_toasts -= 1;
+        self.native_ui.send(UiMessage::new(
+            self.toast_host,
+            MessageDirection::ToWidget,
+            ToastMessage::DismissOldest,
+        ));
+        true
+    }
+
+    /// Show the highest-priority active job and expose cancellation.
+    ///
+    /// Idempotent: called every frame, and does nothing at all when the job
+    /// has not changed. `set_visibility` invalidates its ancestors
+    /// unconditionally, so re-sending the same value re-measured the whole
+    /// status bar sixty times a second.
+    pub fn update_jobs(&mut self, jobs: &[UiJobStatus]) {
+        let job = jobs.first();
+        let next = job.map(|job| job.id);
+        let changed = next != self.status_cancel_job;
+        self.status_cancel_job = next;
+        if changed {
+            self.native_ui
+                .set_visibility(self.status_cancel, job.is_some());
+        }
+        match job {
+            Some(job) => {
+                self.native_ui.send(TextMessage::set_text(
+                    self.status_text,
+                    format!("{} — {:.0}%", job.name, job.progress * 100.0),
+                ));
+            }
+            // The status line borrowed by a job has to be given back, or it
+            // keeps reporting work that finished.
+            None if changed => {
+                self.native_ui
+                    .send(TextMessage::set_text(self.status_text, "Ready"));
+            }
+            None => {}
+        }
     }
 
     pub fn set_scene_dirty(&mut self, dirty: bool) {
@@ -1619,6 +2374,36 @@ impl UiManager {
             self.status_dirty,
             if dirty { "Unsaved changes" } else { "Saved" },
         ));
+        self.refresh_title();
+    }
+
+    /// The scene the title bar names. `None` is an unsaved scene.
+    pub fn set_scene_name(&mut self, name: Option<String>) {
+        if self.scene_name == name {
+            return;
+        }
+        self.scene_name = name;
+        self.refresh_title();
+    }
+
+    /// `Somnium Engine — scene.somnium •` — CONTROL-J's accurate title bar.
+    ///
+    /// The bullet is the convention every editor uses for unsaved work, and
+    /// the title bar is the one place that state is visible without looking
+    /// down at the status bar. Composed here rather than at the two call
+    /// sites so the facts it combines cannot get out of step.
+    fn refresh_title(&mut self) {
+        let mut title = "Somnium Engine".to_string();
+        if let Some(name) = &self.scene_name {
+            title.push_str(" \u{2014} ");
+            title.push_str(name);
+        }
+        if self.scene_dirty {
+            title.push_str(" \u{2022}");
+        }
+        self.native_ui
+            .send(TextMessage::set_text(self.title_label, title.clone()));
+        self.window.set_title(&title);
     }
 
     /// Name of the current selection, shown in the status bar. `None` clears
@@ -1673,6 +2458,30 @@ impl UiManager {
         self.refresh_content_list();
     }
 
+    fn begin_inline_content_rename(&mut self, entry: crate::metaphor::ContentEntry) {
+        if let Some((handle, _)) = self.content_inline_rename.take() {
+            self.native_ui.remove_node(handle);
+        }
+        let Some(tile) = self
+            .content_entries
+            .iter()
+            .find_map(|(handle, candidate)| (candidate.path == entry.path).then_some(*handle))
+        else {
+            return;
+        };
+        let field = TextBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_height(theme::ROW_HEIGHT)
+                .with_background(theme::BG_INPUT),
+        )
+        .with_text(entry.name)
+        .with_font_id(self.font_id)
+        .build();
+        let field = self.native_ui.add_node(field, tile);
+        self.native_ui.set_focus(field);
+        self.content_inline_rename = Some((field, entry.path));
+    }
+
     // ── Content Drawer right-click ───────────────────────────────────────
 
     /// Open the drawer's context menu at `pos`, if `pos` is over it.
@@ -1685,6 +2494,77 @@ impl UiManager {
     /// right-click, with no undo and no confirmation, is not a mistake
     /// anyone recovers from; the OS file browser is one menu item away
     /// and has a recycle bin.
+    /// The Outliner's right-click menu, built from the registry.
+    ///
+    /// Right-clicking a row that is *not* in the selection selects it first,
+    /// which is what every file manager does and what stops "Delete" from
+    /// meaning something other than the row under the cursor.
+    fn open_outliner_menu(&mut self, pos: Vec2) -> bool {
+        let hit = self.native_ui.hit_test(pos);
+        if !self.native_ui.is_under(hit, self.outliner_tree) {
+            return false;
+        }
+        let bounds = self.native_ui.screen_bounds(self.outliner_tree);
+        let row = ((pos.y - bounds.y) / crate::theme::TREE_ROW_HEIGHT).floor() as usize;
+        if let Some((_, id)) = self.outliner_rows.get(row).copied()
+            && !self.outliner_selection.contains(&id)
+        {
+            self.editor_events.push_back(EditorEvent::ModifySelection {
+                id,
+                mode: SelectionMode::Replace,
+            });
+        }
+
+        let ctx = self.command_context();
+        let items: Vec<MenuItem> = crate::commands::registry()
+            .surface(crate::commands::CommandSurface::OutlinerContext)
+            .into_iter()
+            .map(|command| MenuItem {
+                id: command.id.to_string(),
+                label: command.menu_label(),
+                enabled: command.enabled(&ctx).is_enabled(),
+            })
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+
+        let height = items.len() as f32 * theme::ROW_HEIGHT + 4.0;
+        let (window_w, window_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let mut placement = pos;
+        if placement.y + height > window_h {
+            placement.y = (pos.y - height).max(0.0);
+        }
+        const ASSUMED_WIDTH: f32 = 180.0;
+        if placement.x + ASSUMED_WIDTH > window_w {
+            placement.x = (window_w - ASSUMED_WIDTH).max(0.0);
+        }
+
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        self.native_ui
+            .set_desired_position(self.outliner_menu, placement);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui
+            .invalidate_ancestors(self.outliner_menu_popup);
+        true
+    }
+
+    fn close_outliner_menu(&mut self) {
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Close,
+        ));
+    }
+
     fn open_content_menu(&mut self, pos: Vec2) -> bool {
         if !self.drawer_open {
             return false;
@@ -1707,35 +2587,24 @@ impl UiManager {
         // what an author means by "here".
         self.content_menu_folder = self.content_path.clone();
 
-        let mut items = vec![
-            MenuItem {
-                id: content_menu_id::NEW_FOLDER,
-                label: "New Folder…".into(),
-                enabled: true,
-            },
-            MenuItem {
-                id: content_menu_id::NEW_SCRIPT,
-                label: "New Script…".into(),
-                enabled: true,
-            },
-        ];
-        if self.content_menu_target.is_some() {
-            items.push(MenuItem {
-                id: content_menu_id::RENAME,
-                label: "Rename…".into(),
-                enabled: true,
-            });
-            items.push(MenuItem {
-                id: content_menu_id::SHOW_IN_FOLDER,
-                label: "Show in Folder".into(),
-                enabled: true,
-            });
-        }
-        items.push(MenuItem {
-            id: content_menu_id::REFRESH,
-            label: "Refresh".into(),
-            enabled: true,
-        });
+        let ctx = self.command_context();
+        let items: Vec<MenuItem> = crate::commands::registry()
+            .surface(crate::commands::CommandSurface::ContentContext)
+            .into_iter()
+            .filter(|command| {
+                self.content_menu_target.is_some()
+                    || !matches!(
+                        command.action,
+                        crate::commands::CommandAction::ContentRename
+                            | crate::commands::CommandAction::ContentShowInFolder
+                    )
+            })
+            .map(|command| MenuItem {
+                id: command.id.to_string(),
+                label: command.menu_label(),
+                enabled: command.enabled(&ctx).is_enabled(),
+            })
+            .collect();
 
         // Keep it on screen. The drawer sits at the bottom of the window,
         // which is precisely where a menu that opened downwards would
@@ -1796,11 +2665,12 @@ impl UiManager {
         ));
         self.native_ui.invalidate_ancestors(self.name_popup);
         // So the author can start typing without clicking the box first.
-        self.native_ui.set_focus(self.name_input);
+        self.enter_modal_focus(self.name_popup, self.name_input);
     }
 
     fn close_name_prompt(&mut self) {
         self.name_prompt = None;
+        self.exit_modal_focus(self.name_popup);
         self.native_ui.send(UiMessage::new(
             self.name_popup,
             MessageDirection::ToWidget,
@@ -1813,6 +2683,24 @@ impl UiManager {
     /// A blank name is treated as a cancel rather than an error: it is
     /// what someone who changed their mind does, and a modal that refuses
     /// to close is worse than one that quietly gives up.
+    /// Start an in-place rename of the primary selection.
+    fn begin_outliner_rename(&mut self) {
+        let Some((_, Some(entity))) = self
+            .last_outliner_state
+            .as_ref()
+            .map(|(rows, selected)| (rows, *selected))
+        else {
+            return;
+        };
+        let current = self
+            .last_outliner_state
+            .as_ref()
+            .and_then(|(rows, _)| rows.iter().find(|row| row.id == entity))
+            .map(|row| row.name.clone())
+            .unwrap_or_default();
+        self.open_name_prompt(NamePrompt::RenameEntity { entity }, "Rename", &current);
+    }
+
     fn confirm_name_prompt(&mut self) {
         let Some(prompt) = self.name_prompt.take() else {
             return;
@@ -1825,52 +2713,37 @@ impl UiManager {
         let event = match prompt {
             NamePrompt::NewFolder { parent } => EditorEvent::CreateContentFolder { parent, name },
             NamePrompt::NewScript { parent } => EditorEvent::CreateContentScript { parent, name },
-            NamePrompt::Rename { path } => EditorEvent::RenameContentItem { path, name },
+            NamePrompt::NewMaterial { parent } => {
+                EditorEvent::CreateContentMaterial { parent, name }
+            }
+            NamePrompt::RenameEntity { entity } => EditorEvent::RenameEntity { entity, name },
         };
         self.editor_events.push_back(event);
     }
 
     /// Act on a chosen menu item.
-    fn activate_content_menu(&mut self, id: u32) {
+    fn activate_content_menu(&mut self, id: &str) {
+        // The context-menu row disappears on close. Restore the underlying
+        // tile (or the drawer search after a gap click) first, so a command
+        // which opens the name modal has a durable return-focus target.
+        let return_focus = self
+            .content_menu_target
+            .as_ref()
+            .and_then(|entry| {
+                self.content_entries
+                    .iter()
+                    .find(|(_, candidate)| candidate.path == entry.path)
+                    .map(|(handle, _)| *handle)
+            })
+            .unwrap_or(self.content_search);
+        self.native_ui.set_focus(return_focus);
+        self.native_ui.send(UiMessage::new(
+            return_focus,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
         self.close_content_menu();
-        let folder = self.content_menu_folder.clone();
-        let target = self.content_menu_target.clone();
-        match id {
-            content_menu_id::NEW_FOLDER => {
-                self.open_name_prompt(
-                    NamePrompt::NewFolder { parent: folder },
-                    "New folder name",
-                    "NewFolder",
-                );
-            }
-            content_menu_id::NEW_SCRIPT => {
-                self.open_name_prompt(
-                    NamePrompt::NewScript { parent: folder },
-                    "New script name",
-                    "NewScript.luau",
-                );
-            }
-            content_menu_id::RENAME => {
-                if let Some(entry) = target {
-                    let path = entry.path.to_string_lossy().into_owned();
-                    self.open_name_prompt(
-                        NamePrompt::Rename { path },
-                        "Rename to",
-                        &entry.name,
-                    );
-                }
-            }
-            content_menu_id::SHOW_IN_FOLDER => {
-                if let Some(entry) = target {
-                    self.editor_events
-                        .push_back(EditorEvent::ShowContentItemInFolder(
-                            entry.path.to_string_lossy().into_owned(),
-                        ));
-                }
-            }
-            content_menu_id::REFRESH => self.refresh_content_list(),
-            _ => {}
-        }
+        let _ = self.run_command_id(id);
     }
 
     /// Phase 16-D: how many blocking script diagnostics are outstanding.
@@ -1889,10 +2762,15 @@ impl UiManager {
     }
 
     pub fn prompt_unsaved_new(&mut self) {
+        self.prompt_unsaved_action(EditorEvent::NewScene);
+    }
+
+    fn prompt_unsaved_action(&mut self, action: EditorEvent) {
         if !self.scene_dirty {
-            self.editor_events.push_back(EditorEvent::NewScene);
+            self.editor_events.push_back(action);
             return;
         }
+        self.pending_scene_action = Some(action);
         self.unsaved_open = true;
         self.native_ui.send(UiMessage::new(
             self.unsaved_popup,
@@ -1900,6 +2778,7 @@ impl UiManager {
             PopupMessage::Open,
         ));
         self.native_ui.invalidate_ancestors(self.unsaved_popup);
+        self.enter_modal_focus(self.unsaved_popup, self.unsaved_save);
     }
 
     pub fn set_fps(&mut self, fps: f64) {
@@ -2000,11 +2879,12 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
-    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 3] {
+    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 4] {
         [
             (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.post_tonemap_combo, self.post_tonemap_popup),
             (self.viewport_res_combo, self.viewport_res_popup),
+            (self.snap_grid_combo, self.snap_grid_popup),
+            (self.snap_angle_combo, self.snap_angle_popup),
         ]
     }
 
@@ -2049,6 +2929,17 @@ impl UiManager {
     /// Returns whether anything was closed, so the caller can let the key fall
     /// through to the viewport when the editor has nothing to dismiss.
     fn close_top_overlay(&mut self) -> bool {
+        // Preferences is modal and sits above the name prompt, because it can
+        // open one (the project picker) but never the other way round.
+        if self.preferences_open {
+            self.toggle_preferences();
+            return true;
+        }
+        // Modal name prompts share the same focus trap as the unsaved prompt.
+        if self.name_prompt.is_some() {
+            self.close_name_prompt();
+            return true;
+        }
         // 6 — modal
         if self.unsaved_open {
             self.close_unsaved();
@@ -2137,21 +3028,29 @@ impl UiManager {
     /// application scope → mode scope → viewport context → left rail →
     /// viewport → Outliner → Details → drawer → status.
     fn focus_stops(&self) -> Vec<NodeHandle> {
-        let mut stops = vec![
-            self.palette_button,
-            self.save_button,
-            self.select_button,
-            self.landscape_button,
-            self.foliage_toolbar_button,
-            self.camera_speed_slider,
-            self.outliner_search,
-            self.outliner_tree,
-            self.inspector_search,
-        ];
-        if self.drawer_open {
+        let mut stops = if self.name_prompt.is_some() {
+            vec![self.name_input, self.name_ok, self.name_cancel]
+        } else if self.unsaved_open {
+            vec![self.unsaved_save, self.unsaved_discard, self.unsaved_cancel]
+        } else {
+            vec![
+                self.palette_button,
+                self.save_button,
+                self.select_button,
+                self.landscape_button,
+                self.foliage_toolbar_button,
+                self.camera_speed_slider,
+                self.outliner_search,
+                self.outliner_tree,
+                self.inspector_search,
+            ]
+        };
+        if self.native_ui.modal_root().is_none() && self.drawer_open {
             stops.push(self.content_search);
         }
-        stops.push(self.drawer_button);
+        if self.native_ui.modal_root().is_none() {
+            stops.push(self.drawer_button);
+        }
         stops.retain(|h| !h.is_none() && self.native_ui.is_globally_visible(*h));
         stops
     }
@@ -2224,6 +3123,7 @@ impl UiManager {
             || self.palette_open
             || self.color_open
             || self.unsaved_open
+            || self.name_prompt.is_some()
             || self.open_combo_popup.is_some()
     }
 
@@ -2246,6 +3146,8 @@ impl UiManager {
             Some(self.palette_popup)
         } else if self.color_open {
             Some(self.color_popup)
+        } else if self.name_prompt.is_some() {
+            Some(self.name_popup)
         } else if self.unsaved_open {
             Some(self.unsaved_popup)
         } else if self.open_combo_popup.is_some() {
@@ -2317,13 +3219,13 @@ impl UiManager {
             MessageDirection::ToWidget,
             PopupMessage::Open,
         ));
-        self.native_ui.set_focus(self.palette_widget);
+        self.enter_modal_focus(self.palette_popup, self.palette_widget);
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
     fn close_palette(&mut self) {
         self.palette_open = false;
-        self.native_ui.set_focus(NodeHandle::NONE);
+        self.exit_modal_focus(self.palette_popup);
         self.native_ui.send(UiMessage::new(
             self.palette_popup,
             MessageDirection::ToWidget,
@@ -2332,29 +3234,39 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.palette_popup);
     }
 
-    /// Number of statically declared palette commands, which occupy indices
-    /// `0..STATIC_PALETTE_COMMANDS` in the order `editor::shell` declares them.
-    ///
-    /// [`Self::run_palette_command`] dispatches on that position, so anything
-    /// dynamic must be **appended** after this point. Inserting or reordering a
-    /// static command silently rebinds every command after it;
-    /// `static_palette_command_count_is_pinned` fails if the count moves.
-    pub(crate) const STATIC_PALETTE_COMMANDS: usize = 15;
-
-    /// Rebuild the searchable set: the static commands, then everything that
-    /// exists right now. Called each time the palette opens, because entities
-    /// and assets change while it is closed.
+    /// Rebuild the searchable set from the command registry and current
+    /// dynamic editor objects. Every row has a stable id.
     fn refresh_palette_items(&mut self) {
         use crate::widgets::command_palette::PaletteCategory as Cat;
 
-        let mut items: Vec<PaletteItem> = crate::editor::shell::palette_commands();
-        debug_assert_eq!(items.len(), Self::STATIC_PALETTE_COMMANDS);
-        let mut targets: Vec<PaletteTarget> = Vec::new();
+        let ctx = self.command_context();
+        let mut items: Vec<PaletteItem> = crate::commands::registry()
+            .commands()
+            .iter()
+            .map(|command| {
+                let enablement = command.enabled(&ctx);
+                PaletteItem::command(
+                    command.id,
+                    command.label,
+                    command
+                        .default_binding
+                        .map(|binding| binding.to_string())
+                        .unwrap_or_default(),
+                )
+                .with_enablement(enablement.is_enabled(), enablement.reason())
+                .with_recency(self.command_history.recency(command.id))
+            })
+            .collect();
+        let mut targets = std::collections::HashMap::new();
 
         // Entities, from whatever the Outliner is currently showing.
         for (id, name) in &self.palette_entities {
-            items.push(PaletteItem::new(name.clone(), "Select", Cat::Entity));
-            targets.push(PaletteTarget::Entity(*id));
+            let key = format!("entity:{id}");
+            items.push(
+                PaletteItem::new(&key, name.clone(), "Select", Cat::Entity)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Entity(*id));
         }
 
         // Assets in the current Content Drawer folder.
@@ -2362,23 +3274,34 @@ impl UiManager {
             if entry.is_dir {
                 continue;
             }
-            items.push(PaletteItem::new(entry.name.clone(), "Open", Cat::Asset));
-            targets.push(PaletteTarget::Asset(entry.path.clone()));
+            let key = format!("asset:{}", entry.path.to_string_lossy());
+            items.push(
+                PaletteItem::new(&key, entry.name.clone(), "Open", Cat::Asset)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Asset(entry.path.clone()));
         }
 
         // Help pages, so a question is answerable from the same surface.
         for (i, title) in crate::metaphor::help_titles().iter().enumerate() {
-            items.push(PaletteItem::new((*title).to_string(), "F1", Cat::Help));
-            targets.push(PaletteTarget::Help(i as u8));
+            let key = format!("help:page:{i}");
+            items.push(
+                PaletteItem::new(&key, (*title).to_string(), "F1", Cat::Help)
+                    .with_recency(self.command_history.recency(&key)),
+            );
+            targets.insert(key, PaletteTarget::Help(i as u8));
         }
 
         // Panels, so the palette can also be used to reach a surface.
-        for (label, target) in [
-            ("Content Drawer", PaletteTarget::Drawer),
-            ("Output Log", PaletteTarget::Log),
+        for (key, label, target) in [
+            ("panel:content", "Content Drawer", PaletteTarget::Drawer),
+            ("panel:log", "Output Log", PaletteTarget::Log),
         ] {
-            items.push(PaletteItem::new(label.to_string(), "", Cat::Panel));
-            targets.push(target);
+            items.push(
+                PaletteItem::new(key, label, "", Cat::Panel)
+                    .with_recency(self.command_history.recency(key)),
+            );
+            targets.insert(key.to_string(), target);
         }
 
         self.palette_targets = targets;
@@ -2389,58 +3312,759 @@ impl UiManager {
         ));
     }
 
-    fn run_palette_command(&mut self, idx: usize) {
-        // Anything past the static block is a dynamic row; the parallel target
-        // list is built in the same order `refresh_palette_items` appended them.
-        if idx >= Self::STATIC_PALETTE_COMMANDS {
-            let target = self
-                .palette_targets
-                .get(idx - Self::STATIC_PALETTE_COMMANDS)
-                .cloned();
-            match target {
-                Some(PaletteTarget::Entity(id)) => {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(id)));
+    /// Open or close the Preferences window.
+    pub fn toggle_preferences(&mut self) {
+        self.preferences_open = !self.preferences_open;
+        self.rebinding = None;
+        self.native_ui.send(UiMessage::new(
+            self.preferences.overlay,
+            MessageDirection::ToWidget,
+            if self.preferences_open {
+                PopupMessage::Open
+            } else {
+                PopupMessage::Close
+            },
+        ));
+        if self.preferences_open {
+            self.enter_modal_focus(self.preferences.overlay, self.preferences.search);
+            self.rebuild_binding_rows();
+        } else {
+            self.exit_modal_focus(self.preferences.overlay);
+        }
+        self.native_ui
+            .invalidate_ancestors(self.preferences.overlay);
+    }
+
+    /// Whether the Preferences window is showing.
+    #[must_use]
+    pub fn preferences_open(&self) -> bool {
+        self.preferences_open
+    }
+
+    /// The settings panels core should publish, filtered by the search box.
+    ///
+    /// Filtering here rather than in core keeps the query where the box is,
+    /// and reuses the generated search that already covers label, field name
+    /// and doc comment — Unity's generated keyword index, not a maintained one.
+    pub fn update_settings_panels(
+        &mut self,
+        panels: Vec<crate::editor::inspector_gen::GeneratedComponentPanel>,
+        overridden: &[(
+            somnium_ecs::reflect::StableId,
+            somnium_ecs::reflect::FieldId,
+            String,
+        )],
+    ) {
+        let filtered: Vec<_> = panels
+            .into_iter()
+            .map(|mut panel| {
+                if !self.preferences_query.trim().is_empty() {
+                    let kept: Vec<_> = crate::editor::inspector_gen::search_rows(
+                        &panel.rows,
+                        &self.preferences_query,
+                    )
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                    panel.rows = kept;
                 }
+                if self.preferences_modified_only {
+                    panel.rows.retain(|row| row.modified);
+                }
+                // An overridden setting is shown, disabled, with the variable
+                // named — craft defect C8. Hiding it would be worse: the value
+                // on screen would then be unexplained.
+                for row in &mut panel.rows {
+                    if overridden.iter().any(|(component, field, _)| {
+                        *component == row.component && *field == row.field
+                    }) {
+                        row.read_only = true;
+                    }
+                }
+                panel
+            })
+            .filter(|panel| !panel.rows.is_empty())
+            .collect();
+
+        let signature: Vec<_> = filtered
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .map(|row| (row.component, row.field, GeneratedEdit::Whole))
+            .collect();
+        if signature != self.settings_signature {
+            if self.settings_root.is_some() {
+                self.native_ui.remove_node(self.settings_root);
+            }
+            self.settings_bindings.clear();
+            self.settings_rows.clear();
+            let (root, bindings, rows, _, _, _) = build_generated_details(
+                &mut self.native_ui,
+                self.preferences.settings_body,
+                self.font_id,
+                &filtered,
+                &self.asset_db,
+            );
+            self.settings_root = root;
+            self.settings_bindings = bindings;
+            self.settings_rows = rows;
+            self.settings_signature = signature;
+            self.native_ui
+                .invalidate_ancestors(self.preferences.settings_body);
+        }
+        self.settings_panels = filtered;
+    }
+
+    /// Rebuild the keyboard tab from the live bindings.
+    fn rebuild_binding_rows(&mut self) {
+        for (_, capture, _) in std::mem::take(&mut self.binding_rows) {
+            let row = self.native_ui.parent(capture);
+            if row.is_some() {
+                self.native_ui.remove_node(row);
+            }
+        }
+        let query = self.preferences_query.to_ascii_lowercase();
+        let rows = self.keybindings.rows();
+        for row in rows {
+            let Some(command) = crate::commands::registry().get(row.command).copied() else {
+                continue;
+            };
+            if !query.is_empty()
+                && !command.label.to_ascii_lowercase().contains(&query)
+                && !command.id.contains(&query)
+            {
+                continue;
+            }
+            if self.preferences_modified_only && !row.customised {
+                continue;
+            }
+            let chord = row
+                .chord
+                .map_or_else(|| "—".to_string(), |chord| chord.to_string());
+            let (capture, reset) = crate::editor::preferences::build_binding_row(
+                &mut self.native_ui,
+                self.preferences.bindings_body,
+                self.font_id,
+                command.label,
+                &chord,
+                row.conflicted,
+                row.customised,
+            );
+            self.binding_rows.push((row.command, capture, reset));
+        }
+        self.native_ui
+            .invalidate_ancestors(self.preferences.bindings_body);
+    }
+
+    /// A keystroke arrived while a binding row was waiting for one.
+    ///
+    /// A conflict is reported and the rebind still applies: the person just
+    /// asked for it, and silently refusing would leave them pressing a key
+    /// that does nothing with no explanation. What is *not* done is unbinding
+    /// the other command behind their back — the conflict stays visible in the
+    /// list until they resolve it.
+    fn capture_rebind(&mut self, chord: crate::commands::Chord) {
+        let Some(id) = self.rebinding.take() else {
+            return;
+        };
+        let conflicts = self.keybindings.conflicts_for(chord, id);
+        self.keybindings.bind(id, Some(chord));
+        self.keybindings.save();
+        if let Some(other) = conflicts
+            .first()
+            .and_then(|other| crate::commands::registry().get(other).map(|c| c.label))
+        {
+            self.push_toast(&format!("{chord} also runs {other}"));
+        }
+        self.rebuild_binding_rows();
+    }
+
+    /// Recently opened scenes, newest first, each with whether it still
+    /// exists. A missing entry is greyed rather than dropped — craft defect
+    /// C11: silently forgetting looks the same as never having opened it.
+    pub fn set_recent_scenes(&mut self, scenes: Vec<(String, bool)>) {
+        if self.recent_scenes == scenes {
+            return;
+        }
+        self.recent_scenes = scenes;
+        self.rebuild_file_menu();
+    }
+
+    /// Rebuild the recent-scenes tail of the File menu.
+    ///
+    /// The registry half of the menu is built once and never changes; this
+    /// appends and re-appends only the recent entries, so a command added to
+    /// `Menu::File` still arrives without touching this code.
+    fn rebuild_file_menu(&mut self) {
+        for (handle, _) in std::mem::take(&mut self.recent_menu_items) {
+            self.native_ui.remove_node(handle);
+        }
+        if self.recent_scenes.is_empty() {
+            return;
+        }
+        let separator =
+            crate::editor::parts::scope_separator(&mut self.native_ui, self.file_menu_stack);
+        self.recent_menu_items.push((separator, String::new()));
+        let recents = self.recent_scenes.clone();
+        for (path, exists) in recents {
+            let label = std::path::Path::new(&path)
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+            let handle = crate::editor::parts::menu_entry(
+                &mut self.native_ui,
+                self.file_menu_stack,
+                self.font_id,
+                &label,
+                &path,
+                exists,
+            );
+            self.recent_menu_items.push((handle, path));
+        }
+        self.native_ui.invalidate_ancestors(self.file_menu_stack);
+    }
+
+    /// How long the pointer rests before a tooltip appears.
+    pub fn set_tooltip_delay_ms(&mut self, ms: f32) {
+        self.tooltip_delay_ms = ms.max(0.0);
+    }
+
+    /// Publish the viewport statistics overlay. `None` hides it, which is what
+    /// the `show_statistics` preference being off means.
+    pub fn set_viewport_statistics(&mut self, stats: Option<crate::debug::ViewportStats>) {
+        let area = stats.map(|stats| {
+            (
+                self.native_ui.screen_bounds(self.viewport_handle),
+                stats.lines(),
+            )
+        });
+        self.native_ui.set_statistics(area);
+    }
+
+    /// Publish the snapping and gizmo state to the viewport context bar.
+    ///
+    /// Also applies Unreal 5.6's overflow rule: below the collapse width the
+    /// whole cluster is hidden behind a chevron rather than clipped, because a
+    /// half-drawn control is worse than one you have to open.
+    pub fn set_snap_state(
+        &mut self,
+        translate_m: f32,
+        rotate_deg: f32,
+        snap_to_surface: bool,
+        local_space: bool,
+        select_only: bool,
+    ) {
+        let rules = CollapseRules::for_width(self.window_size.0 as f32);
+        self.native_ui
+            .set_visibility(self.snap_cluster, rules.context_bar_snap_inline);
+        self.native_ui
+            .set_visibility(self.snap_overflow, !rules.context_bar_snap_inline);
+
+        let grid = nearest_index(&SNAP_GRID_VALUES, translate_m);
+        let angle = nearest_index(&SNAP_ANGLE_VALUES, rotate_deg);
+        self.native_ui
+            .send(ComboBoxMessage::set_selected(self.snap_grid_combo, grid));
+        self.native_ui
+            .send(ComboBoxMessage::set_selected(self.snap_angle_combo, angle));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.snap_surface_toggle,
+            snap_to_surface,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.gizmo_space_toggle,
+            local_space,
+        ));
+        self.native_ui.send(TextMessage::set_text(
+            self.gizmo_space_label,
+            if local_space { "Local" } else { "World" }.to_string(),
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.select_only_toggle,
+            select_only,
+        ));
+    }
+
+    /// Publish the corner axis widget. `axes` are the world X/Y/Z directions
+    /// projected into screen space, y already flipped.
+    pub fn set_axis_widget(&mut self, axes: [(f32, f32); 3]) {
+        let viewport = self.native_ui.screen_bounds(self.viewport_handle);
+        self.native_ui
+            .set_axis_widget(viewport, axes.map(|(x, y)| Vec2::new(x, y)));
+    }
+
+    /// Which debug visualisation is active, so the View menu can mark it and
+    /// the status bar can say so. `"lit"` means the ordinary image.
+    pub fn set_active_debug_view(&mut self, id: &'static str) {
+        self.active_debug_view = id;
+    }
+
+    /// The active debug visualisation.
+    #[must_use]
+    pub fn active_debug_view(&self) -> &'static str {
+        self.active_debug_view
+    }
+
+    /// Mirror of the renderer's pipeline switches, so the View menu can show
+    /// each one checked, and disabled with its variable named when the
+    /// environment owns it.
+    pub fn set_render_toggles(&mut self, toggles: crate::debug::DebugToggles) {
+        self.render_toggles = toggles;
+    }
+
+    /// The live pipeline switches.
+    #[must_use]
+    pub fn render_toggles(&self) -> &crate::debug::DebugToggles {
+        &self.render_toggles
+    }
+
+    /// Show every selectable entity under the cursor — Unity 6's piercing
+    /// menu, and craft defect C9.
+    ///
+    /// Reuses the Outliner's context-menu popup: the rows are entity names
+    /// and the ids are entity indices, so nothing new has to learn how a
+    /// menu is placed or dismissed.
+    pub fn open_piercing_menu(&mut self, rows: Vec<(u32, String)>) {
+        self.piercing_rows = rows;
+        if self.piercing_rows.is_empty() {
+            self.push_toast("Nothing under the cursor");
+            return;
+        }
+        let items: Vec<MenuItem> = self
+            .piercing_rows
+            .iter()
+            .map(|(index, name)| MenuItem {
+                id: format!("pierce:{index}"),
+                label: name.clone(),
+                enabled: true,
+            })
+            .collect();
+        let pos = self.native_ui.cursor_pos;
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        self.native_ui.set_desired_position(self.outliner_menu, pos);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui
+            .invalidate_ancestors(self.outliner_menu_popup);
+    }
+
+    /// The chord in force for a command, for menus and tooltips.
+    #[must_use]
+    pub fn chord_for(&self, id: &str) -> Option<crate::commands::Chord> {
+        let default = crate::commands::registry()
+            .get(id)
+            .and_then(|command| command.default_binding);
+        self.keybindings.chord_for(id, default)
+    }
+
+    /// Everything the Preferences window does with a message.
+    ///
+    /// One function rather than four arms scattered through the main loop,
+    /// because every one of them is answered the same way — publish a
+    /// `SetSetting` and let core decide whether the environment has taken the
+    /// field away — and because the window is either open or it is not.
+    /// The viewport context bar's snap cluster.
+    ///
+    /// Every one of these writes a Seam-4 setting rather than an ad-hoc field,
+    /// which is what makes them survive a restart and appear in Preferences
+    /// without a second implementation.
+    fn handle_snap_message(&mut self, msg: &UiMessage) -> bool {
+        if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
+            if msg.destination == self.snap_grid_combo {
+                self.push_setting(
+                    "somnium.EditorSettings",
+                    "snap_translate_m",
+                    somnium_ecs::reflect::ReflectValue::F64(f64::from(
+                        SNAP_GRID_VALUES.get(*index).copied().unwrap_or(0.0),
+                    )),
+                );
+                return true;
+            }
+            if msg.destination == self.snap_angle_combo {
+                self.push_setting(
+                    "somnium.EditorSettings",
+                    "snap_rotate_deg",
+                    somnium_ecs::reflect::ReflectValue::F64(f64::from(
+                        SNAP_ANGLE_VALUES.get(*index).copied().unwrap_or(0.0),
+                    )),
+                );
+                return true;
+            }
+        }
+        if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            return false;
+        }
+        if msg.destination == self.snap_overflow {
+            // The overflow opens Preferences at the Settings tab rather than
+            // duplicating the cluster in a popup: one place these live.
+            if !self.preferences_open {
+                self.toggle_preferences();
+            }
+            self.preferences_query = "snap".into();
+            // The query has to reach the box too, or Preferences opens
+            // filtered with an empty-looking search field and reads as broken.
+            self.native_ui.send(UiMessage::new(
+                self.preferences.search,
+                MessageDirection::ToWidget,
+                crate::widgets::search_box::SearchBoxMessage::SetText("snap".into()),
+            ));
+            self.settings_signature.clear();
+            return true;
+        }
+        for (handle, component, field) in [
+            (
+                self.snap_surface_toggle,
+                "somnium.EditorSettings",
+                "snap_to_surface",
+            ),
+            (
+                self.gizmo_space_toggle,
+                "somnium.EditorSettings",
+                "gizmo_local_space",
+            ),
+            (
+                self.select_only_toggle,
+                "somnium.EditorSettings",
+                "select_only",
+            ),
+        ] {
+            if msg.destination == handle {
+                self.editor_events.push_back(EditorEvent::ToggleSetting {
+                    component: somnium_ecs::reflect::StableId::new(component),
+                    field_name: field,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    fn push_setting(
+        &mut self,
+        component: &'static str,
+        field_name: &'static str,
+        value: somnium_ecs::reflect::ReflectValue,
+    ) {
+        self.editor_events.push_back(EditorEvent::SetSettingByName {
+            component: somnium_ecs::reflect::StableId::new(component),
+            field_name,
+            value,
+        });
+    }
+
+    fn handle_preferences_message(&mut self, msg: &UiMessage) -> bool {
+        if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            if msg.destination == self.preferences.close {
+                self.toggle_preferences();
+                return true;
+            }
+            if msg.destination == self.preferences.tab_settings
+                || msg.destination == self.preferences.tab_bindings
+            {
+                self.preferences_bindings_tab = msg.destination == self.preferences.tab_bindings;
+                self.native_ui.set_visibility(
+                    self.preferences.settings_body,
+                    !self.preferences_bindings_tab,
+                );
+                self.native_ui.set_visibility(
+                    self.preferences.bindings_body,
+                    self.preferences_bindings_tab,
+                );
+                self.rebuild_binding_rows();
+                return true;
+            }
+            if msg.destination == self.preferences.reset_all {
+                self.keybindings.reset_all();
+                self.keybindings.save();
+                self.editor_events.push_back(EditorEvent::ResetAllSettings);
+                self.rebuild_binding_rows();
+                return true;
+            }
+            if let Some((id, _, _)) = self
+                .binding_rows
+                .iter()
+                .find(|(_, capture, _)| *capture == msg.destination)
+            {
+                self.rebinding = Some(id);
+                self.push_toast("Press a shortcut, or Esc to cancel");
+                return true;
+            }
+            if let Some((id, _, _)) = self
+                .binding_rows
+                .iter()
+                .find(|(_, _, reset)| *reset == msg.destination)
+                .map(|entry| (entry.0, entry.1, entry.2))
+            {
+                self.keybindings.reset(id);
+                self.keybindings.save();
+                self.rebuild_binding_rows();
+                return true;
+            }
+        }
+        if msg.destination == self.preferences.search
+            && let Some(SearchBoxMessage::Query(query)) = msg.data::<SearchBoxMessage>()
+        {
+            self.preferences_query = query.clone();
+            self.settings_signature.clear();
+            if self.preferences_bindings_tab {
+                self.rebuild_binding_rows();
+            }
+            return true;
+        }
+        if msg.destination == self.preferences.modified_only
+            && let Some(CheckBoxMessage::Check(value)) = msg.data::<CheckBoxMessage>()
+        {
+            self.preferences_modified_only = *value;
+            self.settings_signature.clear();
+            if self.preferences_bindings_tab {
+                self.rebuild_binding_rows();
+            }
+            return true;
+        }
+
+        // A settings row edited. The value shape follows the widget, exactly
+        // as it does for entity properties; the difference is only where the
+        // write lands.
+        let Some(binding) = self.settings_bindings.get(&msg.destination).cloned() else {
+            return false;
+        };
+        let value = if let Some(NumericFieldMessage::ValueChanged(v)) =
+            msg.data::<NumericFieldMessage>()
+        {
+            Self::numeric_reflect_value(&binding, *v)
+        } else if let Some(CheckBoxMessage::Check(v)) = msg.data::<CheckBoxMessage>() {
+            Some(somnium_ecs::reflect::ReflectValue::Bool(*v))
+        } else if let Some(TextBoxMessage::TextCommit(v)) = msg.data::<TextBoxMessage>() {
+            Some(somnium_ecs::reflect::ReflectValue::Str(v.clone()))
+        } else if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>()
+        {
+            Some(somnium_ecs::reflect::ReflectValue::I64(*index as i64))
+        } else {
+            None
+        };
+        let Some(value) = value else {
+            // A live scrub inside the Preferences window is deliberately
+            // ignored: settings are written straight to disk, and a drag would
+            // otherwise write the file once per pixel.
+            return msg.data::<NumericFieldMessage>().is_some();
+        };
+        self.editor_events.push_back(EditorEvent::SetSetting {
+            component: binding.component,
+            field: binding.field,
+            value,
+        });
+        true
+    }
+
+    fn command_context(&self) -> crate::commands::EditorCtx {
+        crate::commands::EditorCtx {
+            has_selection: self
+                .last_outliner_state
+                .as_ref()
+                .is_some_and(|(_, selected)| selected.is_some()),
+            // UiManager does not own the undo cursor; core remains authoritative.
+            // Keep existing reachability until CONTROL-H exposes that snapshot.
+            can_undo: true,
+            can_redo: true,
+            has_content_target: self.content_menu_target.is_some(),
+            has_clipboard: self.clipboard_filled,
+        }
+    }
+
+    /// Core owns the entity clipboard; this is the enablement mirror, pushed
+    /// every frame so `Paste` greys out honestly instead of always offering.
+    pub fn set_clipboard_filled(&mut self, filled: bool) {
+        self.clipboard_filled = filled;
+    }
+
+    fn run_command_id(&mut self, id: &str) -> bool {
+        if let Some(command) = crate::commands::registry().get(id).copied() {
+            if !command.enabled(&self.command_context()).is_enabled() {
+                return false;
+            }
+            self.run_command_action(command.action);
+        } else {
+            match self.palette_targets.get(id).cloned() {
+                Some(PaletteTarget::Entity(entity)) => self
+                    .editor_events
+                    .push_back(EditorEvent::SelectEntity(Some(entity))),
                 Some(PaletteTarget::Asset(path)) => {
                     self.editor_events
                         .push_back(EditorEvent::ShowContentItemInFolder(
                             path.to_string_lossy().into_owned(),
-                        ));
+                        ))
                 }
                 Some(PaletteTarget::Help(page)) => self.toggle_help(Some(page)),
                 Some(PaletteTarget::Drawer) => self.toggle_drawer(),
                 Some(PaletteTarget::Log) => self.toggle_log_panel(),
-                None => {}
+                None => return false,
             }
-            return;
         }
-        match idx {
-            0 => self.prompt_unsaved_new(),
-            1 => self.editor_events.push_back(EditorEvent::SaveScene),
-            2 => self.editor_events.push_back(EditorEvent::ImportModel),
-            3 => self.editor_events.push_back(EditorEvent::Undo),
-            4 => self.editor_events.push_back(EditorEvent::Redo),
-            5 => self.editor_events.push_back(EditorEvent::DeleteSelected),
-            6 => self.editor_events.push_back(EditorEvent::DuplicateSelected),
-            7 => self.editor_events.push_back(EditorEvent::PlaySimulation),
-            8 => self.editor_events.push_back(EditorEvent::PauseSimulation),
-            9 => self.editor_events.push_back(EditorEvent::StopSimulation),
-            10 => self.editor_events.push_back(EditorEvent::ToggleProfiler),
-            11 => self.toggle_drawer(),
-            12 => self.toggle_help(Some(0)),
-            13 => self
+        self.command_history.record(id);
+        self.command_history.save();
+        true
+    }
+
+    fn run_command_action(&mut self, action: crate::commands::CommandAction) {
+        use crate::commands::CommandAction as A;
+        match action {
+            A::NewScene => self.prompt_unsaved_new(),
+            A::SaveScene => self.editor_events.push_back(EditorEvent::SaveScene),
+            A::ImportModel => self.editor_events.push_back(EditorEvent::ImportModel),
+            A::Undo => self.editor_events.push_back(EditorEvent::Undo),
+            A::Redo => self.editor_events.push_back(EditorEvent::Redo),
+            A::DeleteSelected => self.editor_events.push_back(EditorEvent::DeleteSelected),
+            A::DuplicateSelected => self.editor_events.push_back(EditorEvent::DuplicateSelected),
+            A::SetDebugView(id) => self.editor_events.push_back(EditorEvent::SetDebugView(id)),
+            A::ToggleRenderSwitch(id) => self
                 .editor_events
-                .push_back(EditorEvent::CreateEntity(CreateKind::Cube)),
-            14 => self
+                .push_back(EditorEvent::ToggleRenderSwitch(id)),
+            A::ViewPreset(index) => self.editor_events.push_back(EditorEvent::ViewPreset(index)),
+            A::SetBookmark(slot) => self
                 .editor_events
-                .push_back(EditorEvent::CreateEntity(CreateKind::DirectionalLight)),
-            _ => {}
+                .push_back(EditorEvent::SetCameraBookmark(slot)),
+            A::RecallBookmark(slot) => self
+                .editor_events
+                .push_back(EditorEvent::RecallCameraBookmark(slot)),
+            A::ToggleOrbitSelection => self
+                .editor_events
+                .push_back(EditorEvent::ToggleOrbitSelection),
+            // CONTROL-L. The hour comes from the registry's own table, so a
+            // preset row and the hour it means cannot disagree.
+            A::SetSkyPreset(id) => self
+                .editor_events
+                .push_back(EditorEvent::SetSkyPreset(id)),
+            A::SetWeatherPreset(id) => self
+                .editor_events
+                .push_back(EditorEvent::SetWeatherPreset(id)),
+            A::SetTimeOfDay(id) => {
+                if let Some((_, _, hour)) = crate::commands::TIME_PRESETS
+                    .iter()
+                    .find(|(preset, _, _)| *preset == id)
+                {
+                    self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                        hour: *hour,
+                        live: false,
+                    });
+                }
+            }
+            A::OpenPreferences => self.toggle_preferences(),
+            A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
+            A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
+            A::PasteClipboard => self.editor_events.push_back(EditorEvent::PasteClipboard),
+            A::SelectAll => self.editor_events.push_back(EditorEvent::SelectAll),
+            A::FocusSelection => self.editor_events.push_back(EditorEvent::FocusSelection),
+            A::RenameSelected => self.begin_outliner_rename(),
+            A::Play => self.editor_events.push_back(EditorEvent::PlaySimulation),
+            A::Pause => self.editor_events.push_back(EditorEvent::PauseSimulation),
+            A::Stop => self.editor_events.push_back(EditorEvent::StopSimulation),
+            A::ToggleProfiler => self.editor_events.push_back(EditorEvent::ToggleProfiler),
+            A::ToggleDrawer => self.toggle_drawer(),
+            A::TogglePalette => self.toggle_palette(),
+            A::OpenHelp(page) => self.toggle_help(Some(page)),
+            A::ReloadScripts => self.editor_events.push_back(EditorEvent::ReloadScripts),
+            A::ToggleShadingMode => self.editor_events.push_back(EditorEvent::ToggleShadingMode),
+            A::SetGizmoMode(mode) => self
+                .editor_events
+                .push_back(EditorEvent::SetGizmoMode(mode)),
+            A::ToggleTerrainEdit => self.editor_events.push_back(EditorEvent::ToggleTerrainEdit),
+            A::ToggleFoliage => self.editor_events.push_back(EditorEvent::ToggleFoliage),
+            A::ToggleImmersiveViewport => self
+                .editor_events
+                .push_back(EditorEvent::ToggleImmersiveViewport),
+            A::OpenOutputLog => self.toggle_log_panel(),
+            A::CreateEntity(kind) => self
+                .editor_events
+                .push_back(EditorEvent::CreateEntity(kind)),
+            A::DockContentDrawer => {
+                self.drawer_docked = true;
+                if !self.drawer_open {
+                    self.toggle_drawer();
+                }
+            }
+            A::SetWorkspace(workspace) => self.set_workspace(workspace),
+            A::ResetWorkspace => self.reset_workspace(),
+            A::ContentNewFolder => self.open_name_prompt(
+                NamePrompt::NewFolder {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New folder name",
+                "NewFolder",
+            ),
+            A::ContentNewScript => self.open_name_prompt(
+                NamePrompt::NewScript {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New script name",
+                "NewScript.luau",
+            ),
+            A::ContentNewMaterial => self.open_name_prompt(
+                NamePrompt::NewMaterial {
+                    parent: self.content_menu_folder.clone(),
+                },
+                "New material name",
+                "NewMaterial.sommat",
+            ),
+            A::ContentRename => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.begin_inline_content_rename(entry);
+                }
+            }
+            A::ContentShowInFolder => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.editor_events
+                        .push_back(EditorEvent::ShowContentItemInFolder(
+                            entry.path.to_string_lossy().into_owned(),
+                        ));
+                }
+            }
+            A::ContentRefresh => self.refresh_content_list(),
+        }
+    }
+
+    fn enter_modal_focus(&mut self, root: NodeHandle, target: NodeHandle) {
+        let previous = self.native_ui.focused();
+        if previous.is_some() && previous != target {
+            self.native_ui.send(UiMessage::new(
+                previous,
+                MessageDirection::ToWidget,
+                WidgetMessage::Unfocus,
+            ));
+        }
+        self.native_ui.enter_modal(root, target);
+        self.native_ui.send(UiMessage::new(
+            target,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
+    }
+
+    fn exit_modal_focus(&mut self, root: NodeHandle) {
+        let previous = self.native_ui.focused();
+        if previous.is_some() {
+            self.native_ui.send(UiMessage::new(
+                previous,
+                MessageDirection::ToWidget,
+                WidgetMessage::Unfocus,
+            ));
+        }
+        let target = self.native_ui.exit_modal(root);
+        if target.is_some() {
+            self.native_ui.send(UiMessage::new(
+                target,
+                MessageDirection::ToWidget,
+                WidgetMessage::Focus,
+            ));
         }
     }
 
     fn close_unsaved(&mut self) {
         self.unsaved_open = false;
+        self.exit_modal_focus(self.unsaved_popup);
         self.native_ui.send(UiMessage::new(
             self.unsaved_popup,
             MessageDirection::ToWidget,
@@ -2452,6 +4076,7 @@ impl UiManager {
     fn dismiss_color_ui(&mut self) {
         self.color_open = false;
         self.color_target = None;
+        self.color_gesture = None;
         self.native_ui.send(UiMessage::new(
             self.color_popup,
             MessageDirection::ToWidget,
@@ -2461,21 +4086,13 @@ impl UiManager {
     }
 
     fn close_color_picker(&mut self, commit: bool) {
-        if let Some(field) = self.color_target {
-            if commit {
-                self.editor_events
-                    .push_back(EditorEvent::SetInspectorColor {
-                        field,
-                        rgba: self.color_live,
-                        live: false,
-                    });
+        if let (Some(target), Some(gesture)) = (self.color_target, self.color_gesture) {
+            let rgba = if commit {
+                self.color_live
             } else {
-                self.editor_events
-                    .push_back(EditorEvent::CancelInspectorColor {
-                        field,
-                        rgba: self.color_original,
-                    });
-            }
+                self.color_original
+            };
+            self.write_color_target(target, rgba, gesture, false);
         }
         self.dismiss_color_ui();
     }
@@ -2572,7 +4189,9 @@ impl UiManager {
         }
         let now = std::time::Instant::now();
         match self.tooltip_since {
-            Some((_, since)) if now.duration_since(since).as_millis() >= 400 => {
+            Some((_, since))
+                if now.duration_since(since).as_millis() >= self.tooltip_delay_ms as u128 =>
+            {
                 self.native_ui
                     .send(TextMessage::set_text(self.tooltip, text));
                 self.native_ui
@@ -2676,12 +4295,12 @@ impl UiManager {
 
     /// Previews the engine must render, drained for the host to fulfil.
     ///
-    /// `somnium_ui` decodes images itself but owns no renderer, so meshes and
-    /// scenes are requests. The host answers with [`Self::deliver_thumbnail`]
+    /// The UI owns no filesystem decoder or renderer. The host answers with
+    /// [`Self::deliver_thumbnail`]
     /// or [`Self::fail_thumbnail`]; an unanswered request leaves the tile on
     /// its type icon, which is a correct resting state rather than a bug.
     pub fn take_thumbnail_requests(&mut self) -> Vec<crate::thumbnail::ThumbnailRequest> {
-        self.native_ui.draw_ctx.thumbnails.take_requests()
+        self.native_ui.draw_ctx.thumbnails.take_requests(8)
     }
 
     /// Supply a rendered preview: `CELL * CELL` RGBA8.
@@ -2689,27 +4308,103 @@ impl UiManager {
         self.native_ui.draw_ctx.thumbnails.deliver(path, rgba)
     }
 
+    /// Copy prepared previews into the atlas within an actual wall-clock
+    /// budget. Unfinished results remain queued for the next frame.
+    pub fn deliver_thumbnails_budgeted(
+        &mut self,
+        ready: &mut VecDeque<(std::path::PathBuf, Vec<u8>)>,
+        budget: std::time::Duration,
+    ) -> usize {
+        self.native_ui
+            .draw_ctx
+            .thumbnails
+            .deliver_budgeted(ready, budget)
+    }
+
     /// Record that a preview could not be produced, so it is not retried.
     pub fn fail_thumbnail(&mut self, path: &std::path::Path) {
         self.native_ui.draw_ctx.thumbnails.mark_failed(path);
     }
 
+    /// Invalidate one thumbnail after its authored asset changed.
+    pub fn invalidate_thumbnail(&mut self, path: &std::path::Path) {
+        self.native_ui.draw_ctx.thumbnails.invalidate(path);
+        self.refresh_content_list();
+    }
+
+    /// Atomically replace the drawer's inventory with a worker-built snapshot.
+    pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
+        self.asset_db = snapshot;
+        self.refresh_content_list();
+    }
+
+    /// Select sort order for the current database query.
+    pub fn set_content_sort(&mut self, sort: somnium_asset::database::AssetSort, descending: bool) {
+        self.content_sort = sort;
+        self.content_sort_descending = descending;
+        self.refresh_content_list();
+    }
+
+    /// Promote only tiles intersecting the scroll viewport. This runs after
+    /// layout so scrolling changes priority without rebuilding the drawer.
+    fn request_visible_thumbnails(&mut self) {
+        let viewport = self.native_ui.screen_bounds(self.content_scroll);
+        let visible: Vec<_> = self
+            .content_entries
+            .iter()
+            .filter(|(_, entry)| !entry.is_dir && !entry.is_engine)
+            .filter_map(|(handle, entry)| {
+                let bounds = self.native_ui.screen_bounds(*handle);
+                let intersection = viewport.intersect(&bounds);
+                (intersection.w > 0.0 && intersection.h > 0.0).then(|| entry.path.clone())
+            })
+            .collect();
+        for path in visible {
+            self.native_ui.draw_ctx.thumbnails.request(&path, true);
+        }
+    }
+
     fn refresh_content_list(&mut self) {
-        let root = std::env::current_dir().unwrap_or_default().join("assets");
-        let current = if self.content_path.is_empty() {
-            std::path::PathBuf::new()
-        } else {
-            root.join(&self.content_path)
+        let kind_mask = match self.content_kind {
+            crate::metaphor::ContentFilterKind::All => u64::MAX,
+            crate::metaphor::ContentFilterKind::Folders => {
+                somnium_asset::database::AssetKind::Folder.bit()
+            }
+            crate::metaphor::ContentFilterKind::Models => {
+                somnium_asset::database::AssetKind::Mesh.bit()
+            }
+            crate::metaphor::ContentFilterKind::Textures => {
+                somnium_asset::database::AssetKind::Texture.bit()
+            }
+            crate::metaphor::ContentFilterKind::Scripts => {
+                somnium_asset::database::AssetKind::Script.bit()
+            }
+            crate::metaphor::ContentFilterKind::Scenes => {
+                somnium_asset::database::AssetKind::Scene.bit()
+            }
+            crate::metaphor::ContentFilterKind::Audio => {
+                somnium_asset::database::AssetKind::Audio.bit()
+            }
         };
-        let entries: Vec<crate::metaphor::ContentEntry> = crate::metaphor::list_content(
-            &root,
-            self.show_engine_content,
-            &self.content_filter,
-            &current,
-        )
-        .into_iter()
-        .filter(|e| self.content_kind.accepts(e))
-        .collect();
+        let mut entries: Vec<crate::metaphor::ContentEntry> = self
+            .asset_db
+            .query(&somnium_asset::database::AssetQuery {
+                parent: self.content_path.clone(),
+                text: self.content_filter.clone(),
+                kind_mask,
+                sort: self.content_sort,
+                descending: self.content_sort_descending,
+            })
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        if self.show_engine_content && self.content_path.is_empty() {
+            entries.extend(
+                crate::metaphor::virtual_engine_content(&self.content_filter)
+                    .into_iter()
+                    .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
+            );
+        }
         let (tile_w, tile_h, icon_px) = self.content_density.metrics();
         self.native_ui.clear_children(self.content_list);
         self.content_entries.clear();
@@ -2752,12 +4447,6 @@ impl UiManager {
                     .with_orientation(Orientation::Vertical)
                     .build();
             let col_h = self.native_ui.add_node(col, bh);
-            // Phase 27-G. Ask for a preview; the tile shows its type icon until
-            // one arrives, and forever if none can be made. `request` is
-            // idempotent, so the drawer's per-frame rebuild costs a lookup.
-            if !entry.is_dir && !entry.is_engine {
-                self.native_ui.draw_ctx.thumbnails.request(&entry.path);
-            }
             let icon = ImageBuilder::new(
                 WidgetBuilder::new()
                     .with_width(tile_w)
@@ -2853,16 +4542,12 @@ impl UiManager {
         let q = self.inspector_filter.to_ascii_lowercase();
         let h = &self.inspector_handles;
         let pairs = [
-            (h.light_section, "light"),
+            (h.post_section, "renderer diagnostics census shade bins"),
             (
-                h.camera_section,
-                "camera frustum cull dynamic resolution target floor",
+                h.terrain_section,
+                "terrain paint layer hex aerial lod distance",
             ),
-            (h.post_section, "post fx bloom exposure tonemap census shade bins"),
-            (h.terrain_section, "terrain paint layer hex aerial lod distance"),
-            (h.foliage_section, "foliage grass tree"),
-            (h.water_section, "water body wave"),
-            (h.vessel_section, "vessel buoyancy"),
+            (h.foliage_section, "foliage brush grass tree"),
         ];
         if q.is_empty() {
             return;
@@ -2875,43 +4560,16 @@ impl UiManager {
         }
     }
 
-    /// Forget every recorded baseline, so no property reads as modified.
-    ///
-    /// Called when the selection changes and when the scene is saved or
-    /// replaced: those are the three moments where "modified" would otherwise
-    /// keep referring to a value the user can no longer see.
-    pub fn reset_inspector_baseline(&mut self) {
-        self.inspector_baseline.clear();
-        let bindings = Self::field_bindings(&self.inspector_handles);
-        for (field_handle, _) in bindings {
-            if let Some(row) = self.native_ui.parent_of(field_handle) {
-                self.native_ui
-                    .send(PropertyRowMessage::set_modified(row, false));
-            }
-        }
-    }
+    /// Schema defaults are the durable baseline; rebuilding Details does not
+    /// manufacture a second save-relative notion of "modified".
+    pub fn reset_inspector_baseline(&mut self) {}
 
-    /// Light or clear the modified dot on every inspector row.
-    ///
-    /// Runs once per frame after the `update_*` writes have landed. The first
-    /// observation of a field becomes its baseline, which is why this must be
-    /// called *after* the inspector has been populated for the frame and not
-    /// before.
     pub fn refresh_modified_dots(&mut self) {
-        let bindings = Self::field_bindings(&self.inspector_handles);
-        for (field_handle, field) in bindings {
-            let Some(value) = self.native_ui.numeric_value_of(field_handle) else {
-                continue;
-            };
-            let baseline = *self.inspector_baseline.entry(field).or_insert(value);
-            // Float equality is the right test here: the baseline is a copy of
-            // a value that came through the same path, so an untouched field
-            // compares bit-identical. An epsilon would hide small real edits.
-            let modified = baseline != value;
-            if let Some(row) = self.native_ui.parent_of(field_handle) {
-                self.native_ui
-                    .send(PropertyRowMessage::set_modified(row, modified));
-            }
+        for (row, binding) in &self.generated_rows {
+            self.native_ui.send(PropertyRowMessage::set_modified(
+                *row,
+                binding.value != binding.default,
+            ));
         }
     }
 
@@ -2925,6 +4583,32 @@ impl UiManager {
         self.native_ui.has_text_focus()
     }
 
+    /// Whether a right-drag over the viewport is currently flying the camera.
+    ///
+    /// The engine's own shortcut dispatcher runs *before* the UI is consulted,
+    /// so it has to ask.
+    #[must_use]
+    pub fn viewport_camera_active(&self) -> bool {
+        self.native_ui.viewport_camera_active()
+    }
+
+    /// Whether a play session is running — playing or paused.
+    #[must_use]
+    pub fn play_session_active(&self) -> bool {
+        self.play_session_active
+    }
+
+    /// Whether the game currently owns the keyboard.
+    ///
+    /// True while the fly-cam is driving *or* a play session is running. In
+    /// both cases an unmodified single-key editor shortcut must stand down:
+    /// bare `S` is the Scale tool and is also "move backward", and whichever
+    /// dispatcher claims it first stops the key reaching the game at all.
+    #[must_use]
+    pub fn game_owns_keyboard(&self) -> bool {
+        self.viewport_camera_active() || self.play_session_active
+    }
+
     // ── Editor event queue ────────────────────────────────────────────────────
 
     /// Drain one EditorEvent per call; returns None when queue is empty.
@@ -2933,6 +4617,41 @@ impl UiManager {
     }
 
     // ── Live UI updates ───────────────────────────────────────────────────────
+
+    /// CONTROL-L: publish the scene's clock to the viewport context bar.
+    ///
+    /// `None` means the scene has no day cycle, and the whole cluster
+    /// disappears — a control that cannot do anything is worse than no control,
+    /// which is craft defect C8's rule applied to presence rather than to
+    /// enablement.
+    pub fn update_time_of_day(&mut self, hour: Option<f32>) {
+        let visible = hour.is_some();
+        self.native_ui.set_visibility(self.time_cluster, visible);
+        let Some(hour) = hour else {
+            self.time_shown = None;
+            return;
+        };
+        // A tenth of a minute: below that the label reads the same and the
+        // handle moves less than a pixel, so rewriting either is pure churn.
+        if self
+            .time_shown
+            .is_some_and(|shown| (shown - hour).abs() < 0.002)
+        {
+            return;
+        }
+        self.time_shown = Some(hour);
+        self.native_ui
+            .send(SliderMessage::set_value(self.time_slider, hour / 24.0));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (h, m) = (hour.floor() as u32, ((hour.fract()) * 60.0).round() as u32);
+        let text = if m >= 60 {
+            format!("{:02}:00", (h + 1) % 24)
+        } else {
+            format!("{h:02}:{m:02}")
+        };
+        self.native_ui
+            .send(TextMessage::set_text(self.time_label, text));
+    }
 
     /// Update the camera-speed slider and its readout (Phase 20B).
     ///
@@ -2953,6 +4672,11 @@ impl UiManager {
     /// Keep the UE-style transport controls visually synchronized with the
     /// engine-owned simulation state.
     pub fn update_simulation_controls(&mut self, state: u8) {
+        // Every transport transition comes through here, which makes it the
+        // one place that knows a play session is running. `0` is stopped; `1`
+        // playing and `2` paused are both "a session exists", and during one
+        // the keyboard belongs to the game.
+        self.play_session_active = state != 0;
         let play = match state {
             1 => "Playing",
             2 => "Paused",
@@ -2997,24 +4721,25 @@ impl UiManager {
 
     /// Rebuild the outliner entity list.  `entities` is (entity_index, display_name).
     pub fn update_outliner(&mut self, entities: &[(u32, String)], selected: Option<u32>) {
-        let rows: Vec<(u32, String, u8, bool)> = entities
+        let rows: Vec<OutlinerRow> = entities
             .iter()
-            .map(|(id, name)| (*id, name.clone(), 0, false))
+            .map(|(id, name)| OutlinerRow {
+                id: *id,
+                name: name.clone(),
+                depth: 0,
+                has_children: false,
+                hidden: false,
+                locked: false,
+                script_error: false,
+                tags: Vec::new(),
+            })
             .collect();
         self.update_outliner_tree(&rows, selected);
     }
 
-    /// Hierarchical outliner (Phase 26-E). Each row is (id, name, depth, has_children).
-    pub fn update_outliner_tree(
-        &mut self,
-        entities: &[(u32, String, u8, bool)],
-        selected: Option<u32>,
-    ) {
-        let flat: Vec<(u32, String)> = entities
-            .iter()
-            .map(|(id, name, _, _)| (*id, name.clone()))
-            .collect();
-        let new_state = (flat, selected);
+    /// Hierarchical outliner (Phase 26-E), one [`OutlinerRow`] per visible row.
+    pub fn update_outliner_tree(&mut self, entities: &[OutlinerRow], selected: Option<u32>) {
+        let new_state = (entities.to_vec(), selected);
         if let Some(ref old_state) = self.last_outliner_state {
             if *old_state == new_state {
                 return;
@@ -3022,23 +4747,23 @@ impl UiManager {
         }
         self.last_outliner_state = Some(new_state);
 
-        let filter = self.outliner_filter.to_ascii_lowercase();
+        let filter = crate::outliner_filter::OutlinerFilter::parse(&self.outliner_filter);
         let mut items = Vec::new();
-        for &(id, ref name, depth, has_children) in entities {
-            if !filter.is_empty() && !name.to_ascii_lowercase().contains(&filter) {
+        for row in entities {
+            if !filter.matches(row) {
                 continue;
             }
-            let expanded = self.outliner_expanded.contains(&id) || !has_children;
-            if has_children && !self.outliner_expanded.contains(&id) && depth > 0 {
-                // collapsed children are omitted by the caller
-            }
+            let expanded = self.outliner_expanded.contains(&row.id) || !row.has_children;
             items.push(TreeItem {
-                id,
-                label: name.clone(),
-                depth,
-                icon: crate::metaphor::icon_for_entity_name(name),
-                has_children,
-                expanded: expanded || self.outliner_expanded.contains(&id),
+                id: row.id,
+                label: row.name.clone(),
+                depth: row.depth,
+                icon: crate::metaphor::icon_for_entity_name(&row.name),
+                has_children: row.has_children,
+                expanded: expanded || self.outliner_expanded.contains(&row.id),
+                hidden: row.hidden,
+                locked: row.locked,
+                script_error: row.script_error,
             });
         }
         // Phase 27-G: an empty scene says so rather than showing a blank panel.
@@ -3053,7 +4778,7 @@ impl UiManager {
         // the widget tree.
         self.palette_entities = entities
             .iter()
-            .map(|(id, name, _, _)| (*id, name.clone()))
+            .map(|row| (row.id, row.name.clone()))
             .collect();
         self.native_ui
             .send(TreeViewMessage::set_items(self.outliner_tree, items));
@@ -3120,19 +4845,17 @@ impl UiManager {
             .with_stroke_thickness(Thickness::uniform(1.0))
             .build();
             let card = self.native_ui.add_node(card, list);
-            let column = StackPanelBuilder::new(
-                WidgetBuilder::new().with_background(theme::TRANSPARENT),
-            )
-            .with_orientation(Orientation::Vertical)
-            .build();
+            let column =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Vertical)
+                    .build();
             let column = self.native_ui.add_node(column, card);
 
             // Header: name, state, and the three structural controls.
-            let header = StackPanelBuilder::new(
-                WidgetBuilder::new().with_background(theme::TRANSPARENT),
-            )
-            .with_orientation(Orientation::Horizontal)
-            .build();
+            let header =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Horizontal)
+                    .build();
             let header = self.native_ui.add_node(header, column);
 
             let enable = crate::widgets::check_box::CheckBoxBuilder::new(
@@ -3232,23 +4955,19 @@ impl UiManager {
                         .with_font_size(12.0)
                         .build();
                         let check = self.native_ui.add_node(check, column);
-                        self.script_widgets.push((
-                            check,
-                            ScriptWidgetAction::Bool(index, field.name.clone()),
-                        ));
+                        self.script_widgets
+                            .push((check, ScriptWidgetAction::Bool(index, field.name.clone())));
                     }
                     ScriptFieldKind::Text(text) => {
                         // Shown, not editable. A property kind the editor
                         // cannot author yet is better visible than absent:
                         // absent looks like the script failed to declare it.
-                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(
-                            Thickness {
-                                left: 10.0,
-                                top: 2.0,
-                                right: 0.0,
-                                bottom: 2.0,
-                            },
-                        ))
+                        let label = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                            left: 10.0,
+                            top: 2.0,
+                            right: 0.0,
+                            bottom: 2.0,
+                        }))
                         .with_role(TextRole::Caption)
                         .with_text(format!("{}: {text}", field.name))
                         .build();
@@ -3261,299 +4980,155 @@ impl UiManager {
             .invalidate_ancestors(self.inspector_handles.script_list);
     }
 
-    /// Update inspector NumericFields from a Transform.
+    /// Refresh the live schema-generated Details tree for one selection.
+    pub fn update_generated_details(
+        &mut self,
+        entity: Option<somnium_ecs::Entity>,
+        panels: Vec<GeneratedComponentPanel>,
+    ) {
+        let signature: Vec<_> = panels
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .flat_map(|row| {
+                let edits: Vec<_> = match row.editor {
+                    PropertyEditorKind::Vec2 => (0..2).map(GeneratedEdit::Lane).collect(),
+                    PropertyEditorKind::Vec3 | PropertyEditorKind::Vec4 => {
+                        let n = if row.editor == PropertyEditorKind::Vec3 {
+                            3
+                        } else {
+                            4
+                        };
+                        (0..n).map(GeneratedEdit::Lane).collect()
+                    }
+                    PropertyEditorKind::Euler => (0..3).map(GeneratedEdit::Euler).collect(),
+                    _ => vec![GeneratedEdit::Whole],
+                };
+                edits
+                    .into_iter()
+                    .map(move |edit| (row.component, row.field, edit))
+            })
+            .collect();
+        let rebuild = self.generated_entity != entity || self.generated_signature != signature;
+        if rebuild {
+            if self.generated_root.is_some() {
+                self.native_ui.remove_node(self.generated_root);
+            }
+            self.generated_bindings.clear();
+            self.generated_rows.clear();
+            self.generated_gestures.clear();
+            self.generated_asset_choices.clear();
+            self.generated_asset_searches.clear();
+            self.generated_asset_actions.clear();
+            let (root, bindings, rows, asset_choices, asset_searches, asset_actions) =
+                build_generated_details(
+                    &mut self.native_ui,
+                    self.inspector_stack,
+                    self.font_id,
+                    &panels,
+                    &self.asset_db,
+                );
+            self.generated_root = root;
+            self.generated_bindings = bindings;
+            self.generated_rows = rows;
+            self.generated_asset_choices = asset_choices;
+            self.generated_asset_searches = asset_searches;
+            self.generated_asset_actions = asset_actions;
+            self.generated_entity = entity;
+            self.generated_signature = signature;
+            self.native_ui.invalidate_ancestors(self.inspector_stack);
+        }
+
+        let values: HashMap<_, _> = panels
+            .iter()
+            .flat_map(|panel| panel.rows.iter())
+            .map(|row| {
+                (
+                    (row.component, row.field),
+                    (row.value.clone(), row.default.clone()),
+                )
+            })
+            .collect();
+        for (handle, binding) in &mut self.generated_bindings {
+            let Some((value, default)) = values.get(&(binding.component, binding.field)) else {
+                continue;
+            };
+            binding.value = value.clone();
+            binding.default = default.clone();
+            match (&binding.value, binding.edit) {
+                (somnium_ecs::reflect::ReflectValue::Bool(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(CheckBoxMessage::set_checked(*handle, *value)),
+                (somnium_ecs::reflect::ReflectValue::I64(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(NumericFieldMessage::set_value(*handle, *value as f32)),
+                (somnium_ecs::reflect::ReflectValue::F64(value), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(NumericFieldMessage::set_value(*handle, *value as f32)),
+                (somnium_ecs::reflect::ReflectValue::Vec2(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec3(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec4(value), GeneratedEdit::Lane(lane)) => {
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        value[lane as usize],
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Curve(curve), GeneratedEdit::Whole) => self
+                    .native_ui
+                    .send(CurveEditorMessage::set_value(*handle, curve.clone())),
+                (somnium_ecs::reflect::ReflectValue::Gradient(gradient), GeneratedEdit::Whole) => {
+                    self.native_ui
+                        .send(GradientEditorMessage::set_value(*handle, gradient.clone()));
+                }
+                (somnium_ecs::reflect::ReflectValue::Quat(value), GeneratedEdit::Euler(lane)) => {
+                    let e = glam::Quat::from_array(*value).to_euler(glam::EulerRot::XYZ);
+                    self.native_ui.send(NumericFieldMessage::set_value(
+                        *handle,
+                        [e.0, e.1, e.2][lane as usize].to_degrees(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for binding in self.generated_rows.values_mut() {
+            if let Some((value, default)) = values.get(&(binding.component, binding.field)) {
+                binding.value = value.clone();
+                binding.default = default.clone();
+            }
+        }
+    }
+
+    /// Update selection visibility. Reflected fields are populated separately.
     /// `transform` is (translation, euler_degrees, scale)`.
     pub fn update_inspector(
         &mut self,
-        entity_idx: Option<u32>,
+        entity: Option<somnium_ecs::Entity>,
         pos: Option<[f32; 3]>,
         rot_deg: Option<[f32; 3]>,
         scale: Option<[f32; 3]>,
     ) {
+        let _ = (pos, rot_deg, scale);
         // Phase 27-G. An empty Details panel now says so. Before this it
         // rendered POSITION / ROTATION / SCALE at 0.000 next to a status bar
         // reading "No selection", which says "the selection sits at the origin"
         // rather than "there is no selection".
-        let has_selection = entity_idx.is_some();
+        self.selected_entity = entity;
+        let has_selection = entity.is_some();
         self.native_ui
             .set_visibility(self.inspector_stack, has_selection);
         self.native_ui
             .set_visibility(self.details_empty, !has_selection);
-
-        let h = &self.inspector_handles;
-        let send = |ui: &mut UserInterface, handle: NodeHandle, v: f32| {
-            ui.send(NumericFieldMessage::set_value(handle, v));
-        };
-        if let Some([x, y, z]) = pos {
-            send(&mut self.native_ui, h.pos_x, x);
-            send(&mut self.native_ui, h.pos_y, y);
-            send(&mut self.native_ui, h.pos_z, z);
-        }
-        if let Some([x, y, z]) = rot_deg {
-            send(&mut self.native_ui, h.rot_x, x);
-            send(&mut self.native_ui, h.rot_y, y);
-            send(&mut self.native_ui, h.rot_z, z);
-        }
-        if let Some([x, y, z]) = scale {
-            send(&mut self.native_ui, h.sc_x, x);
-            send(&mut self.native_ui, h.sc_y, y);
-            send(&mut self.native_ui, h.sc_z, z);
-        }
     }
 
-    /// Show or hide the inspector's Light section and refresh it
-    /// (Phase 13E). Pass `None` when the selection has no `LightComponent`.
-    pub fn update_light_inspector(&mut self, values: Option<LightInspectorState>) {
-        let h = &self.inspector_handles;
-        let (section, intensity, range, inner, outer) = (
-            h.light_section,
-            h.light_intensity,
-            h.light_range,
-            h.light_inner,
-            h.light_outer,
-        );
-        let light_color = h.light_color;
-        let light_temp = h.light_temp_k;
-        let (range_row, inner_row, outer_row, moon_row, moon_int) = (
-            h.light_range_row,
-            h.light_inner_row,
-            h.light_outer_row,
-            h.light_moon_row,
-            h.light_moon_int,
-        );
-        match values {
-            Some(LightInspectorState {
-                values: [i, r, ia, oa, cr, cg, cb, moon_i, radius, width, height],
-                kelvin,
-                directional,
-                show_cone,
-                show_width,
-                show_height,
-            }) => {
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(intensity, i));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(range, r));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(inner, ia));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(outer, oa));
-                self.native_ui.send(UiMessage::new(
-                    light_color,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor([cr, cg, cb, 1.0]),
-                ));
-                self.native_ui.send(UiMessage::new(
-                    light_color,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetLocked(kelvin > 0.0),
-                ));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(light_temp, kelvin));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(moon_int, moon_i));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_radius, radius));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_width, width));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.light_height, height));
-                self.native_ui.set_visibility(range_row, !directional);
-                self.native_ui.set_visibility(inner_row, show_cone);
-                self.native_ui.set_visibility(outer_row, show_cone);
-                self.native_ui.set_visibility(moon_row, directional);
-                self.native_ui.set_visibility(h.light_width_row, show_width);
-                self.native_ui
-                    .set_visibility(h.light_height_row, show_height);
-            }
-            None => self.native_ui.set_visibility(section, false),
-        }
-    }
-
-    /// Show or hide the Camera section (Phase CR-C, extended by DOOM-F).
-    ///
-    /// `dynamic` is `(enabled, target_ms, floor_fraction)`. The floor is shown
-    /// as a percentage because "67" is a number someone can reason about and
-    /// "0.67" is not.
-    pub fn update_camera_inspector(
-        &mut self,
-        frustum_cull: Option<bool>,
-        dynamic: Option<(bool, f32, f32)>,
-    ) {
-        let h = &self.inspector_handles;
-        let (dynres_toggle, dynres_target, dynres_floor) = (
-            h.camera_dynres_toggle,
-            h.camera_dynres_target,
-            h.camera_dynres_floor,
-        );
-        let (section, frustum) = (h.camera_section, h.camera_frustum_toggle);
-        match frustum_cull {
-            Some(on) => {
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(CheckBoxMessage::set_checked(frustum, on));
-            }
-            None => {
-                self.native_ui.set_visibility(section, false);
-                return;
-            }
-        }
-        if let Some((on, target_ms, floor)) = dynamic {
-            self.native_ui
-                .send(CheckBoxMessage::set_checked(dynres_toggle, on));
-            self.native_ui
-                .send(NumericFieldMessage::set_value(dynres_target, target_ms));
-            self.native_ui
-                .send(NumericFieldMessage::set_value(dynres_floor, floor * 100.0));
-        }
-    }
-
-    /// Show or hide the inspector's Post FX section and refresh it (Phase 15A1).
-    ///
-    /// `values` is `[exposure, vignette_strength, ca_strength, ibl_intensity]`
-    /// plus the three enable flags; pass `None` when the selection has no
-    /// `PostProcessComponent`.
-    ///
-    /// Grouped into a struct rather than a tuple: it had already grown to four
-    /// positional booleans, which is exactly the shape that invites passing
-    /// them in the wrong order.
-    pub fn update_post_inspector(&mut self, values: Option<PostInspectorState>) {
-        let h = &self.inspector_handles;
-        let (section, exposure, vig_str, ca_str, ibl) = (
-            h.post_section,
-            h.post_exposure,
-            h.post_vig_str,
-            h.post_ca_str,
-            h.post_ibl,
-        );
-        let vig_toggle = h.post_vig_toggle;
-        let ca_toggle = h.post_ca_toggle;
-        let fxaa_toggle = h.post_fxaa_toggle;
-        let auto_toggle = h.post_auto_exp_toggle;
-        let tonemap_combo = h.post_tonemap_button;
-        let cel_toggle = h.post_cel_toggle;
-        let taa_toggle = h.post_taa_toggle;
-        let gtao_toggle = h.post_gtao_toggle;
-        let restir_toggle = h.post_restir_toggle;
-        let restir_gi_toggle = h.post_restir_gi_toggle;
-        let pcss_toggle = h.post_pcss_toggle;
-        let contact_toggle = h.post_contact_toggle;
-        let cas_toggle = h.post_cas_toggle;
-        let mb_toggle = h.post_mb_toggle;
-        let bloom_toggle = h.post_bloom_toggle;
-        let dof_toggle = h.post_dof_toggle;
-        let vol_toggle = h.post_vol_toggle;
-        let shafts_toggle = h.post_shafts_toggle;
-        let phys_toggle = h.post_phys_toggle;
-        let exp_comp = h.post_exp_comp;
-
-        match values {
-            Some(v) => {
-                let ([exp, ec, vig, ca, ibl_i], vig_on, ca_on, fxaa_on, auto_on, tonemap) = (
-                    v.values,
-                    v.vignette,
-                    v.chromatic,
-                    v.fxaa,
-                    v.auto_exposure,
-                    v.tonemapper,
-                );
-                let cel_on = v.cel_shading;
-                self.native_ui.set_visibility(section, true);
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(exposure, exp));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(exp_comp, ec));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(vig_str, vig));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(ca_str, ca));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(ibl, ibl_i));
-                // Redraw the tick in each toggle's checkbox.
-                let tick = |ui: &mut UserInterface, handle: NodeHandle, on: bool| {
-                    ui.send(CheckBoxMessage::set_checked(handle, on));
-                };
-                tick(&mut self.native_ui, vig_toggle, vig_on);
-                tick(&mut self.native_ui, ca_toggle, ca_on);
-                tick(&mut self.native_ui, fxaa_toggle, fxaa_on);
-                tick(&mut self.native_ui, auto_toggle, auto_on);
-                self.native_ui.send(ComboBoxMessage::set_selected(
-                    tonemap_combo,
-                    crate::metaphor::tonemap_index(tonemap),
-                ));
-                tick(&mut self.native_ui, cel_toggle, cel_on);
-                for (handle, on) in [
-                    (taa_toggle, v.taa),
-                    (gtao_toggle, v.gtao),
-                    (restir_toggle, v.restir),
-                    (restir_gi_toggle, v.restir_gi),
-                    (h.post_rt_reflect_toggle, v.rt_reflect),
-                    (h.post_rt_refract_toggle, v.rt_refract),
-                    (pcss_toggle, v.pcss),
-                    (contact_toggle, v.contact_shadows),
-                    (cas_toggle, v.cas),
-                    (mb_toggle, v.motion_blur),
-                    (bloom_toggle, v.bloom),
-                    (dof_toggle, v.dof),
-                    (vol_toggle, v.volumetrics),
-                    (shafts_toggle, v.shafts),
-                    (phys_toggle, v.physical_camera),
-                    (h.post_world_cache_toggle, v.world_cache),
-                    (h.post_specular_toggle, v.specular_gi),
-                    (h.post_path_toggle, v.path_tracer),
-                    (h.post_sdf_toggle, v.mesh_sdf),
-                    (h.post_probes_toggle, v.probes),
-                    (h.post_analytic_toggle, v.analytic_grad),
-                    (h.post_fsr_toggle, v.fsr),
-                ] {
-                    tick(&mut self.native_ui, handle, on);
-                }
-                for (field, value) in [
-                    (h.post_bloom_amt, v.extras[0]),
-                    (h.post_dof_focus, v.extras[1]),
-                    (h.post_temperature, v.extras[2]),
-                    (h.post_contrast, v.extras[3]),
-                    (h.post_saturation, v.extras[4]),
-                    (h.post_grain, v.extras[5]),
-                    (h.post_fog_density, v.extras[6]),
-                    (h.post_fog_height, v.extras[7]),
-                    (h.post_fog_asym, v.extras[8]),
-                    (h.post_tint, v.extras[9]),
-                    (h.post_lift, v.extras[10]),
-                    (h.post_gamma, v.extras[11]),
-                    (h.post_gain, v.extras[12]),
-                    (h.post_aperture, v.extras[13]),
-                    (h.post_shutter, v.extras[14]),
-                    (h.post_iso, v.extras[15]),
-                    (h.post_ao_radius, v.extras[16]),
-                    (h.post_ao_intensity, v.extras[17]),
-                    (h.post_cas_sharp, v.extras[18]),
-                    (h.post_cas_strength, v.extras[19]),
-                    (h.post_mb_shutter, v.extras[20]),
-                    (h.post_gi_intensity, v.extras[21]),
-                    (h.post_cache_intensity, v.cache_intensity),
-                    (h.post_cache_cell, v.cache_cell),
-                    (h.post_spec_rough, v.spec_rough),
-                    (h.post_path_bounces, v.path_bounces),
-                    (h.post_probe_intensity, v.probe_intensity),
-                    (h.post_shaft_amt, v.shaft_intensity),
-                    (h.post_fsr_sharp, v.fsr_sharpness),
-                ] {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(field, value));
-                }
-            }
-            None => self.native_ui.set_visibility(section, false),
-        }
-    }
-
-    /// Refresh the profiler overlay (Phase 29).
-    ///
-    /// `None` hides it. Rows past [`PROFILER_ROWS`] are dropped rather than
-    /// grown into: the overlay is a glance at the frame, and a panel that
-    /// resizes itself every time a pass appears is harder to read than one that
-    /// stays put.
     pub fn update_profiler(&mut self, rows: Option<&[ProfilerRow]>) {
         let panel = self.profiler_panel;
         let Some(rows) = rows else {
@@ -3569,17 +5144,14 @@ impl UiManager {
             self.profiler_toggle_lbl,
             "Profiler".to_string(),
         ));
-
         let names = self.profiler_names.clone();
         let values = self.profiler_values.clone();
         for i in 0..names.len() {
             let (label, value) = match rows.get(i) {
-                Some(r) => (
-                    format!("{}{}", "   ".repeat(r.depth as usize), r.label),
-                    r.value.clone(),
+                Some(row) => (
+                    format!("{}{}", "   ".repeat(row.depth as usize), row.label),
+                    row.value.clone(),
                 ),
-                // Blanked rather than hidden: hiding a row would reflow the
-                // panel every frame a pass drops out of the list.
                 None => (String::new(), String::new()),
             };
             self.native_ui.send(TextMessage::set_text(names[i], label));
@@ -3595,8 +5167,6 @@ impl UiManager {
         let wetness = h.terrain_wetness;
         let macro_s = h.terrain_macro;
         let debug = h.terrain_debug;
-        let mode_label = h.terrain_mode_label;
-        let _paint_label = h.terrain_paint_label;
         match values {
             Some(v) => {
                 self.native_ui.set_visibility(section, true);
@@ -3619,17 +5189,6 @@ impl UiManager {
                 let paint =
                     (v.paint_layer.round().max(0.0) as usize).min(TERRAIN_LAYER_SHORT.len() - 1);
                 let brush = (v.brush as usize).min(TERRAIN_BRUSH_NAMES.len() - 1);
-                let status = if v.foliage_paint {
-                    "Active: FOLIAGE paint".to_string()
-                } else if v.terrain_edit && v.terrain_paint {
-                    format!("Active: TERRAIN paint — {}", TERRAIN_LAYER_SHORT[paint])
-                } else if v.terrain_edit {
-                    format!("Active: TERRAIN sculpt — {}", TERRAIN_BRUSH_NAMES[brush])
-                } else {
-                    "Active: none — click Terrain Paint or a layer".to_string()
-                };
-                self.native_ui
-                    .send(TextMessage::set_text(mode_label, status));
                 self.native_ui.send(CheckBoxMessage::set_checked(
                     h.terrain_paint_toggle,
                     v.terrain_paint && !v.foliage_paint,
@@ -3685,151 +5244,6 @@ impl UiManager {
     }
 
     /// Show the stable authoring subset of a first-class water body.
-    pub fn update_water_inspector(&mut self, values: Option<[f32; 19]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(values) => {
-                self.native_ui.set_visibility(h.water_section, true);
-                for (handle, value) in [
-                    h.water_surface,
-                    h.water_depth,
-                    h.water_clarity,
-                    h.water_amplitude,
-                    h.water_roughness,
-                    h.water_ssr,
-                    h.water_rt_reflect,
-                    h.water_reflect_debug,
-                    h.water_wave_a,
-                    h.water_wave_b,
-                    h.water_speed,
-                    h.water_steepness,
-                    h.water_wind_speed,
-                    h.water_foam_decay,
-                    h.water_foam_threshold,
-                    h.water_spectrum_blend,
-                    h.water_edge_scale,
-                    h.water_anisotropy,
-                    h.water_caustic,
-                ]
-                .into_iter()
-                .zip(values)
-                {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(handle, value));
-                }
-            }
-            None => self.native_ui.set_visibility(h.water_section, false),
-        }
-    }
-
-    pub fn update_water_iris(
-        &mut self,
-        values: Option<(
-            [f32; 4],
-            [f32; 4],
-            [f32; 4],
-            [f32; 3],
-            [f32; 3],
-            bool,
-            [f32; 4],
-        )>,
-    ) {
-        let h = &self.inspector_handles;
-        match values {
-            Some((deep, shallow, edge, abs, scatter, underwater, dirs)) => {
-                let (abs_tint, abs_mag) = crate::color::split_magnitude(abs);
-                let (sc_tint, sc_mag) = crate::color::split_magnitude(scatter);
-                for (handle, rgba) in [
-                    (h.water_deep, deep),
-                    (h.water_shallow, shallow),
-                    (h.water_edge, edge),
-                    (h.water_abs, [abs_tint[0], abs_tint[1], abs_tint[2], 1.0]),
-                    (h.water_scatter, [sc_tint[0], sc_tint[1], sc_tint[2], 1.0]),
-                ] {
-                    self.native_ui.send(UiMessage::new(
-                        handle,
-                        MessageDirection::ToWidget,
-                        ColorSwatchMessage::SetColor(rgba),
-                    ));
-                }
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_abs_mag, abs_mag));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_scatter_mag, sc_mag));
-                self.native_ui
-                    .send(CheckBoxMessage::set_checked(h.water_underwater, underwater));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_ax, dirs[0]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_az, dirs[1]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_bx, dirs[2]));
-                self.native_ui
-                    .send(NumericFieldMessage::set_value(h.water_dir_bz, dirs[3]));
-            }
-            None => {}
-        }
-    }
-
-    pub fn update_particle_inspector(&mut self, values: Option<([f32; 4], [f32; 4])>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some((start, end)) => {
-                self.native_ui.set_visibility(h.particle_section, true);
-                self.native_ui.send(UiMessage::new(
-                    h.particle_start,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(start),
-                ));
-                self.native_ui.send(UiMessage::new(
-                    h.particle_end,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(end),
-                ));
-            }
-            None => self.native_ui.set_visibility(h.particle_section, false),
-        }
-    }
-
-    pub fn update_material_inspector(&mut self, values: Option<[f32; 4]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(base) => {
-                self.native_ui.set_visibility(h.material_section, true);
-                self.native_ui.send(UiMessage::new(
-                    h.material_base,
-                    MessageDirection::ToWidget,
-                    ColorSwatchMessage::SetColor(base),
-                ));
-            }
-            None => self.native_ui.set_visibility(h.material_section, false),
-        }
-    }
-
-    /// Show buoyancy controls when a `BuoyantVessel` is selected.
-    pub fn update_vessel_inspector(&mut self, values: Option<[f32; 6]>) {
-        let h = &self.inspector_handles;
-        match values {
-            Some(values) => {
-                self.native_ui.set_visibility(h.vessel_section, true);
-                for (handle, value) in [
-                    h.vessel_buoyancy,
-                    h.vessel_drag,
-                    h.vessel_angular_drag,
-                    h.vessel_thrust,
-                    h.vessel_draft,
-                    h.vessel_righting,
-                ]
-                .into_iter()
-                .zip(values)
-                {
-                    self.native_ui
-                        .send(NumericFieldMessage::set_value(handle, value));
-                }
-            }
-            None => self.native_ui.set_visibility(h.vessel_section, false),
-        }
-    }
 
     /// Show or hide the Foliage section and refresh it (Phase 17C).
     ///
@@ -3845,15 +5259,11 @@ impl UiManager {
             h.foliage_layer,
             h.foliage_smin,
             h.foliage_smax,
-            h.foliage_shadow,
-            h.foliage_cull,
-            h.foliage_lod,
-            h.foliage_impostor,
         ];
         match values {
             Some((v, flags)) => {
                 self.native_ui.set_visibility(section, true);
-                for (f, val) in fields.iter().zip(v.iter()) {
+                for (f, val) in fields.iter().zip(v[..6].iter()) {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(*f, *val));
                 }
@@ -3876,180 +5286,381 @@ impl UiManager {
         }
     }
 
-    /// Append a line to the output log panel (ring buffer, max 200).
+    /// Append a line to the Output Log.
+    ///
+    /// The ring buffer is still 200 entries, but pinned lines are exempt: a
+    /// line you deliberately kept should not be evicted by two hundred lines
+    /// of import chatter arriving behind it.
     pub fn append_log(&mut self, text: &str) {
-        const MAX: usize = 200;
-        self.log_lines.push_back(text.to_string());
-        if self.log_lines.len() > MAX {
-            self.log_lines.pop_front();
-            let first = self.native_ui.first_child(self.log_stack);
-            if first.is_some() {
-                self.native_ui.remove_node(first);
-            }
-            self.log_entry_count = self.log_entry_count.saturating_sub(1);
+        self.log
+            .append(self.log_clock.elapsed().as_secs_f64(), text);
+        self.rebuild_log_rows();
+    }
+
+    /// The Output Log's state.
+    #[must_use]
+    pub fn log(&self) -> &crate::log::OutputLog {
+        &self.log
+    }
+
+    /// The undo history, for the History view: the entry names in order, and
+    /// how many of them have been applied.
+    pub fn set_history(&mut self, entries: Vec<String>, position: usize) {
+        if self.history_rows == entries && self.history_position == position {
+            return;
+        }
+        self.history_rows = entries;
+        self.history_position = position;
+        if self.log_view == LogView::History {
+            self.rebuild_log_rows();
+        }
+    }
+
+    /// Background jobs, for the Jobs view. `(id, label, progress, failed)`.
+    pub fn set_job_rows(&mut self, rows: Vec<(u64, String, f32, bool)>) {
+        if self.job_rows == rows {
+            return;
+        }
+        self.job_rows = rows;
+        if self.log_view == LogView::Jobs {
+            self.rebuild_log_rows();
+        }
+    }
+
+    /// Show the first error, opening the panel and filtering to errors.
+    ///
+    /// This is what the status bar's "N script errors" clicks through to. It
+    /// filters rather than merely scrolling, because a lone error thirty lines
+    /// up in a busy log is not findable by scrolling to it.
+    pub fn reveal_first_error(&mut self) {
+        self.log_view = LogView::Log;
+        self.log.reveal_errors();
+        if !self.log_open {
+            self.toggle_log_panel();
+        }
+        self.rebuild_log_rows();
+    }
+
+    /// Rebuild the panel from the model.
+    ///
+    /// Wholesale rather than incrementally: the list is bounded at 200 rows,
+    /// a filter change invalidates all of them anyway, and an incremental path
+    /// would be a second place for the view and the model to disagree.
+    fn rebuild_log_rows(&mut self) {
+        for (row, _) in std::mem::take(&mut self.log_rows) {
+            self.native_ui.remove_node(row);
         }
         let font_id = self.font_id;
-        let entry = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 8.0,
-            top: 1.0,
-            right: 0.0,
-            bottom: 0.0,
-        }))
-        .with_text(text)
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
-        .build();
-        let log_stack = self.log_stack;
-        self.native_ui.add_node(entry, log_stack);
-        // The first line retires the empty state; it never comes back, because
-        // the log is append-only for the session.
-        if self.log_entry_count == 1 {
-            self.native_ui.set_visibility(self.log_empty, false);
-            self.native_ui.set_visibility(self.log_stack, true);
+        let stack = self.log_stack;
+        let mut rows = Vec::new();
+
+        if self.log_view == LogView::History {
+            // Row 0 is the state before anything happened, so the list is one
+            // longer than the entry list. Marking the current position rather
+            // than only the last row is what makes this a *history* instead of
+            // a list of things that already happened.
+            let entries = self.history_rows.clone();
+            let position = self.history_position;
+            for index in 0..=entries.len() {
+                let label = if index == 0 {
+                    "\u{2014} before any change \u{2014}".to_string()
+                } else {
+                    format!("{index}. {}", entries[index - 1])
+                };
+                let current = index == position;
+                let button = ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(15.0)
+                        .with_background(theme::TRANSPARENT),
+                )
+                .build();
+                let button = self.native_ui.add_node(button, stack);
+                let marker = if current { "\u{25b8} " } else { "  " };
+                let node =
+                    TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
+                        .with_text(&format!("{marker}{label}"))
+                        .with_font_size(11.0)
+                        .with_font_id(font_id)
+                        .with_color(if current {
+                            theme::active().semantic.accent.default.bytes()
+                        } else if index > position {
+                            // Everything past the marker is redo: still there, but not
+                            // part of the current state.
+                            theme::TEXT_DISABLED
+                        } else {
+                            theme::TEXT_PRIMARY
+                        })
+                        .build();
+                self.native_ui.add_node(node, button);
+                rows.push((button, index as u64));
+            }
+        } else if self.log_view == LogView::Jobs {
+            for (id, label, progress, failed) in self.job_rows.clone() {
+                let text = if failed {
+                    format!("{label} — failed")
+                } else if progress >= 1.0 {
+                    format!("{label} — done")
+                } else {
+                    format!("{label} — {:.0}%", progress * 100.0)
+                };
+                let node =
+                    TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
+                        .with_text(&text)
+                        .with_font_size(11.0)
+                        .with_font_id(font_id)
+                        .with_color(if failed {
+                            theme::active().semantic.status.error.bytes()
+                        } else {
+                            theme::TEXT_SECONDARY
+                        })
+                        .build();
+                rows.push((self.native_ui.add_node(node, stack), id));
+            }
+        } else {
+            let visible: Vec<_> = self.log.visible().into_iter().cloned().collect();
+            for entry in visible {
+                // A line carrying a source reference is a button, so it can be
+                // clicked; a line without one is text, so it cannot pretend to
+                // be. Craft: a link that does nothing teaches people not to
+                // click links.
+                let colour = match entry.severity {
+                    crate::log::LogSeverity::Error => theme::active().semantic.status.error.bytes(),
+                    crate::log::LogSeverity::Warn => {
+                        theme::active().semantic.status.warning.bytes()
+                    }
+                    crate::log::LogSeverity::Debug => theme::TEXT_DISABLED,
+                    crate::log::LogSeverity::Info => theme::TEXT_PRIMARY,
+                };
+                let label = format!("{:>7.2}s  {}", entry.timestamp, entry.text);
+                let row = if entry.sources.is_empty() {
+                    let node = TextBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)),
+                    )
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(font_id)
+                    .with_color(colour)
+                    .build();
+                    self.native_ui.add_node(node, stack)
+                } else {
+                    let button = ButtonBuilder::new(
+                        WidgetBuilder::new()
+                            .with_height(15.0)
+                            .with_tooltip(&format!(
+                                "Open {}:{}",
+                                entry.sources[0].file, entry.sources[0].line
+                            ))
+                            .with_background(theme::TRANSPARENT),
+                    )
+                    .build();
+                    let button = self.native_ui.add_node(button, stack);
+                    let node = TextBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)),
+                    )
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(font_id)
+                    .with_color(theme::active().semantic.accent.default.bytes())
+                    .build();
+                    self.native_ui.add_node(node, button);
+                    button
+                };
+                rows.push((row, entry.id));
+            }
         }
-        self.log_entry_count += 1;
+
+        let empty = rows.is_empty();
+        self.log_rows = rows;
+        self.native_ui.set_visibility(self.log_empty, empty);
+        self.native_ui.set_visibility(self.log_stack, !empty);
+        for (chip, severity) in self.log_severity_chips.clone() {
+            self.native_ui.send(ButtonMessage::set_selected(
+                chip,
+                self.log.filter.severities.contains(&severity),
+            ));
+        }
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_pin_only,
+            self.log.filter.pinned_only,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_jobs_toggle,
+            self.log_view == LogView::Jobs,
+        ));
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.log_history_toggle,
+            self.log_view == LogView::History,
+        ));
+        self.native_ui.invalidate_ancestors(self.log_stack);
+    }
+
+    /// Everything the Output Log's toolbar and rows do with a message.
+    fn handle_log_message(&mut self, msg: &UiMessage) -> bool {
+        if msg.destination == self.log_search
+            && let Some(SearchBoxMessage::Query(query)) = msg.data::<SearchBoxMessage>()
+        {
+            self.log.filter.search = query.clone();
+            self.rebuild_log_rows();
+            return true;
+        }
+        if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
+            return false;
+        }
+        if let Some((_, severity)) = self
+            .log_severity_chips
+            .iter()
+            .find(|(chip, _)| *chip == msg.destination)
+            .copied()
+        {
+            self.log.filter.toggle(severity);
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.status_stats_button {
+            self.reveal_first_error();
+            return true;
+        }
+        if msg.destination == self.log_pin_only {
+            self.log.filter.pinned_only = !self.log.filter.pinned_only;
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_jobs_toggle {
+            self.log_view = if self.log_view == LogView::Jobs {
+                LogView::Log
+            } else {
+                LogView::Jobs
+            };
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_history_toggle {
+            self.log_view = if self.log_view == LogView::History {
+                LogView::Log
+            } else {
+                LogView::History
+            };
+            self.rebuild_log_rows();
+            return true;
+        }
+        if self.log_view == LogView::History
+            && let Some(index) = self
+                .log_rows
+                .iter()
+                .position(|(row, _)| *row == msg.destination)
+        {
+            // Row 0 is "before anything happened", so the click target is the
+            // position *after* the entry named on the row — which is what
+            // "take me back to there" means when you click the row itself.
+            self.editor_events
+                .push_back(EditorEvent::JumpToHistory(index));
+            return true;
+        }
+        if msg.destination == self.log_clear {
+            // Pinned lines survive Clear. That is the whole point of a pin.
+            self.log.clear();
+            self.rebuild_log_rows();
+            return true;
+        }
+        if msg.destination == self.log_copy {
+            let text = self.log.copy_text();
+            self.editor_events.push_back(EditorEvent::CopyText(text));
+            self.push_toast("Copied the visible log");
+            return true;
+        }
+        // A row with a source reference. `command()`-click pins instead of
+        // opening, so the two useful things a log line can do are one gesture
+        // apart rather than behind a menu.
+        if let Some((_, id)) = self
+            .log_rows
+            .iter()
+            .find(|(row, _)| *row == msg.destination)
+            .copied()
+        {
+            if self.native_ui.modifiers().command() {
+                self.log.toggle_pin(id);
+                self.rebuild_log_rows();
+                return true;
+            }
+            if let Some(source) = self.log.source_of(id).cloned() {
+                self.editor_events.push_back(EditorEvent::OpenSource {
+                    file: source.file,
+                    line: source.line,
+                    column: source.column.unwrap_or(1),
+                });
+            }
+            return true;
+        }
+        false
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
-    /// Every inspector numeric field paired with the `InspectorField` it
-    /// writes.
-    ///
-    /// Extracted from `process_outgoing` in Phase 26-Zeta-G because the
-    /// modified-dot sync needs exactly the same pairing, and two copies of a
-    /// 100-row table would drift the first time a field was added.
-    fn field_bindings(h: &InspectorHandles) -> Vec<(NodeHandle, IF)> {
-        vec![
-            (h.pos_x, IF::PosX),
-            (h.pos_y, IF::PosY),
-            (h.pos_z, IF::PosZ),
-            (h.rot_x, IF::RotX),
-            (h.rot_y, IF::RotY),
-            (h.rot_z, IF::RotZ),
-            (h.sc_x, IF::ScaleX),
-            (h.sc_y, IF::ScaleY),
-            (h.sc_z, IF::ScaleZ),
-            (h.light_intensity, IF::LightIntensity),
-            (h.light_range, IF::LightRange),
-            (h.light_inner, IF::LightInnerAngle),
-            (h.light_outer, IF::LightOuterAngle),
-            (h.light_col_r, IF::LightColorR),
-            (h.light_col_g, IF::LightColorG),
-            (h.light_col_b, IF::LightColorB),
-            (h.light_temp_k, IF::LightColorTemperature),
-            (h.light_moon_int, IF::LightMoonIntensity),
-            (h.light_radius, IF::LightSourceRadius),
-            (h.light_width, IF::LightAreaWidth),
-            (h.light_height, IF::LightAreaHeight),
-            (h.terrain_aerial_dist, IF::TerrainAerialDistance),
-            (h.camera_dynres_target, IF::CameraDynResTargetMs),
-            (h.camera_dynres_floor, IF::CameraDynResFloor),
-            (h.post_exposure, IF::PostExposure),
-            (h.post_exp_comp, IF::PostExposureCompensation),
-            (h.post_bloom_amt, IF::PostBloomIntensity),
-            (h.post_dof_focus, IF::PostFocusDistance),
-            (h.post_temperature, IF::PostTemperature),
-            (h.post_contrast, IF::PostContrast),
-            (h.post_saturation, IF::PostSaturation),
-            (h.post_grain, IF::PostGrain),
-            (h.post_fog_density, IF::PostFogDensity),
-            (h.post_fog_height, IF::PostFogHeight),
-            (h.post_fog_asym, IF::PostFogAsymmetry),
-            (h.post_tint, IF::PostTint),
-            (h.post_lift, IF::PostLift),
-            (h.post_gamma, IF::PostGamma),
-            (h.post_gain, IF::PostGain),
-            (h.post_aperture, IF::PostAperture),
-            (h.post_shutter, IF::PostShutter),
-            (h.post_iso, IF::PostIso),
-            (h.post_ao_radius, IF::PostAoRadius),
-            (h.post_ao_intensity, IF::PostAoIntensity),
-            (h.post_fsr_sharp, IF::PostFsrSharpness),
-            (h.post_cas_sharp, IF::PostCasSharpness),
-            (h.post_cas_strength, IF::PostCasStrength),
-            (h.post_mb_shutter, IF::PostMotionBlurShutter),
-            (h.post_gi_intensity, IF::PostGiIntensity),
-            (h.post_cache_intensity, IF::PostCacheIntensity),
-            (h.post_cache_cell, IF::PostCacheCell),
-            (h.post_spec_rough, IF::PostSpecRough),
-            (h.post_path_bounces, IF::PostPathBounces),
-            (h.post_probe_intensity, IF::PostProbeIntensity),
-            (h.post_shaft_amt, IF::PostShaftIntensity),
-            (h.post_vig_str, IF::PostVignetteStrength),
-            (h.post_ca_str, IF::PostCaStrength),
-            (h.post_ibl, IF::PostIblIntensity),
-            (h.terrain_layer, IF::TerrainPaintLayer),
-            (h.terrain_tile, IF::TerrainTile0),
-            (h.terrain_relief, IF::TerrainRelief),
-            (h.terrain_wetness, IF::TerrainWetness),
-            (h.terrain_macro, IF::TerrainMacroStrength),
-            (h.terrain_debug, IF::TerrainDebugView),
-            (h.terrain_morph_start, IF::TerrainMorphStart),
-            (h.water_surface, IF::WaterSurface),
-            (h.water_depth, IF::WaterMaxDepth),
-            (h.water_clarity, IF::WaterClarity),
-            (h.water_amplitude, IF::WaterAmplitude),
-            (h.water_roughness, IF::WaterRoughness),
-            (h.water_ssr, IF::WaterSsrStrength),
-            (h.water_rt_reflect, IF::WaterRtReflect),
-            (h.water_reflect_debug, IF::WaterReflectDebug),
-            (h.water_wave_a, IF::WaterWaveLengthA),
-            (h.water_wave_b, IF::WaterWaveLengthB),
-            (h.water_speed, IF::WaterWaveSpeed),
-            (h.water_steepness, IF::WaterWaveSteepness),
-            (h.water_wind_speed, IF::WaterWindSpeed),
-            (h.water_foam_decay, IF::WaterFoamDecay),
-            (h.water_foam_threshold, IF::WaterFoamThreshold),
-            (h.water_spectrum_blend, IF::WaterSpectrumBlend),
-            (h.water_edge_scale, IF::WaterEdgeScale),
-            (h.water_anisotropy, IF::WaterAnisotropy),
-            (h.water_caustic, IF::WaterCausticStrength),
-            (h.water_dir_ax, IF::WaterWaveDirAX),
-            (h.water_dir_az, IF::WaterWaveDirAZ),
-            (h.water_dir_bx, IF::WaterWaveDirBX),
-            (h.water_dir_bz, IF::WaterWaveDirBZ),
-            (h.water_abs_mag, IF::WaterAbsorptionMag),
-            (h.water_scatter_mag, IF::WaterScatteringMag),
-            (h.vessel_buoyancy, IF::VesselBuoyancy),
-            (h.vessel_drag, IF::VesselDrag),
-            (h.vessel_angular_drag, IF::VesselAngularDrag),
-            (h.vessel_thrust, IF::VesselThrust),
-            (h.vessel_draft, IF::VesselDraft),
-            (h.vessel_righting, IF::VesselRighting),
-            (h.foliage_density, IF::FoliageDensity),
-            (h.foliage_seed, IF::FoliageSeed),
-            (h.foliage_slope, IF::FoliageSlope),
-            (h.foliage_layer, IF::FoliageLayer),
-            (h.foliage_smin, IF::FoliageScaleMin),
-            (h.foliage_smax, IF::FoliageScaleMax),
-            (h.foliage_shadow, IF::FoliageShadowDistance),
-            (h.foliage_cull, IF::FoliageCullDistance),
-            (h.foliage_lod, IF::FoliageLodDistance),
-            (h.foliage_impostor, IF::FoliageImpostorDistance),
-        ]
-    }
-
     fn process_outgoing(&mut self, msgs: Vec<UiMessage>) {
         let h = &self.inspector_handles;
-        let field_map = Self::field_bindings(h);
-
-        let color_map: &[(NodeHandle, crate::ColorField)] = &[
-            (h.light_color, crate::ColorField::Light),
-            (h.water_deep, crate::ColorField::WaterDeep),
-            (h.water_shallow, crate::ColorField::WaterShallow),
-            (h.water_edge, crate::ColorField::WaterEdge),
-            (h.water_abs, crate::ColorField::WaterAbsorption),
-            (h.water_scatter, crate::ColorField::WaterScattering),
-            (h.particle_start, crate::ColorField::ParticleStart),
-            (h.particle_end, crate::ColorField::ParticleEnd),
-            (h.material_base, crate::ColorField::MaterialBase),
+        let terrain_numeric = [
+            (h.terrain_aerial_dist, TerrainToolField::AerialDistance),
+            (h.terrain_layer, TerrainToolField::PaintLayer),
+            (h.terrain_tile, TerrainToolField::TileScale),
+            (h.terrain_relief, TerrainToolField::Relief),
+            (h.terrain_wetness, TerrainToolField::Wetness),
+            (h.terrain_macro, TerrainToolField::MacroStrength),
+            (h.terrain_debug, TerrainToolField::DebugView),
+            (h.terrain_morph_start, TerrainToolField::MorphStart),
         ];
-
+        let foliage_numeric = [
+            (h.foliage_density, FoliageBrushField::Density),
+            (h.foliage_seed, FoliageBrushField::Radius),
+            (h.foliage_slope, FoliageBrushField::MaxSlope),
+            (h.foliage_layer, FoliageBrushField::Kind),
+            (h.foliage_smin, FoliageBrushField::ScaleMin),
+            (h.foliage_smax, FoliageBrushField::ScaleMax),
+        ];
         for msg in msgs {
+            if self.handle_preferences_message(&msg) {
+                continue;
+            }
+            if self.handle_snap_message(&msg) {
+                continue;
+            }
+            if self.handle_log_message(&msg) {
+                continue;
+            }
+            if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+                && let Some((_, path)) = self
+                    .recent_menu_items
+                    .iter()
+                    .find(|(handle, path)| *handle == msg.destination && !path.is_empty())
+                    .cloned()
+            {
+                self.close_all_menus();
+                self.prompt_unsaved_action(EditorEvent::LoadScene(path));
+                continue;
+            }
             if let Some(ColorSwatchMessage::Clicked(rgba)) = msg.data::<ColorSwatchMessage>() {
-                if let Some((_, field)) = color_map.iter().find(|(h, _)| *h == msg.destination) {
-                    self.color_target = Some(*field);
+                let generated_target =
+                    self.generated_bindings
+                        .get(&msg.destination)
+                        .and_then(|binding| match binding.value {
+                            somnium_ecs::reflect::ReflectValue::Vec3(_) => {
+                                Some(ColorTarget::Reflected {
+                                    component: binding.component,
+                                    field: binding.field,
+                                    vec4: false,
+                                })
+                            }
+                            somnium_ecs::reflect::ReflectValue::Vec4(_) => {
+                                Some(ColorTarget::Reflected {
+                                    component: binding.component,
+                                    field: binding.field,
+                                    vec4: true,
+                                })
+                            }
+                            _ => None,
+                        });
+                if let Some(field) = generated_target {
+                    self.color_target = Some(field);
+                    self.color_gesture = Some(self.allocate_property_gesture());
                     self.color_open = true;
                     self.color_original = *rgba;
                     self.color_live = *rgba;
@@ -4073,34 +5684,20 @@ impl UiManager {
                 continue;
             }
             if let Some(cmsg) = msg.data::<ColorPickerMessage>() {
-                if let Some(field) = self.color_target {
+                if let (Some(target), Some(gesture)) = (self.color_target, self.color_gesture) {
                     match cmsg {
                         ColorPickerMessage::Changing(rgba) => {
                             self.color_live = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::SetInspectorColor {
-                                    field,
-                                    rgba: *rgba,
-                                    live: true,
-                                });
+                            self.write_color_target(target, *rgba, gesture, true);
                         }
                         ColorPickerMessage::Changed(rgba) => {
                             self.color_live = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::SetInspectorColor {
-                                    field,
-                                    rgba: *rgba,
-                                    live: false,
-                                });
+                            self.write_color_target(target, *rgba, gesture, false);
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::Cancelled(rgba) => {
                             self.color_original = *rgba;
-                            self.editor_events
-                                .push_back(EditorEvent::CancelInspectorColor {
-                                    field,
-                                    rgba: *rgba,
-                                });
+                            self.write_color_target(target, *rgba, gesture, false);
                             self.dismiss_color_ui();
                         }
                         ColorPickerMessage::SetColor(_) => {}
@@ -4108,9 +5705,12 @@ impl UiManager {
                 }
                 continue;
             }
-            if let Some(CommandPaletteMessage::Run(idx)) = msg.data::<CommandPaletteMessage>() {
-                self.run_palette_command(*idx);
+            if let Some(CommandPaletteMessage::Run(id)) = msg.data::<CommandPaletteMessage>() {
                 self.close_palette();
+                // Close (and restore focus from) the palette before running a
+                // command which may open another modal, such as New Scene's
+                // unsaved-changes prompt. Modal focus scopes never overlap.
+                self.run_command_id(id);
                 continue;
             }
             if let Some(SplitterMessage::Changed(size)) = msg.data::<SplitterMessage>() {
@@ -4144,7 +5744,7 @@ impl UiManager {
                             .and_then(|e| e.to_str())
                             .is_some_and(|e| e.eq_ignore_ascii_case("somnium"));
                     if is_map {
-                        self.editor_events.push_back(EditorEvent::LoadScene(
+                        self.prompt_unsaved_action(EditorEvent::LoadScene(
                             entry.path.to_string_lossy().into_owned(),
                         ));
                     }
@@ -4152,29 +5752,108 @@ impl UiManager {
                 continue;
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
-                if msg.destination == self.file_new_item {
-                    self.close_all_menus();
-                    self.prompt_unsaved_new();
+                if msg.destination == self.status_cancel {
+                    if let Some(id) = self.status_cancel_job {
+                        self.editor_events.push_back(EditorEvent::CancelJob(id));
+                    }
                     continue;
                 }
-                if msg.destination == self.file_save_item {
-                    self.close_all_menus();
-                    self.editor_events.push_back(EditorEvent::SaveScene);
+                if let Some((_, action)) = self
+                    .content_toolbar_actions
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .copied()
+                {
+                    match action {
+                        ContentToolbarAction::Back => {
+                            self.content_back();
+                        }
+                        ContentToolbarAction::Forward => {
+                            self.content_forward();
+                        }
+                        ContentToolbarAction::Up => {
+                            let up = std::path::Path::new(&self.content_path)
+                                .parent()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            self.navigate_content(up);
+                        }
+                        ContentToolbarAction::Kind(kind) => self.set_content_kind(kind),
+                        ContentToolbarAction::Sort => {
+                            self.content_sort = match self.content_sort {
+                                somnium_asset::database::AssetSort::Name => {
+                                    somnium_asset::database::AssetSort::Kind
+                                }
+                                somnium_asset::database::AssetSort::Kind => {
+                                    somnium_asset::database::AssetSort::Size
+                                }
+                                somnium_asset::database::AssetSort::Size => {
+                                    somnium_asset::database::AssetSort::Modified
+                                }
+                                somnium_asset::database::AssetSort::Modified => {
+                                    somnium_asset::database::AssetSort::Name
+                                }
+                            };
+                            self.refresh_content_list();
+                        }
+                        ContentToolbarAction::Density => {
+                            self.cycle_content_density();
+                        }
+                    }
+                    continue;
+                }
+                if let Some((combo, action)) =
+                    self.generated_asset_actions.get(&msg.destination).copied()
+                {
+                    let binding = self.generated_bindings.get(&combo).cloned();
+                    let record = binding.as_ref().and_then(|binding| match binding.value {
+                        somnium_ecs::reflect::ReflectValue::Asset(Some(asset)) => self
+                            .asset_db
+                            .get(somnium_asset::database::AssetId::from_raw(asset.raw()))
+                            .cloned(),
+                        _ => None,
+                    });
+                    match (action, binding, record) {
+                        (AssetPickerAction::Locate, _, Some(record)) => {
+                            self.navigate_content(record.parent);
+                        }
+                        (AssetPickerAction::Edit, _, Some(record)) => {
+                            self.editor_events.push_back(EditorEvent::EditContentAsset(
+                                record.absolute_path.to_string_lossy().into_owned(),
+                            ));
+                        }
+                        (AssetPickerAction::MakeUnique, Some(binding), Some(record)) => {
+                            if let Some(entity) = self.selected_entity {
+                                self.editor_events.push_back(EditorEvent::MakeAssetUnique {
+                                    source: record.absolute_path.to_string_lossy().into_owned(),
+                                    entity,
+                                    component: binding.component,
+                                    field: binding.field,
+                                });
+                            }
+                        }
+                        _ => self.push_toast("Choose an asset first"),
+                    }
                     continue;
                 }
                 if msg.destination == self.unsaved_save {
                     self.close_unsaved();
                     self.editor_events.push_back(EditorEvent::SaveScene);
-                    self.editor_events.push_back(EditorEvent::NewScene);
+                    if let Some(action) = self.pending_scene_action.take() {
+                        self.editor_events.push_back(action);
+                    }
                     continue;
                 }
                 if msg.destination == self.unsaved_discard {
                     self.close_unsaved();
-                    self.editor_events.push_back(EditorEvent::NewScene);
+                    if let Some(action) = self.pending_scene_action.take() {
+                        self.editor_events.push_back(action);
+                    }
                     continue;
                 }
                 if msg.destination == self.unsaved_cancel {
                     self.close_unsaved();
+                    self.pending_scene_action = None;
                     continue;
                 }
                 if msg.destination == self.name_ok {
@@ -4190,8 +5869,20 @@ impl UiManager {
             // prompt the three creating flows share.
             if let Some(ContextMenuMessage::Activate(id)) = msg.data::<ContextMenuMessage>() {
                 if msg.destination == self.content_menu {
-                    let id = *id;
                     self.activate_content_menu(id);
+                    continue;
+                }
+                if msg.destination == self.outliner_menu {
+                    self.close_outliner_menu();
+                    if let Some(index) = id.strip_prefix("pierce:")
+                        && let Ok(index) = index.parse::<u32>()
+                    {
+                        self.piercing_rows.clear();
+                        self.editor_events
+                            .push_back(EditorEvent::PickPierced(index));
+                        continue;
+                    }
+                    self.run_command_id(id);
                     continue;
                 }
             }
@@ -4213,33 +5904,51 @@ impl UiManager {
                     continue;
                 }
             }
-            if let Some(CheckBoxMessage::Check(on)) = msg.data::<CheckBoxMessage>() {
-                if msg.destination == self.inspector_handles.water_underwater {
-                    let _ = on;
-                    self.editor_events
-                        .push_back(EditorEvent::ToggleWaterUnderwater);
-                    continue;
-                }
-            }
             if let Some(PopupMessage::Close) = msg.data::<PopupMessage>() {
                 if msg.destination == self.color_popup && self.color_open {
                     // Click-away commits (Iris: OK = click-outside).
                     self.close_color_picker(true);
                 }
                 if msg.destination == self.palette_popup {
-                    self.palette_open = false;
+                    self.close_palette();
                 }
                 if msg.destination == self.unsaved_popup {
-                    self.unsaved_open = false;
+                    self.close_unsaved();
                 }
                 if msg.destination == self.name_popup {
                     // Clicking away from the prompt abandons it, the same
                     // as Cancel.
-                    self.name_prompt = None;
+                    self.close_name_prompt();
                 }
             }
 
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if let Some((_, id)) = self
+                    .menu_command_items
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .copied()
+                {
+                    if let Some(opener) = self.open_menu_button() {
+                        let previous = self.native_ui.focused();
+                        if previous.is_some() && previous != opener {
+                            self.native_ui.send(UiMessage::new(
+                                previous,
+                                MessageDirection::ToWidget,
+                                WidgetMessage::Unfocus,
+                            ));
+                        }
+                        self.native_ui.set_focus(opener);
+                        self.native_ui.send(UiMessage::new(
+                            opener,
+                            MessageDirection::ToWidget,
+                            WidgetMessage::Focus,
+                        ));
+                    }
+                    self.close_all_menus();
+                    self.run_command_id(id);
+                    continue;
+                }
                 // Outliner row
                 if msg.destination == self.palette_button {
                     self.toggle_palette();
@@ -4250,8 +5959,10 @@ impl UiManager {
                     .iter()
                     .find(|(bh, _)| *bh == msg.destination)
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(eidx)));
+                    self.editor_events.push_back(EditorEvent::ModifySelection {
+                        id: eidx,
+                        mode: self.selection_mode(),
+                    });
                     continue;
                 }
                 if let Some(layer) = self
@@ -4264,57 +5975,40 @@ impl UiManager {
                         .push_back(EditorEvent::SetTerrainPaintLayer(layer as u8));
                     continue;
                 }
-                // File > Import Model (Phase 19B)
-                if msg.destination == self.file_import_item {
-                    self.editor_events.push_back(EditorEvent::ImportModel);
-                    self.file_popup_open = false;
-                    self.native_ui.send(UiMessage::new(
-                        self.file_popup,
-                        MessageDirection::ToWidget,
-                        PopupMessage::Close,
-                    ));
-                    self.native_ui.invalidate_ancestors(self.file_popup);
-                    continue;
-                }
                 // Post-process controls are checkboxes now. Handling their
                 // underlying button-click messages as well as Check messages
                 // delivered two events for one click and flipped the setting
                 // straight back to its starting value.
                 if msg.destination == self.profiler_toggle {
-                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
+                    self.run_command_id("editor.view.profiler");
                     continue;
                 }
                 if msg.destination == self.play_button {
-                    self.editor_events.push_back(EditorEvent::PlaySimulation);
+                    self.run_command_id("editor.simulation.play");
                     continue;
                 }
                 if msg.destination == self.select_button {
-                    self.editor_events.push_back(EditorEvent::SetGizmoMode(0));
+                    self.run_command_id("editor.gizmo.translate");
                     continue;
                 }
                 if msg.destination == self.landscape_button {
-                    self.editor_events.push_back(EditorEvent::ToggleTerrainEdit);
+                    self.run_command_id("editor.terrain.edit");
                     continue;
                 }
                 if msg.destination == self.foliage_toolbar_button {
-                    self.editor_events.push_back(EditorEvent::ToggleFoliage);
+                    self.run_command_id("editor.foliage.edit");
                     continue;
                 }
                 if msg.destination == self.immersive_button {
-                    self.editor_events
-                        .push_back(EditorEvent::ToggleImmersiveViewport);
+                    self.run_command_id("editor.viewport.immersive");
                     continue;
                 }
                 if msg.destination == self.pause_button {
-                    self.editor_events.push_back(EditorEvent::PauseSimulation);
+                    self.run_command_id("editor.simulation.pause");
                     continue;
                 }
                 if msg.destination == self.stop_button {
-                    self.editor_events.push_back(EditorEvent::StopSimulation);
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_tonemap_button {
-                    self.editor_events.push_back(EditorEvent::CycleTonemapper);
+                    self.run_command_id("editor.simulation.stop");
                     continue;
                 }
                 if msg.destination == self.inspector_handles.foliage_toggle {
@@ -4380,72 +6074,9 @@ impl UiManager {
                         .push_back(EditorEvent::SetTerrainTool(tool));
                     continue;
                 }
-                if msg.destination == self.edit_undo {
-                    self.editor_events.push_back(EditorEvent::Undo);
+                if msg.destination == self.help_button {
                     self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_redo {
-                    self.editor_events.push_back(EditorEvent::Redo);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_delete {
-                    self.editor_events.push_back(EditorEvent::DeleteSelected);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.edit_dup {
-                    self.editor_events.push_back(EditorEvent::DuplicateSelected);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.view_profiler {
-                    self.editor_events.push_back(EditorEvent::ToggleProfiler);
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.view_content {
-                    self.close_all_menus();
-                    self.toggle_drawer();
-                    continue;
-                }
-                if let Some(idx) = self
-                    .window_workspace_items
-                    .iter()
-                    .position(|h| *h == msg.destination)
-                {
-                    let workspace = crate::workspace::Workspace::ALL[idx];
-                    self.close_all_menus();
-                    self.set_workspace(workspace);
-                    continue;
-                }
-                if msg.destination == self.window_reset_item {
-                    self.close_all_menus();
-                    self.reset_workspace();
-                    continue;
-                }
-                if msg.destination == self.window_dock_content {
-                    self.drawer_docked = true;
-                    if !self.drawer_open {
-                        self.toggle_drawer();
-                    }
-                    self.close_all_menus();
-                    continue;
-                }
-                if msg.destination == self.help_open_item || msg.destination == self.help_button {
-                    self.close_all_menus();
-                    self.toggle_help(Some(0));
-                    continue;
-                }
-                if msg.destination == self.help_shortcuts {
-                    self.close_all_menus();
-                    self.toggle_help(Some(2));
-                    continue;
-                }
-                if msg.destination == self.help_about {
-                    self.close_all_menus();
-                    self.toggle_help(Some(4));
+                    self.run_command_id("editor.help.index");
                     continue;
                 }
                 if msg.destination == self.log_button {
@@ -4478,7 +6109,7 @@ impl UiManager {
                     continue;
                 }
                 if msg.destination == self.save_button {
-                    self.editor_events.push_back(EditorEvent::SaveScene);
+                    self.run_command_id("editor.scene.save");
                     continue;
                 }
                 if let Some((_, entry)) = self
@@ -4488,7 +6119,7 @@ impl UiManager {
                     .cloned()
                 {
                     if entry.is_dir {
-                        let root = std::env::current_dir().unwrap_or_default().join("assets");
+                        let root = self.asset_db.root().to_path_buf();
                         // Through `navigate_content` so the move lands in
                         // history. Setting `content_path` directly is what would
                         // leave Back pointing at a folder the user never left.
@@ -4510,19 +6141,19 @@ impl UiManager {
                             self.editor_events
                                 .push_back(EditorEvent::CreateEntity(kind));
                         }
-                    } else if entry
-                        .path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
-                    {
-                        // Phase 16-D: clicking a script attaches it to the
-                        // selection. `app.rs` refuses with a toast if there
-                        // is nothing selected, rather than silently doing
-                        // nothing.
-                        self.editor_events.push_back(EditorEvent::AttachScript(
-                            entry.path.to_string_lossy().into_owned(),
-                        ));
+                    } else {
+                        let additive = self.native_ui.modifiers().ctrl;
+                        self.select_content(entry.path.clone(), additive);
+                        if entry
+                            .path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("luau"))
+                        {
+                            self.editor_events.push_back(EditorEvent::AttachScript(
+                                entry.path.to_string_lossy().into_owned(),
+                            ));
+                        }
                     }
                     continue;
                 }
@@ -4539,7 +6170,8 @@ impl UiManager {
                                 .push_back(EditorEvent::ReorderScript { index, delta });
                         }
                         ScriptWidgetAction::Detach(index) => {
-                            self.editor_events.push_back(EditorEvent::DetachScript(index));
+                            self.editor_events
+                                .push_back(EditorEvent::DetachScript(index));
                         }
                         // Enable and the property widgets are not buttons;
                         // they arrive as CheckBox and NumericField messages.
@@ -4554,13 +6186,12 @@ impl UiManager {
                     continue;
                 }
                 // Create popup item
-                if let Some(&(_, kind)) = self
+                if let Some(&(_, id)) = self
                     .create_popup_items
                     .iter()
                     .find(|(bh, _)| *bh == msg.destination)
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::CreateEntity(kind));
+                    self.run_command_id(id);
                     self.create_popup_open = false;
                     self.native_ui.send(UiMessage::new(
                         self.create_popup,
@@ -4686,22 +6317,6 @@ impl UiManager {
                     }
                     continue;
                 }
-                // Inspector checkboxes share the same destinations as the old buttons.
-                if msg.destination == self.inspector_handles.post_vig_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Vignette, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_auto_exp_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::AutoExposure, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_cel_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::CelShading, *on));
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.foliage_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleFoliage);
                     continue;
@@ -4730,13 +6345,6 @@ impl UiManager {
                         .push_back(EditorEvent::ToggleTerrainClipmap);
                     continue;
                 }
-                if msg.destination == self.inspector_handles.camera_frustum_toggle {
-                    if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events
-                            .push_back(EditorEvent::SetCpuFrustum(*on));
-                    }
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.terrain_aerial_toggle {
                     if msg.direction == MessageDirection::FromWidget {
                         self.editor_events
@@ -4753,20 +6361,14 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.post_census_toggle {
                     if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events.push_back(EditorEvent::SetPixelCensus(*on));
+                        self.editor_events
+                            .push_back(EditorEvent::SetPixelCensus(*on));
                     }
                     continue;
                 }
                 if msg.destination == self.inspector_handles.post_bins_toggle {
                     if msg.direction == MessageDirection::FromWidget {
                         self.editor_events.push_back(EditorEvent::SetShadeBins(*on));
-                    }
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.camera_dynres_toggle {
-                    if msg.direction == MessageDirection::FromWidget {
-                        self.editor_events
-                            .push_back(EditorEvent::SetDynamicResolution(*on));
                     }
                     continue;
                 }
@@ -4785,108 +6387,8 @@ impl UiManager {
                         .push_back(EditorEvent::ToggleFoliageSingle);
                     continue;
                 }
-                if msg.destination == self.inspector_handles.post_fxaa_toggle {
-                    self.editor_events
-                        .push_back(EditorEvent::SetPostFx(PostFxToggle::Fxaa, *on));
-                    continue;
-                }
-                if msg.destination == self.inspector_handles.post_ca_toggle {
-                    self.editor_events.push_back(EditorEvent::SetPostFx(
-                        PostFxToggle::ChromaticAberration,
-                        *on,
-                    ));
-                    continue;
-                }
-                for (handle, which) in [
-                    (self.inspector_handles.post_taa_toggle, PostFxToggle::Taa),
-                    (self.inspector_handles.post_gtao_toggle, PostFxToggle::Gtao),
-                    (
-                        self.inspector_handles.post_restir_toggle,
-                        PostFxToggle::Restir,
-                    ),
-                    (
-                        self.inspector_handles.post_restir_gi_toggle,
-                        PostFxToggle::RestirGi,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_reflect_toggle,
-                        PostFxToggle::RtReflect,
-                    ),
-                    (
-                        self.inspector_handles.post_rt_refract_toggle,
-                        PostFxToggle::RtRefract,
-                    ),
-                    (self.inspector_handles.post_pcss_toggle, PostFxToggle::Pcss),
-                    (
-                        self.inspector_handles.post_contact_toggle,
-                        PostFxToggle::ContactShadows,
-                    ),
-                    (self.inspector_handles.post_cas_toggle, PostFxToggle::Cas),
-                    (
-                        self.inspector_handles.post_mb_toggle,
-                        PostFxToggle::MotionBlur,
-                    ),
-                    (
-                        self.inspector_handles.post_bloom_toggle,
-                        PostFxToggle::Bloom,
-                    ),
-                    (
-                        self.inspector_handles.post_dof_toggle,
-                        PostFxToggle::DepthOfField,
-                    ),
-                    (
-                        self.inspector_handles.post_vol_toggle,
-                        PostFxToggle::Volumetrics,
-                    ),
-                    (
-                        self.inspector_handles.post_shafts_toggle,
-                        PostFxToggle::LightShafts,
-                    ),
-                    (
-                        self.inspector_handles.post_phys_toggle,
-                        PostFxToggle::PhysicalCamera,
-                    ),
-                    (
-                        self.inspector_handles.post_world_cache_toggle,
-                        PostFxToggle::WorldCache,
-                    ),
-                    (
-                        self.inspector_handles.post_specular_toggle,
-                        PostFxToggle::SpecularGi,
-                    ),
-                    (
-                        self.inspector_handles.post_path_toggle,
-                        PostFxToggle::PathTracer,
-                    ),
-                    (
-                        self.inspector_handles.post_sdf_toggle,
-                        PostFxToggle::MeshSdf,
-                    ),
-                    (
-                        self.inspector_handles.post_probes_toggle,
-                        PostFxToggle::Probes,
-                    ),
-                    (
-                        self.inspector_handles.post_analytic_toggle,
-                        PostFxToggle::AnalyticGrad,
-                    ),
-                    (self.inspector_handles.post_fsr_toggle, PostFxToggle::Fsr),
-                ] {
-                    if msg.destination == handle {
-                        self.editor_events
-                            .push_back(EditorEvent::SetPostFx(which, *on));
-                        break;
-                    }
-                }
             } else if let Some(ComboBoxMessage::SelectionChanged(i)) = msg.data::<ComboBoxMessage>()
             {
-                if msg.destination == self.inspector_handles.post_tonemap_button
-                    || msg.destination == self.post_tonemap_combo
-                {
-                    self.editor_events
-                        .push_back(EditorEvent::SetTonemapper(*i as u8));
-                    continue;
-                }
                 if msg.destination == self.inspector_handles.foliage_kind_button
                     || msg.destination == self.foliage_kind_combo
                 {
@@ -4928,8 +6430,31 @@ impl UiManager {
                 continue;
             } else if let Some(TreeViewMessage::Select(id)) = msg.data::<TreeViewMessage>() {
                 if msg.destination == self.outliner_tree {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectEntity(Some(*id)));
+                    self.editor_events.push_back(EditorEvent::ModifySelection {
+                        id: *id,
+                        mode: self.selection_mode(),
+                    });
+                }
+            } else if let Some(TreeViewMessage::ToggleBadge { id, lock }) =
+                msg.data::<TreeViewMessage>()
+            {
+                if msg.destination == self.outliner_tree {
+                    // A drag down the column sets every row it crosses to the
+                    // value the first click produced, rather than toggling each
+                    // one — otherwise dragging over an already-hidden row would
+                    // un-hide it and the gesture would read as noise.
+                    let value = self.badge_drag_value.get_or_insert_with(|| {
+                        self.last_outliner_state
+                            .as_ref()
+                            .and_then(|(rows, _)| rows.iter().find(|row| row.id == *id))
+                            .map(|row| !if *lock { row.locked } else { row.hidden })
+                            .unwrap_or(true)
+                    });
+                    self.editor_events.push_back(EditorEvent::ToggleEntityFlag {
+                        entity: *id,
+                        lock: *lock,
+                        value: Some(*value),
+                    });
                 }
             } else if let Some(TreeViewMessage::ToggleExpand(id)) = msg.data::<TreeViewMessage>() {
                 if self.outliner_expanded.contains(id) {
@@ -4939,6 +6464,42 @@ impl UiManager {
                 }
                 self.last_outliner_state = None;
             } else if let Some(SearchBoxMessage::Query(q)) = msg.data::<SearchBoxMessage>() {
+                if let Some(picker) = self.generated_asset_searches.get(&msg.destination).copied() {
+                    use crate::editor::property_editors::AssetEditorContext;
+                    let candidates = AssetEditorContext::query(&self.asset_db, q, picker.kind_mask);
+                    let mut labels = vec!["None".to_string()];
+                    labels.extend(candidates.iter().map(|candidate| candidate.label.clone()));
+                    let mut choices = vec![None];
+                    choices.extend(candidates.iter().map(|candidate| Some(candidate.id)));
+                    let mut paths = vec![None];
+                    paths.extend(candidates.iter().map(|candidate| {
+                        self.asset_db
+                            .get(somnium_asset::database::AssetId::from_raw(
+                                candidate.id.raw(),
+                            ))
+                            .map(|record| record.absolute_path.clone())
+                    }));
+                    self.generated_asset_choices.insert(picker.combo, choices);
+                    self.native_ui.send(UiMessage::new(
+                        picker.combo,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetItems(labels.clone()),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        picker.list,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetItems(labels),
+                    ));
+                    self.native_ui.send(UiMessage::new(
+                        picker.list,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::SetAssetPaths(paths.clone()),
+                    ));
+                    for path in paths.into_iter().flatten().take(8) {
+                        self.native_ui.draw_ctx.thumbnails.request(&path, true);
+                    }
+                    continue;
+                }
                 if msg.destination == self.content_search {
                     self.content_filter = q.clone();
                     self.refresh_content_list();
@@ -4964,11 +6525,32 @@ impl UiManager {
                 }
             }
 
-            // — Camera speed slider (Phase 20B) ————————
-            if let Some(SliderMessage::Value(v)) = msg.data::<SliderMessage>() {
+            // — Camera speed slider (Phase 20B), day scrub (CONTROL-L) ————
+            if let Some(smsg) = msg.data::<SliderMessage>() {
                 if msg.destination == self.camera_speed_slider {
-                    self.editor_events
-                        .push_back(EditorEvent::SetCameraSpeed(*v));
+                    if let SliderMessage::Value(v) = smsg {
+                        self.editor_events
+                            .push_back(EditorEvent::SetCameraSpeed(*v));
+                    }
+                } else if msg.destination == self.time_slider {
+                    // `Value` while dragging, `Committed` once at the end:
+                    // every intermediate hour is applied so the light moves
+                    // under the cursor, and exactly one undo entry is recorded.
+                    match smsg {
+                        SliderMessage::Value(v) => {
+                            self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                                hour: v * 24.0,
+                                live: true,
+                            });
+                        }
+                        SliderMessage::Committed(v) => {
+                            self.editor_events.push_back(EditorEvent::SetTimeOfDayHour {
+                                hour: v * 24.0,
+                                live: false,
+                            });
+                        }
+                        SliderMessage::SetValue(_) => {}
+                    }
                 }
             }
 
@@ -4982,20 +6564,9 @@ impl UiManager {
                 msg.data::<PropertyRowMessage>(),
                 Some(PropertyRowMessage::RevertRequested)
             ) {
-                if let Some(&(field_handle, field)) = field_map
-                    .iter()
-                    .find(|(fh, _)| self.native_ui.parent_of(*fh) == Some(msg.destination))
-                {
-                    if let Some(&baseline) = self.inspector_baseline.get(&field) {
-                        self.native_ui
-                            .send(NumericFieldMessage::set_value(field_handle, baseline));
-                        self.editor_events
-                            .push_back(EditorEvent::SetInspectorValue {
-                                field,
-                                value: baseline,
-                                live: false,
-                            });
-                    }
+                if let Some(binding) = self.generated_rows.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(&binding, binding.default.clone(), gesture, false);
                 }
             }
 
@@ -5006,10 +6577,46 @@ impl UiManager {
                 _ => None,
             };
             if let Some((v, live)) = numeric {
-                if let Some(&(_, field)) = field_map.iter().find(|(fh, _)| *fh == msg.destination) {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = if live {
+                        if let Some(gesture) =
+                            self.generated_gestures.get(&msg.destination).copied()
+                        {
+                            gesture
+                        } else {
+                            let gesture = self.allocate_property_gesture();
+                            self.generated_gestures.insert(msg.destination, gesture);
+                            gesture
+                        }
+                    } else {
+                        self.generated_gestures
+                            .remove(&msg.destination)
+                            .unwrap_or_else(|| self.allocate_property_gesture())
+                    };
+                    if let Some(value) = Self::numeric_reflect_value(&binding, v) {
+                        self.queue_generated_binding(&binding, value, gesture, live);
+                    }
+                    continue;
+                }
+                if let Some((_, field)) = terrain_numeric
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                {
                     self.editor_events
-                        .push_back(EditorEvent::SetInspectorValue {
-                            field,
+                        .push_back(EditorEvent::SetTerrainToolValue {
+                            field: *field,
+                            value: v,
+                            live,
+                        });
+                    continue;
+                }
+                if let Some((_, field)) = foliage_numeric
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                {
+                    self.editor_events
+                        .push_back(EditorEvent::SetFoliageBrushValue {
+                            field: *field,
                             value: v,
                             live,
                         });
@@ -5031,6 +6638,139 @@ impl UiManager {
                         value: v,
                         live,
                     });
+                }
+            }
+
+            // — CONTROL-K: curve and gradient edits ————————
+            //
+            // Both follow the drag-scrub convention exactly as `NumericField`
+            // does above: a live gesture reuses one `GestureId` so the whole
+            // drag coalesces into a single undo entry, and the commit consumes
+            // it. Nothing here knows what a keyframe is; the value that
+            // travels is the whole `ReflectValue::Curve`.
+            if let Some(CurveEditorMessage::Value { curve, live }) = msg.data::<CurveEditorMessage>()
+            {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.gesture_for(msg.destination, *live);
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Curve(curve.clone()),
+                        gesture,
+                        *live,
+                    );
+                }
+                continue;
+            }
+            if let Some(gmsg) = msg.data::<GradientEditorMessage>() {
+                match gmsg {
+                    GradientEditorMessage::Value { gradient, live } => {
+                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        {
+                            let gesture = self.gesture_for(msg.destination, *live);
+                            self.queue_generated_binding(
+                                &binding,
+                                somnium_ecs::reflect::ReflectValue::Gradient(gradient.clone()),
+                                gesture,
+                                *live,
+                            );
+                        }
+                    }
+                    GradientEditorMessage::StopActivated { index, color } => {
+                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        {
+                            self.color_target = Some(ColorTarget::GradientStop {
+                                component: binding.component,
+                                field: binding.field,
+                                index: *index,
+                            });
+                            self.color_gesture = Some(self.allocate_property_gesture());
+                            self.color_open = true;
+                            self.color_original = *color;
+                            self.color_live = *color;
+                            self.native_ui.send(UiMessage::new(
+                                self.color_picker,
+                                MessageDirection::ToWidget,
+                                ColorPickerMessage::SetColor(*color),
+                            ));
+                            self.native_ui.send(UiMessage::new(
+                                self.color_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::SetAnchor(msg.destination),
+                            ));
+                            self.native_ui.send(UiMessage::new(
+                                self.color_popup,
+                                MessageDirection::ToWidget,
+                                PopupMessage::Open,
+                            ));
+                            self.native_ui.invalidate_ancestors(self.color_popup);
+                        }
+                    }
+                    GradientEditorMessage::SetValue(_) => {}
+                }
+                continue;
+            }
+            if let Some(CheckBoxMessage::Check(value)) = msg.data::<CheckBoxMessage>() {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Bool(*value),
+                        gesture,
+                        false,
+                    );
+                    continue;
+                }
+            }
+            if let Some(TextBoxMessage::TextCommit(value)) = msg.data::<TextBoxMessage>() {
+                if self
+                    .content_inline_rename
+                    .as_ref()
+                    .is_some_and(|(handle, _)| *handle == msg.destination)
+                {
+                    let (_, path) = self.content_inline_rename.take().expect("checked above");
+                    self.editor_events
+                        .push_back(EditorEvent::RenameContentItem {
+                            path: path.to_string_lossy().into_owned(),
+                            name: value.clone(),
+                        });
+                    self.native_ui.remove_node(msg.destination);
+                    continue;
+                }
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::Str(value.clone()),
+                        gesture,
+                        false,
+                    );
+                    continue;
+                }
+            }
+            if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
+                if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
+                    let gesture = self.allocate_property_gesture();
+                    if let Some(choice) = self
+                        .generated_asset_choices
+                        .get(&msg.destination)
+                        .and_then(|choices| choices.get(*index))
+                        .copied()
+                    {
+                        self.queue_generated_binding(
+                            &binding,
+                            somnium_ecs::reflect::ReflectValue::Asset(choice),
+                            gesture,
+                            false,
+                        );
+                        continue;
+                    }
+                    self.queue_generated_binding(
+                        &binding,
+                        somnium_ecs::reflect::ReflectValue::I64(*index as i64),
+                        gesture,
+                        false,
+                    );
+                    continue;
                 }
             }
         }
@@ -5055,6 +6795,12 @@ pub struct CollapseRules {
     pub search_field: bool,
     /// The status bar shows the object count beside the frame rate.
     pub status_objects: bool,
+    /// CONTROL-G, following Unreal 5.6: the floating viewport context bar
+    /// keeps its snap cluster inline. Below the threshold the cluster moves
+    /// into an overflow menu rather than clipping, because Zeta's 68 px
+    /// pre-scene budget makes the bar genuinely too short at 1280 and a
+    /// control that is half-drawn is worse than one behind a chevron.
+    pub context_bar_snap_inline: bool,
 }
 
 impl CollapseRules {
@@ -5063,6 +6809,7 @@ impl CollapseRules {
             transport_label: width >= 1400.0,
             search_field: width >= 1100.0,
             status_objects: width >= 1280.0,
+            context_bar_snap_inline: width >= 1600.0,
         }
     }
 }
@@ -5078,8 +6825,11 @@ mod elysium_tests {
         // must be visible, at startup and after every selection change.
         let mut ui = UserInterface::new(1920.0, 1080.0);
         let font_id = load_fonts(&mut ui);
-        let layout =
-            build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
 
         // The builder leaves both visible; `UiManager::new` seeds the empty
         // one, and `update_inspector` flips them from then on. Assert the
@@ -5092,53 +6842,20 @@ mod elysium_tests {
     }
 
     #[test]
-    fn static_palette_command_count_is_pinned() {
-        // `run_palette_command` dispatches on position. If this count moves,
-        // every dynamic row is off by the difference and commands silently run
-        // the wrong action.
-        assert_eq!(
-            crate::editor::shell::palette_commands().len(),
-            UiManager::STATIC_PALETTE_COMMANDS
-        );
-    }
-
-    #[test]
-    fn static_palette_commands_keep_their_exact_positions() {
-        // The real guard: `run_palette_command` maps 0 to New Scene, 1 to Save
-        // Scene and so on. Inserting a command anywhere but the end rebinds
-        // everything after it, and nothing else in the codebase would notice.
-        let labels: Vec<String> = crate::editor::shell::palette_commands()
-            .into_iter()
-            .map(|i| i.label)
+    fn every_registered_command_is_palette_and_help_discoverable() {
+        let registry = crate::commands::registry();
+        let palette_ids: std::collections::HashSet<_> = registry
+            .commands()
+            .iter()
+            .map(|command| command.id)
             .collect();
-        assert_eq!(
-            labels,
-            vec![
-                "New Scene",
-                "Save Scene",
-                "Import Model…",
-                "Undo",
-                "Redo",
-                "Delete",
-                "Duplicate",
-                "Play",
-                "Pause",
-                "Stop",
-                "Toggle Profiler",
-                "Content Drawer",
-                "Help",
-                "Create Cube",
-                "Create Directional Light",
-            ]
+        let help_ids: std::collections::HashSet<_> =
+            registry.help_index().iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(palette_ids, help_ids);
+        assert!(
+            palette_ids.len() > 15,
+            "CONTROL-A2 must replace the old shortlist"
         );
-    }
-
-    #[test]
-    fn every_static_palette_row_is_a_command() {
-        use crate::widgets::command_palette::PaletteCategory;
-        for item in crate::editor::shell::palette_commands() {
-            assert_eq!(item.category, PaletteCategory::Command, "{}", item.label);
-        }
     }
 
     #[test]
@@ -5220,7 +6937,11 @@ mod dpi_tests {
         let mut ui = UserInterface::new(logical_w, logical_h);
         ui.set_ui_scale(scale);
         let font_id = load_fonts(&mut ui);
-        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let _ = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
         ui.perform_layout();
         ui
     }
@@ -5252,9 +6973,7 @@ mod dpi_tests {
         let b = shell(1280.0, 720.0, 2.0);
         let c = shell(1280.0, 720.0, 1.5);
 
-        for (h_a, h_b, h_c) in [
-            (a.root(), b.root(), c.root()),
-        ] {
+        for (h_a, h_b, h_c) in [(a.root(), b.root(), c.root())] {
             assert_eq!(bounds(&a, h_a), bounds(&b, h_b));
             assert_eq!(bounds(&a, h_a), bounds(&c, h_c));
         }
@@ -5314,7 +7033,10 @@ mod dpi_tests {
             logical.x,
             save
         );
-        assert!(ui.hit_test(logical).is_some(), "hit test must land on a widget");
+        assert!(
+            ui.hit_test(logical).is_some(),
+            "hit test must land on a widget"
+        );
     }
 
     #[test]
@@ -5338,7 +7060,11 @@ mod styx_budget_tests {
     fn shell_frame(w: f32, h: f32) -> UserInterface {
         let mut ui = UserInterface::new(w, h);
         let font_id = load_fonts(&mut ui);
-        let _ = build_editor_layout(&mut ui, font_id, crate::layout_persist::ChromeLayout::default());
+        let _ = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
         ui.perform_layout();
         ui.draw();
         ui
@@ -5413,21 +7139,23 @@ mod styx_budget_tests {
             inst.len()
         );
 
-        // Floors, not exact counts: adding chrome should never take these
-        // backwards. The first run after the widget migration measured 49 / 28 /
-        // 20 / 4 / 17, and the wash count was 1 until `wash_from` stopped
-        // treating a caller-supplied background as a request for flatness.
+        // CONTROL-B no longer constructs 100+ hidden component rows at shell
+        // startup; those rows exist only when a selected entity supplies a
+        // schema. Keep a floor for real idle-shell strokes without fabricating
+        // invisible legacy chrome merely to preserve the old count.
         assert!(rounded >= 40, "corner radius regressed to {rounded}");
         assert!(gradients >= 20, "chrome wash regressed to {gradients}");
         assert!(shadows >= 15, "elevation regressed to {shadows}");
         assert!(insets >= 4, "recession regressed to {insets}");
-        assert!(borders >= 15, "strokes regressed to {borders}");
+        assert!(borders >= 10, "strokes regressed to {borders}");
 
         // Content grounds must stay flat: a wash on every surface is exactly the
         // "lit like a toy" failure §5.2 forbids.
         let ground = crate::theme::active().semantic.surface.canvas.bytes();
         assert!(
-            !inst.iter().any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
+            !inst
+                .iter()
+                .any(|p| p.fill_a == ground && p.flags & FLAG_GRADIENT != 0),
             "the canvas ground must never be washed"
         );
     }
@@ -5447,22 +7175,30 @@ mod styx_budget_tests {
                 let x = p.rect[0] + p.rect[2] * 0.5;
                 let y = p.rect[1] + p.rect[3] * 0.5;
                 let opaque = p.fill_a[3] > 0 || p.border_color[3] > 0 || p.shadow_color[3] > 0;
-                opaque
-                    && x >= r.x
-                    && x <= r.x + r.w
-                    && y >= r.y
-                    && y <= r.y + r.h
+                opaque && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
             })
         };
 
         let w = 1920.0;
         let h = 1080.0;
         for (name, region) in [
-            ("application bar", crate::types::Rect::new(0.0, 0.0, w, 36.0)),
+            (
+                "application bar",
+                crate::types::Rect::new(0.0, 0.0, w, 36.0),
+            ),
             ("mode toolbar", crate::types::Rect::new(0.0, 36.0, w, 32.0)),
-            ("left rail", crate::types::Rect::new(0.0, 68.0, 120.0, 400.0)),
-            ("right column", crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0)),
-            ("status bar", crate::types::Rect::new(0.0, h - 26.0, w, 26.0)),
+            (
+                "left rail",
+                crate::types::Rect::new(0.0, 68.0, 120.0, 400.0),
+            ),
+            (
+                "right column",
+                crate::types::Rect::new(w - 300.0, 68.0, 300.0, 600.0),
+            ),
+            (
+                "status bar",
+                crate::types::Rect::new(0.0, h - 26.0, w, 26.0),
+            ),
         ] {
             assert!(visible_in(region), "{name} paints nothing visible");
         }
@@ -5478,12 +7214,14 @@ mod styx_budget_tests {
         let inst = &ui.draw_ctx.instances;
         let invisible = inst
             .iter()
-            .filter(|p| {
-                p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0
-            })
+            .filter(|p| p.fill_a[3] == 0 && p.border_color[3] == 0 && p.shadow_color[3] == 0)
             .count();
         let ratio = invisible as f32 / inst.len() as f32;
-        println!("invisible instances: {invisible}/{} ({:.1}%)", inst.len(), ratio * 100.0);
+        println!(
+            "invisible instances: {invisible}/{} ({:.1}%)",
+            inst.len(),
+            ratio * 100.0
+        );
         assert!(
             ratio < 0.25,
             "{:.0}% of the draw list paints nothing — a surface was likely lost",
@@ -5607,7 +7345,7 @@ mod zeta_layout_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        assert_eq!(layout.create_popup_items.len(), 13);
+        assert_eq!(layout.create_popup_items.len(), 15);
         for handle in [
             layout.save_button,
             layout.select_button,
@@ -5664,7 +7402,7 @@ mod must_not_break {
         // §14.4. The Create popup is built from `CreateKind`, so a new variant
         // that nobody added a row for shows up here.
         let (_, l) = layout(1920.0, 1080.0);
-        let kinds: Vec<CreateKind> = l.create_popup_items.iter().map(|(_, k)| *k).collect();
+        let ids: Vec<&str> = l.create_popup_items.iter().map(|(_, id)| *id).collect();
         for kind in [
             CreateKind::Cube,
             CreateKind::Sphere,
@@ -5677,8 +7415,16 @@ mod must_not_break {
             CreateKind::Terrain,
             CreateKind::VoxelTerrain,
         ] {
-            assert!(kinds.contains(&kind), "{kind:?} lost its Create row");
+            let command = crate::commands::registry()
+                .menu(crate::commands::Menu::Create)
+                .into_iter()
+                .find(|command| {
+                    command.action == crate::commands::CommandAction::CreateEntity(kind)
+                })
+                .unwrap();
+            assert!(ids.contains(&command.id), "{kind:?} lost its Create row");
         }
+        assert!(ids.contains(&"editor.asset.new_material"));
     }
 
     #[test]
@@ -5709,19 +7455,25 @@ mod must_not_break {
             );
         }
 
-        // Menu rows live in popups that are closed at rest, so they have no
-        // arranged size until the menu opens. Their handles must still be
-        // valid: a File menu that lost Import is the §14.5 regression.
-        for (name, handle) in [
-            ("new scene", l.file_new_item),
-            ("save scene", l.file_save_item),
-            ("import model", l.file_import_item),
-            ("undo", l.edit_undo),
-            ("redo", l.edit_redo),
-            ("delete", l.edit_delete),
-            ("duplicate", l.edit_dup),
+        // Menu rows are registry-derived and map back to stable ids.
+        for id in [
+            "editor.scene.new",
+            "editor.scene.save",
+            "editor.asset.import_model",
+            "editor.edit.undo",
+            "editor.edit.redo",
+            "editor.edit.delete",
+            "editor.edit.duplicate",
         ] {
-            assert!(!handle.is_none(), "{name} is missing from its menu");
+            let handle = l
+                .menu_command_items
+                .iter()
+                .find(|(_, command_id)| *command_id == id)
+                .map(|(handle, _)| *handle);
+            assert!(
+                handle.is_some_and(|handle| !handle.is_none()),
+                "{id} is missing from its menu"
+            );
         }
     }
 
@@ -5770,99 +7522,36 @@ mod must_not_break {
     }
 
     #[test]
-    fn every_inspector_control_is_actually_hittable() {
-        // Phase 26-Zeta-G moved every inspector row into `PropertyRow`, which
-        // arranges its value control itself. A row that measures to zero height
-        // or zero width still *draws* its label, so a broken control looks
-        // present and silently ignores clicks. This walks the whole handle
-        // bundle and fails on anything that cannot be hit.
+    fn every_tool_only_inspector_control_is_hittable() {
         let mut ui = UserInterface::new(1920.0, 1080.0);
-        let l = build_editor_layout(
+        let layout = build_editor_layout(
             &mut ui,
             0,
             crate::layout_persist::ChromeLayout::default().resolved(1920.0, 1080.0),
         );
-        // Sections are hidden until something of that type is selected; make
-        // them all visible so their rows get arranged.
-        let h = &l.inspector_handles;
+        let handles = &layout.inspector_handles;
         for section in [
-            h.light_section,
-            h.camera_section,
-            h.post_section,
-            h.terrain_section,
-            h.foliage_section,
-            h.water_section,
-            h.vessel_section,
-            h.particle_section,
-            h.material_section,
+            handles.post_section,
+            handles.terrain_section,
+            handles.foliage_section,
         ] {
             ui.set_visibility(section, true);
         }
-        // Rows revealed conditionally by light type or foliage mode. They are
-        // hidden at rest by design; the test still has to prove they arrange to
-        // something clickable when they are shown.
-        for row in [h.light_width_row, h.light_height_row] {
-            ui.set_visibility(row, true);
-        }
-        if let Some(row) = ui.parent_of(h.foliage_layer) {
-            ui.set_visibility(row, true);
-        }
         ui.perform_layout();
-
-        let mut broken = Vec::new();
-
-        // Toggles, combos and colour swatches do not appear in
-        // `field_bindings`, so a check that only walked that table would miss
-        // exactly the controls the Details panel is mostly made of.
-        for (name, handle) in [
-            ("post tonemap combo", h.post_tonemap_button),
-            ("foliage kind combo", h.foliage_kind_button),
-            ("water underwater", h.water_underwater),
-            ("camera frustum cull", h.camera_frustum_toggle),
-            ("camera dynamic resolution", h.camera_dynres_toggle),
-            ("terrain paint", h.terrain_paint_toggle),
-            ("terrain hex", h.terrain_hex_toggle),
-            ("foliage enabled", h.foliage_toggle),
-            ("foliage paint", h.foliage_paint_toggle),
-            ("foliage erase", h.foliage_erase_toggle),
-            ("foliage single", h.foliage_single_toggle),
-            ("post bloom", h.post_bloom_toggle),
-            ("post vignette", h.post_vig_toggle),
-            ("post fsr", h.post_fsr_toggle),
-            ("light colour", h.light_color),
-            ("water deep colour", h.water_deep),
-            ("water scattering colour", h.water_scatter),
-            ("particle start colour", h.particle_start),
-            ("material base colour", h.material_base),
+        for handle in [
+            handles.post_census_toggle,
+            handles.post_bins_toggle,
+            handles.terrain_paint_toggle,
+            handles.terrain_aerial_dist,
+            handles.foliage_kind_button,
+            handles.foliage_density,
         ] {
-            if handle.is_none() {
-                broken.push(format!("{name} (no widget)"));
-                continue;
-            }
-            let b = bounds_of(&ui, handle);
-            if b.w < 8.0 || b.h < 8.0 {
-                broken.push(format!("{name} ({}x{})", b.w, b.h));
-            }
+            let bounds = bounds_of(&ui, handle);
+            assert!(
+                bounds.w >= 8.0 && bounds.h >= 8.0,
+                "{handle} is not hittable"
+            );
         }
-
-        for (handle, field) in UiManager::field_bindings(h) {
-            if handle.is_none() {
-                // Retired bindings (the pre-Iris light R/G/B rows) keep their
-                // `InspectorField` so the event contract is stable, but have no
-                // widget.
-                continue;
-            }
-            let b = bounds_of(&ui, handle);
-            if b.w < 8.0 || b.h < 8.0 {
-                broken.push(format!("{field:?} ({}x{})", b.w, b.h));
-            }
-        }
-        assert!(
-            broken.is_empty(),
-            "{} inspector controls cannot be clicked: {:?}",
-            broken.len(),
-            broken
-        );
     }
 
     #[test]

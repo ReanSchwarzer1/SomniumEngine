@@ -31,11 +31,11 @@ use crate::{
         popup::{PopupBuilder, PopupPlacement},
         scroll_viewer::ScrollViewerBuilder,
         search_box::{SearchBoxBuilder, TooltipBuilder},
-        text_box::TextBoxBuilder,
         slider::SliderBuilder,
         splitter::{SplitterBuilder, SplitterOrientation},
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
+        text_box::TextBoxBuilder,
         toast::ToastHostBuilder,
         tree_view::TreeViewBuilder,
     },
@@ -49,33 +49,17 @@ use crate::editor::parts::*;
 use crate::*;
 use glam::Vec2;
 
-// ── Editor layout builder ─────────────────────────────────────────────────────
-
-/// The statically declared palette commands.
-///
-/// Order is load-bearing: `UiManager::run_palette_command` dispatches on
-/// position, so inserting or reordering an entry here silently rebinds every
-/// command after it. Append only, and update
-/// `UiManager::STATIC_PALETTE_COMMANDS` when you do.
-pub(crate) fn palette_commands() -> Vec<PaletteItem> {
-    vec![
-        PaletteItem::command("New Scene", "Ctrl+N"),
-        PaletteItem::command("Save Scene", "Ctrl+S"),
-        PaletteItem::command("Import Model…", ""),
-        PaletteItem::command("Undo", "Ctrl+Z"),
-        PaletteItem::command("Redo", "Ctrl+Y"),
-        PaletteItem::command("Delete", "Del"),
-        PaletteItem::command("Duplicate", "Ctrl+D"),
-        PaletteItem::command("Play", ""),
-        PaletteItem::command("Pause", ""),
-        PaletteItem::command("Stop", ""),
-        PaletteItem::command("Toggle Profiler", ""),
-        PaletteItem::command("Content Drawer", "Ctrl+Space"),
-        PaletteItem::command("Help", "F1"),
-        PaletteItem::command("Create Cube", ""),
-        PaletteItem::command("Create Directional Light", ""),
-    ]
+fn command_tooltip(id: &str) -> String {
+    let command = crate::commands::registry()
+        .get(id)
+        .expect("toolbar command must be registered");
+    command.default_binding.map_or_else(
+        || command.help.to_string(),
+        |binding| format!("{} ({binding})", command.help),
+    )
 }
+
+// ── Editor layout builder ─────────────────────────────────────────────────────
 
 pub(crate) fn build_editor_layout(
     ui: &mut UserInterface,
@@ -170,7 +154,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::BodyStrong)
     .with_text("Somnium Engine")
     .build();
-    ui.add_node(title_lbl, title_left_h);
+    let title_label = ui.add_node(title_lbl, title_left_h);
 
     let title_right = StackPanelBuilder::new(
         WidgetBuilder::new()
@@ -180,7 +164,12 @@ pub(crate) fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let title_right_h = ui.add_node(title_right, title_grid_h);
-    let help_button = icon_tool_button(ui, title_right_h, IconId::HelpCircle, "Help (F1)");
+    let help_button = icon_tool_button(
+        ui,
+        title_right_h,
+        IconId::HelpCircle,
+        &command_tooltip("editor.help.index"),
+    );
     let fps_node = TextBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
@@ -268,6 +257,13 @@ pub(crate) fn build_editor_layout(
     let window_button = menu_button(ui, menu_stack_h, "Window", font_id);
     let help_menu_button = menu_button(ui, menu_stack_h, "Help", font_id);
 
+    let palette_command = crate::commands::registry()
+        .get("editor.search.commands")
+        .expect("palette command");
+    let palette_binding = palette_command
+        .default_binding
+        .expect("palette binding")
+        .to_string();
     let palette_button_node = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
@@ -282,7 +278,7 @@ pub(crate) fn build_editor_layout(
                 bottom: 5.0,
             })
             .with_background(theme::BG_INPUT)
-            .with_tooltip("Search commands, entities, assets (Ctrl+P)"),
+            .with_tooltip(format!("{} ({palette_binding})", palette_command.help)),
     )
     .build();
     let palette_button = ui.add_node(palette_button_node, menu_grid_h);
@@ -292,7 +288,9 @@ pub(crate) fn build_editor_layout(
         right: 10.0,
         bottom: 0.0,
     }))
-    .with_text("Search commands, entities, assets     Ctrl+P")
+    .with_text(format!(
+        "Search commands, entities, assets     {palette_binding}"
+    ))
     .with_font_size(theme::NOCTURNE.typography.caption)
     .with_font_id(font_id)
     .with_color(theme::TEXT_MUTED)
@@ -331,7 +329,7 @@ pub(crate) fn build_editor_layout(
         main_tb_stack_h,
         IconId::Save,
         "Save",
-        "Save scene (Ctrl+S)",
+        &command_tooltip("editor.scene.save"),
         font_id,
         theme::NOCTURNE.density.row_chrome,
     );
@@ -350,7 +348,7 @@ pub(crate) fn build_editor_layout(
         main_tb_stack_h,
         IconId::Landscape,
         "Landscape",
-        "Terrain sculpt and paint (F6)",
+        &command_tooltip("editor.terrain.edit"),
         font_id,
         theme::NOCTURNE.density.row_chrome,
     );
@@ -359,20 +357,35 @@ pub(crate) fn build_editor_layout(
         main_tb_stack_h,
         IconId::Foliage,
         "Foliage",
-        "Foliage placement (F8)",
+        &command_tooltip("editor.foliage.edit"),
         font_id,
         theme::NOCTURNE.density.row_chrome,
     );
     scope_separator(ui, main_tb_stack_h);
-    let play_button = icon_tool_button(ui, main_tb_stack_h, IconId::Play, "Play (simulate)");
+    let play_button = icon_tool_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Play,
+        &command_tooltip("editor.simulation.play"),
+    );
     let immersive_button = icon_tool_button(
         ui,
         main_tb_stack_h,
         IconId::ImmersivePlay,
-        "Immersive play (Esc to exit)",
+        &command_tooltip("editor.viewport.immersive"),
     );
-    let pause_button = icon_tool_button(ui, main_tb_stack_h, IconId::Pause, "Pause");
-    let stop_button = icon_tool_button(ui, main_tb_stack_h, IconId::Stop, "Stop");
+    let pause_button = icon_tool_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Pause,
+        &command_tooltip("editor.simulation.pause"),
+    );
+    let stop_button = icon_tool_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Stop,
+        &command_tooltip("editor.simulation.stop"),
+    );
     let play_label_n = TextBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
@@ -594,7 +607,7 @@ pub(crate) fn build_editor_layout(
         vp_stack_h,
         IconId::Profiler,
         "Profiler",
-        "Toggle GPU profiler overlay",
+        &command_tooltip("editor.view.profiler"),
         font_id,
         22.0,
     );
@@ -625,6 +638,132 @@ pub(crate) fn build_editor_layout(
     .with_font_id(font_id)
     .build();
     let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
+
+    // ── CONTROL-G: the snap cluster ─────────────────────────────────────────
+    //
+    // On the floating context bar because snapping is something you change
+    // *while* looking at what you are moving. The whole cluster is one node so
+    // the overflow rule can hide it in a single call: Unreal 5.6's answer to a
+    // narrow viewport, and necessary rather than optional here because Zeta's
+    // 68 px budget leaves the bar genuinely short at 1280.
+    let snap_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let snap_cluster = ui.add_node(snap_cluster, vp_stack_h);
+
+    let snap_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 8.0,
+        top: 6.0,
+        right: 6.0,
+        bottom: 0.0,
+    }))
+    .with_role(TextRole::Label)
+    .with_text("Snap")
+    .build();
+    ui.add_node(snap_lbl, snap_cluster);
+
+    let snap_grid_combo = ui.add_node(
+        ComboBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(84.0)
+                .with_margin(Thickness::axes(0.0, 2.0))
+                .with_tooltip("Translate grid. Hold Ctrl while dragging to invert."),
+        )
+        .with_items(SNAP_GRID_NAMES)
+        .with_selected(0)
+        .with_font_id(font_id)
+        .build(),
+        snap_cluster,
+    );
+    let snap_angle_combo = ui.add_node(
+        ComboBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(72.0)
+                .with_margin(Thickness::axes(4.0, 2.0))
+                .with_tooltip("Rotate increment. Hold Ctrl while dragging to invert."),
+        )
+        .with_items(SNAP_ANGLE_NAMES)
+        .with_selected(0)
+        .with_font_id(font_id)
+        .build(),
+        snap_cluster,
+    );
+    let (snap_surface_toggle, _) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Landscape,
+        "Surface",
+        "Drop a dragged object onto whatever is under it.",
+        font_id,
+        22.0,
+    );
+    let (gizmo_space_toggle, gizmo_space_label) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Translate,
+        "World",
+        "Gizmo axes: world or the object's own rotation.",
+        font_id,
+        22.0,
+    );
+    let (select_only_toggle, _) = labeled_icon_button(
+        ui,
+        snap_cluster,
+        IconId::Select,
+        "Select Only",
+        "Picking cannot start a transform drag.",
+        font_id,
+        22.0,
+    );
+
+    // ── CONTROL-L: the day-cycle scrub ──────────────────────────────────────
+    //
+    // On the context bar for exactly the reason the snap cluster is: time of
+    // day is something you change *while* looking at the light. Hidden
+    // entirely when the scene has no Environment, so a scene without a day
+    // cycle does not carry a dead control across the top of its viewport.
+    let time_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let time_cluster = ui.add_node(time_cluster, vp_stack_h);
+    let time_label = ui.add_node(
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 10.0,
+            top: 6.0,
+            right: 6.0,
+            bottom: 0.0,
+        }))
+        .with_role(TextRole::Label)
+        .with_text("12:00")
+        .build(),
+        time_cluster,
+    );
+    let time_slider = ui.add_node(
+        crate::widgets::slider::SliderBuilder::new(
+            WidgetBuilder::new()
+                .with_width(120.0)
+                .with_margin(Thickness::axes(0.0, 7.0))
+                .with_tooltip("Scrub the scene's day cycle. One undo step per drag."),
+        )
+        .with_value(0.5)
+        .build(),
+        time_cluster,
+    );
+    ui.set_visibility(time_cluster, false);
+
+    // The overflow chevron, shown only when the cluster is hidden.
+    let (snap_overflow, _) = labeled_icon_button(
+        ui,
+        vp_stack_h,
+        IconId::ChevronDown,
+        "Snap",
+        "Snapping and gizmo options.",
+        font_id,
+        22.0,
+    );
+    ui.set_visibility(snap_overflow, false);
 
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
@@ -671,14 +810,12 @@ pub(crate) fn build_editor_layout(
     .with_stroke_thickness(Thickness::uniform(theme::active().geometry.stroke_hairline))
     .build();
     let vp_overlay_h = ui.add_node(vp_overlay, viewport_handle);
-    let vp_overlay_text = TextBuilder::new(
-        WidgetBuilder::new().with_margin(Thickness {
-            left: 10.0,
-            top: 6.0,
-            right: 10.0,
-            bottom: 6.0,
-        }),
-    )
+    let vp_overlay_text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 10.0,
+        top: 6.0,
+        right: 10.0,
+        bottom: 6.0,
+    }))
     .with_text("")
     .with_font_size(theme::active().typography.caption)
     .with_font_id(font_id)
@@ -947,8 +1084,15 @@ pub(crate) fn build_editor_layout(
         .build();
     let bottom_swap_h = ui.add_node(bottom_swap, bottom_h);
 
-    let (content_drawer, content_search, content_breadcrumb, content_engine_toggle, content_list) =
-        build_content_drawer(ui, bottom_swap_h, font_id);
+    let (
+        content_drawer,
+        content_search,
+        content_breadcrumb,
+        content_engine_toggle,
+        content_scroll,
+        content_list,
+        content_toolbar_actions,
+    ) = build_content_drawer(ui, bottom_swap_h, font_id);
 
     let log_panel = GridBuilder::new(
         WidgetBuilder::new()
@@ -989,6 +1133,89 @@ pub(crate) fn build_editor_layout(
     .with_text("Output Log")
     .build();
     ui.add_node(log_header, log_hdr_h);
+
+    // ── CONTROL-I: the log's own toolbar ────────────────────────────────────
+    //
+    // In the header rather than a second row because the panel is short and
+    // Zeta's budget is tight; four chips, a search box and three verbs fit
+    // beside a title, and a second 22 px band would cost a line of log.
+    let log_tools = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Right)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let log_tools = ui.add_node(log_tools, log_hdr_h);
+
+    let mut log_severity_chips = Vec::new();
+    for severity in crate::log::LogSeverity::ALL {
+        let (chip, _) = labeled_icon_button(
+            ui,
+            log_tools,
+            IconId::Filter,
+            severity.label(),
+            "Show or hide this severity.",
+            font_id,
+            18.0,
+        );
+        log_severity_chips.push((chip, severity));
+    }
+    let log_search = ui.add_node(
+        SearchBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(160.0)
+                .with_margin(Thickness::axes(6.0, 1.0)),
+        )
+        .with_font_id(font_id)
+        .build(),
+        log_tools,
+    );
+    let (log_pin_only, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Visibility,
+        "Pinned",
+        "Show only pinned lines.",
+        font_id,
+        18.0,
+    );
+    let (log_copy, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Duplicate,
+        "Copy",
+        "Copy the visible lines.",
+        font_id,
+        18.0,
+    );
+    let (log_clear, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Delete,
+        "Clear",
+        "Clear the log. Pinned lines survive.",
+        font_id,
+        18.0,
+    );
+    let (log_jobs_toggle, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Import,
+        "Jobs",
+        "Background jobs, including failed and cancelled ones.",
+        font_id,
+        18.0,
+    );
+    let (log_history_toggle, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Undo,
+        "History",
+        "The undo history. Click a row to go there.",
+        font_id,
+        18.0,
+    );
 
     let log_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
@@ -1051,7 +1278,7 @@ pub(crate) fn build_editor_layout(
         status_stack_h,
         IconId::ContentDrawer,
         "Content Drawer",
-        "Show or hide the Content Drawer (Ctrl+Space)",
+        &command_tooltip("editor.view.content_drawer"),
         font_id,
         theme::STATUS_HEIGHT,
     );
@@ -1060,7 +1287,7 @@ pub(crate) fn build_editor_layout(
         status_stack_h,
         IconId::OutputLog,
         "Output Log",
-        "Show or hide the Output Log",
+        &command_tooltip("editor.window.output_log"),
         font_id,
         theme::STATUS_HEIGHT,
     );
@@ -1099,6 +1326,19 @@ pub(crate) fn build_editor_layout(
     .with_text("")
     .build();
     let status_text = ui.add_node(status_lbl, status_stack_h);
+    let status_cancel = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_height(theme::ROW_HEIGHT)
+            .with_visibility(false),
+    )
+    .build();
+    let status_cancel = ui.add_node(status_cancel, status_stack_h);
+    let cancel_label =
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 3.0)))
+            .with_role(TextRole::Caption)
+            .with_text("Cancel")
+            .build();
+    ui.add_node(cancel_label, status_cancel);
 
     let status_stats_stack = StackPanelBuilder::new(
         WidgetBuilder::new()
@@ -1108,70 +1348,47 @@ pub(crate) fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let status_stats_stack_h = ui.add_node(status_stats_stack, status_grid_h);
+    // CONTROL-I: the cluster is a button, because "N script errors" is the one
+    // thing in it that needs acting on and a count you cannot click through to
+    // is a count that makes you go looking.
+    let status_stats_button = ui.add_node(
+        ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_tooltip("Scene objects and frame rate. Click to show the first error.")
+                .with_background(theme::TRANSPARENT),
+        )
+        .build(),
+        status_stats_stack_h,
+    );
     let status_stats_n = TextBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_margin(Thickness::axes(10.0, 0.0))
-            .with_tooltip("Scene objects and frame rate"),
+            .with_margin(Thickness::axes(10.0, 0.0)),
     )
     .with_role(TextRole::Mono)
     .with_text("— objects · — fps")
     .build();
-    let status_stats = ui.add_node(status_stats_n, status_stats_stack_h);
+    let status_stats = ui.add_node(status_stats_n, status_stats_button);
 
     // ── Popup overlays (children of root, drawn on top) ───────────────────────
     let (create_popup, create_popup_items) = build_create_popup(ui, root, font_id);
-    let (file_popup, file_items) = popup_items(
-        ui,
-        root,
-        font_id,
-        &["New Scene", "Save Scene", "Import Model..."],
-    );
-    let file_new_item = file_items[0];
-    let file_save_item = file_items[1];
-    let file_import_item = file_items[2];
-    let (edit_popup, edit_items) =
-        popup_items(ui, root, font_id, &["Undo", "Redo", "Delete", "Duplicate"]);
-    let edit_undo = edit_items[0];
-    let edit_redo = edit_items[1];
-    let edit_delete = edit_items[2];
-    let edit_dup = edit_items[3];
-    let (view_popup, view_items) = popup_items(ui, root, font_id, &["Profiler", "Content Drawer"]);
-    let view_profiler = view_items[0];
-    let view_content = view_items[1];
+    let (file_popup, file_menu_stack, file_items) =
+        command_popup_items(ui, root, font_id, crate::commands::Menu::File);
+    let (edit_popup, _edit_menu_stack, edit_items) =
+        command_popup_items(ui, root, font_id, crate::commands::Menu::Edit);
+    let (view_popup, _view_menu_stack, view_items) =
+        command_popup_items(ui, root, font_id, crate::commands::Menu::View);
     // Window menu is now the workspace switcher (Zeta-F). "Reset workspace"
     // last, after a separator's worth of distance, because it is the
     // destructive one.
-    let (window_popup, window_items) = popup_items(
-        ui,
-        root,
-        font_id,
-        &[
-            "Show Content Drawer",
-            "Workspace: Layout",
-            "Workspace: Terrain",
-            "Workspace: Foliage",
-            "Workspace: Lighting",
-            "Workspace: Materials",
-            "Workspace: Debug",
-            "Workspace: Play",
-            "Reset workspace",
-        ],
-    );
-    let window_dock_content = window_items[0];
-    let window_workspace_items: Vec<NodeHandle> = window_items[1..8].to_vec();
-    let window_reset_item = window_items[8];
-    let (help_menu_popup, help_items) = popup_items(
-        ui,
-        root,
-        font_id,
-        &["Help Overlay (F1)", "Shortcuts", "About"],
-    );
-    let help_open_item = help_items[0];
-    let help_shortcuts = help_items[1];
-    let help_about = help_items[2];
+    let (window_popup, _window_menu_stack, window_items) =
+        command_popup_items(ui, root, font_id, crate::commands::Menu::Window);
+    let (help_menu_popup, _help_menu_stack, help_items) =
+        command_popup_items(ui, root, font_id, crate::commands::Menu::Help);
 
     let (help_overlay, help_body, help_toc, help_close) = build_help_overlay(ui, root, font_id);
+    let preferences = super::preferences::build_preferences_window(ui, root, font_id);
 
     let tooltip_node = TooltipBuilder::new(
         WidgetBuilder::new()
@@ -1205,8 +1422,23 @@ pub(crate) fn build_editor_layout(
     .build();
     let content_menu = ui.add_node(content_menu_node, content_menu_popup);
 
+    // CONTROL-F: the Outliner's own right-click menu. A second popup rather
+    // than a shared one, because the two can never be open at once but a
+    // shared node would make that an assumption instead of a fact.
+    let outliner_menu_popup_node =
+        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
+    let outliner_menu_popup = ui.add_node(outliner_menu_popup_node, root);
+    let outliner_menu_node = ContextMenuBuilder::new(
+        WidgetBuilder::new()
+            .with_horizontal_alignment(HorizontalAlignment::Left)
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_desired_position(Vec2::ZERO),
+    )
+    .with_items(Vec::new())
+    .with_font_id(font_id)
+    .build();
+    let outliner_menu = ui.add_node(outliner_menu_node, outliner_menu_popup);
 
-    let palette_items = palette_commands();
     let palette_popup_node = PopupBuilder::new(
         WidgetBuilder::new().with_background(theme::NOCTURNE.semantic.surface.modal_scrim.bytes()),
     )
@@ -1220,7 +1452,7 @@ pub(crate) fn build_editor_layout(
             .with_vertical_alignment(VerticalAlignment::Center),
     )
     .with_font_id(font_id)
-    .with_items(palette_items)
+    .with_items(Vec::new())
     .build();
     let palette_widget = ui.add_node(palette_widget_node, palette_popup);
 
@@ -1351,12 +1583,27 @@ pub(crate) fn build_editor_layout(
     let color_picker = ui.add_node(color_picker_node, color_popup);
 
     let foliage_kind_combo = inspector_handles.foliage_kind_button;
-    let post_tonemap_combo = inspector_handles.post_tonemap_button;
     let foliage_kind_popup =
         attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
-    let post_tonemap_popup = attach_combo_popup(ui, post_tonemap_combo, &TONEMAP_NAMES, font_id);
     let viewport_res_popup =
         attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
+    // CONTROL-G's snap combos were built without one of these, so pressing
+    // them set `open = true` on a `ComboBox` whose popup handle was `NONE` and
+    // every branch that would show a list was skipped. Nothing opened, no
+    // `SelectionChanged` was ever emitted, and the header went on displaying
+    // the right label because `set_snap_state` pushes `SetSelected` into it
+    // every frame — which is exactly why "Snap does nothing" looked like a
+    // handler bug and was not one.
+    let snap_grid_popup = attach_combo_popup(ui, snap_grid_combo, &SNAP_GRID_NAMES, font_id);
+    let snap_angle_popup = attach_combo_popup(ui, snap_angle_combo, &SNAP_ANGLE_NAMES, font_id);
+
+    let menu_command_items = file_items
+        .into_iter()
+        .chain(edit_items)
+        .chain(view_items)
+        .chain(window_items)
+        .chain(help_items)
+        .collect();
 
     EditorLayout {
         outliner_scroll,
@@ -1366,14 +1613,20 @@ pub(crate) fn build_editor_layout(
         details_empty,
         log_stack,
         log_empty,
+        log_severity_chips,
+        log_search,
+        log_pin_only,
+        log_copy,
+        log_clear,
+        log_jobs_toggle,
+        log_history_toggle,
         create_button,
         create_popup,
         create_popup_items,
         file_button,
         file_popup,
-        file_import_item,
-        file_new_item,
-        file_save_item,
+        file_menu_stack,
+        menu_command_items,
         camera_speed_slider,
         camera_speed_label,
         viewport_res_combo,
@@ -1408,7 +1661,19 @@ pub(crate) fn build_editor_layout(
         status_dirty,
         status_selection,
         status_stats,
+        status_stats_button,
         vp_bar_h,
+        snap_cluster,
+        snap_grid_combo,
+        snap_angle_combo,
+        snap_surface_toggle,
+        gizmo_space_toggle,
+        gizmo_space_label,
+        select_only_toggle,
+        snap_overflow,
+        time_cluster,
+        time_label,
+        time_slider,
         inner_h,
         content_split_h,
         right_split_h,
@@ -1419,6 +1684,7 @@ pub(crate) fn build_editor_layout(
         help_button,
         help_overlay,
         help_body,
+        preferences,
         tooltip,
         edit_button,
         view_button,
@@ -1428,33 +1694,24 @@ pub(crate) fn build_editor_layout(
         view_popup,
         window_popup,
         help_menu_popup,
-        edit_undo,
-        edit_redo,
-        edit_delete,
-        edit_dup,
-        view_profiler,
-        view_content,
-        window_dock_content,
-        window_workspace_items,
-        window_reset_item,
-        help_open_item,
-        help_shortcuts,
-        help_about,
         status_text,
+        status_cancel,
         drawer_button,
         log_button,
         content_drawer,
         content_search,
         content_breadcrumb,
         content_engine_toggle,
+        content_scroll,
         content_list,
+        content_toolbar_actions,
         outliner_tree,
         outliner_search,
         inspector_search,
         foliage_kind_combo,
-        post_tonemap_combo,
+        snap_grid_popup,
+        snap_angle_popup,
         foliage_kind_popup,
-        post_tonemap_popup,
         viewport_res_popup,
         save_button,
         palette_button,
@@ -1466,6 +1723,8 @@ pub(crate) fn build_editor_layout(
         unsaved_discard,
         unsaved_cancel,
         content_menu_popup,
+        outliner_menu_popup,
+        outliner_menu,
         content_menu,
         name_popup,
         name_title,
@@ -1475,6 +1734,7 @@ pub(crate) fn build_editor_layout(
         color_popup,
         color_picker,
         title_drag,
+        title_label,
         win_min,
         win_max,
         win_close,

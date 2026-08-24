@@ -414,7 +414,10 @@ mod tests {
         // The full Latin inventory must fit with room to spare — if this trips,
         // the shelf allocator or the atlas size needs revisiting before any new
         // face or size is added.
-        assert!(!a.is_full(), "ASCII at five sizes across five cuts must fit");
+        assert!(
+            !a.is_full(),
+            "ASCII at five sizes across five cuts must fit"
+        );
         assert!(util < 0.9, "utilization {util} leaves no headroom");
 
         // The 27-B decision, recorded as an assertion so it stays reproducible.
@@ -429,7 +432,10 @@ mod tests {
         // Subpixel phases stay blocked until the atlas grows to 2048^2 or the
         // shelf allocator learns to evict. Revisit there, not here.
         let phases_3x = util * 3.0;
-        println!("three-phase subpixel positioning would need {:.1}%", phases_3x * 100.0);
+        println!(
+            "three-phase subpixel positioning would need {:.1}%",
+            phases_3x * 100.0
+        );
         assert!(
             phases_3x > 1.0,
             "three-phase subpixel positioning now fits ({:.1}%) -- revisit the              27-B decision to snap glyph quads instead",
@@ -450,7 +456,10 @@ mod tests {
             }
             px *= 1.5;
         }
-        assert!(a.is_full(), "the allocator must eventually refuse and say so");
+        assert!(
+            a.is_full(),
+            "the allocator must eventually refuse and say so"
+        );
     }
 
     #[test]

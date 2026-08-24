@@ -11,14 +11,15 @@ use glam::Vec2;
 
 #[derive(Clone, Debug)]
 pub struct MenuItem {
-    pub id: u32,
+    /// Stable command id.
+    pub id: String,
     pub label: String,
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum ContextMenuMessage {
-    Activate(u32),
+    Activate(String),
     SetItems(Vec<MenuItem>),
 }
 
@@ -82,7 +83,7 @@ impl Control for ContextMenu {
                     emit.push(UiMessage::new(
                         widget.handle,
                         MessageDirection::FromWidget,
-                        ContextMenuMessage::Activate(item.id),
+                        ContextMenuMessage::Activate(item.id.clone()),
                     ));
                 }
                 msg.handled = true;
@@ -131,7 +132,7 @@ mod tests {
     #[test]
     fn menu_item_can_be_disabled() {
         let i = MenuItem {
-            id: 1,
+            id: "editor.test.open".into(),
             label: "Open…".into(),
             enabled: false,
         };

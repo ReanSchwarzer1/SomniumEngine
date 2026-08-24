@@ -14,18 +14,48 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub enum ToastMessage {
     Push(String),
+    /// CONTROL-I: an error toast, which does **not** expire.
+    ///
+    /// A four-second failure notice is a failure notice you miss while looking
+    /// at the thing that failed. Errors stay until dismissed; everything else
+    /// still fades.
+    PushError(String),
+    /// Dismiss the oldest sticky toast — what a click on one does.
+    DismissOldest,
+}
+
+/// One toast. `sticky` is the whole of the CONTROL-I change: a sticky toast is
+/// exempt from the four-second prune and paints at full opacity forever.
+struct Toast {
+    text: String,
+    raised: Instant,
+    sticky: bool,
 }
 
 pub struct ToastHost {
-    items: Vec<(String, Instant)>,
+    items: Vec<Toast>,
     font_id: u8,
 }
 
 impl ToastHost {
     fn prune(&mut self) {
         let now = Instant::now();
-        self.items
-            .retain(|(_, t)| now.duration_since(*t) < Duration::from_secs(4));
+        self.items.retain(|toast| {
+            toast.sticky || now.duration_since(toast.raised) < Duration::from_secs(4)
+        });
+    }
+
+    /// Whether anything is still on screen. Used by the tests, and by the
+    /// shell to decide whether the host needs painting at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// How many sticky toasts are waiting to be dismissed.
+    #[must_use]
+    pub fn sticky_count(&self) -> usize {
+        self.items.iter().filter(|toast| toast.sticky).count()
     }
 }
 
@@ -37,14 +67,19 @@ impl Control for ToastHost {
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         let now = Instant::now();
-        let visible: Vec<&(String, Instant)> = self
+        let visible: Vec<&Toast> = self
             .items
             .iter()
-            .filter(|(_, t)| now.duration_since(*t) < Duration::from_secs(4))
+            .filter(|toast| {
+                toast.sticky || now.duration_since(toast.raised) < Duration::from_secs(4)
+            })
             .collect();
-        for (i, (text, started)) in visible.iter().rev().enumerate() {
-            let age = now.duration_since(*started).as_secs_f32();
-            let alpha = if age > 3.0 {
+        for (i, toast) in visible.iter().rev().enumerate() {
+            let text = &toast.text;
+            let age = now.duration_since(toast.raised).as_secs_f32();
+            let alpha = if toast.sticky {
+                255
+            } else if age > 3.0 {
                 ((4.0 - age) * 255.0).clamp(0.0, 255.0) as u8
             } else {
                 230
@@ -68,7 +103,10 @@ impl Control for ToastHost {
                     theme::with_alpha(t.semantic.surface.popup.bytes(), alpha),
                 )
                 .with_radii(radii)
-                .with_border(t.geometry.stroke_hairline, t.semantic.border.default.bytes()),
+                .with_border(
+                    t.geometry.stroke_hairline,
+                    t.semantic.border.default.bytes(),
+                ),
                 None,
             );
             ctx.push_text(
@@ -76,7 +114,11 @@ impl Control for ToastHost {
                 Vec2::new(x + 10.0, y + 7.0),
                 self.font_id,
                 12.0,
-                theme::TEXT_PRIMARY,
+                if toast.sticky {
+                    t.semantic.status.error.bytes()
+                } else {
+                    theme::TEXT_PRIMARY
+                },
             );
         }
     }
@@ -87,9 +129,30 @@ impl Control for ToastHost {
         msg: &mut UiMessage,
         _emit: &mut Vec<UiMessage>,
     ) {
-        if let Some(ToastMessage::Push(text)) = msg.data::<ToastMessage>() {
-            self.items.push((text.clone(), Instant::now()));
-            msg.handled = true;
+        match msg.data::<ToastMessage>() {
+            Some(ToastMessage::Push(text)) => {
+                self.items.push(Toast {
+                    text: text.clone(),
+                    raised: Instant::now(),
+                    sticky: false,
+                });
+                msg.handled = true;
+            }
+            Some(ToastMessage::PushError(text)) => {
+                self.items.push(Toast {
+                    text: text.clone(),
+                    raised: Instant::now(),
+                    sticky: true,
+                });
+                msg.handled = true;
+            }
+            Some(ToastMessage::DismissOldest) => {
+                if let Some(index) = self.items.iter().position(|toast| toast.sticky) {
+                    self.items.remove(index);
+                }
+                msg.handled = true;
+            }
+            None => {}
         }
         self.prune();
     }
@@ -119,5 +182,63 @@ impl ToastHostBuilder {
                 font_id: self.font_id,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> ToastHost {
+        ToastHost {
+            items: Vec::new(),
+            font_id: 0,
+        }
+    }
+
+    fn push(host: &mut ToastHost, message: ToastMessage) {
+        let mut widget = WidgetBuilder::new().build();
+        let mut msg = UiMessage::new(
+            widget.handle,
+            crate::message::MessageDirection::ToWidget,
+            message,
+        );
+        host.handle_routed_message(&mut widget, &mut msg, &mut Vec::new());
+    }
+
+    /// The CONTROL-I change: a four-second failure notice is one you miss
+    /// while looking at the thing that failed.
+    #[test]
+    fn an_error_toast_outlives_the_prune_and_an_ordinary_one_does_not() {
+        let mut host = host();
+        push(&mut host, ToastMessage::Push("Scene saved".into()));
+        push(&mut host, ToastMessage::PushError("Import failed".into()));
+        assert_eq!(host.items.len(), 2);
+        assert_eq!(host.sticky_count(), 1);
+
+        // Age both past the four-second window.
+        let old = Instant::now() - Duration::from_secs(10);
+        for toast in &mut host.items {
+            toast.raised = old;
+        }
+        host.prune();
+        assert_eq!(host.items.len(), 1, "only the error survives");
+        assert!(host.items[0].sticky);
+    }
+
+    #[test]
+    fn dismiss_removes_the_oldest_error_and_leaves_the_rest() {
+        let mut host = host();
+        push(&mut host, ToastMessage::PushError("first".into()));
+        push(&mut host, ToastMessage::PushError("second".into()));
+        push(&mut host, ToastMessage::DismissOldest);
+        assert_eq!(host.sticky_count(), 1);
+        assert_eq!(host.items[0].text, "second");
+
+        push(&mut host, ToastMessage::DismissOldest);
+        assert!(host.is_empty());
+        // Dismissing an empty host is a no-op rather than a panic.
+        push(&mut host, ToastMessage::DismissOldest);
+        assert!(host.is_empty());
     }
 }

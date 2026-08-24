@@ -35,7 +35,14 @@ struct PostParams {
     grain:             f32,
     /// Seconds, so grain moves rather than sitting as a static pattern.
     time:              f32,
-    _pad0:             f32,
+    /// CONTROL-K. Non-zero when `response` holds an authored tone-response
+    /// curve. Zero leaves grading exactly as Phase 24Y left it, which is what
+    /// keeps this addition invisible until somebody authors a curve.
+    response_enabled:  f32,
+    /// 32 uniform samples of the authored response curve over `0..=1`, packed
+    /// four to a vector because a uniform `array<f32, N>` has a 16-byte stride
+    /// and would cost four times the space for the same table.
+    response: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -181,7 +188,37 @@ fn apply_grading(c_in: vec3<f32>) -> vec3<f32> {
     let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     c = mix(vec3<f32>(luma), c, pp.saturation);
 
+    // CONTROL-K: the authored response curve, applied per channel after the
+    // fixed grade. Per channel rather than on luminance so a curve can shape
+    // colour as well as brightness — an S-curve on all three is the film look,
+    // and the alternative would forbid ever curving one of them alone.
+    if (pp.response_enabled > 0.5) {
+        c = vec3<f32>(response_at(c.r), response_at(c.g), response_at(c.b));
+    }
+
     return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+/// Sample the authored response table, linearly between its 32 entries.
+///
+/// Indexing is dynamic, which a uniform array supports; the vector component
+/// is selected by comparison rather than by dynamic subscript, because WGSL
+/// forbids dynamically indexing a vector in a uniform.
+fn response_at(x: f32) -> f32 {
+    let u = clamp(x, 0.0, 1.0) * 31.0;
+    let i0 = u32(floor(u));
+    let i1 = min(i0 + 1u, 31u);
+    let f  = u - floor(u);
+    return mix(response_sample(i0), response_sample(i1), f);
+}
+
+fn response_sample(i: u32) -> f32 {
+    let v = pp.response[i / 4u];
+    let c = i % 4u;
+    if (c == 0u) { return v.x; }
+    if (c == 1u) { return v.y; }
+    if (c == 2u) { return v.z; }
+    return v.w;
 }
 
 /// Hash for grain and dither.

@@ -21,6 +21,9 @@
 /// Immutable engine-wide configuration consumed at startup.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Project content directory. All inventory, authoring and preview-cache
+    /// paths derive from this one source.
+    pub content_root: std::path::PathBuf,
     /// Title displayed in the window's title bar.
     pub window_title: String,
 
@@ -57,6 +60,9 @@ impl Default for EngineConfig {
     /// | `resizable`    | `true`               |
     fn default() -> Self {
         Self {
+            content_root: std::env::var_os("SOMNIUM_CONTENT_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("assets")),
             window_title: "Somnium Engine".into(),
             window_size: (1280, 720),
             target_fps: Some(60),

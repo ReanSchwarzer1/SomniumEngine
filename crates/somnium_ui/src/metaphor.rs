@@ -100,6 +100,26 @@ pub struct ContentEntry {
     pub is_dir: bool,
     pub icon: IconId,
     pub is_engine: bool,
+    /// Immutable database identity; absent only for virtual Engine entries.
+    pub asset_id: Option<somnium_asset::database::AssetId>,
+    /// Precomputed facts shown by the drawer tooltip.
+    pub tooltip: String,
+}
+
+impl From<somnium_asset::database::AssetRecord> for ContentEntry {
+    fn from(record: somnium_asset::database::AssetRecord) -> Self {
+        let is_dir = record.kind == somnium_asset::database::AssetKind::Folder;
+        let tooltip = record.tooltip();
+        Self {
+            icon: icon_for_path(&record.absolute_path, is_dir),
+            path: record.absolute_path,
+            name: record.name,
+            is_dir,
+            is_engine: false,
+            asset_id: Some(record.id),
+            tooltip,
+        }
+    }
 }
 
 pub fn icon_for_path(path: &Path, is_dir: bool) -> IconId {
@@ -172,28 +192,40 @@ pub fn list_content(
                 icon: icon_for_path(&path, is_dir),
                 is_dir,
                 is_engine: false,
+                asset_id: None,
+                tooltip: String::new(),
                 name,
                 path,
             });
         }
     }
     if show_engine && (current.as_os_str().is_empty() || current == root) {
-        for (name, icon) in [
-            ("Cube", IconId::Cube),
-            ("Sphere", IconId::Sphere),
-            ("Plane", IconId::Plane),
-            ("Cylinder", IconId::Cylinder),
-            ("Inter-Regular.ttf", IconId::Font),
-        ] {
-            if filter.is_empty() || name.to_ascii_lowercase().contains(&filter) {
-                out.push(ContentEntry {
-                    path: PathBuf::from("/Engine").join(name),
-                    name: name.into(),
-                    is_dir: false,
-                    icon,
-                    is_engine: true,
-                });
-            }
+        out.extend(virtual_engine_content(&filter));
+    }
+    out
+}
+
+/// Built-in entries are virtual and never require a filesystem query.
+pub fn virtual_engine_content(filter: &str) -> Vec<ContentEntry> {
+    let filter = filter.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (name, icon) in [
+        ("Cube", IconId::Cube),
+        ("Sphere", IconId::Sphere),
+        ("Plane", IconId::Plane),
+        ("Cylinder", IconId::Cylinder),
+        ("Inter-Regular.ttf", IconId::Font),
+    ] {
+        if filter.is_empty() || name.to_ascii_lowercase().contains(&filter) {
+            out.push(ContentEntry {
+                path: PathBuf::from("/Engine").join(name),
+                name: name.into(),
+                is_dir: false,
+                icon,
+                is_engine: true,
+                asset_id: None,
+                tooltip: "Built-in Engine asset".into(),
+            });
         }
     }
     out
@@ -239,6 +271,8 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         Particle => IconId::Particle,
         Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
+        // CONTROL-L: the environment is the sun, so it takes the sun icon.
+        Environment => IconId::DirectionalLight,
     }
 }
 
@@ -502,7 +536,10 @@ impl ContentHistory {
     }
 
     pub fn current(&self) -> &str {
-        self.entries.get(self.cursor).map(|s| s.as_str()).unwrap_or("")
+        self.entries
+            .get(self.cursor)
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// Navigate somewhere new. A no-op when it is where we already are, so
@@ -552,6 +589,8 @@ mod browser_workflow_tests {
             icon: icon_for_path(&path, is_dir),
             is_dir,
             is_engine: false,
+            asset_id: None,
+            tooltip: String::new(),
             name: name.to_string(),
             path,
         }
@@ -618,8 +657,14 @@ mod browser_workflow_tests {
             seen = seen.next();
         }
         assert_eq!(seen, ContentDensity::Compact, "next() must cycle");
-        assert!(sizes[0].0 < sizes[1].0 && sizes[1].0 < sizes[2].0, "widths ascend");
-        assert!(sizes[0].2 < sizes[1].2 && sizes[1].2 < sizes[2].2, "icons ascend");
+        assert!(
+            sizes[0].0 < sizes[1].0 && sizes[1].0 < sizes[2].0,
+            "widths ascend"
+        );
+        assert!(
+            sizes[0].2 < sizes[1].2 && sizes[1].2 < sizes[2].2,
+            "icons ascend"
+        );
     }
 
     #[test]

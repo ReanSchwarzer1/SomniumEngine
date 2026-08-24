@@ -35,7 +35,50 @@ struct WaterFrameData {
     current_time: f32,
     previous_time: f32,
     history_valid: f32,
-    _pad: f32,
+    /// Phase CONTROL-N: rain-ripple strength, 0..1. Zero leaves the surface
+    /// exactly as Phase IV left it, which is what "off by default" means here.
+    rain_ripple: f32,
+}
+
+/// Concentric rain rings on a water surface.
+///
+/// Not a texture and not a particle: a sum of two travelling radial waves per
+/// cell of a jittered grid, which is enough to read as rain at any distance
+/// and costs no sampler. The rings are *slope*, returned as an XZ perturbation
+/// for the surface normal, because a rain ripple is a normal-map effect —
+/// displacing the surface by a millimetre would be invisible and cost a
+/// vertex-stage change.
+fn rain_ripple_slope(world_xz: vec2<f32>, time: f32, strength: f32) -> vec2<f32> {
+    if strength <= 0.001 {
+        return vec2<f32>(0.0);
+    }
+    // Half-metre cells: about the spacing of visible impacts in heavy rain,
+    // and small enough that the grid never reads as a grid.
+    let cell_size = 0.5;
+    let grid = world_xz / cell_size;
+    let cell = floor(grid);
+    var slope = vec2<f32>(0.0);
+    for (var j = -1; j <= 1; j = j + 1) {
+        for (var i = -1; i <= 1; i = i + 1) {
+            let neighbour = cell + vec2<f32>(f32(i), f32(j));
+            // Per-cell hash gives the impact its own position and its own
+            // moment, so drops do not all land on the beat.
+            let h = fract(sin(dot(neighbour, vec2<f32>(127.1, 311.7))) * 43758.5453);
+            let h2 = fract(sin(dot(neighbour, vec2<f32>(269.5, 183.3))) * 43758.5453);
+            let centre = (neighbour + vec2<f32>(h, h2)) * cell_size;
+            let delta = world_xz - centre;
+            let r = length(delta);
+            // Each impact lives for one second and its ring expands outward.
+            let age = fract(time * 1.7 + h);
+            let radius = age * 0.55;
+            let ring = exp(-abs(r - radius) * 26.0) * (1.0 - age);
+            if ring > 0.001 && r > 1e-4 {
+                slope += normalize(delta) * ring
+                    * sin((r - radius) * 90.0) * strength * 0.35;
+            }
+        }
+    }
+    return slope;
 }
 
 struct WaterMaterial {
@@ -1016,6 +1059,16 @@ fn fs_prepass(input: VertexOutput, @builtin(front_facing) front_facing: bool) ->
     let mapped = normalize(mat3x3<f32>(tangent, bitangent, resolved_wave_normal) * detail_normal);
     let detail_strength = 0.24 * (1.0 - smoothstep(75.0, 360.0, water_view_depth));
     var n = normalize(mix(resolved_wave_normal, mapped, detail_strength));
+    // CONTROL-N: rain rings, folded into the same normal the waves and the
+    // detail map produced. Faded with distance for the same reason the detail
+    // normal is: half-metre rings a hundred metres out are sub-pixel noise
+    // that TAA then has to fight.
+    let ripple_fade = 1.0 - smoothstep(30.0, 160.0, water_view_depth);
+    let ripple = rain_ripple_slope(
+        input.world_position.xz, frame.current_time, frame.rain_ripple * ripple_fade);
+    if any(abs(ripple) > vec2<f32>(1e-5)) {
+        n = normalize(n + vec3<f32>(-ripple.x, 0.0, -ripple.y));
+    }
     let v = normalize(view.camera_pos - input.world_position);
     if dot(n, v) < 0.0 { n = -n; }
     let ndotv = max(dot(n, v), 1e-4);

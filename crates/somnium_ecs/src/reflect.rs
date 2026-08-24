@@ -96,6 +96,20 @@ pub struct FieldId(pub u16);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetRef(pub u128);
 
+impl AssetRef {
+    /// Construct a reflected asset handle from its durable database value.
+    #[must_use]
+    pub const fn from_raw(raw: u128) -> Self {
+        Self(raw)
+    }
+
+    /// Return the durable database value without exposing tuple layout at call sites.
+    #[must_use]
+    pub const fn raw(self) -> u128 {
+        self.0
+    }
+}
+
 /// A bounded, engine-neutral value.
 ///
 /// Every value that crosses a reflection boundary — into a scene file,
@@ -130,6 +144,14 @@ pub enum ReflectValue {
     Asset(Option<AssetRef>),
     /// Homogeneous list.
     Array(Vec<ReflectValue>),
+    /// An authored one-dimensional curve — CONTROL-K.
+    ///
+    /// A first-class value rather than an array of numbers so the editor,
+    /// the serializer and the undo stack all agree on what a keyframe is
+    /// without any of them having to reconstruct one from floats.
+    Curve(crate::curve::Curve),
+    /// An authored colour ramp — CONTROL-K.
+    Gradient(crate::curve::Gradient),
     /// Nested record, keyed by field id. Used where a schema is known.
     Object(ReflectObject),
     /// Nested record keyed by name.
@@ -162,6 +184,8 @@ impl ReflectValue {
             Self::Entity(_) => "entity",
             Self::Asset(_) => "asset",
             Self::Array(_) => "array",
+            Self::Curve(_) => "curve",
+            Self::Gradient(_) => "gradient",
             Self::Object(_) => "object",
             Self::Map(_) => "map",
         }
@@ -183,6 +207,8 @@ impl ReflectValue {
             Self::Vec3(v) => all(v),
             Self::Vec4(v) | Self::Quat(v) => all(v),
             Self::Array(items) => items.iter().all(Self::is_finite),
+            Self::Curve(curve) => curve.is_finite(),
+            Self::Gradient(gradient) => gradient.is_finite(),
             Self::Object(fields) => fields.values().all(Self::is_finite),
             Self::Map(entries) => entries.values().all(Self::is_finite),
             _ => true,
@@ -224,6 +250,10 @@ pub enum FieldType {
     Enum(&'static [&'static str]),
     /// A homogeneous [`ReflectValue::Array`].
     Array(Box<FieldType>),
+    /// An authored [`ReflectValue::Curve`] — CONTROL-K.
+    Curve,
+    /// An authored [`ReflectValue::Gradient`] — CONTROL-K.
+    Gradient,
 }
 
 impl FieldType {
@@ -252,6 +282,9 @@ impl FieldType {
             }
             (Self::Array(inner), ReflectValue::Array(items)) => {
                 items.iter().all(|item| inner.accepts(item))
+            }
+            (Self::Curve, ReflectValue::Curve(_)) | (Self::Gradient, ReflectValue::Gradient(_)) => {
+                true
             }
             _ => false,
         }
@@ -302,6 +335,8 @@ impl FieldType {
             Self::Asset => "Asset".into(),
             Self::Enum(_) => "enum".into(),
             Self::Array(inner) => format!("{{{}}}", inner.name()),
+            Self::Curve => "Curve".into(),
+            Self::Gradient => "Gradient".into(),
         }
     }
 }
@@ -340,6 +375,24 @@ impl FieldFlags {
     }
 }
 
+/// How much state an edit must snapshot to undo safely.
+///
+/// Most fields are independent scalar values. Rebuilding fields can declare a
+/// wider scope so a generic editor command never restores only half of their
+/// derived state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChangeScope {
+    /// Restore just the addressed field.
+    #[default]
+    Field,
+    /// Restore the complete component record.
+    Component,
+    /// Restore every registered component on the entity.
+    Entity,
+    /// Restore the complete registered world state.
+    Scene,
+}
+
 /// Everything the engine knows about one field of one component.
 #[derive(Debug, Clone)]
 pub struct FieldSchema {
@@ -355,6 +408,36 @@ pub struct FieldSchema {
     pub min: Option<f64>,
     /// Inclusive upper bound for numeric fields.
     pub max: Option<f64>,
+    /// Preferred numeric increment.
+    pub step: Option<f64>,
+    /// Suggested slider lower bound; typing may exceed it.
+    pub soft_min: Option<f64>,
+    /// Suggested slider upper bound; typing may exceed it.
+    pub soft_max: Option<f64>,
+    /// Decimal places shown by numeric editors.
+    pub precision: Option<u8>,
+    /// Unit suffix, such as `m`, `deg`, or `ms`.
+    pub unit: Option<&'static str>,
+    /// Author-facing help copied from the component contract.
+    pub doc: Option<&'static str>,
+    /// Label override; otherwise generated from [`Self::name`].
+    pub display_name: Option<&'static str>,
+    /// Foldable inspector section.
+    pub group: Option<&'static str>,
+    /// Stable ordering hint within the group.
+    pub order: Option<i32>,
+    /// Hidden behind the inspector's advanced-properties affordance.
+    pub advanced: bool,
+    /// Visible but never writable from the editor.
+    pub read_only: bool,
+    /// How a slider maps travel to value — CONTROL-K, NeoAxis's convenient
+    /// distribution. A property of the quantity, not of the widget.
+    pub slider: crate::curve::SliderCurve,
+    /// Undo snapshot width required by this field.
+    pub scope: ChangeScope,
+    /// Engine-neutral asset-kind constraint. Each bit is assigned by the asset
+    /// layer; `u64::MAX` accepts every kind and avoids an ECS → asset dependency.
+    pub asset_kind_mask: u64,
     /// Permissions.
     pub flags: FieldFlags,
 }
@@ -579,7 +662,9 @@ impl ComponentSchema {
     /// Fill in defaults for every field the record does not mention.
     pub fn apply_defaults(&self, record: &mut ReflectObject) {
         for field in &self.fields {
-            record.entry(field.id).or_insert_with(|| field.default.clone());
+            record
+                .entry(field.id)
+                .or_insert_with(|| field.default.clone());
         }
     }
 }
@@ -605,7 +690,7 @@ impl fmt::Debug for ComponentSchema {
 /// Iteration order is sorted by [`StableId`] and never by registration
 /// order, insertion order or hash order — a serializer that walks this
 /// registry must produce the same file on every run.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TypeRegistry {
     /// Sorted by `stable_id`.
     schemas: Vec<ComponentSchema>,
@@ -615,6 +700,26 @@ pub struct TypeRegistry {
     /// a component by the string an author typed. A linear scan over the
     /// schema list was measurable at that call rate.
     by_text: HashMap<&'static str, usize>,
+    decorators: Vec<Box<dyn SchemaDecorator>>,
+}
+
+impl fmt::Debug for TypeRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypeRegistry")
+            .field("schemas", &self.schemas)
+            .field("decorators", &self.decorators.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Editor-only schema metadata extension point.
+///
+/// Decorators keep reflection authoritative while allowing a later tool or
+/// plugin to attach presentation metadata without editing a component's
+/// declaration.
+pub trait SchemaDecorator: Send + Sync {
+    /// Mutate a schema when it enters the registry.
+    fn decorate(&self, schema: &mut ComponentSchema);
 }
 
 impl TypeRegistry {
@@ -631,7 +736,10 @@ impl TypeRegistry {
     /// Panics if the stable id or the runtime component id is already
     /// registered. Both are programmer errors that would otherwise show
     /// up as a component silently reading another one's data.
-    pub fn register(&mut self, schema: ComponentSchema) {
+    pub fn register(&mut self, mut schema: ComponentSchema) {
+        for decorator in &self.decorators {
+            decorator.decorate(&mut schema);
+        }
         assert!(
             !self.by_stable.contains_key(&schema.stable_id),
             "duplicate component stable id `{}`",
@@ -657,6 +765,14 @@ impl TypeRegistry {
             .partition_point(|s| s.stable_id < schema.stable_id);
         self.schemas.insert(pos, schema);
         self.reindex();
+    }
+
+    /// Add an editor metadata decorator and apply it to existing schemas.
+    pub fn register_decorator(&mut self, decorator: Box<dyn SchemaDecorator>) {
+        for schema in &mut self.schemas {
+            decorator.decorate(schema);
+        }
+        self.decorators.push(decorator);
     }
 
     /// Look up by durable name.
@@ -939,6 +1055,89 @@ impl ReflectField for Entity {
     }
 }
 
+impl ReflectField for AssetRef {
+    fn field_type() -> FieldType {
+        FieldType::Asset
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Asset(Some(*self))
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Asset(Some(value)) => Ok(*value),
+            other => Err(mismatch(field, &FieldType::Asset, other)),
+        }
+    }
+}
+
+impl ReflectField for Option<AssetRef> {
+    fn field_type() -> FieldType {
+        FieldType::Asset
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Asset(*self)
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Asset(value) => Ok(*value),
+            ReflectValue::Nil => Ok(None),
+            other => Err(mismatch(field, &FieldType::Asset, other)),
+        }
+    }
+}
+
+impl ReflectField for crate::curve::Curve {
+    fn field_type() -> FieldType {
+        FieldType::Curve
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Curve(self.clone())
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Curve(curve) => Ok(curve.clone()),
+            // An absent track is an empty curve, not a load failure: a scene
+            // written before a component grew its curve must still open.
+            ReflectValue::Nil => Ok(Self::empty()),
+            other => Err(mismatch(field, &FieldType::Curve, other)),
+        }
+    }
+}
+
+impl ReflectField for crate::curve::Gradient {
+    fn field_type() -> FieldType {
+        FieldType::Gradient
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Gradient(self.clone())
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Gradient(gradient) => Ok(gradient.clone()),
+            ReflectValue::Nil => Ok(Self::empty()),
+            other => Err(mismatch(field, &FieldType::Gradient, other)),
+        }
+    }
+}
+
+impl<T: ReflectField> ReflectField for Vec<T> {
+    fn field_type() -> FieldType {
+        FieldType::Array(Box::new(T::field_type()))
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Array(self.iter().map(ReflectField::to_reflect).collect())
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Array(items) => items
+                .iter()
+                .map(|item| T::from_reflect(item, field))
+                .collect(),
+            other => Err(mismatch(field, &Self::field_type(), other)),
+        }
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Declaration macro
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -973,20 +1172,87 @@ impl ReflectField for Entity {
 /// staged writes) and every named field must implement [`ReflectField`].
 #[macro_export]
 macro_rules! component_schema {
+    (@doc) => { None };
+    (@doc $first:literal $(, $rest:literal)*) => { Some(concat!($first $(, "\n", $rest)*)) };
     // Per-field options. These rules come first so that the recursive
     // `@opt` calls below can never be mistaken for a schema declaration.
-    (@opt $min:ident, $max:ident, $flags:ident, min, $v:expr) => { $min = Some(f64::from($v)); };
-    (@opt $min:ident, $max:ident, $flags:ident, max, $v:expr) => { $max = Some(f64::from($v)); };
-    (@opt $min:ident, $max:ident, $flags:ident, flags, $v:expr) => { $flags = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        min, $v:expr) => { $min = Some(f64::from($v)); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        max, $v:expr) => { $max = Some(f64::from($v)); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        advanced, $v:expr) => { $advanced = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        read_only, $v:expr) => { $read_only = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        scope, $v:expr) => { $scope = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        slider, $v:expr) => { $slider = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        asset_kind_mask, $v:expr) => { $asset_kind_mask = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        flags, $v:expr) => { $flags = $v; };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        step, $v:expr) => { $step = Some(f64::from($v)); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        soft_min, $v:expr) => { $soft_min = Some(f64::from($v)); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        soft_max, $v:expr) => { $soft_max = Some(f64::from($v)); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        precision, $v:expr) => { $precision = Some($v); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        unit, $v:expr) => { $unit = Some($v); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        doc, $v:expr) => { $doc = Some($v); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        display_name, $v:expr) => { $display_name = Some($v); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        group, $v:expr) => { $group = Some($v); };
+    (@opt $min:ident, $max:ident, $step:ident, $soft_min:ident, $soft_max:ident,
+        $precision:ident, $unit:ident, $doc:ident, $display_name:ident, $group:ident,
+        $order:ident, $advanced:ident, $read_only:ident, $scope:ident, $slider:ident, $asset_kind_mask:ident, $flags:ident,
+        order, $v:expr) => { $order = Some($v); };
 
     (
         $ty:ty as $stable:literal,
         display $display:literal,
         version $version:expr,
-        fields { $( $field:ident $({ $($opt:ident : $optval:expr),* $(,)? })? ),* $(,)? }
+        fields { $( $(#[doc = $field_doc:literal])* $field:ident $({ $($opt:ident : $optval:expr),* $(,)? })? ),* $(,)? }
     ) => {{
         use $crate::reflect::{
-            ComponentSchema, FieldFlags, FieldId, FieldSchema, ReflectError, ReflectField,
+            ChangeScope, ComponentSchema, FieldFlags, FieldId, FieldSchema, ReflectError, ReflectField,
             ReflectFieldTypeOf, ReflectObject, StableId,
         };
 
@@ -1004,9 +1270,27 @@ macro_rules! component_schema {
                 let mut min: Option<f64> = None;
                 #[allow(unused_mut, unused_assignments)]
                 let mut max: Option<f64> = None;
+                #[allow(unused_mut, unused_assignments)] let mut step: Option<f64> = None;
+                #[allow(unused_mut, unused_assignments)] let mut soft_min: Option<f64> = None;
+                #[allow(unused_mut, unused_assignments)] let mut soft_max: Option<f64> = None;
+                #[allow(unused_mut, unused_assignments)] let mut precision: Option<u8> = None;
+                #[allow(unused_mut, unused_assignments)] let mut unit: Option<&'static str> = None;
+                #[allow(unused_mut, unused_assignments)] let mut doc: Option<&'static str> =
+                    $crate::component_schema!(@doc $($field_doc),*);
+                #[allow(unused_mut, unused_assignments)] let mut display_name: Option<&'static str> = None;
+                #[allow(unused_mut, unused_assignments)] let mut group: Option<&'static str> = None;
+                #[allow(unused_mut, unused_assignments)] let mut order: Option<i32> = None;
+                #[allow(unused_mut, unused_assignments)] let mut advanced = false;
+                #[allow(unused_mut, unused_assignments)] let mut read_only = false;
+                #[allow(unused_mut, unused_assignments)] let mut scope = ChangeScope::Field;
+                #[allow(unused_mut, unused_assignments)]
+                let mut slider = $crate::curve::SliderCurve::Linear;
+                #[allow(unused_mut, unused_assignments)] let mut asset_kind_mask = u64::MAX;
                 #[allow(unused_mut, unused_assignments)]
                 let mut flags: FieldFlags = FieldFlags::DEFAULT;
-                $( $( $crate::component_schema!(@opt min, max, flags, $opt, $optval); )* )?
+                $( $( $crate::component_schema!(@opt min, max, step, soft_min, soft_max,
+                    precision, unit, doc, display_name, group, order, advanced, read_only,
+                    scope, slider, asset_kind_mask, flags, $opt, $optval); )* )?
                 fields.push(FieldSchema {
                     name: stringify!($field),
                     id: FieldId(u16::try_from(fields.len()).expect("too many fields")),
@@ -1014,6 +1298,20 @@ macro_rules! component_schema {
                     default: ReflectField::to_reflect(&defaults.$field),
                     min,
                     max,
+                    step,
+                    soft_min,
+                    soft_max,
+                    precision,
+                    unit,
+                    doc,
+                    display_name,
+                    group,
+                    order,
+                    advanced,
+                    read_only,
+                    slider,
+                    scope,
+                    asset_kind_mask,
                     flags,
                 });
             }
@@ -1234,7 +1532,13 @@ mod tests {
         bad.insert(FieldId(0), ReflectValue::F64(7.0)); // fine
         bad.insert(FieldId(2), ReflectValue::I64(1)); // bool field, not an int
         let err = (schema.apply)(&mut world, e, &bad).unwrap_err();
-        assert!(matches!(err, ReflectError::TypeMismatch { field: "engaged", .. }));
+        assert!(matches!(
+            err,
+            ReflectError::TypeMismatch {
+                field: "engaged",
+                ..
+            }
+        ));
         assert_eq!(world.get::<Motor>(e), Some(&before), "no partial write");
     }
 
@@ -1247,7 +1551,10 @@ mod tests {
         let mut patch = ReflectObject::new();
         patch.insert(FieldId(1), ReflectValue::I64(70_000)); // u8 field
         let err = (schema.apply)(&mut world, e, &patch).unwrap_err();
-        assert!(matches!(err, ReflectError::OutOfRange { field: "gear", .. }));
+        assert!(matches!(
+            err,
+            ReflectError::OutOfRange { field: "gear", .. }
+        ));
     }
 
     #[test]

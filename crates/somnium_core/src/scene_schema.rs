@@ -145,8 +145,21 @@ fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
         },
         ReflectValue::Asset(Some(asset)) => json!({ "$asset": format!("{:032x}", asset.0) }),
         ReflectValue::Array(items) => {
-            json!(items.iter().map(|i| value_to_json(world, i)).collect::<Vec<_>>())
+            json!(
+                items
+                    .iter()
+                    .map(|i| value_to_json(world, i))
+                    .collect::<Vec<_>>()
+            )
         }
+        // CONTROL-K. A curve and a gradient go out as a tagged flat float
+        // array — `[t, v, in, out, interp]` and `[t, r, g, b, a]` quintuples.
+        // Flat rather than an array of objects because a forty-key track
+        // should not cost forty JSON objects in every scene that mentions it,
+        // and the tag is what lets the reader reject a differently-shaped
+        // array outright instead of half-decoding it.
+        ReflectValue::Curve(curve) => json!({ "$curve": curve.to_flat() }),
+        ReflectValue::Gradient(gradient) => json!({ "$gradient": gradient.to_flat() }),
         ReflectValue::Object(fields) => {
             let mut map = serde_json::Map::new();
             for (id, value) in fields {
@@ -226,7 +239,40 @@ fn value_from_json(
                 .collect::<Option<Vec<_>>>()
                 .map(ReflectValue::Array)
         }
+        FieldType::Curve => {
+            // A null curve is an empty curve, which is what a field added
+            // after a scene was written reads as.
+            if json.is_null() {
+                return Some(ReflectValue::Curve(somnium_ecs::curve::Curve::empty()));
+            }
+            let flat = flat_floats(json.get("$curve")?)?;
+            Some(ReflectValue::Curve(somnium_ecs::curve::Curve::from_flat(
+                &flat,
+            )))
+        }
+        FieldType::Gradient => {
+            if json.is_null() {
+                return Some(ReflectValue::Gradient(
+                    somnium_ecs::curve::Gradient::empty(),
+                ));
+            }
+            let flat = flat_floats(json.get("$gradient")?)?;
+            Some(ReflectValue::Gradient(
+                somnium_ecs::curve::Gradient::from_flat(&flat),
+            ))
+        }
     }
+}
+
+/// Read a JSON array of numbers as `f32`s, rejecting anything else.
+fn flat_floats(json: &serde_json::Value) -> Option<Vec<f32>> {
+    json.as_array()?
+        .iter()
+        .map(|v| {
+            #[allow(clippy::cast_possible_truncation)]
+            v.as_f64().map(|v| v as f32)
+        })
+        .collect()
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -323,7 +369,10 @@ fn attachment_from_json(
     Some(ScriptAttachment {
         instance: InstanceUuid::parse_hex(json.get("instance")?.as_str()?)?,
         asset: ScriptAssetId::parse_hex(json.get("asset")?.as_str()?)?,
-        enabled: json.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        enabled: json
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         execution_order: json
             .get("execution_order")
             .and_then(serde_json::Value::as_i64)
@@ -372,6 +421,17 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         .iter()
         .map(|&(id, entity)| {
             let mut components = serde_json::Map::new();
+            // CONTROL-J: whatever the last reader could not name is written
+            // back first, so a build that lacks a component still returns the
+            // file with that component in it. Known components are written
+            // over the top, which is the right precedence — this build's
+            // understanding wins wherever it has one.
+            let retained = world.get::<crate::RetainedUnknowns>(entity).cloned();
+            if let Some(retained) = &retained {
+                for (name, body) in &retained.components {
+                    components.insert(name.clone(), body.clone());
+                }
+            }
             for schema in registry.schemas_on(world, entity) {
                 let Some(record) = (schema.snapshot)(world, entity) else {
                     continue;
@@ -383,6 +443,13 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
                     }
                     if let Some(value) = record.get(&field.id) {
                         fields.insert(field.name.to_owned(), value_to_json(world, value));
+                    }
+                }
+                // Fields this build's schema no longer declares, restored
+                // beside the ones it does.
+                if let Some(retained) = &retained {
+                    for (name, value) in retained.fields_of(schema.stable_id.as_str()) {
+                        fields.insert(name.to_owned(), value.clone());
                     }
                 }
                 if fields.is_empty() {
@@ -425,10 +492,40 @@ pub fn save_scene_schema(
     registry: &TypeRegistry,
     path: &str,
 ) -> Result<(), SceneError> {
+    save_scene_schema_with_thumbnail(world, registry, path, None)
+}
+
+/// Write a version-3 scene, with an optional viewport PNG in the container
+/// header — CONTROL-J, §6.2.3.
+///
+/// The thumbnail goes ahead of the data so the Content Drawer can read it with
+/// a `seek` rather than by parsing the scene, and it is written by the same
+/// operation that writes the data, so the two can never disagree.
+///
+/// # Errors
+///
+/// [`SceneError::Io`] if the file cannot be written.
+pub fn save_scene_schema_with_thumbnail(
+    world: &mut World,
+    registry: &TypeRegistry,
+    path: &str,
+    thumbnail_png: Option<&[u8]>,
+) -> Result<(), SceneError> {
     let document = scene_to_json(world, registry);
-    let text = serde_json::to_string_pretty(&document)
-        .map_err(|e| SceneError::Malformed(e.to_string()))?;
-    std::fs::write(path, text).map_err(|e| SceneError::Io(e.to_string()))
+    let mut header = crate::scene_file::SceneHeader {
+        container: crate::scene_file::CONTAINER_VERSION,
+        document_version: SCENE_VERSION,
+        saved_unix_secs: crate::scene_file::now_unix_secs(),
+        entity_count: document
+            .get("entities")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len),
+        thumbnail_png_base64: None,
+    };
+    if let Some(png) = thumbnail_png {
+        header.set_thumbnail_png(png);
+    }
+    crate::scene_file::write(std::path::Path::new(path), &header, &document).map_err(SceneError::Io)
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -476,7 +573,9 @@ pub fn scene_from_json(
             .and_then(serde_json::Value::as_str)
             .and_then(PersistentId::parse_hex)
         else {
-            return Err(SceneError::Malformed("entity without a persistent id".into()));
+            return Err(SceneError::Malformed(
+                "entity without a persistent id".into(),
+            ));
         };
         let entity = world.spawn((id,));
         by_id.insert(id, entity);
@@ -494,12 +593,22 @@ pub fn scene_from_json(
             .unwrap_or("?")
             .to_owned();
 
-        if let Some(components) = entry.get("components").and_then(serde_json::Value::as_object) {
+        let mut retained = crate::RetainedUnknowns::default();
+        if let Some(components) = entry
+            .get("components")
+            .and_then(serde_json::Value::as_object)
+        {
             for (name, body) in components {
                 let Some(schema) = registry.by_name(name) else {
+                    // Kept, not skipped. This is the whole of CONTROL-J's
+                    // §6.2.3: the previous behaviour destroyed the data on the
+                    // next save and only said so in a log line.
+                    retained.keep_component(name, body.clone());
                     report.warnings.push(SceneWarning {
                         entity: entity_label.clone(),
-                        message: format!("no component named `{name}` in this build; skipped"),
+                        message: format!(
+                            "no component named `{name}` in this build; retained verbatim"
+                        ),
                     });
                     continue;
                 };
@@ -516,9 +625,12 @@ pub fn scene_from_json(
                 let mut record = ReflectObject::new();
                 for (field_name, value_json) in fields_json {
                     let Some(field) = schema.field_by_name(field_name) else {
+                        retained.keep_field(name, field_name, value_json.clone());
                         report.warnings.push(SceneWarning {
                             entity: entity_label.clone(),
-                            message: format!("`{name}` has no field `{field_name}`; dropped"),
+                            message: format!(
+                                "`{name}` has no field `{field_name}`; retained verbatim"
+                            ),
                         });
                         continue;
                     };
@@ -573,6 +685,17 @@ pub fn scene_from_json(
             }
         }
 
+        // Attached only when there is something to carry, so the
+        // overwhelming majority of entities gain no component at all.
+        if !retained.is_empty()
+            && let Err(err) = world.insert_component(entity, retained)
+        {
+            report.warnings.push(SceneWarning {
+                entity: entity_label.clone(),
+                message: format!("could not retain unknown data: {err}"),
+            });
+        }
+
         if let Some(scripts) = entry.get("scripts").and_then(serde_json::Value::as_array) {
             if scripts.is_empty() {
                 continue;
@@ -612,10 +735,211 @@ pub fn load_scene_schema(
     registry: &TypeRegistry,
     path: &str,
 ) -> Result<LoadReport, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(|e| SceneError::Io(e.to_string()))?;
-    let document: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| SceneError::Malformed(e.to_string()))?;
+    // The container reader accepts both a framed file and a bare document, so
+    // every scene written before CONTROL-J still loads with no migration.
+    let (_, document) =
+        crate::scene_file::read(std::path::Path::new(path)).map_err(SceneError::Io)?;
     scene_from_json(world, registry, &document)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::reflect_registry::component_registry;
+    use crate::{LightComponent, Name, Transform};
+
+    fn scene_with_a_light() -> serde_json::Value {
+        let mut world = World::new();
+        let registry = component_registry();
+        world.spawn((
+            Transform::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
+            Name::new("Lamp"),
+            LightComponent {
+                intensity: 4200.0,
+                ..LightComponent::default()
+            },
+        ));
+        scene_to_json(&mut world, &registry)
+    }
+
+    /// CONTROL-J's headline defect, as a test: a build missing a component
+    /// used to **destroy that component's data permanently** on the next save,
+    /// with only a log line to say so.
+    #[test]
+    fn a_build_without_a_component_returns_the_file_with_it_intact() {
+        // A scene saved by a build that has a component this one does not.
+        // Renaming it in the document is exactly that situation and tests the
+        // general case, rather than one component's absence in particular.
+        let mut original = scene_with_a_light();
+        let light = original["entities"][0]["components"]["somnium.Light"].clone();
+        assert!(light.is_object(), "the fixture really has a light");
+        let components = original["entities"][0]["components"]
+            .as_object_mut()
+            .expect("components object");
+        components.remove("somnium.Light");
+        components.insert("acme.HoloProjector".into(), light.clone());
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report = scene_from_json(&mut world, &registry, &original).expect("loads");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("retained verbatim")),
+            "the load says what it kept: {:?}",
+            report.warnings
+        );
+
+        let round_tripped = scene_to_json(&mut world, &registry);
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["acme.HoloProjector"], light,
+            "the component survived a build that cannot read it"
+        );
+        // …and the components this build *does* know are still written.
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["value"],
+            serde_json::json!("Lamp")
+        );
+    }
+
+    /// A field the schema no longer declares survives the same way.
+    #[test]
+    fn a_field_this_build_does_not_declare_survives_a_round_trip() {
+        let mut document = scene_with_a_light();
+        document["entities"][0]["components"]["somnium.Name"]["fields"]["nickname"] =
+            serde_json::json!("the good lamp");
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report = scene_from_json(&mut world, &registry, &document).expect("loads");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("nickname")),
+            "{:?}",
+            report.warnings
+        );
+
+        let round_tripped = scene_to_json(&mut world, &registry);
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["nickname"],
+            serde_json::json!("the good lamp")
+        );
+        // …and the fields this build *does* know are still its own.
+        assert_eq!(
+            round_tripped["entities"][0]["components"]["somnium.Name"]["fields"]["value"],
+            serde_json::json!("Lamp")
+        );
+    }
+
+    /// Defold's round-trip invariant: what is read equals what is written
+    /// back. Asserted on the component graph rather than on bytes, because
+    /// `serde_json` may legitimately reformat whitespace.
+    #[test]
+    fn a_scene_is_byte_stable_across_save_load_save() {
+        let registry = component_registry();
+        let first = scene_with_a_light();
+
+        let mut world = World::new();
+        scene_from_json(&mut world, &registry, &first).expect("loads");
+        let second = scene_to_json(&mut world, &registry);
+        assert_eq!(first, second, "one round trip must change nothing");
+
+        let mut again = World::new();
+        scene_from_json(&mut again, &registry, &second).expect("loads");
+        let third = scene_to_json(&mut again, &registry);
+        assert_eq!(second, third, "and neither must the next");
+    }
+
+    /// The exit clause, as far as a headless test can carry it: save, drop the
+    /// world entirely, reopen from the file, and every component is the one
+    /// that was saved.
+    #[test]
+    fn save_quit_reopen_returns_the_same_scene() {
+        let dir = std::env::temp_dir().join(format!(
+            "somnium_scene_lifecycle_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("scene.somnium");
+        let text = path.to_string_lossy().into_owned();
+        let registry = component_registry();
+
+        let saved = {
+            let mut world = World::new();
+            world.spawn((
+                Transform::from_translation(glam::Vec3::new(4.0, 5.0, 6.0)),
+                Name::new("Lamp"),
+                LightComponent {
+                    intensity: 4200.0,
+                    ..LightComponent::default()
+                },
+            ));
+            save_scene_schema_with_thumbnail(
+                &mut world,
+                &registry,
+                &text,
+                Some(&[0x89, b'P', b'N', b'G']),
+            )
+            .expect("saves");
+            scene_to_json(&mut world, &registry)
+        };
+
+        // The world is gone. Everything now comes from the file.
+        let mut reopened = World::new();
+        load_scene_schema(&mut reopened, &registry, &text).expect("loads");
+        assert_eq!(scene_to_json(&mut reopened, &registry), saved);
+
+        let entity = reopened.entities().next().expect("one entity");
+        assert_eq!(reopened.get::<Name>(entity).unwrap().as_str(), "Lamp");
+        assert_eq!(
+            reopened.get::<Transform>(entity).unwrap().translation.x,
+            4.0
+        );
+        assert_eq!(
+            reopened.get::<LightComponent>(entity).unwrap().intensity,
+            4200.0
+        );
+
+        // And the drawer can read the thumbnail without parsing any of it.
+        let header = crate::scene_file::read_header(&path)
+            .expect("header reads")
+            .expect("header present");
+        assert_eq!(header.document_version, SCENE_VERSION);
+        assert_eq!(header.entity_count, 1);
+        assert_eq!(
+            header.thumbnail_png().unwrap(),
+            vec![0x89, b'P', b'N', b'G']
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A scene written before CONTROL-J is bare JSON, and must keep loading.
+    #[test]
+    fn a_pre_container_scene_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "somnium_scene_legacy_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("old.somnium");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&scene_with_a_light()).unwrap(),
+        )
+        .unwrap();
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let report =
+            load_scene_schema(&mut world, &registry, &path.to_string_lossy()).expect("loads");
+        assert_eq!(report.entities.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
@@ -640,6 +964,80 @@ mod tests {
             .unwrap_or_else(|| panic!("no entity named {name}"))
     }
 
+    /// CONTROL-K's exit criterion, in one test: an authored curve and an
+    /// authored ramp survive the file, keys, tangents, interpolation modes and
+    /// all. A curve that round-trips as "two linear keys" would look right in
+    /// a screenshot and be wrong in every scene reloaded after this.
+    #[test]
+    fn curves_and_gradients_survive_a_save() {
+        use somnium_ecs::curve::{Curve, CurveKey, Gradient, GradientStop, Interpolation};
+
+        let registry = component_registry();
+        let mut world = World::new();
+
+        let response = Curve::from_keys(vec![
+            CurveKey {
+                out_tangent: 2.5,
+                interpolation: Interpolation::Smooth,
+                ..CurveKey::new(0.0, 0.0)
+            },
+            CurveKey {
+                interpolation: Interpolation::Step,
+                ..CurveKey::new(0.35, 0.4)
+            },
+            CurveKey::new(1.0, 1.0),
+        ]);
+        let post = crate::PostProcessComponent {
+            response_curve: response.clone(),
+            ..crate::PostProcessComponent::default()
+        };
+        let ramp = Gradient::from_stops(vec![
+            GradientStop::new(0.0, [1.0, 0.4, 0.1, 1.0]),
+            GradientStop::new(0.6, [0.9, 0.9, 0.2, 0.7]),
+            GradientStop::new(1.0, [0.2, 0.0, 0.0, 0.0]),
+        ]);
+        let emitter = crate::ParticleEmitter {
+            color_over_life: ramp.clone(),
+            ..crate::ParticleEmitter::default()
+        };
+
+        world.spawn((Name::new("Look"), Transform::default(), post));
+        world.spawn((Name::new("Sparks"), Transform::default(), emitter));
+
+        let (loaded, report) = round_trip(&mut world, &registry);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            loaded
+                .get::<crate::PostProcessComponent>(find(&loaded, "Look"))
+                .unwrap()
+                .response_curve,
+            response
+        );
+        assert_eq!(
+            loaded
+                .get::<crate::ParticleEmitter>(find(&loaded, "Sparks"))
+                .unwrap()
+                .color_over_life,
+            ramp
+        );
+    }
+
+    /// A field that did not exist when the file was written must load as an
+    /// empty curve rather than failing the entity.
+    #[test]
+    fn an_absent_curve_field_loads_as_an_empty_curve() {
+        use somnium_ecs::reflect::{FieldType, ReflectValue};
+        let resolve = |_: PersistentId| None;
+        assert_eq!(
+            value_from_json(&resolve, &FieldType::Curve, &serde_json::Value::Null),
+            Some(ReflectValue::Curve(somnium_ecs::curve::Curve::empty()))
+        );
+        assert_eq!(
+            value_from_json(&resolve, &FieldType::Gradient, &serde_json::Value::Null),
+            Some(ReflectValue::Gradient(somnium_ecs::curve::Gradient::empty()))
+        );
+    }
+
     #[test]
     fn components_round_trip_through_the_registry() {
         let registry = component_registry();
@@ -661,7 +1059,12 @@ mod tests {
         let transform = loaded.get::<Transform>(sun).unwrap();
         assert!((transform.translation - glam::Vec3::new(1.5, -2.0, 3.25)).length() < 1.0e-6);
         assert!((transform.scale - glam::Vec3::new(1.0, 2.0, 3.0)).length() < 1.0e-6);
-        assert!(transform.rotation.angle_between(glam::Quat::from_rotation_x(0.75)) < 1.0e-5);
+        assert!(
+            transform
+                .rotation
+                .angle_between(glam::Quat::from_rotation_x(0.75))
+                < 1.0e-5
+        );
 
         let light = loaded.get::<LightComponent>(sun).unwrap();
         assert!((light.intensity - 50_000.0).abs() < 1.0e-2);
@@ -745,12 +1148,18 @@ mod tests {
         attachment.execution_order = -3;
         attachment.enabled = false;
         attachment.schema_version = 4;
-        attachment.properties.insert("speed".into(), ScriptValue::F64(12.5));
-        attachment.properties.insert("label".into(), ScriptValue::Str("wheel".into()));
+        attachment
+            .properties
+            .insert("speed".into(), ScriptValue::F64(12.5));
+        attachment
+            .properties
+            .insert("label".into(), ScriptValue::Str("wheel".into()));
         attachment
             .properties
             .insert("offset".into(), ScriptValue::Vec3([1.0, 0.0, -1.0]));
-        attachment.properties.insert("armed".into(), ScriptValue::Bool(true));
+        attachment
+            .properties
+            .insert("armed".into(), ScriptValue::Bool(true));
         let instance = attachment.instance;
 
         let mut set = ScriptSet::new();
@@ -824,7 +1233,15 @@ mod tests {
         assert!(report.warnings.is_empty());
 
         let entity = find(&loaded, "Haunted");
-        assert_eq!(loaded.get::<ScriptSet>(entity).unwrap().get(instance).unwrap().asset, ghost);
+        assert_eq!(
+            loaded
+                .get::<ScriptSet>(entity)
+                .unwrap()
+                .get(instance)
+                .unwrap()
+                .asset,
+            ghost
+        );
 
         // Saving again must not lose it.
         let again = scene_to_json(&mut loaded, &registry);
@@ -864,6 +1281,34 @@ mod tests {
     }
 
     #[test]
+    fn material_asset_reference_round_trips_but_runtime_pool_id_does_not() {
+        let registry = component_registry();
+        let asset =
+            somnium_asset::database::AssetId::from_relative_path("materials/Polished.sommat");
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Polished Cube"),
+            Transform::default(),
+            crate::MaterialComponent {
+                asset,
+                runtime_id: 913,
+            },
+        ));
+        let document = scene_to_json(&mut world, &registry);
+        let text = serde_json::to_string(&document).unwrap();
+        assert!(text.contains(&asset.to_string()));
+        assert!(!text.contains("runtime_id"));
+        assert!(!text.contains("913"));
+
+        let mut loaded = World::new();
+        scene_from_json(&mut loaded, &registry, &document).unwrap();
+        let entity = find(&loaded, "Polished Cube");
+        let material = loaded.get::<crate::MaterialComponent>(entity).unwrap();
+        assert_eq!(material.asset, asset);
+        assert_eq!(material.runtime_id, 0);
+    }
+
+    #[test]
     fn an_unknown_component_warns_and_the_rest_of_the_entity_loads() {
         let registry = component_registry();
         let mut world = World::new();
@@ -877,7 +1322,13 @@ mod tests {
         let report = scene_from_json(&mut loaded, &registry, &document).unwrap();
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].message.contains("mod.FromANewerBuild"));
-        assert_eq!(loaded.get::<Name>(find(&loaded, "Future")).unwrap().as_str(), "Future");
+        assert_eq!(
+            loaded
+                .get::<Name>(find(&loaded, "Future"))
+                .unwrap()
+                .as_str(),
+            "Future"
+        );
     }
 
     #[test]
@@ -907,7 +1358,12 @@ mod tests {
 
         let mut loaded = World::new();
         let report = scene_from_json(&mut loaded, &registry, &document).unwrap();
-        assert!(report.warnings.iter().any(|w| w.message.contains("version 0")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("version 0"))
+        );
         assert!(loaded.get::<Transform>(find(&loaded, "Old")).is_some());
     }
 
@@ -942,7 +1398,10 @@ mod tests {
     fn a_file_on_disk_round_trips() {
         let registry = component_registry();
         let mut world = World::new();
-        world.spawn((Name::new("OnDisk"), Transform::from_translation(glam::Vec3::Y)));
+        world.spawn((
+            Name::new("OnDisk"),
+            Transform::from_translation(glam::Vec3::Y),
+        ));
 
         let path = std::env::temp_dir().join("somnium_scene_schema_round_trip.somnium");
         let path = path.to_str().unwrap();
@@ -1010,7 +1469,7 @@ mod tests {
         foliage.density = 7.25;
         foliage.seed = 4242;
         foliage.max_instances = 31_000;
-        world.spawn((Name::new("Ground"), Transform::default(), foliage));
+        world.spawn((Name::new("Ground"), Transform::default(), foliage.clone()));
 
         let (loaded, report) = round_trip(&mut world, &registry);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);

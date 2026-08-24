@@ -85,10 +85,11 @@ egui-wgpu  = "0.34"
 egui-winit = "0.34"
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
 
 # -- Asset loading -----------------------------------------------------------
 gltf = { version = "1", features = ["names", "utils", "image", "KHR_texture_transform",
-    "KHR_materials_transmission"] }
+    "KHR_materials_transmission", "KHR_materials_emissive_strength"] }
 image = "0.25"
 exr = "1.74"
 

@@ -51,6 +51,9 @@ pub struct UploadedNode {
     pub index_offset: u32,
     pub index_count: u32,
     pub material_id: u32,
+    /// Source material index, retained so the editor can attach the editable
+    /// `.sommat` sibling rather than authoring the runtime pool slot.
+    pub material_index: usize,
     pub transform: glam::Mat4,
 }
 
@@ -236,6 +239,12 @@ pub struct SomniumRenderer {
     terrain_materials: crate::material::pool::TerrainMaterialPool,
     /// Inspector override for `SOMNIUM_SHADOW_DEBUG` (0 = use env).
     pub shading_debug: f32,
+    /// CONTROL-G: the named pipeline switches, seeded from the environment.
+    ///
+    /// The individual fields below stay as they are — every pass reads them
+    /// and nothing about that changes. This is the *authored* state, and
+    /// [`Self::apply_debug_toggles`] is the one place it reaches them.
+    pub debug_toggles: somnium_ui::debug::DebugToggles,
     /// Deterministic HDR frame readback for A/B measurement. Inert unless
     /// `SOMNIUM_CAPTURE` or `SOMNIUM_CAPTURE_COMPARE` is set.
     capture: crate::capture::FrameCapture,
@@ -300,6 +309,17 @@ pub struct SomniumRenderer {
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
+    /// Phase CONTROL-M: volumetric clouds. Public because the editor drives
+    /// every one of its parameters from `SkyComponent`.
+    pub cloud_pass: crate::pass::clouds::CloudPass,
+    /// Phase CONTROL-O: deferred decals, binned through the same froxel grid
+    /// as the local lights.
+    pub decal_grid: crate::pass::decal::DecalGrid,
+    /// This frame's decals, pushed by the engine layer and cleared after
+    /// binning — the same lifecycle `local_lights` has, and for the same
+    /// reason: the binning must use the *render's* view matrix, not whatever
+    /// the matrix was when the ECS was walked.
+    pub decals: Vec<crate::pass::decal::GpuDecal>,
     /// Phases 24U/25I: froxel volume carrying aerial perspective and fog.
     pub volumetric_pass: crate::pass::volumetric::VolumetricPass,
 
@@ -370,6 +390,50 @@ pub struct SomniumRenderer {
 }
 
 impl SomniumRenderer {
+    /// Push [`Self::debug_toggles`] into the fields the passes actually read.
+    ///
+    /// Called after every menu flip rather than every frame: the toggles are
+    /// authored state that changes when a person changes it, and copying them
+    /// per frame would quietly overwrite anything else that writes the same
+    /// field — which is exactly how the terrain inspector's parallax control
+    /// and a view-menu toggle would end up fighting.
+    pub fn apply_debug_toggles(&mut self) {
+        let on = |id: &str| self.debug_toggles.is_on(id);
+        self.meshlet_draws = on("meshlets");
+        self.occlusion_off = !on("occlusion");
+        self.cull_stats = on("cull_stats");
+        self.cascade_caster_cull = on("cascade_cull");
+        self.aerial_split_enabled = on("aerial");
+        self.aerial_hero_bank = on("aerial_hero");
+        self.census_pass.enabled = on("pixel_census");
+        self.cloud_pass.jitter = on("cloud_jitter");
+        self.classify_pass.enabled = on("shading_bins");
+
+        let hex = on("hex_tiling");
+        let morph = on("terrain_lod_morph");
+        let height_blend = on("terrain_height_blend");
+        let triplanar = u32::from(on("terrain_triplanar"));
+        let macro_on = on("terrain_macro");
+        let detail_fade = on("terrain_detail_fade");
+        let parallax = on("terrain_parallax");
+        for terrain in &mut self.terrains {
+            terrain.hex_tiling = hex;
+            terrain.lod_morph = morph;
+            terrain.height_blend = height_blend;
+            terrain.projection_mode = triplanar;
+            // Strength and distance are authored numbers, not booleans: the
+            // toggle turns the effect off and restores the held value rather
+            // than inventing one.
+            terrain.macro_strength = if macro_on { 0.55 } else { 0.0 };
+            terrain.detail_fade_start = if detail_fade { 60.0 } else { 1.0e9 };
+            terrain.parallax_scale = if parallax { terrain.parallax_held } else { 0.0 };
+            terrain.invalidate_unique_colour();
+        }
+        for clipmap in &mut self.clipmaps {
+            clipmap.enabled = on("terrain_clipmap");
+        }
+    }
+
     /// Initialize the renderer using the provided `RenderContext`.
     pub fn new(ctx: &RenderContext) -> Self {
         let geometry = GeometryPool::new(&ctx.device);
@@ -558,6 +622,19 @@ impl SomniumRenderer {
         );
         let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
 
+        // Phase CONTROL-M. Built before the shading pass because shading binds
+        // its cloud-shadow field, and the field must exist before the bind
+        // group that names it.
+        let cloud_pass = crate::pass::clouds::CloudPass::new(
+            &ctx.device,
+            ctx.config.width,
+            ctx.config.height,
+        );
+
+        // Phase CONTROL-O. Built before the shading pass, like the clouds and
+        // for the same reason: shading binds its buffers.
+        let decal_grid = crate::pass::decal::DecalGrid::new(&ctx.device);
+
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
@@ -580,6 +657,9 @@ impl SomniumRenderer {
             lighting_extra_pass.aux_view(),
             lighting_extra_pass.volume_view(),
             lighting_extra_pass.sh_buffer(),
+            &cloud_pass.shadow_view,
+            &cloud_pass.shadow_params,
+            &decal_grid,
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -741,6 +821,9 @@ impl SomniumRenderer {
             single_sided_args: 0,
             ibl_pass,
             volumetric_pass,
+            cloud_pass,
+            decal_grid,
+            decals: Vec::new(),
             hiz_pass,
             hiz_ready: false,
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
@@ -767,6 +850,7 @@ impl SomniumRenderer {
             camera_submersion: 0.0,
             terrain_materials,
             shading_debug: 0.0,
+            debug_toggles: somnium_ui::debug::DebugToggles::from_env(),
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
             timing: crate::timing::TimingRun::from_env(),
@@ -804,6 +888,69 @@ impl SomniumRenderer {
         self.global_pool.texture_views[index as usize] = view;
         self.global_pool.update_textures(&ctx.device);
         index
+    }
+
+    /// Upload worker-decoded RGBA8 pixels into the bindless pool. Material
+    /// asset jobs use this main-thread half after file IO and decode complete.
+    pub fn upload_material_texture(
+        &mut self,
+        ctx: &RenderContext,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> i32 {
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Material Asset Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let row_bytes = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = row_bytes.div_ceil(align) * align;
+        let upload = if padded_row == row_bytes {
+            rgba.to_vec()
+        } else {
+            let mut padded = vec![0_u8; padded_row as usize * height as usize];
+            for row in 0..height as usize {
+                let source = row * row_bytes as usize;
+                let target = row * padded_row as usize;
+                padded[target..target + row_bytes as usize]
+                    .copy_from_slice(&rgba[source..source + row_bytes as usize]);
+            }
+            padded
+        };
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &upload,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.add_texture(
+            ctx,
+            texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        ) as i32
     }
 
     /// Upload a `LoadedScene` to the GPU pools and return one `UploadedNode` per
@@ -938,7 +1085,8 @@ impl SomniumRenderer {
                         emissive: mat.emissive,
                         emissive_map: resolve_tex(mat.emissive_map),
                         terrain_index: -1,
-                        _pad: [0.0; 2],
+                        porosity: 0.5,
+                        _pad: 0.0,
                         // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                         // and BLEND goes to the forward pass, so a cutoff on either
                         // would punch holes in geometry that should be solid.
@@ -1004,6 +1152,7 @@ impl SomniumRenderer {
                     index_offset: alloc.index_offset,
                     index_count: alloc.index_count,
                     material_id: mat_id,
+                    material_index: mat_idx,
                     transform: node.transform,
                 })
             })
@@ -1482,6 +1631,10 @@ impl SomniumRenderer {
             self.restir_pass.resize(&ctx.device, width, height);
             self.restir_gi_pass.resize(&ctx.device, width, height);
             self.lighting_extra_pass.resize(&ctx.device, width, height);
+            // CONTROL-M: the quarter-res march target follows the scene, and
+            // dropping its bind groups here is what makes the next frame
+            // rebuild them against the new depth view rather than the old one.
+            self.cloud_pass.resize(&ctx.device, width, height);
             self.shading_pass.resize(
                 &ctx.device,
                 &self.vis_pass.view,
@@ -1821,7 +1974,8 @@ impl SomniumRenderer {
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: terrain.terrain_index as i32,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -1962,6 +2116,25 @@ impl SomniumRenderer {
             shading_mode,
         );
         self.local_lights.clear();
+
+        // Phase CONTROL-O: the same grid geometry, the same matrices, the same
+        // near and far. Binned here rather than where the ECS is walked so a
+        // decal and a light in the same froxel genuinely are in the same
+        // froxel — a submission-time binning would be one frame stale, which
+        // shows as decals popping at tile boundaries under a fast camera.
+        let decals = std::mem::take(&mut self.decals);
+        self.decal_grid.assign_and_upload(
+            &ctx.queue,
+            &decals,
+            self.view_matrix,
+            self.proj_matrix,
+            self.render_width,
+            self.render_height,
+            0.1,
+            1000.0,
+        );
+        self.decals = decals;
+        self.decals.clear();
         // ── 0. Upload view buffer ────────────────────────────────────────────
         self.write_view_buffer(&ctx.queue, self.view_proj);
 
@@ -2082,7 +2255,7 @@ impl SomniumRenderer {
             // traced shadows; without it, the TLAS holds the same scene 24J saw.
             if self.raytrace_pass.supported()
                 && !self.rebuilt_chunks.is_empty()
-                && std::env::var("SOMNIUM_RT_TERRAIN").as_deref() != Ok("0")
+                && self.debug_toggles.is_on("rt_terrain")
             {
                 if let Some((rt_index_offset, rt_index_count)) = terrain.rt_index_block() {
                     let vertex_count = terrain.chunk_vertex_capacity();
@@ -2676,6 +2849,33 @@ impl SomniumRenderer {
         self.shading_pass
             .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
 
+        // ── 6.9 Volumetric clouds (Phase CONTROL-M) ──────────────────────────
+        //
+        // Marched here rather than after shading because it reads the froxel
+        // volume for its own aerial perspective, and because a compute
+        // dispatch issued before the shading draw can overlap with it. The
+        // *composite* has to wait until shading has drawn the sky, and does —
+        // see 7.4 below.
+        self.profiler.begin(&mut encoder, "Clouds");
+        self.cloud_pass.ensure_bind_groups(
+            &ctx.device,
+            self.atmosphere_pass.transmittance_view(),
+            self.atmosphere_pass.multiscatter_view(),
+            self.atmosphere_pass.sampler(),
+            &self.vis_pass.depth_view,
+            &self.volumetric_pass.view,
+        );
+        self.cloud_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.view_proj_unjittered.inverse(),
+            self.camera_pos,
+            self.light_direction,
+            self.light_color,
+            self.volumetric_pass.max_distance(),
+        );
+        self.profiler.end(&mut encoder);
+
         // ── 6.95 Terrain clipmap generate (Phase DF) ─────────────────────────
         // World XZ, no FSR jitter. Generate paints array layers as color
         // attachments; shade samples the same images (group 2).
@@ -3128,6 +3328,18 @@ impl SomniumRenderer {
         // perspective reaching it for the first time — and with one copy of
         // `sample_shadow` and the cluster lookup instead of two. It still
         // writes depth before the water pass, because the visibility pass does.
+
+        // ── 7.4 Cloud composite (Phase CONTROL-M) ────────────────────────────
+        //
+        // After the sky is in the HDR target and before water and transparents,
+        // so a cloud is behind a wave and in front of the sky, which is where
+        // clouds are. Before TAA too: the clouds land in the buffer TAA already
+        // resolves, so they inherit 24F's jittered-matrix reprojection instead
+        // of growing a second, naive history.
+        self.profiler.begin(&mut encoder, "Cloud composite");
+        self.cloud_pass
+            .composite(&mut encoder, &self.postprocess_pass.hdr_view);
+        self.profiler.end(&mut encoder);
 
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         self.water_pass.clear_surface(&mut encoder);

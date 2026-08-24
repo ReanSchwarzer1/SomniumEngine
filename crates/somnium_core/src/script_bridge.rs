@@ -36,11 +36,11 @@
 
 use somnium_ecs::reflect::{FieldFlags, TypeRegistry};
 use somnium_ecs::{Entity, FieldId, PersistentId, ReflectObject, StableId, World};
+use somnium_script::ScriptAssetId;
 use somnium_script::command::{ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken};
 use somnium_script::order::OrderKey;
 use somnium_script::snapshot::WorldView;
 use somnium_script::value::ScriptValue;
-use somnium_script::ScriptAssetId;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Read side
@@ -75,12 +75,7 @@ impl WorldView for EngineWorldView<'_> {
         (schema.snapshot)(self.world, entity)
     }
 
-    fn read_field(
-        &self,
-        entity: Entity,
-        component: StableId,
-        field: &str,
-    ) -> Option<ScriptValue> {
+    fn read_field(&self, entity: Entity, component: StableId, field: &str) -> Option<ScriptValue> {
         let schema = self.registry.by_stable_id(component)?;
         let field = schema.field_by_name(field)?;
         if !field.flags.contains(FieldFlags::SCRIPT_READ) {
@@ -267,7 +262,15 @@ pub fn apply_commands(
                 component,
                 fields,
             } => {
-                apply_set_fields(world, registry, order, entity, component, &fields, &mut outcome);
+                apply_set_fields(
+                    world,
+                    registry,
+                    order,
+                    entity,
+                    component,
+                    &fields,
+                    &mut outcome,
+                );
             }
 
             ScriptCommand::AddComponent {
@@ -318,7 +321,13 @@ pub fn apply_commands(
                         continue;
                     }
                     apply_set_fields(
-                        world, registry, order, entity, *component, fields, &mut outcome,
+                        world,
+                        registry,
+                        order,
+                        entity,
+                        *component,
+                        fields,
+                        &mut outcome,
                     );
                 }
                 if ok {
@@ -547,7 +556,10 @@ mod tests {
                 Some(ScriptValue::Str("Thing".into()))
             );
             assert_eq!(view.components_on(e), vec![NAME, TRANSFORM]);
-            assert!(view.read_component(e, LIGHT).is_none(), "not on this entity");
+            assert!(
+                view.read_component(e, LIGHT).is_none(),
+                "not on this entity"
+            );
         }
 
         world.despawn(e);
@@ -816,14 +828,11 @@ mod tests {
             token,
             components: vec![
                 (TRANSFORM, translation([7.0, 0.0, 0.0])),
-                (
-                    NAME,
-                    {
-                        let mut record = ReflectObject::new();
-                        record.insert(FieldId(0), ReflectValue::Str("Spawned".into()));
-                        record
-                    },
-                ),
+                (NAME, {
+                    let mut record = ReflectObject::new();
+                    record.insert(FieldId(0), ReflectValue::Str("Spawned".into()));
+                    record
+                }),
             ],
         });
         buffer.end();
@@ -866,7 +875,10 @@ mod tests {
 
         assert!(outcome.is_clean(), "{:?}", outcome.rejected);
         assert_eq!(outcome.despawned, vec![e]);
-        assert!(!world.is_alive(e), "the entity is gone by the end of the pass");
+        assert!(
+            !world.is_alive(e),
+            "the entity is gone by the end of the pass"
+        );
     }
 
     #[test]

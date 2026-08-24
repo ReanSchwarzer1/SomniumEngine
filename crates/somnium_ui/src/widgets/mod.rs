@@ -1,3 +1,10 @@
+/// What an editor shows when the selection does not agree on a value.
+///
+/// One constant rather than a literal per widget, because the em dash is a
+/// contract: an untouched control displaying it has *no* value to write back,
+/// and every widget that can show it must clear it on the first real edit.
+pub const MIXED_PLACEHOLDER: &str = "\u{2014}";
+
 pub mod border;
 pub mod button;
 pub mod canvas;
@@ -6,6 +13,8 @@ pub mod color_picker;
 pub mod combo_box;
 pub mod command_palette;
 pub mod context_menu;
+pub mod curve_editor;
+pub mod gradient_editor;
 pub mod grid;
 pub mod image;
 pub mod menu;
@@ -37,6 +46,8 @@ pub use command_palette::{
     CommandPalette, CommandPaletteBuilder, CommandPaletteMessage, PaletteItem,
 };
 pub use context_menu::{ContextMenu, ContextMenuBuilder, ContextMenuMessage, MenuItem};
+pub use curve_editor::{CurveEditor, CurveEditorBuilder, CurveEditorMessage};
+pub use gradient_editor::{GradientEditor, GradientEditorBuilder, GradientEditorMessage};
 pub use grid::{Grid, GridBuilder, GridDimension, GridMessage, SizeMode};
 pub use image::{IconBuilder, Image, ImageBuilder};
 pub use numeric_field::{NumericField, NumericFieldBuilder, NumericFieldMessage};

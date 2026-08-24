@@ -18,14 +18,23 @@ use glam::Vec2;
 pub enum ComboBoxMessage {
     SelectionChanged(usize),
     SetSelected(usize),
-    BindPopup { popup: NodeHandle, list: NodeHandle },
+    BindPopup {
+        popup: NodeHandle,
+        list: NodeHandle,
+    },
     Open,
     Close,
+    /// Replace filtered entries without replacing/focusing the widget.
+    SetItems(Vec<String>),
+    /// Optional asset paths aligned with items; dropdown draws their previews.
+    SetAssetPaths(Vec<Option<std::path::PathBuf>>),
 }
 
 pub struct ComboBox {
     pub items: Vec<String>,
     pub selected: usize,
+    /// See [`super::MIXED_PLACEHOLDER`]. Cleared on the first choice.
+    pub mixed: bool,
     pub open: bool,
     pub font_id: u8,
     pub px: f32,
@@ -34,6 +43,10 @@ pub struct ComboBox {
 }
 
 impl Control for ComboBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let w = self
             .items
@@ -61,11 +74,14 @@ impl Control for ComboBox {
         paint.border = t.semantic.border.default.bytes();
         paint.border_thickness = t.geometry.stroke_hairline;
         ctx.push_paint(header, &paint);
-        let label = self
-            .items
-            .get(self.selected)
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let label = if self.mixed {
+            super::MIXED_PLACEHOLDER
+        } else {
+            self.items
+                .get(self.selected)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        };
         ctx.push_text(
             label,
             Vec2::new(b.x + 6.0, b.y + 4.0),
@@ -108,6 +124,12 @@ impl Control for ComboBox {
             msg.handled = true;
             return;
         }
+        if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
+            self.items = items.clone();
+            self.selected = self.selected.min(self.items.len().saturating_sub(1));
+            msg.handled = true;
+            return;
+        }
         if let Some(ComboBoxMessage::Close) = msg.data::<ComboBoxMessage>() {
             if self.open {
                 self.open = false;
@@ -133,6 +155,7 @@ impl Control for ComboBox {
             return;
         }
         if let Some(WidgetMessage::MouseDown { .. }) = msg.data::<WidgetMessage>() {
+            self.mixed = false;
             if self.open {
                 self.open = false;
                 if self.popup.is_some() {
@@ -181,6 +204,7 @@ impl Control for ComboBox {
 
 pub struct ComboBoxBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     items: Vec<String>,
     selected: usize,
     font_id: u8,
@@ -188,8 +212,16 @@ pub struct ComboBoxBuilder {
 }
 
 impl ComboBoxBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
+            mixed: false,
             widget,
             items: Vec::new(),
             selected: 0,
@@ -213,6 +245,7 @@ impl ComboBoxBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(ComboBox {
+                mixed: self.mixed,
                 items: self.items,
                 selected: self.selected,
                 open: false,
@@ -251,6 +284,7 @@ pub struct ComboDropdown {
     pub popup: NodeHandle,
     pub font_id: u8,
     pub px: f32,
+    pub asset_paths: Vec<Option<std::path::PathBuf>>,
 }
 
 impl Control for ComboDropdown {
@@ -289,9 +323,21 @@ impl Control for ComboDropdown {
                 ));
                 ctx.push_paint(row, &sel);
             }
+            let text_x = if let Some(Some(path)) = self.asset_paths.get(i) {
+                let icon = Rect::new(row.x + 3.0, row.y + 2.0, 20.0, 20.0);
+                if let Some(uv) = ctx.thumbnails.uv(path) {
+                    ctx.push_primitive(
+                        crate::primitive::Primitive::textured(icon, uv, [255; 4]),
+                        Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),
+                    );
+                }
+                row.x + 28.0
+            } else {
+                row.x + 8.0
+            };
             ctx.push_text(
                 item,
-                Vec2::new(row.x + 8.0, row.y + 4.0),
+                Vec2::new(text_x, row.y + 4.0),
                 self.font_id,
                 self.px,
                 t.semantic.text.primary.bytes(),
@@ -313,6 +359,17 @@ impl Control for ComboDropdown {
             if *i < self.items.len() {
                 self.selected = *i;
             }
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
+            self.items = items.clone();
+            self.selected = self.selected.min(self.items.len().saturating_sub(1));
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetAssetPaths(paths)) = msg.data::<ComboBoxMessage>() {
+            self.asset_paths = paths.clone();
             msg.handled = true;
             return;
         }
@@ -357,6 +414,7 @@ pub struct ComboDropdownBuilder {
     popup: NodeHandle,
     font_id: u8,
     px: f32,
+    asset_paths: Vec<Option<std::path::PathBuf>>,
 }
 
 impl ComboDropdownBuilder {
@@ -368,6 +426,7 @@ impl ComboDropdownBuilder {
             popup: NodeHandle::NONE,
             font_id: 0,
             px: 12.0,
+            asset_paths: Vec::new(),
         }
     }
 
@@ -391,6 +450,14 @@ impl ComboDropdownBuilder {
         self
     }
 
+    pub fn with_asset_paths(
+        mut self,
+        paths: impl IntoIterator<Item = Option<std::path::PathBuf>>,
+    ) -> Self {
+        self.asset_paths = paths.into_iter().collect();
+        self
+    }
+
     pub fn build(self) -> UiNode {
         UiNode::new(
             self.widget.build(),
@@ -401,6 +468,7 @@ impl ComboDropdownBuilder {
                 popup: self.popup,
                 font_id: self.font_id,
                 px: self.px,
+                asset_paths: self.asset_paths,
             }),
         )
     }
@@ -413,6 +481,7 @@ mod tests {
     #[test]
     fn selection_stays_in_range() {
         let cb = ComboBox {
+            mixed: false,
             items: vec!["AgX".into(), "ACES".into(), "Reinhard".into()],
             selected: 0,
             open: false,

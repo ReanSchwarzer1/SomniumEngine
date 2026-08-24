@@ -14,7 +14,7 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, NodeHandle, UiMessage, WidgetMessage},
+    message::{MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
     pool::Pool,
     types::{HorizontalAlignment, Rect, VerticalAlignment},
@@ -29,6 +29,19 @@ pub type NodePool = Pool<UiNode>;
 
 // Internal concrete handle type (what Pool<UiNode> uses).
 type IH = crate::pool::Handle<UiNode>;
+
+/// Ownership record for the one modal-feeling gesture currently in flight.
+/// Gesture-specific restoration data stays in the owning control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GestureToken {
+    pub owner: NodeHandle,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModalFocus {
+    root: NodeHandle,
+    return_to: NodeHandle,
+}
 
 #[inline]
 fn to_ih(h: NodeHandle) -> IH {
@@ -59,9 +72,30 @@ pub struct UserInterface {
     /// at half its intended apparent size.
     ui_scale: f32,
     focused_ih: IH,
+    /// Set while a right-drag over the viewport is flying the camera. See
+    /// [`Self::viewport_camera_active`].
+    viewport_camera_active: bool,
     #[allow(dead_code)]
     captured_ih: IH,
     hovered_ih: IH,
+    modifiers: Modifiers,
+    active_gesture: Option<GestureToken>,
+    drag_drop: crate::drag_drop::DragDropState,
+    /// Screen bounds of the widget the current acceptance resolved against.
+    /// Kept beside the acceptance so the highlight, the cursor and the adorner
+    /// text cannot disagree about what is under the pointer.
+    drop_highlight: Option<Rect>,
+    /// Viewport rubber-band, painted with the tree so it sits above the
+    /// viewport image but below every panel.
+    marquee: Option<Rect>,
+    /// CONTROL-G's statistics overlay: its lines, and where they go.
+    statistics: Option<(Rect, Vec<String>)>,
+    /// The corner axis widget's screen-space axis endpoints, recomputed each
+    /// frame from the live view matrix: `(axis index, tip, positive)`.
+    axis_widget: Vec<(u8, Vec2, bool)>,
+    /// Where the widget sits, so a click can be tested against it.
+    axis_widget_bounds: Rect,
+    modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
 }
@@ -89,14 +123,125 @@ impl UserInterface {
             cursor_pos: Vec2::ZERO,
             ui_scale: 1.0,
             focused_ih: IH::NONE,
+            viewport_camera_active: false,
             captured_ih: IH::NONE,
             hovered_ih: IH::NONE,
+            modifiers: Modifiers::default(),
+            active_gesture: None,
+            drag_drop: crate::drag_drop::DragDropState::default(),
+            drop_highlight: None,
+            marquee: None,
+            statistics: None,
+            axis_widget: Vec::new(),
+            axis_widget_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
+            modal_focus: None,
             viewport_handle: NodeHandle::NONE,
         }
     }
 
     pub fn root(&self) -> NodeHandle {
         to_nh(self.root_ih)
+    }
+
+    pub fn arm_drag(&mut self, payload: crate::drag_drop::DragPayload) {
+        self.drag_drop.arm(self.cursor_pos, payload);
+    }
+
+    pub fn begin_external_drag(&mut self, payload: crate::drag_drop::DragPayload) {
+        self.drag_drop.begin_external(payload);
+    }
+
+    #[must_use]
+    pub fn is_dragging(&self) -> bool {
+        self.drag_drop.is_dragging()
+    }
+
+    pub fn set_drop_acceptance(&mut self, value: Option<crate::drag_drop::DropAcceptance>) {
+        self.drag_drop.set_acceptance(value);
+    }
+
+    /// Publish the corner axis widget: the viewport it sits in, and each
+    /// axis's direction in view space.
+    ///
+    /// Core supplies the directions because it holds the view matrix; the
+    /// widget is otherwise pure paint and pure hit-testing, which is what lets
+    /// it be clickable without the UI learning what a camera is.
+    pub fn set_axis_widget(&mut self, viewport: Rect, axes: [Vec2; 3]) {
+        const SIZE: f32 = 56.0;
+        let bounds = Rect::new(
+            viewport.x + viewport.w - SIZE - 16.0,
+            viewport.y + viewport.h - SIZE - 16.0,
+            SIZE,
+            SIZE,
+        );
+        self.axis_widget_bounds = bounds;
+        let centre = Vec2::new(bounds.x + SIZE * 0.5, bounds.y + SIZE * 0.5);
+        let radius = SIZE * 0.36;
+        self.axis_widget.clear();
+        for (index, dir) in axes.iter().enumerate() {
+            // Both ends: a gizmo that only shows +X cannot be clicked to look
+            // from the other side, which is half of what it is for.
+            self.axis_widget
+                .push((index as u8, centre + *dir * radius, true));
+            self.axis_widget
+                .push((index as u8, centre - *dir * radius, false));
+        }
+    }
+
+    /// Which axis end a click lands on, if any. `(axis index, positive)`.
+    #[must_use]
+    pub fn axis_widget_hit(&self, pos: Vec2) -> Option<(u8, bool)> {
+        if !self.axis_widget_bounds.contains(pos) {
+            return None;
+        }
+        self.axis_widget
+            .iter()
+            .find(|(_, tip, _)| tip.distance(pos) <= 9.0)
+            .map(|(axis, _, positive)| (*axis, *positive))
+    }
+
+    /// The statistics overlay's lines and the viewport they sit in.
+    pub fn set_statistics(&mut self, area: Option<(Rect, Vec<String>)>) {
+        self.statistics = area;
+    }
+
+    /// The live viewport rubber-band, or `None` when there is not one.
+    pub fn set_marquee(&mut self, rect: Option<Rect>) {
+        self.marquee = rect;
+    }
+
+    /// Bounds the resolved drop target occupies on screen, or `None` when the
+    /// pointer is over nothing that accepts the payload.
+    pub fn set_drop_highlight(&mut self, bounds: Option<Rect>) {
+        self.drop_highlight = bounds;
+    }
+
+    #[must_use]
+    pub fn drop_highlight(&self) -> Option<Rect> {
+        self.drop_highlight
+    }
+
+    pub fn drag_payload(&self) -> Option<&crate::drag_drop::DragPayload> {
+        self.drag_drop.payload()
+    }
+
+    pub fn take_completed_drop(&mut self) -> Option<crate::drag_drop::CompletedDrop> {
+        self.drag_drop.release()
+    }
+
+    pub fn parent(&self, handle: NodeHandle) -> NodeHandle {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.parent)
+            .unwrap_or(NodeHandle::NONE)
+    }
+
+    /// Screen-space bounds of a node after layout.
+    pub fn screen_bounds(&self, handle: NodeHandle) -> Rect {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|node| node.widget.screen_bounds())
+            .unwrap_or(Rect::ZERO)
     }
 
     /// Set the viewport handle so mouse events in the viewport area pass through to the game.
@@ -449,6 +594,15 @@ impl UserInterface {
 
     /// Cursor for the widget under the pointer (or the captured widget while dragging).
     pub fn cursor_kind(&self) -> crate::node::CursorKind {
+        if self.drag_drop.is_dragging() {
+            return match self.drag_drop.acceptance().map(|a| a.effect) {
+                Some(crate::drag_drop::DropEffect::Move) => crate::node::CursorKind::Move,
+                Some(crate::drag_drop::DropEffect::Copy | crate::drag_drop::DropEffect::Link) => {
+                    crate::node::CursorKind::Copy
+                }
+                _ => crate::node::CursorKind::NoDrop,
+            };
+        }
         let handle = if self.captured_ih.is_some() {
             to_nh(self.captured_ih)
         } else {
@@ -502,7 +656,233 @@ impl UserInterface {
     }
 
     pub fn set_focus(&mut self, handle: NodeHandle) {
+        if let Some(modal) = self.modal_focus {
+            if handle.is_none() || !self.is_under(handle, modal.root) {
+                return;
+            }
+        }
         self.focused_ih = to_ih(handle);
+        self.bring_focus_into_view(handle);
+    }
+
+    /// Enter a modal focus scope and remember the invoking control. Attempts
+    /// to focus outside `root` are ignored until the matching modal exits.
+    pub fn enter_modal(&mut self, root: NodeHandle, initial_focus: NodeHandle) {
+        let return_to = self.focused();
+        self.modal_focus = Some(ModalFocus { root, return_to });
+        self.focused_ih = to_ih(initial_focus);
+        self.bring_focus_into_view(initial_focus);
+    }
+
+    /// Leave a modal focus scope and return focus to the control which opened
+    /// it, if that control still exists and is visible.
+    pub fn exit_modal(&mut self, root: NodeHandle) -> NodeHandle {
+        let Some(modal) = self.modal_focus.filter(|m| m.root == root) else {
+            return self.focused();
+        };
+        self.modal_focus = None;
+        let target = if modal.return_to.is_some()
+            && self.nodes.try_borrow(to_ih(modal.return_to)).is_ok()
+            && self.is_globally_visible(modal.return_to)
+        {
+            modal.return_to
+        } else {
+            NodeHandle::NONE
+        };
+        self.focused_ih = to_ih(target);
+        self.bring_focus_into_view(target);
+        target
+    }
+
+    pub fn modal_root(&self) -> Option<NodeHandle> {
+        self.modal_focus.map(|m| m.root)
+    }
+
+    /// Whether the fly-cam currently owns the keyboard.
+    ///
+    /// True from a right-press over the viewport until the matching release.
+    /// Single-key shortcuts must stand down while this holds: `S` is bound to
+    /// the Scale tool and is also "move backward", and a dispatcher that does
+    /// not know the camera is driving eats the press.
+    #[must_use]
+    pub fn viewport_camera_active(&self) -> bool {
+        self.viewport_camera_active
+    }
+
+    /// Drop the fly-cam latch — for a focus-loss or capture-loss event, where
+    /// no release will ever arrive.
+    pub fn end_viewport_camera(&mut self) {
+        self.viewport_camera_active = false;
+    }
+
+    /// Hand the keyboard back to the game.
+    ///
+    /// Sends `Unfocus` to whatever held focus and clears it. A modal scope is
+    /// left alone: a dialog that has trapped focus must keep it, or `Esc` and
+    /// `Tab` stop meaning anything inside it.
+    ///
+    /// Returns whether anything was actually released, so a caller can tell a
+    /// no-op from a real hand-off.
+    pub fn release_keyboard(&mut self) -> bool {
+        if self.modal_focus.is_some() || !self.focused_ih.is_some() {
+            return false;
+        }
+        let previous = to_nh(self.focused_ih);
+        self.focused_ih = IH::NONE;
+        self.send(UiMessage::new(
+            previous,
+            MessageDirection::ToWidget,
+            WidgetMessage::Unfocus,
+        ));
+        true
+    }
+
+    /// Current modifiers at the OS boundary. Programmatic input can use this
+    /// to preserve the same self-contained message contract.
+    pub fn modifiers(&self) -> Modifiers {
+        self.modifiers
+    }
+
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+    }
+
+    fn keyboard_message(&self, code: winit::keyboard::KeyCode, pressed: bool) -> WidgetMessage {
+        if pressed {
+            WidgetMessage::KeyDown(code, self.modifiers)
+        } else {
+            WidgetMessage::KeyUp(code, self.modifiers)
+        }
+    }
+
+    pub fn active_gesture(&self) -> Option<GestureToken> {
+        self.active_gesture
+    }
+
+    /// Cancel the active gesture before any overlay is dismissed. Returns true
+    /// only when a control accepted cancellation.
+    pub fn cancel_active_gesture(&mut self) -> bool {
+        if self.drag_drop.cancel() {
+            self.captured_ih = IH::NONE;
+            return true;
+        }
+        let Some(token) = self.active_gesture.take() else {
+            return false;
+        };
+        let mut emit = Vec::new();
+        let cancelled = if let Ok(node) = self.nodes.try_borrow_mut(to_ih(token.owner)) {
+            let (widget, control) = (&mut node.widget, &mut node.control);
+            control.cancel_gesture(widget, &mut emit)
+        } else {
+            false
+        };
+        for message in emit {
+            self.message_queue.push_back(message);
+        }
+        if cancelled {
+            self.captured_ih = IH::NONE;
+            self.invalidate_ancestors(token.owner);
+        }
+        cancelled
+    }
+
+    /// Scroll one target node into a specific ScrollViewer.
+    pub fn scroll_into_view(&mut self, viewer: NodeHandle, target: NodeHandle) -> bool {
+        let target_bounds = self.focus_bounds_of(target);
+        self.scroll_rect_into_view(viewer, target_bounds)
+    }
+
+    fn focus_bounds_of(&self, handle: NodeHandle) -> Rect {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.control.focus_bounds(&n.widget))
+            .unwrap_or(Rect::ZERO)
+    }
+
+    fn scroll_rect_into_view(&mut self, viewer: NodeHandle, target: Rect) -> bool {
+        let changed = if let Ok(node) = self.nodes.try_borrow_mut(to_ih(viewer)) {
+            let (widget, control) = (&mut node.widget, &mut node.control);
+            control.scroll_into_view(widget, target)
+        } else {
+            false
+        };
+        if changed {
+            self.invalidate_ancestors(viewer);
+        }
+        changed
+    }
+
+    /// Bring a node (or a composite control's focused row) into every ancestor
+    /// scroll viewport.
+    pub fn bring_focus_into_view(&mut self, handle: NodeHandle) {
+        if handle.is_none() {
+            return;
+        }
+        let target = self.focus_bounds_of(handle);
+        let mut ancestor = self.parent_of(handle);
+        while let Some(parent) = ancestor {
+            self.scroll_rect_into_view(parent, target);
+            ancestor = self.parent_of(parent);
+        }
+    }
+
+    fn collect_focusable(&self, handle: NodeHandle, out: &mut Vec<NodeHandle>) {
+        let (focusable, children) = {
+            let Ok(node) = self.nodes.try_borrow(to_ih(handle)) else {
+                return;
+            };
+            if !node.widget.global_visibility || !node.widget.enabled {
+                return;
+            }
+            (
+                node.control.is_keyboard_focusable(),
+                node.widget.children.clone(),
+            )
+        };
+        if focusable {
+            out.push(handle);
+        }
+        for child in children {
+            self.collect_focusable(child, out);
+        }
+    }
+
+    /// Arrow traversal for a region whose rows are ordinary child controls.
+    /// TreeView handles the same keys internally because its rows are virtual.
+    pub fn traverse_region(&mut self, region: NodeHandle, key: winit::keyboard::KeyCode) -> bool {
+        use winit::keyboard::KeyCode;
+        let mut stops = Vec::new();
+        self.collect_focusable(region, &mut stops);
+        if stops.is_empty() {
+            return false;
+        }
+        let current = self.focused();
+        let current_index = stops.iter().position(|h| *h == current);
+        let next = match key {
+            KeyCode::ArrowDown => current_index.map_or(0, |i| (i + 1).min(stops.len() - 1)),
+            KeyCode::ArrowUp => current_index.map_or(stops.len() - 1, |i| i.saturating_sub(1)),
+            KeyCode::Home => 0,
+            KeyCode::End => stops.len() - 1,
+            _ => return false,
+        };
+        let target = stops[next];
+        if current != target {
+            if current.is_some() {
+                self.send(UiMessage::new(
+                    current,
+                    MessageDirection::ToWidget,
+                    WidgetMessage::Unfocus,
+                ));
+            }
+            self.focused_ih = to_ih(target);
+            self.send(UiMessage::new(
+                target,
+                MessageDirection::ToWidget,
+                WidgetMessage::Focus,
+            ));
+        }
+        self.bring_focus_into_view(target);
+        true
     }
 
     /// Tooltip string on the widget under `pos`, walking parents if empty.
@@ -570,6 +950,29 @@ impl UserInterface {
                         if dirty {
                             self.invalidate_ancestors(to_nh(current_ih));
                         }
+                        let gesture_active = self
+                            .nodes
+                            .try_borrow(current_ih)
+                            .map(|n| n.control.gesture_active())
+                            .unwrap_or(false);
+                        let owner = to_nh(current_ih);
+                        if gesture_active && self.active_gesture.is_none() {
+                            self.active_gesture = Some(GestureToken { owner });
+                        } else if !gesture_active
+                            && self
+                                .active_gesture
+                                .is_some_and(|token| token.owner == owner)
+                        {
+                            self.active_gesture = None;
+                        }
+                        if msg.handled
+                            && matches!(
+                                msg.data::<WidgetMessage>(),
+                                Some(WidgetMessage::KeyDown(..))
+                            )
+                        {
+                            self.bring_focus_into_view(msg.destination);
+                        }
                         // If handled or no parent, stop bubbling.
                         if msg.handled || !parent_nh.is_some() {
                             break;
@@ -593,6 +996,191 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
+        self.draw_axis_widget();
+        self.draw_statistics();
+        self.draw_marquee();
+        self.draw_drag_overlay();
+    }
+
+    /// The corner axis widget. Three labelled ends, each a click target.
+    fn draw_axis_widget(&mut self) {
+        if self.axis_widget.is_empty() {
+            return;
+        }
+        let bounds = self.axis_widget_bounds;
+        let centre = Vec2::new(bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5);
+        let theme = crate::theme::active();
+        // Fixed colours rather than theme tokens: X is red, Y is green and Z
+        // is blue in every tool anyone has used, and a themed axis gizmo would
+        // be a small daily confusion for no gain.
+        const AXIS_COLOURS: [[u8; 4]; 3] = [
+            [0xE0, 0x5A, 0x5A, 0xFF],
+            [0x5A, 0xD0, 0x6A, 0xFF],
+            [0x5A, 0x8A, 0xE0, 0xFF],
+        ];
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        // Far ends first, so a near axis draws over one pointing away.
+        let mut ends = self.axis_widget.clone();
+        ends.sort_by(|a, b| centre.distance(b.1).total_cmp(&centre.distance(a.1)));
+        for (axis, tip, positive) in ends {
+            let colour = AXIS_COLOURS[axis as usize % 3];
+            let colour = if positive {
+                colour
+            } else {
+                crate::theme::with_alpha(colour, 120)
+            };
+            // The stem, stepped rather than stroked: the primitive pipeline
+            // draws axis-aligned quads, and at a 20 px radius a run of 2 px
+            // dots is indistinguishable from a line while needing no new
+            // primitive kind for one widget.
+            for step in 1..10 {
+                let t = step as f32 / 10.0;
+                let point = centre + (tip - centre) * t;
+                self.draw_ctx.push_round_rect(
+                    Rect::new(point.x - 1.0, point.y - 1.0, 2.0, 2.0),
+                    1.0,
+                    colour,
+                );
+            }
+            self.draw_ctx.push_round_rect(
+                Rect::new(tip.x - 6.0, tip.y - 6.0, 12.0, 12.0),
+                6.0,
+                colour,
+            );
+            if positive {
+                let label = ["X", "Y", "Z"][axis as usize % 3];
+                let size = self.draw_ctx.font_atlas.measure_text(label, style.px, font);
+                self.draw_ctx.push_text(
+                    label,
+                    Vec2::new(tip.x - size.x * 0.5, tip.y - style.px * 0.5),
+                    font,
+                    style.px,
+                    theme.semantic.text.primary.bytes(),
+                );
+            }
+        }
+    }
+
+    /// The statistics overlay, in the viewport's top-right corner.
+    ///
+    /// Top-*right* because the floating context bar owns the top-centre and
+    /// the gizmo usually sits near the middle; a panel that covers the thing
+    /// being judged is worse than no panel.
+    fn draw_statistics(&mut self) {
+        let Some((viewport, lines)) = self.statistics.clone() else {
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        let width = lines
+            .iter()
+            .map(|line| {
+                self.draw_ctx
+                    .font_atlas
+                    .measure_text(line, style.px, font)
+                    .x
+            })
+            .fold(0.0f32, f32::max)
+            + 20.0;
+        let line_height = style.px + 5.0;
+        let panel = Rect::new(
+            viewport.x + viewport.w - width - 12.0,
+            viewport.y + 12.0,
+            width,
+            lines.len() as f32 * line_height + 12.0,
+        );
+        let theme = crate::theme::active();
+        self.draw_ctx.push_round_rect(
+            panel,
+            theme.geometry.radius_popup,
+            crate::theme::with_alpha(theme.semantic.surface.panel.bytes(), 216),
+        );
+        for (index, line) in lines.iter().enumerate() {
+            self.draw_ctx.push_text(
+                line,
+                Vec2::new(panel.x + 10.0, panel.y + 6.0 + index as f32 * line_height),
+                font,
+                style.px,
+                theme.semantic.text.secondary.bytes(),
+            );
+        }
+    }
+
+    /// The selection rubber-band: an accent hairline over a faint wash, using
+    /// the same recipe a valid drop target uses, because they mean the same
+    /// thing — "this is what the release will act on".
+    fn draw_marquee(&mut self) {
+        let Some(rect) = self.marquee else {
+            return;
+        };
+        let paint = crate::style::drop_target(crate::drag_drop::DropEffect::Move);
+        self.draw_ctx.push_paint(rect, &paint);
+    }
+
+    /// The drag ghost and the drop-target adorner, painted after the whole
+    /// tree so they are never clipped by the panel the pointer happens to be
+    /// over. Everything here reads the *cached* acceptance — the same value
+    /// the release will execute — which is what makes the pre-drop feedback
+    /// truthful rather than merely plausible.
+    fn draw_drag_overlay(&mut self) {
+        if !self.drag_drop.is_dragging() {
+            return;
+        }
+        let effect = self
+            .drag_drop
+            .acceptance()
+            .map_or(crate::drag_drop::DropEffect::Forbidden, |a| a.effect);
+        if let Some(bounds) = self.drop_highlight {
+            let paint = crate::style::drop_target(effect);
+            self.draw_ctx.push_paint(bounds, &paint);
+        }
+
+        let label = self.drag_ghost_label();
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let font = style.font_id();
+        let px = style.px;
+        let width = self.draw_ctx.font_atlas.measure_text(&label, px, font).x + 16.0;
+        let ghost = Rect::new(
+            self.cursor_pos.x + 14.0,
+            self.cursor_pos.y + 14.0,
+            width,
+            px + 10.0,
+        );
+        let paint = crate::style::drop_target(effect);
+        self.draw_ctx.push_paint(ghost, &paint);
+        self.draw_ctx.push_text(
+            &label,
+            Vec2::new(ghost.x + 8.0, ghost.y + 5.0),
+            font,
+            px,
+            crate::theme::active().semantic.text.primary.bytes(),
+        );
+    }
+
+    /// The adorner's words. A rejection states *why*; a partial accept states
+    /// the exact count, so "2 of 5 · Copy" is never guessed from the cursor.
+    fn drag_ghost_label(&self) -> String {
+        let total = match self.drag_drop.payload() {
+            Some(crate::drag_drop::DragPayload::Assets(v)) => v.len(),
+            Some(crate::drag_drop::DragPayload::Entities(v)) => v.len(),
+            Some(crate::drag_drop::DragPayload::ExternalFiles(v)) => v.len(),
+            None => 0,
+        };
+        match self.drag_drop.acceptance() {
+            Some(acceptance) if acceptance.can_drop() => acceptance
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{total} · {:?}", acceptance.effect)),
+            Some(acceptance) => acceptance
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Can't drop here".to_string()),
+            None => format!("{total} item(s)"),
+        }
     }
 
     fn update_global_visibility(&mut self, handle: IH, parent_visible: bool) {
@@ -798,15 +1386,41 @@ impl UserInterface {
         }
 
         match event {
+            // Alt-tabbing away mid-drag means no release will ever arrive, and
+            // a stuck fly-cam latch would disable every single-key shortcut
+            // for the rest of the session.
+            WindowEvent::Focused(false) => {
+                self.viewport_camera_active = false;
+                false
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.modifiers = Modifiers {
+                    ctrl: state.control_key(),
+                    shift: state.shift_key(),
+                    alt: state.alt_key(),
+                    logo: state.super_key(),
+                };
+                false
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = self.to_logical(position.x, position.y);
+                let crossed = self.drag_drop.pointer_moved(self.cursor_pos);
+                if crossed {
+                    // The drag owns pointer capture from this point. Cancel the
+                    // pressed widget so release cannot also become a Click.
+                    self.captured_ih = IH::NONE;
+                }
                 let captured = to_nh(self.captured_ih);
                 if captured.is_some() {
                     let pos = self.cursor_pos;
                     self.send(UiMessage::new(
                         captured,
                         MessageDirection::ToWidget,
-                        WidgetMessage::MouseMove { pos },
+                        WidgetMessage::MouseMove {
+                            pos,
+                            mods: self.modifiers,
+                        },
                     ));
                 }
                 let hit = self.hit_test(self.cursor_pos);
@@ -829,17 +1443,42 @@ impl UserInterface {
                     }
                     self.hovered_ih = new_hover;
                 }
-                false // Never consumed — both UI and game need cursor tracking
+                self.drag_drop.is_dragging()
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                if *button == winit::event::MouseButton::Left
+                    && matches!(state, ElementState::Released)
+                    && self.drag_drop.is_dragging()
+                {
+                    self.captured_ih = IH::NONE;
+                    return true;
+                }
                 let pos = self.cursor_pos;
                 let hit = self.hit_test(pos);
                 // RMB over the viewport is fly-cam. RMB over chrome can open
                 // context menus (Phase 26-B).
                 if *button == winit::event::MouseButton::Right {
                     let over_viewport = !hit.is_some() || hit == self.viewport_handle;
+                    // The release clears the latch wherever it lands. A drag
+                    // that started in the viewport and ended over the chrome
+                    // must not leave the camera holding the keyboard for ever.
+                    if matches!(state, ElementState::Released) {
+                        self.viewport_camera_active = false;
+                    }
                     if over_viewport {
+                        // Right-press over the viewport starts the fly-cam, and
+                        // the fly-cam needs WASD. Whatever in the chrome held
+                        // the keyboard has to let go here, or every key goes on
+                        // being consumed by a text field the user has visibly
+                        // stopped using — which presents as the camera simply
+                        // not responding. Left-press already unfocuses a few
+                        // lines below; this is the same rule for the button
+                        // that actually takes the camera.
+                        if matches!(state, ElementState::Pressed) {
+                            self.release_keyboard();
+                            self.viewport_camera_active = true;
+                        }
                         return false;
                     }
                 }
@@ -864,6 +1503,12 @@ impl UserInterface {
                 }
 
                 if matches!(state, ElementState::Pressed) {
+                    if self
+                        .modal_focus
+                        .is_some_and(|modal| !self.is_under(hit, modal.root))
+                    {
+                        return true;
+                    }
                     let old = to_nh(self.focused_ih);
                     if old != hit && old.is_some() {
                         self.send(UiMessage::new(
@@ -872,7 +1517,7 @@ impl UserInterface {
                             WidgetMessage::Unfocus,
                         ));
                     }
-                    self.focused_ih = to_ih(hit);
+                    self.set_focus(hit);
                     // Focus is re-sent even when this widget already held it. A
                     // numeric field that was drag-scrubbed drops its edit state
                     // while staying the focused node, so skipping the message
@@ -898,6 +1543,7 @@ impl UserInterface {
                             WidgetMessage::MouseDown {
                                 pos,
                                 button: *button,
+                                mods: self.modifiers,
                             },
                         )
                     }
@@ -910,6 +1556,7 @@ impl UserInterface {
                             WidgetMessage::MouseUp {
                                 pos,
                                 button: *button,
+                                mods: self.modifiers,
                             },
                         )
                     }
@@ -933,7 +1580,11 @@ impl UserInterface {
                     self.send(UiMessage::new(
                         hit,
                         MessageDirection::ToWidget,
-                        WidgetMessage::MouseWheel { pos, delta: d },
+                        WidgetMessage::MouseWheel {
+                            pos,
+                            delta: d,
+                            mods: self.modifiers,
+                        },
                     ));
                     return true;
                 }
@@ -949,11 +1600,8 @@ impl UserInterface {
                 if focused_ih.is_some() {
                     let focused = to_nh(focused_ih);
                     if let PhysicalKey::Code(code) = key_ev.physical_key {
-                        let wmsg = if key_ev.state == ElementState::Pressed {
-                            WidgetMessage::KeyDown(code)
-                        } else {
-                            WidgetMessage::KeyUp(code)
-                        };
+                        let wmsg =
+                            self.keyboard_message(code, key_ev.state == ElementState::Pressed);
                         self.send(UiMessage::new(focused, MessageDirection::ToWidget, wmsg));
                     }
                     if key_ev.state == ElementState::Pressed {
@@ -1051,8 +1699,7 @@ mod overlay_order_tests {
     use super::*;
     use crate::widget::WidgetBuilder;
     use crate::widgets::{
-        border::BorderBuilder, scroll_viewer::ScrollViewerBuilder,
-        stack_panel::StackPanelBuilder,
+        border::BorderBuilder, scroll_viewer::ScrollViewerBuilder, stack_panel::StackPanelBuilder,
     };
 
     /// A container that paints in `draw()` and a marker that paints in
@@ -1077,7 +1724,10 @@ mod overlay_order_tests {
         let root = ui.root();
 
         let probe = UiNode::new(
-            WidgetBuilder::new().with_width(100.0).with_height(100.0).build(),
+            WidgetBuilder::new()
+                .with_width(100.0)
+                .with_height(100.0)
+                .build(),
             Box::new(OrderProbe),
         );
         let probe_h = ui.add_node(probe, root);
@@ -1122,10 +1772,9 @@ mod overlay_order_tests {
         let mut ui = UserInterface::new(300.0, 120.0);
         let root = ui.root();
 
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
         // Content taller than the viewport, so the bar is live.
@@ -1149,10 +1798,7 @@ mod overlay_order_tests {
 
         // The bar track uses the input surface; find it after the content.
         let bar = crate::theme::active().semantic.surface.input.bytes();
-        let bar_after = instances
-            .iter()
-            .skip(last_content)
-            .any(|p| p.fill_a == bar);
+        let bar_after = instances.iter().skip(last_content).any(|p| p.fill_a == bar);
         assert!(
             bar_after,
             "the scrollbar must paint after the content it scrolls"
@@ -1163,16 +1809,186 @@ mod overlay_order_tests {
 #[cfg(test)]
 mod input_contract_tests {
     use super::*;
+
+    /// Right-pressing the viewport hands the keyboard back to the game.
+    ///
+    /// Reported from a live session: clicking a curve row in Details and then
+    /// holding right-mouse in the viewport left `W`/`A`/`S`/`D` being eaten by
+    /// the focused widget, so the fly-cam simply did not respond. Left-press
+    /// already unfocused; right-press — the button that actually takes the
+    /// camera — did not.
+    #[test]
+    fn a_right_press_on_the_viewport_releases_the_keyboard() {
+        use crate::widget::WidgetBuilder;
+        use crate::widgets::text_box::TextBoxBuilder;
+
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let viewport = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(
+                WidgetBuilder::new().with_width(800.0).with_height(600.0),
+            )
+            .build(),
+            root,
+        );
+        ui.set_viewport_handle(viewport);
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(20.0)).build(),
+            root,
+        );
+        ui.perform_layout();
+
+        ui.set_focus(field);
+        assert!(
+            ui.has_text_focus(),
+            "a focused text field owns the keyboard, which is the state the bug started from"
+        );
+
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        let consumed = ui.process_os_event(&winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Right,
+        });
+        assert!(
+            !consumed,
+            "the viewport's right-press still belongs to the game, not to the UI"
+        );
+        assert!(
+            !ui.has_text_focus(),
+            "starting the fly-cam must release the keyboard"
+        );
+    }
+
+    /// The fly-cam owns the keyboard for as long as right-mouse is held.
+    ///
+    /// Reported from a live session: holding right-mouse and pressing `S`
+    /// moved the camera backward only after two or three seconds. `S` is bound
+    /// to the Scale tool, so the shortcut dispatcher consumed the press and the
+    /// game never saw it; movement began exactly when OS key-repeat started,
+    /// because repeats skip the chord path. The latch below is what lets the
+    /// dispatcher stand down.
+    #[test]
+    fn the_fly_cam_owns_the_keyboard_while_right_mouse_is_held() {
+        let mut ui = viewport_ui();
+        assert!(!ui.viewport_camera_active());
+
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(
+            ui.viewport_camera_active(),
+            "a right-press in the viewport starts the fly-cam"
+        );
+
+        ui.process_os_event(&right_button(winit::event::ElementState::Released));
+        assert!(!ui.viewport_camera_active(), "and the release ends it");
+    }
+
+    /// A drag that began in the viewport and ended over the chrome must not
+    /// leave the latch set — that would silently kill every single-key
+    /// shortcut for the rest of the session.
+    #[test]
+    fn a_release_outside_the_viewport_still_ends_the_fly_cam() {
+        let mut ui = viewport_ui();
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(ui.viewport_camera_active());
+
+        // Released with the pointer nowhere near the viewport.
+        ui.cursor_pos = glam::Vec2::new(-50.0, -50.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Released));
+        assert!(!ui.viewport_camera_active());
+    }
+
+    /// Alt-tabbing mid-drag means no release ever arrives.
+    #[test]
+    fn losing_window_focus_ends_the_fly_cam() {
+        let mut ui = viewport_ui();
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        ui.process_os_event(&right_button(winit::event::ElementState::Pressed));
+        assert!(ui.viewport_camera_active());
+
+        ui.process_os_event(&winit::event::WindowEvent::Focused(false));
+        assert!(!ui.viewport_camera_active());
+    }
+
+    fn viewport_ui() -> UserInterface {
+        use crate::widget::WidgetBuilder;
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let viewport = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(
+                WidgetBuilder::new().with_width(800.0).with_height(600.0),
+            )
+            .build(),
+            root,
+        );
+        ui.set_viewport_handle(viewport);
+        ui.perform_layout();
+        ui
+    }
+
+    fn right_button(state: winit::event::ElementState) -> winit::event::WindowEvent {
+        winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Right,
+        }
+    }
+
+    /// A modal has trapped focus deliberately; a stray right-press must not
+    /// steal it, or `Esc` and `Tab` stop working inside the dialog.
+    #[test]
+    fn a_modal_keeps_the_keyboard_through_a_right_press() {
+        use crate::widget::WidgetBuilder;
+        use crate::widgets::text_box::TextBoxBuilder;
+
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let dialog = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(WidgetBuilder::new()).build(),
+            root,
+        );
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(20.0)).build(),
+            dialog,
+        );
+        ui.perform_layout();
+        ui.enter_modal(dialog, field);
+
+        assert!(!ui.release_keyboard(), "a modal scope refuses the hand-off");
+        assert!(ui.has_text_focus());
+    }
+
     use crate::message::{MessageDirection, UiMessage};
     use crate::widget::WidgetBuilder;
     use crate::widgets::{
         check_box::{CheckBoxBuilder, CheckBoxMessage},
+        numeric_field::{NumericFieldBuilder, NumericFieldMessage},
+        popup::{PopupBuilder, PopupMessage},
         scroll_viewer::ScrollViewerBuilder,
         slider::{SliderBuilder, SliderMessage},
         stack_panel::StackPanelBuilder,
         tree_view::{TreeItem, TreeViewBuilder, TreeViewMessage},
     };
     use glam::Vec2;
+    use std::sync::{Arc, Mutex};
+
+    struct ModifierProbe(Arc<Mutex<Option<Modifiers>>>);
+
+    impl Control for ModifierProbe {
+        fn handle_routed_message(
+            &mut self,
+            _widget: &mut Widget,
+            msg: &mut UiMessage,
+            _emit: &mut Vec<UiMessage>,
+        ) {
+            if let Some(WidgetMessage::KeyDown(_, modifiers)) = msg.data::<WidgetMessage>() {
+                *self.0.lock().expect("probe mutex") = Some(*modifiers);
+                msg.handled = true;
+            }
+        }
+    }
 
     fn bounds_of(ui: &UserInterface, handle: NodeHandle) -> crate::types::Rect {
         ui.nodes
@@ -1195,15 +2011,13 @@ mod input_contract_tests {
     /// Returns (viewer, content).
     fn scrollable(ui: &mut UserInterface) -> (NodeHandle, NodeHandle) {
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
-        let column = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let column =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let col_h = ui.add_node(column, sv_h);
         ui.perform_layout();
         (sv_h, col_h)
@@ -1216,11 +2030,183 @@ mod input_contract_tests {
             WidgetMessage::MouseWheel {
                 pos: Vec2::new(100.0, 50.0),
                 delta,
+                mods: Modifiers::default(),
             },
         ));
         let out = ui.update();
         ui.perform_layout();
         out
+    }
+
+    #[test]
+    fn shift_held_is_delivered_to_the_focused_widget() {
+        let mut ui = UserInterface::new(200.0, 80.0);
+        let observed = Arc::new(Mutex::new(None));
+        let probe = UiNode::new(
+            WidgetBuilder::new()
+                .with_width(100.0)
+                .with_height(24.0)
+                .build(),
+            Box::new(ModifierProbe(observed.clone())),
+        );
+        let handle = ui.add_node(probe, ui.root());
+        ui.set_focus(handle);
+        ui.set_modifiers(Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        });
+        let key = ui.keyboard_message(crate::message::KeyCode::KeyA, true);
+        ui.send(UiMessage::new(handle, MessageDirection::ToWidget, key));
+        ui.update();
+
+        let delivered = observed
+            .lock()
+            .expect("probe mutex")
+            .expect("key delivered");
+        assert!(delivered.shift);
+        assert!(!delivered.ctrl && !delivered.alt && !delivered.logo);
+    }
+
+    #[test]
+    fn arrow_traversal_in_a_long_tree_scrolls_the_focused_row_into_view() {
+        let mut ui = UserInterface::new(300.0, 120.0);
+        let viewer = ui.add_node(
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build(),
+            ui.root(),
+        );
+        let tree = ui.add_node(
+            TreeViewBuilder::new(WidgetBuilder::new().with_width(280.0)).build(),
+            viewer,
+        );
+        let items: Vec<TreeItem> = (0..30)
+            .map(|id| TreeItem {
+                hidden: false,
+                locked: false,
+                script_error: false,
+                id,
+                label: format!("Row {id}"),
+                depth: 0,
+                icon: crate::icons::IconId::EmptyEntity,
+                has_children: false,
+                expanded: false,
+            })
+            .collect();
+        ui.send(TreeViewMessage::set_items(tree, items));
+        ui.update();
+        ui.perform_layout();
+        ui.set_focus(tree);
+        ui.send(UiMessage::new(
+            tree,
+            MessageDirection::ToWidget,
+            WidgetMessage::KeyDown(crate::message::KeyCode::End, Modifiers::default()),
+        ));
+        let outgoing = ui.update();
+        ui.perform_layout();
+
+        assert!(outgoing.iter().any(|message| matches!(
+            message.data::<TreeViewMessage>(),
+            Some(TreeViewMessage::Select(29))
+        )));
+        let viewport = bounds_of(&ui, viewer);
+        let tree_bounds = bounds_of(&ui, tree);
+        let focused_bottom = tree_bounds.y + 30.0 * crate::theme::TREE_ROW_HEIGHT;
+        assert!(
+            tree_bounds.y < viewport.y,
+            "the long tree must have scrolled"
+        );
+        assert!(
+            focused_bottom <= viewport.y + viewport.h + 0.5,
+            "focused row bottom {focused_bottom} must be inside viewport {:?}",
+            viewport
+        );
+    }
+
+    #[test]
+    fn cancelling_a_scrub_restores_the_value_without_closing_an_open_popup() {
+        let mut ui = UserInterface::new(320.0, 120.0);
+        let root = ui.root();
+        let field = ui.add_node(
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(24.0))
+                .with_value(10.0)
+                .with_drag_step(1.0)
+                .build(),
+            root,
+        );
+        let popup = ui.add_node(PopupBuilder::new(WidgetBuilder::new()).build(), root);
+        ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        ui.update();
+        ui.perform_layout();
+        let bounds = bounds_of(&ui, field);
+        let start = Vec2::new(bounds.x + bounds.w - 8.0, bounds.y + bounds.h * 0.5);
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseDown {
+                pos: start,
+                button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
+            },
+        ));
+        ui.update();
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseMove {
+                pos: start + Vec2::new(20.0, 0.0),
+                mods: Modifiers::default(),
+            },
+        ));
+        ui.update();
+        assert_ne!(ui.numeric_value_of(field), Some(10.0));
+        assert_eq!(ui.active_gesture(), Some(GestureToken { owner: field }));
+
+        assert!(
+            ui.cancel_active_gesture(),
+            "Esc precedence must find the scrub"
+        );
+        let outgoing = ui.update();
+        assert_eq!(ui.numeric_value_of(field), Some(10.0));
+        assert!(
+            ui.nodes
+                .try_borrow(popup.transmute())
+                .expect("popup exists")
+                .widget
+                .visibility,
+            "cancelling the gesture must not dismiss the popup below it"
+        );
+        assert!(outgoing.iter().any(|message| matches!(
+            message.data::<NumericFieldMessage>(),
+            Some(NumericFieldMessage::ValueChanging(value)) if *value == 10.0
+        )));
+    }
+
+    #[test]
+    fn modal_focus_is_trapped_and_returns_to_its_invoker() {
+        let mut ui = UserInterface::new(300.0, 120.0);
+        let root = ui.root();
+        let invoker = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            root,
+        );
+        let modal = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            root,
+        );
+        let inside = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(RootControl)),
+            modal,
+        );
+        ui.set_focus(invoker);
+        ui.enter_modal(modal, inside);
+        ui.set_focus(invoker);
+        assert_eq!(ui.focused(), inside, "focus cannot escape an active modal");
+        assert_eq!(ui.exit_modal(modal), invoker);
+        assert_eq!(ui.focused(), invoker);
     }
 
     #[test]
@@ -1233,23 +2219,20 @@ mod input_contract_tests {
         // properties than fit.
         let mut ui = UserInterface::new(400.0, 200.0);
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
-        let tall = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let tall =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let tall_h = ui.add_node(tall, sv_h);
 
         // Added *after* the tall child, exactly as the Details empty state is.
-        let short = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(90.0),
-        )
-        .build();
+        let short =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(90.0))
+                .build();
         ui.add_node(short, sv_h);
 
         ui.perform_layout();
@@ -1267,16 +2250,14 @@ mod input_contract_tests {
         // 600 px of content it is not showing.
         let mut ui = UserInterface::new(400.0, 200.0);
         let root = ui.root();
-        let sv = ScrollViewerBuilder::new(
-            WidgetBuilder::new().with_width(300.0).with_height(120.0),
-        )
-        .build();
+        let sv =
+            ScrollViewerBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(120.0))
+                .build();
         let sv_h = ui.add_node(sv, root);
 
-        let tall = StackPanelBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(600.0),
-        )
-        .build();
+        let tall =
+            StackPanelBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(600.0))
+                .build();
         let tall_h = ui.add_node(tall, sv_h);
         ui.perform_layout();
 
@@ -1323,7 +2304,11 @@ mod input_contract_tests {
         wheel(&mut ui, sv, 100_000.0);
         let at_top = top_of(&ui, content);
         wheel(&mut ui, sv, 100_000.0);
-        assert_eq!(top_of(&ui, content), at_top, "must not scroll above the top");
+        assert_eq!(
+            top_of(&ui, content),
+            at_top,
+            "must not scroll above the top"
+        );
 
         wheel(&mut ui, sv, -100_000.0);
         let at_bottom = top_of(&ui, content);
@@ -1333,7 +2318,10 @@ mod input_contract_tests {
             at_bottom,
             "must not scroll past the end"
         );
-        assert!(at_bottom < at_top, "the content must actually be scrollable");
+        assert!(
+            at_bottom < at_top,
+            "the content must actually be scrollable"
+        );
     }
 
     #[test]
@@ -1352,6 +2340,7 @@ mod input_contract_tests {
             WidgetMessage::MouseDown {
                 pos: point,
                 button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
             },
         ));
         ui.update();
@@ -1366,10 +2355,8 @@ mod input_contract_tests {
     fn a_checkbox_reports_its_new_state_when_set() {
         let mut ui = UserInterface::new(200.0, 60.0);
         let root = ui.root();
-        let cb = CheckBoxBuilder::new(
-            WidgetBuilder::new().with_width(160.0).with_height(24.0),
-        )
-        .build();
+        let cb =
+            CheckBoxBuilder::new(WidgetBuilder::new().with_width(160.0).with_height(24.0)).build();
         let cb_h = ui.add_node(cb, root);
         ui.perform_layout();
 
@@ -1379,8 +2366,8 @@ mod input_contract_tests {
         ui.draw();
 
         // A ticked box paints the Check glyph; an unticked one does not.
-        let (uv, _) = crate::icons::IconId::Check
-            .draw_quad(crate::types::Rect::new(0.0, 0.0, 16.0, 16.0));
+        let (uv, _) =
+            crate::icons::IconId::Check.draw_quad(crate::types::Rect::new(0.0, 0.0, 16.0, 16.0));
         let tick_u0 = uv[0].x;
         let ticked = ui
             .draw_ctx
@@ -1396,14 +2383,15 @@ mod input_contract_tests {
         // rows would simply never highlight, and nothing else would notice.
         let mut ui = UserInterface::new(300.0, 200.0);
         let root = ui.root();
-        let tv = TreeViewBuilder::new(
-            WidgetBuilder::new().with_width(280.0).with_height(180.0),
-        )
-        .build();
+        let tv =
+            TreeViewBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(180.0)).build();
         let tv_h = ui.add_node(tv, root);
         ui.perform_layout();
 
         let item = |id: u32, label: &str| TreeItem {
+            hidden: false,
+            locked: false,
+            script_error: false,
             id,
             label: label.into(),
             depth: 0,
@@ -1441,22 +2429,24 @@ mod input_contract_tests {
                     let b = bounds_of(&ui, tv_h);
                     Vec2::new(b.x + 40.0, b.y + crate::theme::TREE_ROW_HEIGHT * 1.5)
                 },
+                mods: Modifiers::default(),
             },
         ));
         ui.update();
         ui.perform_layout();
         ui.draw();
-        assert!(painted(&ui), "the row under the pointer must paint a hover fill");
+        assert!(
+            painted(&ui),
+            "the row under the pointer must paint a hover fill"
+        );
     }
 
     #[test]
     fn pressing_a_slider_track_emits_a_value_change() {
         let mut ui = UserInterface::new(200.0, 40.0);
         let root = ui.root();
-        let sl = SliderBuilder::new(
-            WidgetBuilder::new().with_width(160.0).with_height(20.0),
-        )
-        .build();
+        let sl =
+            SliderBuilder::new(WidgetBuilder::new().with_width(160.0).with_height(20.0)).build();
         let sl_h = ui.add_node(sl, root);
         ui.perform_layout();
 
@@ -1467,6 +2457,7 @@ mod input_contract_tests {
             WidgetMessage::MouseDown {
                 pos: Vec2::new(b.x + b.w * 0.75, b.y + b.h * 0.5),
                 button: crate::message::MouseButton::Left,
+                mods: Modifiers::default(),
             },
         ));
         let emitted = ui.update();
@@ -1475,6 +2466,140 @@ mod input_contract_tests {
                 .iter()
                 .any(|m| matches!(m.data::<SliderMessage>(), Some(SliderMessage::Value(_)))),
             "pressing the track must emit a value change"
+        );
+    }
+}
+
+#[cfg(test)]
+mod drag_overlay_tests {
+    use super::*;
+    use crate::drag_drop::{DragPayload, DropAcceptance, DropEffect, DropTarget};
+
+    fn payload() -> DragPayload {
+        DragPayload::ExternalFiles(vec![
+            std::path::PathBuf::from("a.png"),
+            std::path::PathBuf::from("b.png"),
+        ])
+    }
+
+    fn acceptance(effect: DropEffect, reason: Option<&str>) -> DropAcceptance {
+        DropAcceptance {
+            accepted: vec![0],
+            effect,
+            reason: reason.map(str::to_string),
+            target: DropTarget::DrawerFolder(std::path::PathBuf::from("textures")),
+        }
+    }
+
+    fn dragging(effect: DropEffect) -> UserInterface {
+        let mut ui = UserInterface::new(400.0, 300.0);
+        ui.arm_drag(payload());
+        ui.cursor_pos = Vec2::new(50.0, 50.0);
+        assert!(ui.drag_drop.pointer_moved(Vec2::new(50.0, 50.0)));
+        ui.set_drop_acceptance(Some(acceptance(effect, None)));
+        ui
+    }
+
+    /// The cursor is read from the cached effect, not from the widget the
+    /// gesture was captured on. Getting this wrong is how a drag ends up
+    /// showing a text caret over a valid target.
+    #[test]
+    fn the_cursor_reports_the_cached_drop_effect() {
+        assert_eq!(
+            dragging(DropEffect::Move).cursor_kind(),
+            crate::node::CursorKind::Move
+        );
+        assert_eq!(
+            dragging(DropEffect::Copy).cursor_kind(),
+            crate::node::CursorKind::Copy
+        );
+        assert_eq!(
+            dragging(DropEffect::Link).cursor_kind(),
+            crate::node::CursorKind::Copy
+        );
+        assert_eq!(
+            dragging(DropEffect::Forbidden).cursor_kind(),
+            crate::node::CursorKind::NoDrop
+        );
+
+        // With no acceptance yet, the honest answer is "not here".
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_acceptance(None);
+        assert_eq!(ui.cursor_kind(), crate::node::CursorKind::NoDrop);
+    }
+
+    /// A drag in flight owns the pointer: motion and the release are consumed
+    /// so neither reaches the gizmo or the fly-cam behind the viewport.
+    #[test]
+    fn an_active_drag_consumes_viewport_pointer_input() {
+        let mut ui = dragging(DropEffect::Copy);
+        let moved = WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(80.0, 80.0),
+        };
+        assert!(
+            ui.process_os_event(&moved),
+            "motion must not reach the game"
+        );
+
+        let release = WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: winit::event::MouseButton::Left,
+        };
+        assert!(
+            ui.process_os_event(&release),
+            "release must not reach the game"
+        );
+        assert!(ui.take_completed_drop().is_some());
+    }
+
+    /// Escape cancels the drag before any overlay is dismissed, and nothing is
+    /// left behind for the release to execute.
+    #[test]
+    fn escape_cancels_the_drag_before_control_gestures() {
+        let mut ui = dragging(DropEffect::Copy);
+        assert!(ui.cancel_active_gesture());
+        assert!(!ui.is_dragging());
+        assert!(ui.take_completed_drop().is_none());
+    }
+
+    /// The adorner states the count and the effect on a partial accept, and
+    /// the reason on a rejection — never a bare "can't drop here" when the
+    /// acceptance actually knows why.
+    #[test]
+    fn the_adorner_says_what_the_release_will_do() {
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_acceptance(Some(acceptance(
+            DropEffect::Copy,
+            Some("1 of 2 \u{b7} Copy"),
+        )));
+        assert_eq!(ui.drag_ghost_label(), "1 of 2 \u{b7} Copy");
+
+        ui.set_drop_acceptance(Some(DropAcceptance::rejected(
+            DropTarget::DrawerFolder(std::path::PathBuf::new()),
+            "This asset kind is not accepted by the field",
+        )));
+        assert_eq!(
+            ui.drag_ghost_label(),
+            "This asset kind is not accepted by the field"
+        );
+    }
+
+    /// The ghost and the highlight are painted after the whole tree, so a
+    /// panel's clip rect cannot swallow them.
+    #[test]
+    fn the_overlay_paints_above_the_tree() {
+        let mut ui = dragging(DropEffect::Copy);
+        ui.set_drop_highlight(Some(Rect::new(0.0, 0.0, 120.0, 24.0)));
+        ui.draw();
+        let painted = ui.draw_ctx.instances.len();
+
+        let mut quiet = UserInterface::new(400.0, 300.0);
+        quiet.draw();
+        assert!(
+            painted > quiet.draw_ctx.instances.len(),
+            "an active drag must add the highlight and the ghost"
         );
     }
 }

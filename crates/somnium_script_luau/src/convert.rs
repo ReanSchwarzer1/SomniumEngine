@@ -17,8 +17,8 @@
 //! does.
 
 use mlua::{FromLua, IntoLua, Lua, UserData, UserDataMethods, Value, Vector};
-use somnium_ecs::reflect::AssetRef;
 use somnium_ecs::Entity;
+use somnium_ecs::reflect::AssetRef;
 use somnium_script::value::ScriptValue;
 
 /// An entity reference as a script sees it.
@@ -44,12 +44,14 @@ macro_rules! impl_handle_from_lua {
                     other => Err(mlua::Error::FromLuaConversionError {
                         from: other.type_name(),
                         to: $name.to_string(),
-                        message: Some(concat!(
-                            "expected an engine ",
-                            $name,
-                            " handle; these cannot be constructed from a number"
-                        )
-                        .to_string()),
+                        message: Some(
+                            concat!(
+                                "expected an engine ",
+                                $name,
+                                " handle; these cannot be constructed from a number"
+                            )
+                            .to_string(),
+                        ),
                     }),
                 }
             }
@@ -122,6 +124,39 @@ pub fn to_lua(lua: &Lua, value: &ScriptValue) -> mlua::Result<Value> {
             let table = lua.create_table_with_capacity(items.len(), 0)?;
             for (i, item) in items.iter().enumerate() {
                 table.set(i + 1, to_lua(lua, item)?)?;
+            }
+            Value::Table(table)
+        }
+        // CONTROL-K. A curve and a gradient widen into ordinary Luau arrays
+        // of key tables, which is everything a script needs in order to read
+        // one. They deliberately do **not** narrow back: `from_lua` produces
+        // an `Array` by shape, and `FieldType::Curve::accepts` rejects it with
+        // a named type mismatch rather than silently reinterpreting a list of
+        // tables as authored keyframes. Authoring a curve is the editor's job.
+        ScriptValue::Curve(curve) => {
+            let table = lua.create_table_with_capacity(curve.len(), 0)?;
+            for (i, key) in curve.keys().iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("t", key.t)?;
+                entry.set("v", key.v)?;
+                entry.set("inTangent", key.in_tangent)?;
+                entry.set("outTangent", key.out_tangent)?;
+                entry.set("interpolation", key.interpolation.as_str())?;
+                table.set(i + 1, entry)?;
+            }
+            Value::Table(table)
+        }
+        ScriptValue::Gradient(gradient) => {
+            let table = lua.create_table_with_capacity(gradient.len(), 0)?;
+            for (i, stop) in gradient.stops().iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("t", stop.t)?;
+                entry.set(
+                    "color",
+                    Value::Vector(Vector::new(stop.color[0], stop.color[1], stop.color[2])),
+                )?;
+                entry.set("alpha", stop.color[3])?;
+                table.set(i + 1, entry)?;
             }
             Value::Table(table)
         }
@@ -298,7 +333,10 @@ mod tests {
             matches!(value, Value::Vector(_)),
             "Vec3 must be a Luau vector, not a table"
         );
-        assert_eq!(from_lua(&value).unwrap(), ScriptValue::Vec3([1.0, 2.0, 3.0]));
+        assert_eq!(
+            from_lua(&value).unwrap(),
+            ScriptValue::Vec3([1.0, 2.0, 3.0])
+        );
     }
 
     #[test]
@@ -381,10 +419,7 @@ mod tests {
     #[test]
     fn a_cyclic_table_is_refused_rather_than_overflowing_the_stack() {
         let lua = lua();
-        let cyclic: Value = lua
-            .load("local t = {} t[1] = {t} return t")
-            .eval()
-            .unwrap();
+        let cyclic: Value = lua.load("local t = {} t[1] = {t} return t").eval().unwrap();
         let err = from_lua(&cyclic).unwrap_err();
         assert!(err.contains("nests deeper"), "got: {err}");
     }

@@ -116,6 +116,30 @@ pub struct EngineContext<'a> {
     /// context is rebuilt per callback and cannot own the state.
     pub camera_speed_request: Option<f32>,
 
+    /// A pending "frame this" request: the world-space centre the editor
+    /// camera should look at and the radius that should fit in view.
+    ///
+    /// The editor camera lives in the game layer, so CONTROL-F's `F` — and
+    /// CONTROL-G's bookmarks, orbit pivot and view presets after it — arrive
+    /// as a request the game honours rather than as a write behind its back.
+    /// Read it with [`Self::take_camera_focus`], which clears it.
+    pub camera_focus: Option<(glam::Vec3, f32)>,
+
+    /// A pending exact camera pose: `(position, yaw degrees, pitch degrees)`.
+    ///
+    /// Distinct from [`Self::camera_focus`] on purpose. A focus request says
+    /// "frame this" and leaves the heading to the camera; a pose says exactly
+    /// where to be and which way to look, which is what a view preset and a
+    /// recalled bookmark both mean. Read with [`Self::take_camera_pose`].
+    pub camera_pose: Option<(glam::Vec3, f32, f32)>,
+
+    /// Whether the editor camera should orbit around the selection rather
+    /// than around itself.
+    pub orbit_selection: bool,
+
+    /// The point to orbit around when [`Self::orbit_selection`] is set.
+    pub orbit_pivot: Option<glam::Vec3>,
+
     /// The UI manager for sending messages to the HTML frontend.
     pub ui: &'a mut UiManager,
 
@@ -138,6 +162,16 @@ pub struct EngineContext<'a> {
 }
 
 impl<'a> EngineContext<'a> {
+    /// Consume any pending exact pose. Returns `(position, yaw, pitch)` once.
+    pub fn take_camera_pose(&mut self) -> Option<(glam::Vec3, f32, f32)> {
+        self.camera_pose.take()
+    }
+
+    /// Consume any pending focus request. Returns `(centre, radius)` once.
+    pub fn take_camera_focus(&mut self) -> Option<(glam::Vec3, f32)> {
+        self.camera_focus.take()
+    }
+
     /// Request a new editor camera speed, as a normalized `0..=1` slider
     /// position. Applied by the engine once the callback returns, which also
     /// refreshes the viewport toolbar so the slider tracks the change.
@@ -175,6 +209,10 @@ impl<'a> EngineContext<'a> {
             camera_speed,
             simulation,
             camera_speed_request: None,
+            camera_focus: None,
+            camera_pose: None,
+            orbit_selection: false,
+            orbit_pivot: None,
             ui,
             scripts,
             should_exit: false,

@@ -61,14 +61,17 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let jolt = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let jolt = JOLT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut host = ScriptHost::new(Budget::default());
         // The cache is keyed on a path that does not exist for these
         // in-memory sources; keeping it off makes the test independent of
         // whatever is in `target/`.
         host.set_bytecode_cache(false);
 
-        let controller_asset = ScriptAssetId::from_path("assets/scripts/first_person_controller.luau");
+        let controller_asset =
+            ScriptAssetId::from_path("assets/scripts/first_person_controller.luau");
         host.load_script(controller_asset, "first_person_controller.luau", CONTROLLER)
             .unwrap_or_else(|d| panic!("the controller must compile:\n{d}"));
         let camera_asset = ScriptAssetId::from_path("assets/scripts/first_person_camera.luau");
@@ -193,7 +196,10 @@ impl Rig {
     }
 
     fn position(&self) -> glam::Vec3 {
-        self.world.get::<Transform>(self.player).unwrap().translation
+        self.world
+            .get::<Transform>(self.player)
+            .unwrap()
+            .translation
     }
 
     fn eye(&self) -> glam::Vec3 {
@@ -280,7 +286,12 @@ fn both_character_scripts_compile_and_declare_their_fields() {
     let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["eyeHeight", "invertMouseY", "mouseSensitivity", "pitchLimit"]
+        vec![
+            "eyeHeight",
+            "invertMouseY",
+            "mouseSensitivity",
+            "pitchLimit"
+        ]
     );
 }
 
@@ -293,7 +304,8 @@ fn the_controller_declares_only_the_fields_it_touches() {
     let mut host = ScriptHost::new(Budget::default());
     host.set_bytecode_cache(false);
     let asset = ScriptAssetId::mint();
-    host.load_script(asset, "controller.luau", CONTROLLER).unwrap();
+    host.load_script(asset, "controller.luau", CONTROLLER)
+        .unwrap();
     let uses = &host.runtime().asset_schema(asset).unwrap().uses;
 
     for declared in uses {

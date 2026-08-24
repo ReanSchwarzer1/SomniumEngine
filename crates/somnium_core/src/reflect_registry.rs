@@ -13,14 +13,16 @@
 
 use somnium_ecs::component_schema;
 use somnium_ecs::reflect::{
-    ComponentSchema, FieldFlags, FieldId, FieldSchema, FieldType, ReflectError, ReflectField,
-    ReflectObject, ReflectValue, StableId, TypeRegistry,
+    ChangeScope, ComponentSchema, FieldFlags, FieldId, FieldSchema, FieldType, ReflectError,
+    ReflectField, ReflectObject, ReflectValue, StableId, TypeRegistry,
 };
 use somnium_ecs::{Entity, World};
 
 use crate::{
-    FoliageComponent, LightComponent, LightType, MaterialComponent, MeshComponent, MeshKind, Name,
-    Parent, TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent,
+    BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
+    PostProcessComponent, TerrainComponent, Tonemapper, Transform, VoxelTerrainComponent,
+    WaterComponent,
 };
 
 // `MeshComponent` and `MaterialComponent` derive `Default` at their
@@ -106,14 +108,7 @@ impl Default for Name {
 
 /// Variant names for [`LightType`]. Order is the wire order; appending is
 /// safe, reordering is not.
-const LIGHT_TYPE_NAMES: &[&str] = &[
-    "Directional",
-    "Point",
-    "Spot",
-    "Rect",
-    "Disc",
-    "Tube",
-];
+const LIGHT_TYPE_NAMES: &[&str] = &["Directional", "Point", "Spot", "Rect", "Disc", "Tube"];
 
 impl ReflectField for LightType {
     fn field_type() -> FieldType {
@@ -186,6 +181,34 @@ impl ReflectField for MeshKind {
     }
 }
 
+const TONEMAPPER_NAMES: &[&str] = &["AgX", "ACES", "Reinhard"];
+
+impl ReflectField for Tonemapper {
+    fn field_type() -> FieldType {
+        FieldType::Enum(TONEMAPPER_NAMES)
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(i64::from(self.as_index()))
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::AgX),
+            ReflectValue::I64(1) => Ok(Self::Aces),
+            ReflectValue::I64(2) => Ok(Self::Reinhard),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(2.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "enum".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Hand-written schemas
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -205,7 +228,11 @@ fn name_schema() -> ComponentSchema {
         Some(out)
     }
 
-    fn apply(world: &mut World, entity: Entity, record: &ReflectObject) -> Result<(), ReflectError> {
+    fn apply(
+        world: &mut World,
+        entity: Entity,
+        record: &ReflectObject,
+    ) -> Result<(), ReflectError> {
         let Some(value) = record.get(&FieldId(0)) else {
             return Ok(());
         };
@@ -218,7 +245,9 @@ fn name_schema() -> ComponentSchema {
         };
         let slot = world
             .get_mut::<Name>(entity)
-            .ok_or(ReflectError::MissingComponent(StableId::new("somnium.Name")))?;
+            .ok_or(ReflectError::MissingComponent(StableId::new(
+                "somnium.Name",
+            )))?;
         // `Name::new` truncates past 63 bytes rather than failing, which
         // is the existing contract and stays the contract here.
         *slot = Name::new(text);
@@ -233,7 +262,9 @@ fn name_schema() -> ComponentSchema {
     }
 
     fn insert_default(world: &mut World, entity: Entity) -> Result<(), ReflectError> {
-        world.insert_component(entity, Name::default()).map_err(Into::into)
+        world
+            .insert_component(entity, Name::default())
+            .map_err(Into::into)
     }
 
     fn remove(world: &mut World, entity: Entity) -> Result<bool, ReflectError> {
@@ -251,6 +282,20 @@ fn name_schema() -> ComponentSchema {
             default: ReflectValue::Str(String::new()),
             min: None,
             max: None,
+            step: None,
+            soft_min: None,
+            soft_max: None,
+            precision: None,
+            unit: None,
+            doc: Some("Entity name."),
+            display_name: None,
+            group: None,
+            order: None,
+            advanced: false,
+            read_only: false,
+            slider: somnium_ecs::curve::SliderCurve::Linear,
+            scope: ChangeScope::Field,
+            asset_kind_mask: u64::MAX,
             flags: FieldFlags::DEFAULT,
         }],
         component_id: somnium_ecs::ComponentId::of::<Name>(),
@@ -272,7 +317,11 @@ fn mesh_kind_schema() -> ComponentSchema {
         Some(out)
     }
 
-    fn apply(world: &mut World, entity: Entity, record: &ReflectObject) -> Result<(), ReflectError> {
+    fn apply(
+        world: &mut World,
+        entity: Entity,
+        record: &ReflectObject,
+    ) -> Result<(), ReflectError> {
         let Some(value) = record.get(&FieldId(0)) else {
             return Ok(());
         };
@@ -300,7 +349,9 @@ fn mesh_kind_schema() -> ComponentSchema {
     }
 
     fn remove(world: &mut World, entity: Entity) -> Result<bool, ReflectError> {
-        world.remove_component::<MeshKind>(entity).map_err(Into::into)
+        world
+            .remove_component::<MeshKind>(entity)
+            .map_err(Into::into)
     }
 
     ComponentSchema {
@@ -314,6 +365,20 @@ fn mesh_kind_schema() -> ComponentSchema {
             default: ReflectValue::I64(0),
             min: None,
             max: None,
+            step: None,
+            soft_min: None,
+            soft_max: None,
+            precision: None,
+            unit: None,
+            doc: Some("Primitive mesh kind."),
+            display_name: None,
+            group: None,
+            order: None,
+            advanced: false,
+            read_only: false,
+            slider: somnium_ecs::curve::SliderCurve::Linear,
+            scope: ChangeScope::Field,
+            asset_kind_mask: u64::MAX,
             flags: FieldFlags::DEFAULT,
         }],
         component_id: somnium_ecs::ComponentId::of::<MeshKind>(),
@@ -339,6 +404,10 @@ fn mesh_kind_schema() -> ComponentSchema {
 pub fn component_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
 
+    registry.register(buoyant_vessel_schema());
+    registry.register(camera_settings_schema());
+    registry.register(decal_schema());
+    registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
     registry.register(material_schema());
@@ -346,13 +415,131 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(mesh_kind_schema());
     registry.register(name_schema());
     registry.register(parent_schema());
+    registry.register(particle_emitter_schema());
+    registry.register(post_process_schema());
     crate::character::register(&mut registry);
+    registry.register(sky_schema());
     registry.register(terrain_schema());
+    registry.register(time_of_day_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
     registry.register(water_schema());
+    registry.register(weather_schema());
 
     registry
+}
+
+/// Registry used by generic editor commands. Asset edit-session components
+/// participate in the same generated Details and undo paths, but are excluded
+/// from [`component_registry`] so scene serialization can never inline asset
+/// contents into an entity.
+#[must_use]
+pub fn editor_registry() -> TypeRegistry {
+    let mut registry = component_registry();
+    registry.register(somnium_asset::material::material_asset_schema());
+    registry.register(editor_settings_schema());
+    registry.register(project_settings_schema());
+    registry
+}
+
+fn camera_settings_schema() -> ComponentSchema {
+    component_schema! {
+        CameraSettingsComponent as "somnium.CameraSettings", display "Camera", version 1,
+        fields {
+            frustum_cull { group: "Culling", doc: "Skip terrain chunks outside the camera frustum." },
+            dynamic_resolution { group: "Dynamic Resolution" },
+            dynamic_target_ms { min: 1.0, soft_max: 50.0, step: 0.1, precision: 2, unit: "ms", group: "Dynamic Resolution" },
+            dynamic_floor { min: 0.25, max: 1.0, step: 0.01, precision: 2, group: "Dynamic Resolution" },
+        }
+    }
+}
+
+fn particle_emitter_schema() -> ComponentSchema {
+    component_schema! {
+        ParticleEmitter as "somnium.ParticleEmitter", display "Particle Emitter", version 1,
+        fields {
+            max_particles { min: 0, group: "Emission" },
+            spawn_rate { min: 0.0, step: 1.0, group: "Emission", unit: "particles/s" },
+            lifetime { min: 0.0, step: 0.1, group: "Particle", unit: "s" },
+            initial_speed { min: 0.0, step: 0.1, group: "Particle", unit: "m/s" },
+            spread_angle { min: 0.0, max: 3.1415927, step: 0.01, precision: 2, group: "Emission", unit: "rad" },
+            size_start { min: 0.0, step: 0.01, group: "Particle", unit: "m" },
+            size_end { min: 0.0, step: 0.01, group: "Particle", unit: "m" },
+            color_over_life { group: "Appearance", display_name: "Colour over Life" },
+            gravity { step: 0.1, group: "Forces", unit: "m/s²" },
+            velocity_bias { step: 0.1, precision: 2, group: "Forces", unit: "m/s",
+                display_name: "Velocity Bias" },
+            spawn_extents { min: 0.0, step: 0.5, precision: 2, group: "Emission", unit: "m",
+                display_name: "Spawn Volume" },
+        }
+    }
+}
+
+fn buoyant_vessel_schema() -> ComponentSchema {
+    component_schema! {
+        BuoyantVessel as "somnium.BuoyantVessel", display "Buoyant Vessel", version 1,
+        fields {
+            water_id { read_only: true, group: "Water" },
+            water_origin { read_only: true, group: "Water", scope: ChangeScope::Entity },
+            buoyancy_per_sample { min: 0.0, step: 100.0, group: "Forces", unit: "N" },
+            linear_drag { min: 0.0, step: 10.0, group: "Forces" },
+            angular_drag { min: 0.0, step: 10.0, group: "Forces" },
+            propulsion_force { min: 0.0, step: 100.0, group: "Forces", unit: "N" },
+            draft { min: 0.0, step: 0.01, group: "Hull", unit: "m" },
+            righting { min: 0.0, step: 100.0, group: "Hull", unit: "N" },
+        }
+    }
+}
+
+fn post_process_schema() -> ComponentSchema {
+    component_schema! {
+        PostProcessComponent as "somnium.PostProcess", display "Post Processing", version 1,
+        fields {
+            ev100 { step: 0.1, precision: 2, group: "Exposure" },
+            aperture_f_stops { min: 0.1, step: 0.1, precision: 1, unit: "f/", group: "Exposure" },
+            shutter_speed_s { min: 0.000001, step: 0.001, precision: 6, unit: "s", group: "Exposure" },
+            sensitivity_iso { min: 1.0, step: 1.0, unit: "ISO", group: "Exposure" },
+            use_physical_camera { group: "Exposure" }, auto_exposure { group: "Exposure" },
+            exposure_compensation { step: 0.1, precision: 2, unit: "EV", group: "Exposure" },
+            tonemapper { group: "Tone Mapping" }, temperature { step: 1.0, group: "Color Grading" },
+            tint { step: 0.01, group: "Color Grading" }, contrast { min: 0.0, step: 0.01, group: "Color Grading" },
+            saturation { min: 0.0, step: 0.01, group: "Color Grading" }, gain { min: 0.0, step: 0.01, group: "Color Grading" },
+            lift { step: 0.01, group: "Color Grading" }, gamma { min: 0.0, step: 0.01, group: "Color Grading" },
+            grain { min: 0.0, step: 0.01, group: "Lens" },
+            response_curve { group: "Color Grading", display_name: "Response Curve",
+                min: 0.0, max: 1.0, soft_min: 0.0, soft_max: 1.0 },
+            bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },
+            gtao_enabled { group: "Ambient Occlusion" }, dof_enabled { group: "Depth of Field" },
+            dof_focus_distance { min: 0.0, step: 0.1, unit: "m", group: "Depth of Field" },
+            taa_enabled { group: "Anti-aliasing" }, restir_enabled { group: "Ray Tracing" },
+            restir_gi_enabled { group: "Ray Tracing" }, rt_reflect_enabled { group: "Ray Tracing" },
+            rt_refract_enabled { group: "Ray Tracing" }, cas_enabled { group: "Sharpening" },
+            cas_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Sharpening" },
+            cas_strength { min: 0.0, max: 1.0, step: 0.01, group: "Sharpening" },
+            motion_blur_enabled { group: "Motion Blur" },
+            motion_blur_shutter { min: 0.0, max: 1.0, step: 0.01, group: "Motion Blur" },
+            restir_gi_intensity { min: 0.0, step: 0.01, group: "Ray Tracing" },
+            volumetrics_enabled { group: "Volumetrics" }, light_shafts { group: "Volumetrics" },
+            fog_density { min: 0.0, step: 0.0001, precision: 5, group: "Volumetrics" },
+            fog_height_falloff { min: 0.0, step: 1.0, unit: "m", group: "Volumetrics" },
+            fog_asymmetry { min: -1.0, max: 1.0, step: 0.01, group: "Volumetrics" },
+            gtao_radius { min: 0.0, step: 0.01, unit: "m", group: "Ambient Occlusion" },
+            gtao_intensity { min: 0.0, step: 0.01, group: "Ambient Occlusion" },
+            cel_shading { group: "Stylization" }, vignette_enabled { group: "Lens" },
+            vignette_strength { min: 0.0, step: 0.01, group: "Lens" }, ca_enabled { group: "Lens" },
+            ca_strength { min: 0.0, step: 0.001, precision: 4, group: "Lens" },
+            fxaa_enabled { group: "Anti-aliasing" }, pcss_enabled { group: "Shadows" },
+            contact_shadows_enabled { group: "Shadows" }, ibl_intensity { min: 0.0, step: 0.01, group: "Lighting" },
+            world_cache { group: "Global Illumination" }, cache_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
+            cache_cell_size { min: 0.01, step: 0.1, unit: "m", group: "Global Illumination" },
+            specular_gi { group: "Global Illumination" }, spec_roughness { min: 0.0, max: 1.0, step: 0.01, group: "Global Illumination" },
+            path_tracer { group: "Path Tracing" }, path_bounces { min: 1, max: 8, group: "Path Tracing" },
+            mesh_sdf { group: "Global Illumination" }, probes { group: "Global Illumination" },
+            probe_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
+            analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
+            fsr_enabled { group: "Anti-aliasing" }, fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
+        }
+    }
 }
 
 /// Water is the largest schema in the engine and the reason the macro
@@ -418,6 +605,53 @@ fn water_schema() -> ComponentSchema {
 /// Version 1 never saved these, so painting foliage and saving lost it.
 /// Registering the component fixes that as a side effect of describing it
 /// — which is the point of having one registry.
+/// CONTROL-F: hide and lock, authored per entity.
+/// CONTROL-H, Seam 4: editor preferences are properties of a non-entity
+/// object, so they get an ordinary schema and reach Details for free.
+/// Deliberately **not** in [`component_registry`] — settings must never
+/// serialise into a scene.
+pub fn editor_settings_schema() -> ComponentSchema {
+    component_schema! {
+        crate::settings::EditorSettings as "somnium.EditorSettings", display "Editor", version 1,
+        fields {
+            snap_translate_m { min: 0.0, soft_max: 10.0, step: 0.05, unit: "m", group: "Snapping" },
+            snap_rotate_deg { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Snapping" },
+            snap_scale { min: 0.0, soft_max: 10.0, step: 0.05, group: "Snapping" },
+            snap_to_surface { group: "Snapping" },
+            gizmo_local_space { group: "Gizmo" },
+            gizmo_pivot_centre { group: "Gizmo" },
+            select_only { group: "Gizmo" },
+            tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface" },
+            show_statistics { group: "Interface" },
+        }
+    }
+}
+
+/// Project settings: facts about the content, committed with it.
+pub fn project_settings_schema() -> ComponentSchema {
+    component_schema! {
+        crate::settings::ProjectSettings as "somnium.ProjectSettings", display "Project", version 1,
+        fields {
+            startup_scene { group: "Startup" },
+            content_root { group: "Startup" },
+            autosave_interval_s { min: 0.0, soft_max: 3600.0, step: 30.0, unit: "s", group: "Saving" },
+            thumbnail_budget_ms { min: 0.0, soft_max: 16.0, step: 0.25, unit: "ms", group: "Content" },
+            external_editor { group: "Tools" },
+            default_float_step { min: 0.0, soft_max: 1.0, step: 0.001, precision: 4, group: "Interface" },
+        }
+    }
+}
+
+fn editor_flags_schema() -> ComponentSchema {
+    component_schema! {
+        EditorFlags as "somnium.EditorFlags", display "Editor", version 1,
+        fields {
+            hidden { doc: "Skip this entity when drawing. Authoring only." },
+            locked { doc: "Refuse viewport picking, dragging and gizmo transforms." },
+        }
+    }
+}
+
 fn foliage_schema() -> ComponentSchema {
     component_schema! {
         FoliageComponent as "somnium.Foliage", display "Foliage", version 1,
@@ -432,6 +666,8 @@ fn foliage_schema() -> ComponentSchema {
             scale_max { min: 0.0 },
             radius { min: 0.0 },
             cull_distance { min: 0.0 },
+            lod_falloff { group: "Level of Detail", display_name: "LOD Falloff",
+                min: 0.0, max: 1.5, soft_min: 0.0, soft_max: 1.0 },
             foliage_shadow_distance { min: 0.0 },
             lod_distance { min: 0.0 },
             impostor_distance { min: 0.0 },
@@ -441,6 +677,149 @@ fn foliage_schema() -> ComponentSchema {
 }
 
 /// Voxel world handle. Like foliage, previously unsaved.
+/// CONTROL-L. Five scalars and five CONTROL-K tracks; the whole day cycle is
+/// a schema block, which is the claim the phase document opens with.
+///
+/// The five track fields declare `soft_min`/`soft_max` of 0..24 because for a
+/// curve those are the *time* domain, while `min`/`max` stay the value range.
+/// That split is Seam 1's, and this is the first schema to need both halves.
+fn time_of_day_schema() -> ComponentSchema {
+    component_schema! {
+        crate::time_of_day::TimeOfDayComponent as "somnium.TimeOfDay", display "Time of Day", version 1,
+        fields {
+            enabled { group: "Clock" },
+            hour { min: 0.0, max: 24.0, step: 0.05, precision: 2, unit: "h", group: "Clock" },
+            day_of_year { min: 1, max: 366, group: "Clock", display_name: "Day of Year" },
+            latitude { min: -90.0, max: 90.0, step: 0.5, precision: 2, unit: "\u{b0}", group: "Location" },
+            longitude { min: -180.0, max: 180.0, step: 0.5, precision: 2, unit: "\u{b0}", group: "Location" },
+            timescale { min: 0.0, soft_max: 60.0, step: 0.1, precision: 2, unit: "h/s", group: "Clock" },
+            sun_color { group: "Tracks", display_name: "Sun Colour" },
+            sun_intensity { group: "Tracks", min: 0.0, max: 130000.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Sun Intensity" },
+            fog_density { group: "Tracks", min: 0.0, max: 0.02,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Fog Density" },
+            exposure_compensation { group: "Tracks", min: -8.0, max: 8.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Exposure Compensation" },
+            cloud_coverage { group: "Tracks", min: 0.0, max: 1.0,
+                soft_min: 0.0, soft_max: 24.0, display_name: "Cloud Coverage" },
+        }
+    }
+}
+
+/// CONTROL-M. Every number the cloud march reads, in one block.
+///
+/// The claim the phase's rendering half exists to test: a renderer feature
+/// whose whole authoring surface is a schema block, with no `SOMNIUM_*`
+/// variable left as the only way to reach any of it.
+fn sky_schema() -> ComponentSchema {
+    let mut schema = component_schema! {
+        crate::sky::SkyComponent as "somnium.Sky", display "Sky", version 1,
+        fields {
+            enabled { group: "Clouds" },
+            coverage { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Clouds" },
+            cloud_type { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Clouds",
+                display_name: "Cloud Type" },
+            density { min: 0.0, soft_max: 4.0, step: 0.01, precision: 2, group: "Clouds" },
+            altitude { min: 100.0, soft_max: 8000.0, step: 10.0, unit: "m", group: "Layer" },
+            thickness { min: 100.0, soft_max: 8000.0, step: 10.0, unit: "m", group: "Layer" },
+            wind { step: 0.5, precision: 2, unit: "m/s", group: "Weather" },
+            precipitation { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Weather" },
+            weather_scale { min: 100.0, soft_max: 80000.0, step: 100.0, unit: "m",
+                group: "Weather", display_name: "Weather Scale" },
+            seed { min: 0, group: "Weather" },
+            detail_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shape",
+                display_name: "Detail Strength" },
+            shape_scale { min: 100.0, soft_max: 40000.0, step: 100.0, unit: "m",
+                group: "Shape", display_name: "Shape Scale" },
+            ambient { min: 0.0, soft_max: 4.0, step: 0.01, precision: 2, group: "Lighting" },
+            phase_forward { min: 0.0, max: 0.95, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Forward Scattering" },
+            phase_backward { min: -0.95, max: 0.0, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Backward Scattering" },
+            phase_blend { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Lobe Blend" },
+            shadow_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shadows",
+                display_name: "Shadow Strength" },
+            shadow_extent { min: 100.0, soft_max: 20000.0, step: 100.0, unit: "m",
+                group: "Shadows", display_name: "Shadow Extent" },
+            max_steps { min: 8, max: 256, group: "Quality", display_name: "March Steps",
+                advanced: true },
+            light_steps { min: 1, max: 16, group: "Quality", display_name: "Light Steps",
+                advanced: true },
+            max_distance { min: 1000.0, soft_max: 200000.0, step: 1000.0, unit: "m",
+                group: "Quality", display_name: "Max Distance", advanced: true },
+            quality { min: 0, max: 2, group: "Clouds", display_name: "Cloud Quality" },
+            temporal_jitter { group: "Quality", display_name: "Temporal Jitter",
+                advanced: true },
+        }
+    };
+    // `quality` is an integer in Rust and a named choice in the panel. The
+    // macro derives `ty` from the Rust type, which is right for every other
+    // field and cannot know about a variant list — so the one enum field is
+    // re-tagged here, the same way `MeshKind` is built by hand. Names live on
+    // `SkyComponent` so the combo box and the conversion cannot disagree.
+    if let Some(field) = schema
+        .fields
+        .iter_mut()
+        .find(|field| field.name == "quality")
+    {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(crate::sky::SkyComponent::QUALITY_NAMES);
+    }
+    schema
+}
+
+/// CONTROL-N. Weather as a set of causes, not a pile of sliders.
+fn weather_schema() -> ComponentSchema {
+    component_schema! {
+        crate::weather::WeatherComponent as "somnium.Weather", display "Weather", version 1,
+        fields {
+            enabled { group: "Weather" },
+            precipitation { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Weather" },
+            temperature_c { min: -50.0, max: 60.0, step: 0.5, precision: 1, unit: "C",
+                group: "Weather", display_name: "Temperature" },
+            wind_speed { min: 0.0, soft_max: 45.0, step: 0.5, precision: 2, unit: "m/s",
+                group: "Wind", display_name: "Wind Speed" },
+            wind_direction_deg { min: 0.0, max: 360.0, step: 1.0, precision: 1,
+                group: "Wind", display_name: "Wind Direction" },
+            wetness_target { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness",
+                display_name: "Wetness Target" },
+            wetting_seconds { min: 0.1, soft_max: 120.0, step: 0.5, precision: 2, unit: "s",
+                group: "Wetness", display_name: "Wetting Time" },
+            drying_seconds { min: 0.1, soft_max: 600.0, step: 1.0, precision: 2, unit: "s",
+                group: "Wetness", display_name: "Drying Time" },
+            specular_dry_ratio { min: 0.1, soft_max: 10.0, step: 0.1, precision: 2,
+                group: "Wetness", display_name: "Specular Dries Faster By" },
+            puddles { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness" },
+            ripple_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Water",
+                display_name: "Rain Ripples" },
+            transition_seconds { min: 0.1, soft_max: 60.0, step: 0.5, precision: 2, unit: "s",
+                group: "Weather", display_name: "Transition" },
+            particle_rate { min: 0.0, soft_max: 40000.0, step: 100.0, group: "Precipitation",
+                display_name: "Particles per Second", advanced: true },
+        }
+    }
+}
+
+/// CONTROL-O. The box is the entity's `Transform`; these are the six things
+/// about the projection that the transform cannot say.
+fn decal_schema() -> ComponentSchema {
+    component_schema! {
+        crate::decal::DecalComponent as "somnium.Decal", display "Decal", version 1,
+        fields {
+            enabled { group: "Decal" },
+            opacity { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Decal" },
+            priority { group: "Decal",
+                doc: "Higher wins where two decals overlap." },
+            angle_fade_degrees { min: 0.0, max: 89.0, step: 1.0, precision: 1,
+                group: "Projection", display_name: "Angle Fade",
+                doc: "How far a surface may tip from the projection axis before the decal fades out." },
+            normal_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2,
+                group: "Projection", display_name: "Normal Strength" },
+            roughness { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Projection" },
+        }
+    }
+}
+
 fn voxel_terrain_schema() -> ComponentSchema {
     component_schema! {
         VoxelTerrainComponent as "somnium.VoxelTerrain", display "Voxel Terrain", version 1,
@@ -492,10 +871,28 @@ fn mesh_schema() -> ComponentSchema {
 }
 
 fn material_schema() -> ComponentSchema {
-    component_schema! {
-        MaterialComponent as "somnium.Material", display "Material", version 1,
-        fields { id }
+    fn migrate_material(_fields: &mut ReflectObject, from: u32) -> Result<(), ReflectError> {
+        match from {
+            // Version 1 only stored a process-local renderer pool index. It
+            // cannot name authored content, so the honest migration is an
+            // unset asset whose runtime slot will be reconstructed.
+            1 => Ok(()),
+            found => Err(ReflectError::UnsupportedVersion {
+                component: StableId::new("somnium.Material"),
+                found,
+                current: 2,
+            }),
+        }
     }
+    let mut schema = component_schema! {
+        MaterialComponent as "somnium.Material", display "Material", version 2,
+        fields {
+            asset { asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL },
+            runtime_id { flags: FieldFlags::RUNTIME_ONLY },
+        }
+    };
+    schema.migrate = Some(migrate_material);
+    schema
 }
 
 fn parent_schema() -> ComponentSchema {
@@ -509,12 +906,12 @@ fn terrain_schema() -> ComponentSchema {
     component_schema! {
         TerrainComponent as "somnium.Terrain", display "Terrain", version 1,
         fields {
-            terrain_id,
-            chunk_cells { min: 1 },
-            grid_x { min: 1 },
-            grid_z { min: 1 },
-            cell_size { min: 0.001 },
-            height_scale,
+            terrain_id { scope: ChangeScope::Entity },
+            chunk_cells { min: 1, scope: ChangeScope::Entity },
+            grid_x { min: 1, scope: ChangeScope::Entity },
+            grid_z { min: 1, scope: ChangeScope::Entity },
+            cell_size { min: 0.001, scope: ChangeScope::Entity },
+            height_scale { scope: ChangeScope::Entity },
         }
     }
 }
@@ -526,11 +923,15 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 12);
+        assert_eq!(registry.len(), 21);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
+                "somnium.BuoyantVessel",
+                "somnium.CameraSettings",
+                "somnium.Decal",
+                "somnium.EditorFlags",
                 "somnium.Foliage",
                 "somnium.Light",
                 "somnium.Material",
@@ -538,11 +939,16 @@ mod tests {
                 "somnium.MeshKind",
                 "somnium.Name",
                 "somnium.Parent",
+                "somnium.ParticleEmitter",
+                "somnium.PostProcess",
                 "somnium.RigidBody",
+                "somnium.Sky",
                 "somnium.Terrain",
+                "somnium.TimeOfDay",
                 "somnium.Transform",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
+                "somnium.Weather",
             ],
             "iteration is sorted by stable id, not by registration order"
         );
@@ -709,5 +1115,109 @@ mod tests {
             world.get::<Transform>(e).is_some(),
             "migration must not disturb the rest of the entity"
         );
+    }
+
+    fn alternate_value(
+        field: &FieldSchema,
+        current: &ReflectValue,
+        target: Entity,
+    ) -> ReflectValue {
+        match (&field.ty, current) {
+            (FieldType::Bool, ReflectValue::Bool(value)) => ReflectValue::Bool(!value),
+            (FieldType::Enum(names), ReflectValue::I64(value)) => {
+                ReflectValue::I64((value + 1).rem_euclid(names.len() as i64))
+            }
+            (FieldType::I64, ReflectValue::I64(value)) => {
+                let next = value.saturating_add(1);
+                let next = field.max.map_or(next, |max| next.min(max as i64));
+                let next = field.min.map_or(next, |min| next.max(min as i64));
+                ReflectValue::I64(next)
+            }
+            (FieldType::F64, ReflectValue::F64(value)) => {
+                let delta = field.step.unwrap_or(0.25).max(0.000_001);
+                let mut next = value + delta;
+                if field.max.is_some_and(|max| next > max) {
+                    next = value - delta;
+                }
+                if let Some(min) = field.min {
+                    next = next.max(min);
+                }
+                ReflectValue::F64(next)
+            }
+            (FieldType::Str, ReflectValue::Str(value)) => {
+                ReflectValue::Str(format!("{value} edited"))
+            }
+            (FieldType::Vec2, ReflectValue::Vec2(value)) => {
+                ReflectValue::Vec2([value[0] + 0.25, value[1] - 0.25])
+            }
+            (FieldType::Vec3 | FieldType::Color, ReflectValue::Vec3(value)) => {
+                ReflectValue::Vec3([value[0] + 0.25, value[1], value[2]])
+            }
+            (FieldType::Vec4, ReflectValue::Vec4(value)) => {
+                ReflectValue::Vec4([value[0] + 0.25, value[1], value[2], value[3]])
+            }
+            (FieldType::Quat, ReflectValue::Quat(_)) => {
+                ReflectValue::Quat(glam::Quat::from_rotation_y(0.25).to_array())
+            }
+            (FieldType::Entity, _) => ReflectValue::Entity(Some(target)),
+            (FieldType::Asset, _) => {
+                ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(7)))
+            }
+            (FieldType::Array(_), ReflectValue::Array(value)) => ReflectValue::Array(value.clone()),
+            _ => current.clone(),
+        }
+    }
+
+    #[test]
+    fn every_editable_serialized_field_round_trips_through_generic_edit_and_scene_schema() {
+        use crate::editor_commands::{EditorCommand, SetFieldCmd};
+        use somnium_ui::GestureId;
+
+        let registry = component_registry();
+        let mut world = World::new();
+        let target = world.spawn((Transform::default(), Name::new("Reference")));
+        let entity = world.spawn((Transform::default(), Name::new("Everything")));
+        for schema in registry.iter() {
+            if (schema.snapshot)(&world, entity).is_none() {
+                (schema.insert_default)(&mut world, entity).unwrap();
+            }
+        }
+
+        let mut touched = 0usize;
+        let mut selected = Some(entity);
+        for schema in registry.iter() {
+            for field in &schema.fields {
+                if !field.flags.contains(FieldFlags::EDIT)
+                    || !field.flags.contains(FieldFlags::SERIALIZE)
+                    || field.read_only
+                {
+                    continue;
+                }
+                let current = (schema.read_field)(&world, entity, field.id).unwrap();
+                let next = alternate_value(field, &current, target);
+                let mut command = SetFieldCmd::new(
+                    &world,
+                    entity,
+                    schema.stable_id,
+                    field.id,
+                    next,
+                    GestureId(touched as u64 + 1),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{}.{}: {error}", schema.stable_id, field.name));
+                command.execute(&mut world, &mut selected);
+                touched += 1;
+            }
+        }
+        assert!(
+            touched > 100,
+            "the test must cover the complete property surface"
+        );
+
+        let document = crate::scene_schema::scene_to_json(&mut world, &registry);
+        let mut loaded = World::new();
+        crate::scene_schema::scene_from_json(&mut loaded, &registry, &document).unwrap();
+        let loaded_document = crate::scene_schema::scene_to_json(&mut loaded, &registry);
+        assert_eq!(loaded_document, document);
     }
 }

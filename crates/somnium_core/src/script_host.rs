@@ -463,7 +463,10 @@ impl ScriptHost {
                 state.pending = None;
                 state.changed_at = None;
             } else if state.pending == Some(current) {
-                if state.changed_at.is_some_and(|at| now.duration_since(at) >= settle) {
+                if state
+                    .changed_at
+                    .is_some_and(|at| now.duration_since(at) >= settle)
+                {
                     state.loaded = current;
                     state.pending = None;
                     state.changed_at = None;
@@ -625,8 +628,14 @@ impl ScriptHost {
             if !self.runtime.has_pending_init() {
                 return false;
             }
-            failures.extend(self.run_phase(Callback::Init, world, phase, services).failures);
-            failures.extend(self.run_phase(Callback::Start, world, phase, services).failures);
+            failures.extend(
+                self.run_phase(Callback::Init, world, phase, services)
+                    .failures,
+            );
+            failures.extend(
+                self.run_phase(Callback::Start, world, phase, services)
+                    .failures,
+            );
             // Only a pass that *created* something can lead to more work:
             // a reload puts existing attachments back into `Loaded`, and
             // that settles in one pass rather than iterating.
@@ -644,12 +653,14 @@ impl ScriptHost {
 
         // The author's `enabled` flag, and quarantine, are both applied
         // here — one diff, one place.
-        report
-            .failures
-            .extend(self.run_phase(Callback::Enable, world, phase, services).failures);
-        report
-            .failures
-            .extend(self.run_phase(Callback::Disable, world, phase, services).failures);
+        report.failures.extend(
+            self.run_phase(Callback::Enable, world, phase, services)
+                .failures,
+        );
+        report.failures.extend(
+            self.run_phase(Callback::Disable, world, phase, services)
+                .failures,
+        );
 
         report.destroyed += self.teardown(world, phase, services);
         report
@@ -816,14 +827,19 @@ impl ScriptHost {
             // The view borrows the world immutably for exactly the
             // duration of the callbacks; nothing it hands out survives.
             let view = EngineWorldView::new(world, &self.registry);
-            self.runtime.run_phase(callback, phase, &view, &mut commands)
+            self.runtime
+                .run_phase(callback, phase, &view, &mut commands)
         };
 
         for failure in &report.failures {
             self.logs.push(ScriptLogLine {
                 level: LogLevel::Error,
                 instance: failure.instance,
-                message: format!("{} raised: {}", failure.callback.script_name(), failure.error),
+                message: format!(
+                    "{} raised: {}",
+                    failure.callback.script_name(),
+                    failure.error
+                ),
             });
         }
 
@@ -903,10 +919,8 @@ impl ScriptHost {
         }
 
         for rejection in outcome.rejected {
-            self.rejections.push(format!(
-                "{:?}: {}",
-                rejection.reason, rejection.detail
-            ));
+            self.rejections
+                .push(format!("{:?}: {}", rejection.reason, rejection.detail));
         }
 
         for event in outcome.events {
@@ -1104,10 +1118,9 @@ fn file_signature(path: &Path) -> FileSignature {
     let Ok(meta) = std::fs::metadata(path) else {
         return FileSignature::Missing;
     };
-    meta.modified()
-        .map_or(FileSignature::Missing, |at| {
-            FileSignature::Present(at, meta.len())
-        })
+    meta.modified().map_or(FileSignature::Missing, |at| {
+        FileSignature::Present(at, meta.len())
+    })
 }
 
 /// A path as the editor and the diagnostics show it: project-relative
@@ -1163,4 +1176,3 @@ pub fn host_diagnostic(asset: ScriptAssetId, message: &str) -> Diagnostic {
         message: message.to_owned(),
     }
 }
-

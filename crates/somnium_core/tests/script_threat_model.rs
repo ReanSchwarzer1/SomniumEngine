@@ -8,8 +8,8 @@
 //! Everything here drives a real VM through the real host. A test that
 //! asserted a sandbox property against a mock would be asserting nothing.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use somnium_core::script_host::{HostServices, ScriptHost};
 use somnium_core::{Name, Transform};
@@ -52,7 +52,10 @@ impl Adversary {
         let entity = world.spawn((Name::new("Target"), Transform::default(), ScriptSet::new()));
         let attachment = ScriptAttachment::new(asset);
         let instance = attachment.instance;
-        world.get_mut::<ScriptSet>(entity).unwrap().attach(attachment);
+        world
+            .get_mut::<ScriptSet>(entity)
+            .unwrap()
+            .attach(attachment);
 
         Self {
             host,
@@ -78,10 +81,18 @@ impl Adversary {
         };
         let mut services = HostServices::default();
         self.host.sync(&mut self.world, &phase, &mut services);
-        self.host
-            .fixed_update(&mut self.world, time, &InputSnapshot::default(), &mut services);
-        self.host
-            .update(&mut self.world, time, &InputSnapshot::default(), &mut services);
+        self.host.fixed_update(
+            &mut self.world,
+            time,
+            &InputSnapshot::default(),
+            &mut services,
+        );
+        self.host.update(
+            &mut self.world,
+            time,
+            &InputSnapshot::default(),
+            &mut services,
+        );
         self.step += 1;
     }
 
@@ -155,7 +166,10 @@ fn row_2_an_allocation_bomb_hits_the_memory_ceiling() {
         budget,
     );
     adversary.frame();
-    assert!(!adversary.errors().is_empty(), "the ceiling must be enforced");
+    assert!(
+        !adversary.errors().is_empty(),
+        "the ceiling must be enforced"
+    );
     adversary.frame();
 }
 
@@ -166,8 +180,20 @@ fn row_3_nothing_that_reaches_outside_the_process_is_reachable() {
     // Not merely absent from the library set: *unreachable by name*, which
     // is the property that survives someone adding a library later.
     for name in [
-        "io", "os", "package", "debug", "loadstring", "load", "loadfile", "dofile", "getfenv",
-        "setfenv", "collectgarbage", "gcinfo", "print", "_G",
+        "io",
+        "os",
+        "package",
+        "debug",
+        "loadstring",
+        "load",
+        "loadfile",
+        "dofile",
+        "getfenv",
+        "setfenv",
+        "collectgarbage",
+        "gcinfo",
+        "print",
+        "_G",
     ] {
         let mut adversary = Adversary::new(&fixed(&format!(
             "if type({name}) ~= 'nil' then ctx:log('REACHABLE') end"
@@ -224,7 +250,10 @@ fn row_4_a_cooked_artifact_from_another_runtime_is_never_loaded() {
         "a different runtime's bytecode must be a cache miss"
     );
     assert!(
-        !artifact.is_valid_for("return Script.define({ schemaVersion = 2 })", &artifact.fingerprint),
+        !artifact.is_valid_for(
+            "return Script.define({ schemaVersion = 2 })",
+            &artifact.fingerprint
+        ),
         "and so must bytecode for a source that has since changed"
     );
 }
@@ -281,13 +310,14 @@ fn row_5_a_stale_handle_storm_costs_rejections_and_nothing_else() {
     }
     buffer.end();
 
-    let outcome = somnium_core::script_bridge::apply_commands(
-        &mut world,
-        &registry,
-        buffer.drain_sorted(),
-    );
+    let outcome =
+        somnium_core::script_bridge::apply_commands(&mut world, &registry, buffer.drain_sorted());
     assert_eq!(outcome.applied, 0);
-    assert_eq!(outcome.rejected.len(), 512, "every one refused, none applied");
+    assert_eq!(
+        outcome.rejected.len(),
+        512,
+        "every one refused, none applied"
+    );
     assert!(world.entities().next().is_none());
 }
 
@@ -384,7 +414,11 @@ fn row_9_a_hundred_reload_cycles_retain_no_instances_or_resources() {
             )
             .unwrap();
         adversary.frame();
-        assert_eq!(adversary.host.runtime().live_instances(), 1, "cycle {cycle}");
+        assert_eq!(
+            adversary.host.runtime().live_instances(),
+            1,
+            "cycle {cycle}"
+        );
     }
     assert_eq!(adversary.host.runtime().owned_resources(), 0);
 }
@@ -472,7 +506,11 @@ fn row_11_a_sandboxed_package_cannot_spawn_despawn_or_touch_physics() {
     );
     // The script itself is untouched — a capability refusal is not a fault.
     assert!(
-        adversary.host.take_logs().iter().any(|l| l.message == "still running"),
+        adversary
+            .host
+            .take_logs()
+            .iter()
+            .any(|l| l.message == "still running"),
         "a refused command must not fault the script"
     );
 }
@@ -676,7 +714,10 @@ fn row_7_a_value_that_is_not_data_is_rendered_rather_than_smuggled() {
     );
     adversary.frame();
     assert!(
-        adversary.logs().iter().any(|line| line.contains("<thread>")),
+        adversary
+            .logs()
+            .iter()
+            .any(|line| line.contains("<thread>")),
         "logging one is fine; it is rendered, not converted"
     );
     assert!(

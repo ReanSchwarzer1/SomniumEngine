@@ -44,6 +44,10 @@ pub struct Button {
 }
 
 impl Control for Button {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let mut desired = Vec2::ZERO;
         for &ch in &widget.children {
@@ -117,13 +121,8 @@ impl Control for Button {
         } else {
             0.0
         };
-        ctx.motion.start(
-            key,
-            0.0,
-            target,
-            t.motion.hover_ms as f32,
-            Easing::Standard,
-        );
+        ctx.motion
+            .start(key, 0.0, target, t.motion.hover_ms as f32, Easing::Standard);
         let wash = ctx.motion.value_or(key, target);
         if wash > 0.0 && wash < 1.0 && state.interaction != Interaction::Pressed {
             let rest = if ghost {
@@ -200,7 +199,7 @@ impl Control for Button {
                     self.is_pressed = false;
                     msg.handled = true;
                 }
-                WidgetMessage::KeyDown(key) => {
+                WidgetMessage::KeyDown(key, _) => {
                     use crate::message::KeyCode;
                     if matches!(key, KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) {
                         emit.push(UiMessage::new(
@@ -253,6 +252,7 @@ mod tests {
             WidgetMessage::MouseDown {
                 pos,
                 button: MouseButton::Left,
+                mods: crate::message::Modifiers::default(),
             },
         );
         button.handle_routed_message(widget, &mut down, emit);
@@ -262,6 +262,7 @@ mod tests {
             WidgetMessage::MouseUp {
                 pos,
                 button: MouseButton::Left,
+                mods: crate::message::Modifiers::default(),
             },
         );
         button.handle_routed_message(widget, &mut up, emit);

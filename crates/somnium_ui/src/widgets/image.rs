@@ -39,11 +39,7 @@ impl Control for Image {
         );
         // A ready preview wins; the tint is dropped with it, because a
         // thumbnail carries real colour and tinting it would wash it out.
-        if let Some(uv) = self
-            .asset
-            .as_deref()
-            .and_then(|p| ctx.thumbnails.uv(p))
-        {
+        if let Some(uv) = self.asset.as_deref().and_then(|p| ctx.thumbnails.uv(p)) {
             ctx.push_primitive(
                 crate::primitive::Primitive::textured(rect, uv, [255, 255, 255, 255]),
                 Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),

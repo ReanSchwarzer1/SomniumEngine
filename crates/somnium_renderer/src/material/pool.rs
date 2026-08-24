@@ -44,13 +44,20 @@ pub struct GpuMaterial {
     /// `shading.wgsl` takes the terrain path when it is non-negative. Occupies
     /// what was padding, so the struct's size and alignment are unchanged.
     pub terrain_index: i32,
+    /// Phase CONTROL-N: how much water this surface takes up, `0..1`.
+    ///
+    /// Lagarde's discriminating channel. Not a wetness-only input — the same
+    /// number governs ageing and pollution — which is why it lives on the
+    /// material beside roughness rather than on the weather. Occupies what was
+    /// padding, so the struct's size and alignment are unchanged.
+    pub porosity: f32,
     /// Explicit tail padding to a 16-byte multiple.
     ///
     /// WGSL requires the array stride of a storage-buffer element to be a
     /// multiple of its alignment, which is 16 here because of `base_color`.
     /// Adding a single f32 took the struct from 48 to 52 bytes, so the padding
     /// is spelled out rather than left to the compiler to insert silently.
-    pub _pad: [f32; 2],
+    pub _pad: f32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -62,6 +69,49 @@ pub const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 1;
 /// leaf should get the curved-card normal treatment in `shading.wgsl`. The
 /// shader tests `(flags & 2u)`.
 pub const MATERIAL_FLAG_FOLIAGE: u32 = 1 << 1;
+
+impl GpuMaterial {
+    /// Rebuild the frozen 80-byte runtime payload from an authored material.
+    /// Texture asset ids are resolved by the caller because only the runtime
+    /// asset cache knows their current bindless slots.
+    #[must_use]
+    pub fn from_asset(
+        asset: &somnium_asset::material::MaterialAsset,
+        mut resolve_texture: impl FnMut(somnium_asset::database::AssetId) -> i32,
+    ) -> Self {
+        let emissive = glam::Vec3::from(asset.emissive.0) * asset.emissive_intensity;
+        Self {
+            base_color: [
+                asset.base_color.0[0],
+                asset.base_color.0[1],
+                asset.base_color.0[2],
+                asset.opacity,
+            ],
+            roughness: asset.roughness,
+            metallic: asset.metallic,
+            albedo_map: resolve_texture(asset.albedo_map),
+            normal_map: resolve_texture(asset.normal_map),
+            metallic_roughness_map: resolve_texture(asset.metallic_roughness_map),
+            alpha_cutoff: cutout_threshold(asset.alpha_mode, asset.alpha_cutoff),
+            flags: if asset.double_sided {
+                MATERIAL_FLAG_DOUBLE_SIDED
+            } else {
+                0
+            } | if asset.foliage {
+                MATERIAL_FLAG_FOLIAGE
+            } else {
+                0
+            },
+            occlusion_map: resolve_texture(asset.occlusion_map),
+            transmission: asset.transmission,
+            emissive: emissive.to_array(),
+            emissive_map: resolve_texture(asset.emissive_map),
+            terrain_index: -1,
+            porosity: asset.porosity,
+            _pad: 0.0,
+        }
+    }
+}
 
 /// Manages a pool of materials in a GPU storage buffer.
 pub struct MaterialPool {
@@ -216,6 +266,23 @@ pub fn cutout_threshold(mode: somnium_asset::AlphaMode, cutoff: f32) -> f32 {
 mod material_flag_tests {
     use super::*;
     use somnium_asset::AlphaMode;
+
+    #[test]
+    fn polished_asset_reconstructs_the_gpu_payload_without_authored_pool_ids() {
+        let asset = somnium_asset::material::MaterialAsset {
+            metallic: 1.0,
+            roughness: 0.2,
+            emissive: somnium_asset::material::LinearColor([0.25, 0.5, 1.0]),
+            emissive_intensity: 4.0,
+            double_sided: true,
+            ..Default::default()
+        };
+        let gpu = GpuMaterial::from_asset(&asset, |_| -1);
+        assert_eq!((gpu.metallic, gpu.roughness), (1.0, 0.2));
+        assert_eq!(gpu.emissive, [1.0, 2.0, 4.0]);
+        assert_eq!(gpu.flags & MATERIAL_FLAG_DOUBLE_SIDED, 1);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+    }
 
     #[test]
     fn only_masked_materials_cut_out() {

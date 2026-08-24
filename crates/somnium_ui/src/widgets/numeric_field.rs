@@ -5,7 +5,7 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{KeyCode, MessageDirection, NodeHandle, UiMessage, WidgetMessage},
+    message::{KeyCode, MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
     node::{Control, CursorKind, LayoutCtx, UiNode},
     theme,
     types::Rect,
@@ -58,6 +58,10 @@ pub struct NumericField {
     /// answer differs per section. Empty means unitless.
     pub unit: &'static str,
     editing_text: Option<String>,
+    /// The multi-selection did not agree on this value. Displays as an em
+    /// dash and is cleared by the first edit, so an untouched mixed field
+    /// cannot write the primary's value over the rest of the selection.
+    pub mixed: bool,
     pub px: f32,
     pub color: [u8; 4],
     pub font_id: u8,
@@ -79,11 +83,19 @@ pub struct NumericField {
     /// against this rather than accumulated, so the value cannot drift if
     /// something else writes to the field mid-drag.
     drag_origin: Option<(f32, f32)>,
+    /// Displayed value before the current pointer gesture. Cancellation uses
+    /// this even for the slider half, whose drag math has a different origin.
+    gesture_origin: Option<f32>,
     /// Set once the pointer has moved far enough for the gesture to count as a
     /// scrub rather than a click.
     scrubbing: bool,
     /// Optional slider range. `None` infers a range from `drag_step`.
     slider_range: Option<(f32, f32)>,
+    /// CONTROL-K: how the track's travel maps to the value. A property of the
+    /// quantity, declared in the field's schema, not a choice this widget
+    /// makes — light intensity in lux and fog density per metre are both
+    /// unusable on a linear track.
+    slider_curve: somnium_ecs::curve::SliderCurve,
     slider_dragging: bool,
 }
 
@@ -119,11 +131,28 @@ fn infer_slider_range(step: f32) -> (f32, f32) {
     }
 }
 
+fn scrub_value(start: f32, dx: f32, step: f32, modifiers: Modifiers) -> f32 {
+    let precision = if modifiers.shift || modifiers.alt {
+        0.1
+    } else {
+        1.0
+    };
+    let mut value = start + dx * step * precision;
+    if modifiers.ctrl && step > 0.0 {
+        value = (value / step).round() * step;
+    }
+    value
+}
+
 impl NumericField {
     fn display_text(&self) -> String {
-        self.editing_text
-            .clone()
-            .unwrap_or_else(|| format!("{:.3}", self.value))
+        if let Some(text) = &self.editing_text {
+            return text.clone();
+        }
+        if self.mixed {
+            return super::MIXED_PLACEHOLDER.to_string();
+        }
+        format!("{:.3}", self.value)
     }
 
     fn effective_range(&self) -> (f32, f32) {
@@ -147,14 +176,46 @@ impl NumericField {
         )
     }
 
-    fn value_from_slider(slider: Rect, x: f32, lo: f32, hi: f32) -> f32 {
+    fn value_from_slider(&self, slider: Rect, x: f32, lo: f32, hi: f32) -> f32 {
         let usable = (slider.w - HANDLE_W).max(1.0);
         let t = ((x - slider.x - HANDLE_W * 0.5) / usable).clamp(0.0, 1.0);
-        lo + t * (hi - lo)
+        self.slider_curve.to_value(t, lo, hi)
+    }
+
+    /// Where the handle sits for the current value, in `0..=1`.
+    fn slider_travel(&self, lo: f32, hi: f32) -> f32 {
+        self.slider_curve.to_travel(self.value, lo, hi)
     }
 }
 
 impl Control for NumericField {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
+    fn gesture_active(&self) -> bool {
+        self.drag_origin.is_some() || self.slider_dragging
+    }
+
+    fn cancel_gesture(&mut self, widget: &mut Widget, emit: &mut Vec<UiMessage>) -> bool {
+        if !self.gesture_active() {
+            return false;
+        }
+        let original = self.gesture_origin.unwrap_or(self.value);
+        self.drag_origin = None;
+        self.gesture_origin = None;
+        self.scrubbing = false;
+        self.slider_dragging = false;
+        if original != self.value {
+            self.value = original;
+            // Restoration is live rather than committed: cancelling must not
+            // create an undo step for a gesture the author declined.
+            emit.push(NumericFieldMessage::value_changing(widget.handle, original));
+        }
+        widget.invalidate_layout();
+        true
+    }
+
     // Governs whether the UI swallows keyboard input. Tied to the live edit
     // state rather than the widget type, so keys reach the game again once a
     // scrub has ended the text-edit session.
@@ -189,11 +250,7 @@ impl Control for NumericField {
         let b = widget.screen_bounds();
         let (slider, field) = Self::split_rects(b);
         let (lo, hi) = self.effective_range();
-        let t = if hi > lo {
-            ((self.value - lo) / (hi - lo)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let t = if hi > lo { self.slider_travel(lo, hi) } else { 0.0 };
 
         // Phase 27-G: this embedded scrub slider was missed by the 27-D widget
         // sweep and still drew flat bars. It now matches the standalone
@@ -300,6 +357,11 @@ impl Control for NumericField {
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {
                 WidgetMessage::MouseDown { pos, .. } => {
+                    // Touching the control is the moment a mixed row acquires a
+                    // value: from here on it shows and writes the primary's,
+                    // which is what "written only when touched" means.
+                    self.mixed = false;
+                    self.gesture_origin = Some(self.value);
                     let (slider, _field) = Self::split_rects(widget.screen_bounds());
                     if slider.contains(pos) {
                         self.slider_dragging = true;
@@ -307,7 +369,7 @@ impl Control for NumericField {
                         self.select_all = false;
                         self.editing_text = None;
                         let (lo, hi) = self.effective_range();
-                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        let v = self.value_from_slider(slider, pos.x, lo, hi);
                         if v != self.value {
                             self.value = v;
                             emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -318,11 +380,11 @@ impl Control for NumericField {
                     }
                     msg.handled = true;
                 }
-                WidgetMessage::MouseMove { pos } => {
+                WidgetMessage::MouseMove { pos, mods } => {
                     if self.slider_dragging {
                         let (slider, _) = Self::split_rects(widget.screen_bounds());
                         let (lo, hi) = self.effective_range();
-                        let v = Self::value_from_slider(slider, pos.x, lo, hi);
+                        let v = self.value_from_slider(slider, pos.x, lo, hi);
                         if v != self.value {
                             self.value = v;
                             emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -341,7 +403,7 @@ impl Control for NumericField {
                             self.editing_text = None;
                         }
                         if self.scrubbing {
-                            let v = start_value + dx * self.drag_step;
+                            let v = scrub_value(start_value, dx, self.drag_step, mods);
                             if v != self.value {
                                 self.value = v;
                                 emit.push(NumericFieldMessage::value_changing(widget.handle, v));
@@ -356,6 +418,7 @@ impl Control for NumericField {
                     self.slider_dragging = false;
                     let was_scrubbing = self.scrubbing;
                     self.drag_origin = None;
+                    self.gesture_origin = None;
                     self.scrubbing = false;
                     if was_scrubbing || was_slider {
                         emit.push(NumericFieldMessage::value_changed(
@@ -368,6 +431,7 @@ impl Control for NumericField {
                 }
                 WidgetMessage::Focus => {
                     self.focused = true;
+                    self.mixed = false;
                     self.editing_text = Some(format!("{:.3}", self.value));
                     self.select_all = true;
                     widget.invalidate_layout();
@@ -410,7 +474,7 @@ impl Control for NumericField {
                         msg.handled = true;
                     }
                 }
-                WidgetMessage::KeyDown(key) => {
+                WidgetMessage::KeyDown(key, _) => {
                     if self.focused {
                         match key {
                             KeyCode::Backspace => {
@@ -465,6 +529,7 @@ impl Control for NumericField {
 
 pub struct NumericFieldBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     unit: &'static str,
     value: f32,
     px: f32,
@@ -472,9 +537,17 @@ pub struct NumericFieldBuilder {
     font_id: u8,
     drag_step: f32,
     slider_range: Option<(f32, f32)>,
+    slider_curve: somnium_ecs::curve::SliderCurve,
 }
 
 impl NumericFieldBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     /// Unit shown after the value: `"m"`, `"°"`, `"×"`. Empty is unitless.
     pub fn with_unit(mut self, unit: &'static str) -> Self {
         self.unit = unit;
@@ -489,6 +562,7 @@ impl NumericFieldBuilder {
         // stops a row twitching under a scrub.
         let style = crate::typography::text_style(crate::typography::TextRole::MonoStrong);
         Self {
+            mixed: false,
             widget,
             unit: "",
             value: 0.0,
@@ -497,6 +571,7 @@ impl NumericFieldBuilder {
             font_id: style.font_id(),
             drag_step: 0.05,
             slider_range: None,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
         }
     }
 
@@ -518,6 +593,12 @@ impl NumericFieldBuilder {
         self
     }
 
+    /// Declare the track's response curve. Defaults to linear.
+    pub fn with_slider_curve(mut self, curve: somnium_ecs::curve::SliderCurve) -> Self {
+        self.slider_curve = curve;
+        self
+    }
+
     pub fn with_range(mut self, min: f32, max: f32) -> Self {
         self.slider_range = Some((min, max));
         self
@@ -527,6 +608,7 @@ impl NumericFieldBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(NumericField {
+                mixed: self.mixed,
                 value: self.value,
                 unit: self.unit,
                 editing_text: None,
@@ -537,8 +619,10 @@ impl NumericFieldBuilder {
                 select_all: false,
                 drag_step: self.drag_step,
                 drag_origin: None,
+                gesture_origin: None,
                 scrubbing: false,
                 slider_range: self.slider_range,
+                slider_curve: self.slider_curve,
                 slider_dragging: false,
             }),
         )
@@ -549,11 +633,85 @@ impl NumericFieldBuilder {
 mod tests {
     use super::*;
 
+    /// A bare field with builder defaults, for the mapping tests. The widget
+    /// tree is not involved: `value_from_slider` and `slider_travel` are pure
+    /// functions of the field's own state.
+    fn plain_field() -> NumericField {
+        NumericField {
+            value: 0.0,
+            unit: "",
+            editing_text: None,
+            mixed: false,
+            px: 12.0,
+            color: [255; 4],
+            font_id: 0,
+            focused: false,
+            select_all: false,
+            drag_step: 0.05,
+            drag_origin: None,
+            gesture_origin: None,
+            scrubbing: false,
+            slider_range: None,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
+            slider_dragging: false,
+        }
+    }
+
     #[test]
     fn slider_maps_left_edge_to_min_and_right_edge_to_max() {
         let r = Rect::new(0.0, 0.0, 108.0, 18.0);
-        assert!((NumericField::value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
-        assert!((NumericField::value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+        let f = plain_field();
+        assert!((f.value_from_slider(r, 0.0, 0.0, 10.0) - 0.0).abs() < 1e-4);
+        assert!((f.value_from_slider(r, 108.0, 0.0, 10.0) - 10.0).abs() < 1e-4);
+    }
+
+    /// CONTROL-K. The same track, read exponentially: half the travel reaches
+    /// the geometric mean, which is what makes a lux slider usable at all.
+    #[test]
+    fn an_exponential_track_is_geometric_in_its_travel() {
+        let r = Rect::new(0.0, 0.0, 108.0, 18.0);
+        let mut f = plain_field();
+        f.slider_curve = somnium_ecs::curve::SliderCurve::Exponential;
+        let mid = f.value_from_slider(r, 4.0 + 100.0 * 0.5, 1.0, 10_000.0);
+        assert!((mid - 100.0).abs() < 1.0, "midpoint was {mid}");
+        f.value = mid;
+        assert!((f.slider_travel(1.0, 10_000.0) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shift_and_alt_are_precision_scrub_modifiers_and_ctrl_snaps() {
+        let ordinary = scrub_value(10.0, 7.0, 0.5, Modifiers::default());
+        let shift = scrub_value(
+            10.0,
+            7.0,
+            0.5,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        let alt = scrub_value(
+            10.0,
+            7.0,
+            0.5,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let snapped = scrub_value(
+            10.0,
+            1.2,
+            0.5,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(ordinary, 13.5);
+        assert!((shift - 10.35).abs() < 1.0e-5);
+        assert_eq!(shift, alt);
+        assert_eq!(snapped, 10.5);
     }
 }
 
@@ -590,11 +748,10 @@ mod unit_tests {
         let mut ui = UserInterface::new(400.0, 60.0);
         load_all_cuts(&mut ui);
         let root = ui.root();
-        let field = NumericFieldBuilder::new(
-            WidgetBuilder::new().with_width(200.0).with_height(22.0),
-        )
-        .with_unit(unit)
-        .build();
+        let field =
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(22.0))
+                .with_unit(unit)
+                .build();
         ui.add_node(field, root);
         ui.perform_layout();
         ui.draw();
@@ -618,10 +775,9 @@ mod unit_tests {
         let mut ui = UserInterface::new(400.0, 60.0);
         load_all_cuts(&mut ui);
         let root = ui.root();
-        let field = NumericFieldBuilder::new(
-            WidgetBuilder::new().with_width(200.0).with_height(22.0),
-        )
-        .build();
+        let field =
+            NumericFieldBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(22.0))
+                .build();
         ui.add_node(field, root);
         ui.perform_layout();
         ui.draw();
@@ -633,5 +789,62 @@ mod unit_tests {
             .count();
         assert_eq!(drawn, glyph_count(""), "the default must add nothing");
         assert!(drawn > 0, "the value itself must still render");
+    }
+}
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::*;
+
+    fn field(mixed: bool) -> NumericField {
+        NumericField {
+            value: 0.75,
+            unit: "",
+            editing_text: None,
+            mixed,
+            px: 12.0,
+            color: [255; 4],
+            font_id: 0,
+            focused: false,
+            select_all: false,
+            drag_step: 0.05,
+            slider_curve: somnium_ecs::curve::SliderCurve::Linear,
+            drag_origin: None,
+            gesture_origin: None,
+            scrubbing: false,
+            slider_range: None,
+            slider_dragging: false,
+        }
+    }
+
+    /// A mixed row shows the em dash rather than the primary's value, which is
+    /// what stops the reader believing twelve entities agree when they do not.
+    #[test]
+    fn a_mixed_field_shows_the_placeholder_not_the_primary_value() {
+        assert_eq!(
+            field(true).display_text(),
+            crate::widgets::MIXED_PLACEHOLDER
+        );
+        assert_eq!(field(false).display_text(), "0.750");
+    }
+
+    /// Touching the control is what gives it a value. Until then it has none,
+    /// so an untouched mixed row cannot overwrite the rest of the selection.
+    #[test]
+    fn clearing_mixed_reveals_the_primary_value() {
+        let mut control = field(true);
+        control.mixed = false;
+        assert_eq!(control.display_text(), "0.750");
+    }
+
+    /// The builder is the only way Details sets it, so it has to carry.
+    #[test]
+    fn the_builder_carries_the_mixed_flag() {
+        assert!(
+            NumericFieldBuilder::new(WidgetBuilder::new())
+                .with_mixed(true)
+                .mixed
+        );
+        assert!(!NumericFieldBuilder::new(WidgetBuilder::new()).mixed);
     }
 }

@@ -10,7 +10,6 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::{
-    editor_event::CreateKind,
     message::NodeHandle,
     theme,
     types::{HorizontalAlignment, Thickness, VerticalAlignment},
@@ -41,7 +40,15 @@ pub(crate) fn build_content_drawer(
     ui: &mut UserInterface,
     parent: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
+) -> (
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    NodeHandle,
+    Vec<(NodeHandle, crate::ContentToolbarAction)>,
+) {
     let panel = BorderBuilder::new(
         WidgetBuilder::new()
             .with_row(0)
@@ -84,16 +91,54 @@ pub(crate) fn build_content_drawer(
     .build();
     let engine_h = ui.add_node(engine, grid_h);
 
-    let crumb = BreadcrumbBuilder::new(
+    let toolbar = StackPanelBuilder::new(
         WidgetBuilder::new()
             .with_row(1)
             .with_column(0)
             .with_background(theme::TRANSPARENT),
     )
-    .with_parts(["Game"])
-    .with_font_id(font_id)
+    .with_orientation(Orientation::Horizontal)
     .build();
-    let crumb_h = ui.add_node(crumb, grid_h);
+    let toolbar = ui.add_node(toolbar, grid_h);
+    let mut toolbar_actions = Vec::new();
+    for (label, action) in [
+        ("‹", crate::ContentToolbarAction::Back),
+        ("›", crate::ContentToolbarAction::Forward),
+        ("↑", crate::ContentToolbarAction::Up),
+        (
+            "All",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::All),
+        ),
+        (
+            "Models",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Models),
+        ),
+        (
+            "Textures",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Textures),
+        ),
+        (
+            "Scripts",
+            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Scripts),
+        ),
+        ("Sort", crate::ContentToolbarAction::Sort),
+        ("Size", crate::ContentToolbarAction::Density),
+    ] {
+        let button = ButtonBuilder::new(WidgetBuilder::new().with_height(22.0)).build();
+        let button = ui.add_node(button, toolbar);
+        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(5.0, 3.0)))
+            .with_text(label)
+            .with_font_id(font_id)
+            .with_font_size(10.0)
+            .build();
+        ui.add_node(text, button);
+        toolbar_actions.push((button, action));
+    }
+    let crumb = BreadcrumbBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .with_parts(["Game"])
+        .with_font_id(font_id)
+        .build();
+    let crumb_h = ui.add_node(crumb, toolbar);
 
     let list_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
@@ -112,7 +157,15 @@ pub(crate) fn build_content_drawer(
     .build();
     let list_h = ui.add_node(list, list_scroll_h);
 
-    (panel_h, search_h, crumb_h, engine_h, list_h)
+    (
+        panel_h,
+        search_h,
+        crumb_h,
+        engine_h,
+        list_scroll_h,
+        list_h,
+        toolbar_actions,
+    )
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).
@@ -120,7 +173,7 @@ pub(crate) fn build_create_popup(
     ui: &mut UserInterface,
     root: NodeHandle,
     font_id: u8,
-) -> (NodeHandle, Vec<(NodeHandle, CreateKind)>) {
+) -> (NodeHandle, Vec<(NodeHandle, &'static str)>) {
     let popup_backdrop =
         PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
     let popup_h = ui.add_node(popup_backdrop, root);
@@ -144,24 +197,9 @@ pub(crate) fn build_create_popup(
             .build();
     let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
 
-    const KINDS: &[CreateKind] = &[
-        CreateKind::Cube,
-        CreateKind::Sphere,
-        CreateKind::Plane,
-        CreateKind::Cylinder,
-        CreateKind::DirectionalLight,
-        CreateKind::PointLight,
-        CreateKind::SpotLight,
-        CreateKind::RectLight,
-        CreateKind::DiscLight,
-        CreateKind::TubeLight,
-        CreateKind::Particle,
-        CreateKind::Terrain,
-        CreateKind::VoxelTerrain,
-    ];
-
-    let mut items = Vec::with_capacity(KINDS.len());
-    for &kind in KINDS {
+    let commands = crate::commands::registry().menu(crate::commands::Menu::Create);
+    let mut items = Vec::with_capacity(commands.len());
+    for command in commands {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -176,13 +214,13 @@ pub(crate) fn build_create_popup(
             right: 0.0,
             bottom: 0.0,
         }))
-        .with_text(kind.label())
+        .with_text(command.menu_label())
         .with_font_size(12.0)
         .with_font_id(font_id)
         .with_color(theme::TEXT_PRIMARY)
         .build();
         ui.add_node(lbl, btn_h);
-        items.push((btn_h, kind));
+        items.push((btn_h, command.id));
     }
 
     (popup_h, items)

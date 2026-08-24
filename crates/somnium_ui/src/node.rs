@@ -143,6 +143,12 @@ pub enum CursorKind {
     RowResize,
     /// Slider track or numeric slider.
     EwResize,
+    /// Accepted drag whose operation preserves the source.
+    Copy,
+    /// Accepted drag whose operation relocates the source.
+    Move,
+    /// Drag target rejects the payload.
+    NoDrop,
 }
 
 impl CursorKind {
@@ -155,6 +161,9 @@ impl CursorKind {
             Self::ColResize => CursorIcon::ColResize,
             Self::RowResize => CursorIcon::RowResize,
             Self::EwResize => CursorIcon::EwResize,
+            Self::Copy => CursorIcon::Copy,
+            Self::Move => CursorIcon::Move,
+            Self::NoDrop => CursorIcon::NoDrop,
         }
     }
 }
@@ -223,6 +232,37 @@ pub trait Control: Send + 'static {
     /// `lib.rs` and hope none of them was ever missed.
     fn numeric_value(&self) -> Option<f32> {
         None
+    }
+
+    /// Whether this control is currently performing a modal-feeling pointer
+    /// gesture. The UI owns the token; the control owns the state needed to
+    /// restore itself if that token is cancelled.
+    fn gesture_active(&self) -> bool {
+        false
+    }
+
+    /// Cancel an active gesture, restoring its pre-gesture state. Any live
+    /// restoration messages are appended to `emit` and follow normal routing.
+    fn cancel_gesture(&mut self, _widget: &mut Widget, _emit: &mut Vec<UiMessage>) -> bool {
+        false
+    }
+
+    /// Bounds which must remain visible while this node has keyboard focus.
+    /// Composite controls such as TreeView override this with their focused
+    /// row rather than returning the bounds of the entire control.
+    fn focus_bounds(&self, widget: &Widget) -> Rect {
+        widget.screen_bounds()
+    }
+
+    /// A control-level focus stop used by arrow traversal inside a region.
+    fn is_keyboard_focusable(&self) -> bool {
+        false
+    }
+
+    /// Scroll `target` into this control's viewport. Containers which are not
+    /// scroll viewers leave this as a no-op.
+    fn scroll_into_view(&mut self, _widget: &mut Widget, _target: Rect) -> bool {
+        false
     }
 }
 

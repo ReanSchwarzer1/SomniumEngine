@@ -3620,6 +3620,7 @@ dependencies = [
 name = "somnium_asset"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytemuck",
  "exr",
  "glam 0.29.3",
@@ -3629,6 +3630,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "somnium_ecs",
  "tracing",
  "ureq",
 ]
@@ -3647,6 +3649,7 @@ dependencies = [
 name = "somnium_core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "glam 0.29.3",
  "pollster 0.3.0",
  "rfd",
@@ -3737,10 +3740,10 @@ dependencies = [
  "bytemuck",
  "fontdue",
  "glam 0.29.3",
- "image",
  "resvg",
  "serde",
  "serde_json",
+ "somnium_asset",
  "somnium_ecs",
  "tracing",
  "wgpu",

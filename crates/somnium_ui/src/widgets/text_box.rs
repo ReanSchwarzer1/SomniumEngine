@@ -27,6 +27,8 @@ impl TextBoxMessage {
 }
 
 pub struct TextBox {
+    /// See [`super::MIXED_PLACEHOLDER`]. Cleared by the first keystroke.
+    pub mixed: bool,
     pub text: String,
     pub px: f32,
     pub color: [u8; 4],
@@ -35,6 +37,10 @@ pub struct TextBox {
 }
 
 impl Control for TextBox {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+
     fn is_text_input(&self) -> bool {
         true
     }
@@ -47,12 +53,15 @@ impl Control for TextBox {
         let b = widget.screen_bounds();
         // Phase 27-D: the input recipe carries the radius, the recession and
         // the focus ring plus its glow.
-        let paint = crate::style::input(
-            crate::style::VisualState::rest().focused(self.focused),
-        );
+        let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
         ctx.push_paint(b, &paint);
         let text_origin = Vec2::new(b.x + 4.0, b.y + 3.0);
-        ctx.push_text(&self.text, text_origin, self.font_id, self.px, self.color);
+        let shown = if self.mixed {
+            super::MIXED_PLACEHOLDER
+        } else {
+            self.text.as_str()
+        };
+        ctx.push_text(shown, text_origin, self.font_id, self.px, self.color);
         if self.focused {
             let advance = ctx
                 .font_atlas
@@ -96,6 +105,7 @@ impl Control for TextBox {
                     msg.handled = true;
                 }
                 WidgetMessage::Text(s) => {
+                    self.mixed = false;
                     if self.focused {
                         self.text.push_str(&s);
                         widget.invalidate_layout();
@@ -106,7 +116,7 @@ impl Control for TextBox {
                         msg.handled = true;
                     }
                 }
-                WidgetMessage::KeyDown(key) => {
+                WidgetMessage::KeyDown(key, _) => {
                     if self.focused {
                         match key {
                             KeyCode::Backspace => {
@@ -146,6 +156,7 @@ impl Control for TextBox {
 
 pub struct TextBoxBuilder {
     widget: WidgetBuilder,
+    mixed: bool,
     text: String,
     px: f32,
     color: [u8; 4],
@@ -153,8 +164,16 @@ pub struct TextBoxBuilder {
 }
 
 impl TextBoxBuilder {
+    /// Display [`super::MIXED_PLACEHOLDER`] until the control is touched.
+    /// Multi-selection is the only caller; a single selection never sets it.
+    pub fn with_mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self
+    }
+
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
+            mixed: false,
             widget,
             text: String::new(),
             px: theme::NOCTURNE.typography.body,
@@ -184,6 +203,7 @@ impl TextBoxBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(TextBox {
+                mixed: self.mixed,
                 text: self.text,
                 px: self.px,
                 color: self.color,

@@ -293,7 +293,12 @@ impl DrawingContext {
             let gx = cursor_x + info.xmin;
             let gy = baseline_y - (info.ymin + info.px_h);
             let rect = Rect::new(gx, gy, info.px_w, info.px_h);
-            let uv = [info.uv_min[0], info.uv_min[1], info.uv_max[0], info.uv_max[1]];
+            let uv = [
+                info.uv_min[0],
+                info.uv_min[1],
+                info.uv_max[0],
+                info.uv_max[1],
+            ];
             self.push_primitive(
                 Primitive::glyph(rect, uv, color),
                 Some(FONT_ATLAS_TEXTURE_ID),
@@ -349,10 +354,7 @@ impl DrawingContext {
         texture_id: u32,
     ) {
         let uv_rect = [uv[0].x, uv[0].y, uv[2].x, uv[2].y];
-        self.push_primitive(
-            Primitive::textured(rect, uv_rect, color),
-            Some(texture_id),
-        );
+        self.push_primitive(Primitive::textured(rect, uv_rect, color), Some(texture_id));
     }
 
     /// 9-slice: corners stay unscaled, edges stretch on one axis, center tiles.
@@ -611,7 +613,10 @@ mod tests {
         use crate::style::{Interaction, VisualState, button};
         let rest = button(VisualState::rest());
         let pressed = button(VisualState::with(Interaction::Pressed));
-        assert!(rest.elevation.is_some(), "a resting button sits above its panel");
+        assert!(
+            rest.elevation.is_some(),
+            "a resting button sits above its panel"
+        );
         assert!(
             pressed.elevation.is_none(),
             "a pressed button is pushed into it"

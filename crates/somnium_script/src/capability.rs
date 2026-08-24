@@ -192,7 +192,11 @@ mod tests {
     fn union_and_without_compose() {
         let caps = Capabilities::SANDBOXED.union(Capabilities::AUDIO);
         assert!(caps.allows(Capabilities::AUDIO));
-        assert!(!caps.without(Capabilities::AUDIO).allows(Capabilities::AUDIO));
+        assert!(
+            !caps
+                .without(Capabilities::AUDIO)
+                .allows(Capabilities::AUDIO)
+        );
         assert!(
             caps.without(Capabilities::AUDIO).allows(Capabilities::LOG),
             "removing one must not remove the rest"
