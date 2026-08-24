@@ -220,10 +220,29 @@
 >   the localisation hook; the shaper is **decided (`cosmic-text`) and
 >   deliberately not adopted**, per Appendix A.5, because GHOSTFENCE has no
 >   golden reference to A/B the block-origin snapping rule against.
->   **The finding that now blocks Track 1: `EngineContext` has no UI hook.** A
->   game gets the world, physics, audio and the renderer, and no way to submit a
->   widget tree — so it can neither draw a HUD nor receive input into one. Found
->   by E, confirmed by F. **Next: that hook, then MORROWIND-H.**
+>   **Track 8 (ALMSIVI) then went three sub-phases deep, out of track order,
+>   because each was cheap and unblocked.** **MORROWIND-AE** created
+>   `somnium_input` (Seam 5) — action maps, control paths, processors,
+>   interactions, composite bindings, hot-plug and rebinding with conflict
+>   detection — and **closed MORROWIND-F with it**, which was F's stated forward
+>   dependency. **MORROWIND-AG** took `somnium_audio` from 93 lines and zero
+>   tests to a crate with buses, a listener, attenuation curves, cones, occlusion
+>   and Doppler, a sound cache, and 40 tests; the volume argument
+>   `AudioEngine::play` had been silently discarding since it was written is
+>   fixed, and the test that would have caught it exists. **MORROWIND-AH item 1**
+>   created `somnium_i18n` — CLDR plural and gender rules, three number
+>   conventions, a `pt-BR -> pt -> en` fallback chain, and an extractor that finds
+>   the strings which never became keys. AH items 2 (video) and 3 (the playable
+>   slice) are open and stay open: item 3 needs Tracks 4, 5 and 6.
+>   **The record lapsed here and is reconciled rather than tidied.** AE, AG and
+>   AH shipped code without evidence files, `ATTRIBUTION.md` §13H entries or a
+>   `context.md` update — three of the five things §8 says a sub-phase closes
+>   with. §13H.8–13H.13 and `MORROWIND-AH.md` were written afterwards and say so
+>   at the top.
+>   **The finding that blocked Track 1: `EngineContext` had no UI hook.** A
+>   game got the world, physics, audio and the renderer, and no way to submit a
+>   widget tree — so it could neither draw a HUD nor receive input into one.
+>   Found by E, confirmed by F, and walked past by AE/AG/AH.
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

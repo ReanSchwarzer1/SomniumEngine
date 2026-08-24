@@ -2123,3 +2123,94 @@ for single-threaded render recording: one copy of scene state per pipeline stage
 so App, Cull and Draw read consistent snapshots without locks. It is a change to
 every piece of scene state in the engine and is **explicitly out of Phase
 MORROWIND** (plan §14.8), recorded here so it is not half-started.
+
+### 13H.8 Fyrox — the vector image, the BBCode parser, and what was refused
+
+*Read for pattern only; MIT.* Recorded late: **MORROWIND-D through -G shipped
+without an entry here**, which is the rule in this file's preamble being broken
+rather than a set of clean-room sub-phases. The entries below are written from
+the sub-phase records in `dev records/phase MORROWIND/` and are the honest
+account, not a retrospective tidy.
+
+- `fyrox-ui/src/vector_image.rs` — the in-architecture precedent for **MORROWIND-D**:
+  a widget whose content is a list of primitives (line, triangle, rectangle,
+  circle) rather than a rectangle with a texture. Somnium's second instance
+  stream is a different shape — one `ShapedInstance` with a 2x3 affine, stroke
+  parameters and a bindless texture slot, tessellated on the CPU — because
+  Somnium's paint layer is an instance buffer and Fyrox's is a command list.
+  The *idea* taken is that vector content is a first-class primitive kind
+  rather than a texture someone baked.
+- `fyrox-ui/src/bbcode.rs` and `fyrox-ui/src/formatted_text/` — the tag
+  vocabulary and the run model for **MORROWIND-G**. Somnium's `StyledRun` carries
+  a byte range into the source string rather than owning its text, so a shaper
+  can be substituted under it later without touching the rich-text parser. That
+  divergence is the point: Fyrox's formatted text owns its glyphs.
+- **Refused:** `bevy-plugins/bevy_vello-main` — a compute-based vector
+  rasteriser (Apache-2.0/MIT). Read for **MORROWIND-D** and explicitly **not
+  taken**: tessellated paths on the CPU feed the existing instance pipeline and
+  keep the frozen Hades contract intact, and a compute rasteriser would have
+  been a second paint path beside it. Recorded here so the question is not
+  reopened annually.
+
+### 13H.9 Flax and Unity — the canvas vocabulary, taken as vocabulary only
+
+**Flax is proprietary** (MORROWIND-A's license audit reclassified it; see
+`dev records/phase MORROWIND/MORROWIND-A_license_audit.md`). `Source/Engine/UI/UICanvas.cpp`
+was read for **MORROWIND-E** as *architecture description only* — it implements
+both world-space modes, render-to-texture and direct 3D submission, and reading
+that both exist is what made the trade-off decidable. Somnium chose
+render-to-texture, and the reason is Somnium's own: direct 3D submission would
+re-open the frozen Phase 27 paint contract.
+
+Unity's **RectTransform** anchor vocabulary — min/max anchor, offsets, pivot,
+stretch — is a *vocabulary*, adopted in **MORROWIND-E** as the names for
+`Anchors`/`Offsets`/`Pivot` and layered on Fyrox's measure/arrange pass rather
+than replacing it. No Unity source was read for this; the vocabulary is public
+API documentation.
+
+### 13H.10 Godot and Unity — directional navigation, both models, because each fails alone
+
+*Pattern only; Godot is MIT, Unity's input system is read below.* **MORROWIND-F**
+takes Godot's explicit neighbour links (`focus_neighbor_*`) **and** Unity's
+geometric search together, because the plan's §8 finding holds: explicit links
+are unmaintainable at scale and geometric search picks the wrong widget in dense
+layouts. Somnium's addition is its own — off-axis distance is weighted ten times
+on-axis distance, so a widget slightly off the direction of travel loses to one
+directly along it, which is the specific failure a naive nearest-centre search
+produces.
+
+### 13H.11 cosmic-text, harfrust, swash, parley — decided, not adopted
+
+*Evaluated, not vendored; all Apache-2.0/MIT.* **MORROWIND-G** chose
+`cosmic-text` (shaping via `harfrust`, rasterisation via `swash`) over `parley`
+and then **deliberately did not land it**, because Appendix A.5 requires the
+shaper to be A/B'd against a golden reference image and GHOSTFENCE had none. The
+decision, the comparison table and the reason for the deferral are in
+`dev records/phase MORROWIND/MORROWIND-G.md` §1; the flag is
+`SOMNIUM_UI_SHAPER`, default off, documented at
+`crates/somnium_ui/src/text/mod.rs:29`.
+
+### 13H.12 Unity Input System — the action-map vocabulary for MORROWIND-AE
+
+*Read for pattern only.* `Runtime/Actions/InputAction.cs`, `InputActionMap.cs`
+and `InputBinding.cs` are the reference for `somnium_input`'s shape: actions as
+named intents, bindings as control paths, processors between the device value
+and the action value, and interactions (hold, tap, multi-tap) as a separate axis
+from processors. Somnium's control-path syntax (`path.rs`) is its own parser and
+its rebinding conflict detection (`rebind.rs`) is its own; what is taken is the
+decomposition, which is the part that is hard to get right by inspection.
+
+### 13H.13 Kira, CLDR and Ren'Py — audio exposure and localisation
+
+- **Kira** (`kira`, Apache-2.0/MIT) is a *dependency*, not a reference:
+  **MORROWIND-AG** exposes its tracks, effects and spatial scene rather than
+  reimplementing them, per the plan's "exposure and design, not DSP".
+- **CLDR plural and gender categories** — the Unicode Common Locale Data
+  Repository's category names and rules (`zero`/`one`/`two`/`few`/`many`/`other`)
+  are the specification `somnium_i18n`'s `plural.rs` implements, including
+  Polish's last-two-digits rule and Arabic's six categories. Unicode license.
+- **Ren'Py** (`renpy-master/renpy/translation/`, MIT) is the reference for
+  **MORROWIND-AH**'s extraction and round-trip: the insight taken is that an
+  extractor must find the strings that *never became keys*, not only the keys
+  that exist, because a translation-file check cannot see the former.
+  `somnium_i18n/src/extract.rs` does both.
