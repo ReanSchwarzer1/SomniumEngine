@@ -13,6 +13,7 @@ somnium_ecs = { workspace = true }
 somnium_jobs = { workspace = true }
 # Seam 5. `somnium_core` is where the input system meets the UI's navigation,
 # which is why the `NavActions` bridge lives here rather than in either crate.
+somnium_i18n = { workspace = true }
 somnium_input = { workspace = true }
 somnium_script = { workspace = true }
 # Phase 16-C. The backend is named here, once, so `ScriptHost` can install

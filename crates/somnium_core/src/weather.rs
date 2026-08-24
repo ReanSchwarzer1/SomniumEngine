@@ -232,7 +232,12 @@ impl WeatherComponent {
                     dt,
                 ),
                 puddles: approach(previous.puddles, 0.0, dry, dt),
-                ripples: approach(previous.ripples, 0.0, self.transition_seconds.max(0.001), dt),
+                ripples: approach(
+                    previous.ripples,
+                    0.0,
+                    self.transition_seconds.max(0.001),
+                    dt,
+                ),
             };
         }
 
@@ -461,7 +466,11 @@ mod tests {
         for _ in 0..(60 * 60) {
             state = clearing.step(state, 1.0 / 60.0);
         }
-        assert!(state.wet_diffuse < 0.6, "a minute of drying: {}", state.wet_diffuse);
+        assert!(
+            state.wet_diffuse < 0.6,
+            "a minute of drying: {}",
+            state.wet_diffuse
+        );
         assert_eq!(state.precipitation, Precipitation::None);
     }
 
@@ -604,7 +613,10 @@ mod tests {
         for (id, label, _) in PRESETS {
             let sky = sky_preset_for(id).unwrap_or_else(|| panic!("{label} names no sky"));
             let mut probe = crate::sky::SkyComponent::default();
-            assert!(probe.apply_preset(sky), "{label} names sky {sky}, which does not exist");
+            assert!(
+                probe.apply_preset(sky),
+                "{label} names sky {sky}, which does not exist"
+            );
         }
         // A storm must actually close the sky, or the chain is decorative.
         let mut stormy = crate::sky::SkyComponent::default();

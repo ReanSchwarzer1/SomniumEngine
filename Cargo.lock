@@ -3670,6 +3670,7 @@ dependencies = [
  "somnium_asset",
  "somnium_audio",
  "somnium_ecs",
+ "somnium_i18n",
  "somnium_input",
  "somnium_jobs",
  "somnium_physics",
@@ -3689,6 +3690,14 @@ version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
  "rayon",
+]
+
+[[package]]
+name = "somnium_i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -36,8 +36,8 @@
 //! on the next frame. That is the correct behaviour and the component's
 //! `enabled` flag is how you stop it.
 
-use somnium_ecs::curve::{Curve, CurveKey, Gradient, GradientStop, Interpolation};
 use somnium_ecs::Component;
+use somnium_ecs::curve::{Curve, CurveKey, Gradient, GradientStop, Interpolation};
 
 /// Hours in a day, as a float, because every conversion here wants it that way.
 const HOURS: f32 = 24.0;
@@ -109,14 +109,14 @@ impl Default for TimeOfDayComponent {
 /// at the ends. Deliberately gentle — see [`TimeOfDayComponent::sun_color`].
 fn default_sun_color() -> Gradient {
     Gradient::from_stops(vec![
-        GradientStop::new(0.0, [0.55, 0.62, 0.85, 1.0]),   // midnight
+        GradientStop::new(0.0, [0.55, 0.62, 0.85, 1.0]), // midnight
         GradientStop::new(5.0 / HOURS, [0.85, 0.72, 0.62, 1.0]), // first light
-        GradientStop::new(8.0 / HOURS, [1.0, 0.97, 0.92, 1.0]),  // morning
-        GradientStop::new(12.0 / HOURS, [1.0, 1.0, 1.0, 1.0]),   // noon
+        GradientStop::new(8.0 / HOURS, [1.0, 0.97, 0.92, 1.0]), // morning
+        GradientStop::new(12.0 / HOURS, [1.0, 1.0, 1.0, 1.0]), // noon
         GradientStop::new(17.0 / HOURS, [1.0, 0.95, 0.88, 1.0]), // afternoon
         GradientStop::new(19.5 / HOURS, [1.0, 0.78, 0.55, 1.0]), // golden hour
         GradientStop::new(21.0 / HOURS, [0.72, 0.62, 0.72, 1.0]), // dusk
-        GradientStop::new(1.0, [0.55, 0.62, 0.85, 1.0]),   // wraps to midnight
+        GradientStop::new(1.0, [0.55, 0.62, 0.85, 1.0]), // wraps to midnight
     ])
 }
 

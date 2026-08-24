@@ -496,8 +496,8 @@ impl SetComponentCmd {
         let schema = registry
             .by_stable_id(component)
             .ok_or_else(|| format!("unknown component {component}"))?;
-        let before = (schema.snapshot)(world, entity)
-            .ok_or_else(|| format!("entity has no {component}"))?;
+        let before =
+            (schema.snapshot)(world, entity).ok_or_else(|| format!("entity has no {component}"))?;
         for (id, value) in &values {
             let field = schema
                 .field(*id)
@@ -1964,9 +1964,17 @@ mod landscape_tests {
         }
         .respawn(&mut world);
 
-        assert!(world.get::<crate::time_of_day::TimeOfDayComponent>(entity).is_some());
+        assert!(
+            world
+                .get::<crate::time_of_day::TimeOfDayComponent>(entity)
+                .is_some()
+        );
         assert!(world.get::<crate::sky::SkyComponent>(entity).is_some());
-        assert!(world.get::<crate::weather::WeatherComponent>(entity).is_some());
+        assert!(
+            world
+                .get::<crate::weather::WeatherComponent>(entity)
+                .is_some()
+        );
 
         // And capture must see it, or delete-then-undo loses the environment.
         let captured = EntitySnapshot::capture(&world, entity);
@@ -2001,8 +2009,14 @@ mod landscape_tests {
 
         undo.push(
             Box::new(
-                SetComponentCmd::new(&world, entity, component, staged.clone(), "Sky preset: Storm")
-                    .expect("staged values validate"),
+                SetComponentCmd::new(
+                    &world,
+                    entity,
+                    component,
+                    staged.clone(),
+                    "Sky preset: Storm",
+                )
+                .expect("staged values validate"),
             ),
             &mut world,
             &mut selected,
@@ -2021,8 +2035,7 @@ mod landscape_tests {
 
         undo.redo(&mut world, &mut selected);
         assert_eq!(
-            (schema.snapshot)(&world, entity)
-                .and_then(|values| values.get(&FieldId(1)).cloned()),
+            (schema.snapshot)(&world, entity).and_then(|values| values.get(&FieldId(1)).cloned()),
             Some(ReflectValue::F64(1.0)),
             "redo puts the storm back"
         );

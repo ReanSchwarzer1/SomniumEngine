@@ -187,7 +187,10 @@ mod shortcut_input_tests {
     #[test]
     fn an_unmodified_shortcut_stands_down_during_a_play_session() {
         let none = Modifiers::default();
-        assert_eq!(shortcut_action_for(KeyCode::KeyS, none, false), Some(CommandAction::SetGizmoMode(2)));
+        assert_eq!(
+            shortcut_action_for(KeyCode::KeyS, none, false),
+            Some(CommandAction::SetGizmoMode(2))
+        );
         assert_eq!(shortcut_action_for(KeyCode::KeyS, none, true), None);
     }
 
@@ -1463,7 +1466,7 @@ impl<G: GameApp> Engine<G> {
         if root != self.config.content_root {
             self.config.content_root = root;
             self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+            self.asset_scan_stamp = None;
         }
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.set_tooltip_delay_ms(self.settings.editor().tooltip_delay_ms);
@@ -2273,11 +2276,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
                 use winit::keyboard::PhysicalKey;
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
-                    let action = shortcut_action_for(
-                        code,
-                        self.shortcut_modifiers,
-                        game_owns_keyboard,
-                    );
+                    let action =
+                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard);
                     use somnium_ui::commands::CommandAction as A;
                     match action {
                         Some(A::NewScene) => {
@@ -3753,7 +3753,7 @@ impl<G: GameApp> Engine<G> {
                         let _ = ui.deliver_thumbnail(&path, &preview);
                     }
                     self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                    self.asset_scan_stamp = None;
                 }
                 Err(error) => self.report_content_error(&path, &error),
             }
@@ -4032,7 +4032,7 @@ impl<G: GameApp> Engine<G> {
                         crate::editor_commands::FileImportCmd::new(destinations),
                     ));
                     self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                    self.asset_scan_stamp = None;
                     if let Some(ui) = self.ui_manager.as_mut() {
                         ui.push_toast("Files imported");
                     }
@@ -4795,11 +4795,11 @@ impl<G: GameApp> Engine<G> {
     /// before `apply_post_process` pushes the authored values they replace.
     fn apply_time_of_day(&mut self, dt: f32) {
         self.day_state = None;
-        let Some(entity) = self
-            .world
-            .entities()
-            .find(|e| self.world.get::<crate::time_of_day::TimeOfDayComponent>(*e).is_some())
-        else {
+        let Some(entity) = self.world.entities().find(|e| {
+            self.world
+                .get::<crate::time_of_day::TimeOfDayComponent>(*e)
+                .is_some()
+        }) else {
             return;
         };
         // The clock only runs during a play session. An editor that advanced
@@ -4893,10 +4893,7 @@ impl<G: GameApp> Engine<G> {
             // still honours `SOMNIUM_CLOUDS=1` for a capture.
             return;
         };
-        renderer.cloud_pass.enabled = renderer
-            .cloud_pass
-            .env_override
-            .unwrap_or(sky.enabled);
+        renderer.cloud_pass.enabled = renderer.cloud_pass.env_override.unwrap_or(sky.enabled);
         let mut settings = sky.to_settings();
         if let Some(coverage) = coverage_override {
             settings.coverage = coverage;
@@ -4948,28 +4945,35 @@ impl<G: GameApp> Engine<G> {
         renderer.decals.clear();
         for (transform, decal, material) in collected {
             let source = material.and_then(|id| renderer.materials_pool.get(id));
-            let (base, albedo, normal, orm) = source.map_or(
-                ([1.0, 1.0, 1.0, 1.0], -1, -1, -1),
-                |m| (m.base_color, m.albedo_map, m.normal_map, m.metallic_roughness_map),
-            );
-            renderer.decals.push(somnium_renderer::pass::decal::GpuDecal::new(
-                transform,
-                somnium_renderer::pass::decal::DecalLook {
-                    base_color: [
-                        base[0],
-                        base[1],
-                        base[2],
-                        base[3] * decal.opacity.clamp(0.0, 1.0),
-                    ],
-                    albedo_map: albedo,
-                    normal_map: normal,
-                    orm_map: orm,
-                    priority: decal.priority,
-                    angle_fade_degrees: decal.angle_fade_degrees,
-                    normal_strength: decal.normal_strength,
-                    roughness: decal.roughness,
-                },
-            ));
+            let (base, albedo, normal, orm) =
+                source.map_or(([1.0, 1.0, 1.0, 1.0], -1, -1, -1), |m| {
+                    (
+                        m.base_color,
+                        m.albedo_map,
+                        m.normal_map,
+                        m.metallic_roughness_map,
+                    )
+                });
+            renderer
+                .decals
+                .push(somnium_renderer::pass::decal::GpuDecal::new(
+                    transform,
+                    somnium_renderer::pass::decal::DecalLook {
+                        base_color: [
+                            base[0],
+                            base[1],
+                            base[2],
+                            base[3] * decal.opacity.clamp(0.0, 1.0),
+                        ],
+                        albedo_map: albedo,
+                        normal_map: normal,
+                        orm_map: orm,
+                        priority: decal.priority,
+                        angle_fade_degrees: decal.angle_fade_degrees,
+                        normal_strength: decal.normal_strength,
+                        roughness: decal.roughness,
+                    },
+                ));
         }
     }
 
@@ -4983,10 +4987,11 @@ impl<G: GameApp> Engine<G> {
     /// fields that are themselves saved, and a world that got dirty by raining
     /// would make "unsaved changes" meaningless.
     fn apply_weather(&mut self, dt: f32) {
-        let weather = self
-            .world
-            .entities()
-            .find_map(|e| self.world.get::<crate::weather::WeatherComponent>(e).copied());
+        let weather = self.world.entities().find_map(|e| {
+            self.world
+                .get::<crate::weather::WeatherComponent>(e)
+                .copied()
+        });
         let Some(weather) = weather else {
             self.weather_state = crate::weather::WeatherState::default();
             return;
@@ -5096,11 +5101,7 @@ impl<G: GameApp> Engine<G> {
             size_end: if snow { 0.09 } else { 0.035 },
             color_over_life: colour,
             gravity: 0.0,
-            velocity_bias: [
-                state.wind[0] * shear,
-                fall_speed,
-                state.wind[1] * shear,
-            ],
+            velocity_bias: [state.wind[0] * shear, fall_speed, state.wind[1] * shear],
             spawn_extents: extents,
             ..crate::ParticleEmitter::default()
         };
@@ -5160,7 +5161,10 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .find(|e| self.world.get::<crate::sky::SkyComponent>(*e).is_some())?;
-        let mut next = self.world.get::<crate::sky::SkyComponent>(entity).copied()?;
+        let mut next = self
+            .world
+            .get::<crate::sky::SkyComponent>(entity)
+            .copied()?;
         if !next.apply_preset(id) {
             return None;
         }
@@ -5206,14 +5210,11 @@ impl<G: GameApp> Engine<G> {
     /// a cycle you are about to scrub — while the driver must do nothing at
     /// all when it is off.
     fn publish_time_of_day(&mut self) {
-        let hour = self
-            .world
-            .entities()
-            .find_map(|e| {
-                self.world
-                    .get::<crate::time_of_day::TimeOfDayComponent>(e)
-                    .map(|tod| tod.hour.rem_euclid(24.0))
-            });
+        let hour = self.world.entities().find_map(|e| {
+            self.world
+                .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                .map(|tod| tod.hour.rem_euclid(24.0))
+        });
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.update_time_of_day(hour);
         }
@@ -5490,7 +5491,15 @@ impl<G: GameApp> Engine<G> {
             .renderer
             .as_ref()
             .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32, f32, f32, f32, somnium_ecs::curve::Curve)> = self
+        let terrains: Vec<(
+            u32,
+            glam::Mat4,
+            f32,
+            f32,
+            f32,
+            f32,
+            somnium_ecs::curve::Curve,
+        )> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -6231,7 +6240,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(()) => {
                         self.config.content_root = folder;
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Project opened");
                         }
@@ -6640,7 +6649,7 @@ impl<G: GameApp> Engine<G> {
                                     emissive_map: -1,
                                     terrain_index: -1,
                                     porosity: 0.5,
-                        _pad: 0.0,
+                                    _pad: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -6904,10 +6913,9 @@ impl<G: GameApp> Engine<G> {
                     .find(|(preset, _)| *preset == id)
                     .map_or(id, |(_, label)| *label);
                 match self.sky_preset_command(id) {
-                    Some(command) => self.push_environment_preset(
-                        vec![command],
-                        format!("Sky preset: {label}"),
-                    ),
+                    Some(command) => {
+                        self.push_environment_preset(vec![command], format!("Sky preset: {label}"))
+                    }
                     None => warn!(%id, "no Sky component, or unknown sky preset"),
                 }
             }
@@ -6918,11 +6926,11 @@ impl<G: GameApp> Engine<G> {
                     .find(|(preset, _)| *preset == id)
                     .map_or(id, |(_, label)| *label);
                 let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::new();
-                let Some(entity) = self
-                    .world
-                    .entities()
-                    .find(|e| self.world.get::<crate::weather::WeatherComponent>(*e).is_some())
-                else {
+                let Some(entity) = self.world.entities().find(|e| {
+                    self.world
+                        .get::<crate::weather::WeatherComponent>(*e)
+                        .is_some()
+                }) else {
                     warn!("no Weather component in the scene");
                     return;
                 };
@@ -6954,8 +6962,8 @@ impl<G: GameApp> Engine<G> {
                         return;
                     }
                 }
-                if let Some(command) = crate::weather::sky_preset_for(id)
-                    .and_then(|sky| self.sky_preset_command(sky))
+                if let Some(command) =
+                    crate::weather::sky_preset_for(id).and_then(|sky| self.sky_preset_command(sky))
                 {
                     commands.push(command);
                 }
@@ -7526,7 +7534,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(_) => {
                         info!("Created {}", path.display());
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         self.after_content_change(&format!(
                             "Created {}",
                             path.file_name().unwrap_or_default().to_string_lossy()
@@ -7622,7 +7630,7 @@ impl<G: GameApp> Engine<G> {
                             live: false,
                         });
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Made unique asset copy");
                         }

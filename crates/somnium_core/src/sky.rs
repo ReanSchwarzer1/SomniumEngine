@@ -354,9 +354,7 @@ mod tests {
     #[test]
     fn quality_reaches_details_as_a_named_choice() {
         let registry = crate::reflect_registry::editor_registry();
-        let schema = registry
-            .by_name("somnium.Sky")
-            .expect("Sky is registered");
+        let schema = registry.by_name("somnium.Sky").expect("Sky is registered");
         let field = schema
             .fields
             .iter()

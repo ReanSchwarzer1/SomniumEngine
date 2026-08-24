@@ -252,9 +252,7 @@ fn value_from_json(
         }
         FieldType::Gradient => {
             if json.is_null() {
-                return Some(ReflectValue::Gradient(
-                    somnium_ecs::curve::Gradient::empty(),
-                ));
+                return Some(ReflectValue::Gradient(somnium_ecs::curve::Gradient::empty()));
             }
             let flat = flat_floats(json.get("$gradient")?)?;
             Some(ReflectValue::Gradient(

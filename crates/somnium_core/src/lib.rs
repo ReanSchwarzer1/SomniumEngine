@@ -49,13 +49,14 @@ pub mod app;
 pub mod autosave;
 pub mod character;
 pub mod clipboard;
-/// Phase CONTROL-O: deferred decals.
-pub mod decal;
 pub mod config;
 pub mod context;
+/// Phase CONTROL-O: deferred decals.
+pub mod decal;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod i18n;
 pub mod input_actions;
 pub mod jobs;
 pub mod landscape;
@@ -78,16 +79,16 @@ pub mod script_cook;
 pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
-/// Phase CONTROL-M: the sky and its cloud layer.
-pub mod sky;
-/// Phase CONTROL-N: weather and the wetness it leaves.
-pub mod weather;
 pub mod selection;
 pub mod settings;
+/// Phase CONTROL-M: the sky and its cloud layer.
+pub mod sky;
 pub mod sun;
 pub mod time;
 /// Phase CONTROL-L: the day cycle.
 pub mod time_of_day;
+/// Phase CONTROL-N: weather and the wetness it leaves.
+pub mod weather;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
