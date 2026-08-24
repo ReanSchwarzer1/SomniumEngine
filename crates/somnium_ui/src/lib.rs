@@ -22,6 +22,7 @@ pub mod primitive;
 pub mod shaped;
 pub mod runtime;
 pub mod style;
+pub mod text;
 pub mod theme;
 pub mod thumbnail;
 pub mod types;
