@@ -116,14 +116,15 @@ pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;
 
 // Re-export input types so game code does not need a direct `winit` dependency.
+pub use winit::event::ElementState;
 pub use winit::event::MouseButton;
 pub use winit::event::WindowEvent;
-pub use winit::keyboard::KeyCode;
+pub use winit::keyboard::{KeyCode, PhysicalKey};
 
 // MORROWIND-E2: the runtime UI, re-exported so a game reaches its HUD through
 // the crate it already depends on. `UiCanvas` is the tree, `GameUiFrame` is the
 // moment it gets drawn in, and a game that needs neither pays nothing for them.
-pub use somnium_ui::{GameUiFrame, UiCanvas};
+pub use somnium_ui::{Easing, GameUiFrame, Motion, Spring, Transition, UiCanvas};
 
 // Re-export core ECS types so game code can use them from `somnium_core`.
 pub use somnium_ecs::{Component, ComponentBundle, Entity, World};

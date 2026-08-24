@@ -272,8 +272,9 @@ mod tests {
 // second set of numbers, so the layout tests keep testing what is on screen.
 
 use somnium_ui::{
-    UiCanvas,
+    Motion, Spring, UiCanvas,
     message::NodeHandle,
+    motion::{MotionKey, MotionProperty},
     theme,
     widget::WidgetBuilder,
     widgets::{border::BorderBuilder, text::TextBuilder},
@@ -295,6 +296,10 @@ pub struct HudTree {
     /// 0..=1. The only piece of game state the slice has, and it exists so the
     /// health bar is observably *driven* rather than observably drawn.
     pub health: f32,
+    /// MORROWIND-H. Whether the HUD is showing. A game hides its HUD in
+    /// cutscenes and menus, and the transition is the interesting part: the
+    /// same call reversed, not a second declaration to keep in step.
+    shown: bool,
 }
 
 impl HudTree {
@@ -346,6 +351,20 @@ impl HudTree {
         .build();
         let crosshair = canvas.ui_mut().add_node(crosshair, root);
 
+        // MORROWIND-H. Seed the shown state rather than defaulting to it. An
+        // animator with no value for a key is not the same as one holding 1.0,
+        // and the difference shows up the first time something is hidden: the
+        // reverse transition would find rest == target and settle instantly,
+        // which reads as a pop and is the bug this seeding prevents.
+        for node in [track, fill, minimap, crosshair] {
+            canvas
+                .motion_mut()
+                .set_immediate(MotionKey::new(node.index(), MotionProperty::HoverWash), 1.0);
+            canvas
+                .motion_mut()
+                .set_immediate(MotionKey::new(node.index(), MotionProperty::Scale), 1.0);
+        }
+
         Self {
             canvas,
             hud,
@@ -355,7 +374,76 @@ impl HudTree {
             crosshair,
             placed_for: Vec2::ZERO,
             health: 1.0,
+            shown: true,
         }
+    }
+
+    /// The HUD's show transition. MORROWIND-H.
+    ///
+    /// Declared once and reversed for the hide, so the two halves cannot drift
+    /// — which is how they drift. A **spring** on the scale and a **timed
+    /// fade** on the wash, deliberately mixed: the fade has a duration the
+    /// design states, and the scale should keep its momentum if the player
+    /// opens and closes a menu quickly, which is exactly the case a duration
+    /// cannot express.
+    fn show_transition() -> somnium_ui::Transition {
+        somnium_ui::Transition::new()
+            .with(
+                MotionProperty::Scale,
+                0.92,
+                1.0,
+                Motion::Spring(Spring::SNAPPY),
+            )
+            .with(
+                MotionProperty::HoverWash,
+                0.0,
+                1.0,
+                Motion::timed(160.0, somnium_ui::Easing::Decelerate),
+            )
+    }
+
+    /// Show or hide the HUD, animated.
+    ///
+    /// Idempotent: asking for the state it is already in does nothing, so a
+    /// game that calls this every frame from a `cutscene_active` flag does not
+    /// restart the transition sixty times a second.
+    pub fn set_shown(&mut self, shown: bool) {
+        if shown == self.shown {
+            return;
+        }
+        self.shown = shown;
+        let transition = Self::show_transition();
+        let transition = if shown {
+            transition
+        } else {
+            transition.reversed()
+        };
+        // Staggered across the three parts, in reading order, so the HUD
+        // assembles rather than appearing.
+        let nodes = [self.health_bar, self.minimap, self.crosshair];
+        let ids: Vec<u32> = nodes.iter().map(|h| h.index()).collect();
+        self.canvas
+            .motion_mut()
+            .play_staggered(&ids, &transition, 40.0);
+    }
+
+    /// Whether the HUD is showing, or on its way to.
+    #[must_use]
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// The show/hide progress of one part, 0 = hidden, 1 = shown.
+    ///
+    /// Read back rather than assumed: this is what the drawing code multiplies
+    /// its alpha by, and what the tests assert on.
+    #[must_use]
+    pub fn part_opacity(&self, part: usize) -> f32 {
+        let nodes = [self.health_bar, self.minimap, self.crosshair];
+        let node = nodes[part.min(2)].index();
+        self.canvas
+            .motion()
+            .value_or(MotionKey::new(node, MotionProperty::HoverWash), 1.0)
     }
 
     /// Re-anchor against `viewport` if it changed, then size the fill to
@@ -518,5 +606,91 @@ mod tree_tests {
             (insets[0] - insets[1]).abs() < 2.0,
             "the minimap left the top-right corner on resize: {insets:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    /// MORROWIND-H through the slice's public surface: a HUD that hides and
+    /// shows, and does it by animating rather than by disappearing.
+    #[test]
+    fn hiding_the_hud_animates_rather_than_popping() {
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.update(Vec2::new(1920.0, 1080.0));
+        assert!(tree.shown());
+        assert_eq!(tree.part_opacity(0), 1.0);
+
+        tree.set_shown(false);
+        // Still visible on the first frame — that is what "animates" means.
+        tree.canvas_mut().tick_motion(16.0);
+        let after_one_frame = tree.part_opacity(0);
+        assert!(
+            after_one_frame > 0.0 && after_one_frame < 1.0,
+            "popped straight to {after_one_frame} instead of animating"
+        );
+
+        for _ in 0..120 {
+            tree.canvas_mut().tick_motion(16.0);
+        }
+        assert_eq!(tree.part_opacity(0), 0.0, "never finished hiding");
+        assert!(!tree.shown());
+    }
+
+    /// The stagger: the second part trails the first.
+    #[test]
+    fn the_hud_assembles_rather_than_appearing() {
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.update(Vec2::new(1920.0, 1080.0));
+        tree.set_shown(false);
+        tree.canvas_mut().tick_motion(16.0);
+        let (first, second) = (tree.part_opacity(0), tree.part_opacity(1));
+        assert!(
+            first < second,
+            "the first part should lead the second: {first} vs {second}"
+        );
+    }
+
+    /// Asking for the state it is already in does nothing — a game calling
+    /// this from a per-frame flag must not restart the transition each frame.
+    #[test]
+    fn setting_the_state_it_is_already_in_is_a_no_op() {
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.update(Vec2::new(1920.0, 1080.0));
+        tree.set_shown(true);
+        assert!(!tree.canvas_mut().is_animating(), "restarted an idle HUD");
+
+        tree.set_shown(false);
+        for _ in 0..8 {
+            tree.canvas_mut().tick_motion(16.0);
+        }
+        let mid = tree.part_opacity(0);
+        for _ in 0..3 {
+            tree.set_shown(false);
+            tree.canvas_mut().tick_motion(16.0);
+        }
+        assert!(
+            tree.part_opacity(0) < mid,
+            "repeating the request restarted the transition"
+        );
+    }
+
+    /// Show, hide, show again — the reversed transition must return the HUD to
+    /// exactly where the forward one put it, not to somewhere near it.
+    #[test]
+    fn a_reversed_transition_returns_to_the_same_place() {
+        let mut tree = HudTree::new(Hud::new(SafeArea::NONE));
+        tree.update(Vec2::new(1920.0, 1080.0));
+        let start = tree.part_opacity(0);
+
+        for want in [false, true] {
+            tree.set_shown(want);
+            for _ in 0..200 {
+                tree.canvas_mut().tick_motion(16.0);
+            }
+        }
+        assert_eq!(tree.part_opacity(0), start);
+        assert!(tree.shown());
     }
 }

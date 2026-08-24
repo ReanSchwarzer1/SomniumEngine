@@ -31,6 +31,14 @@ pub struct UiCanvas {
     /// MORROWIND-E. What space this tree lives in, how it scales, what it must
     /// keep clear of, and which layer it draws on.
     canvas: Canvas,
+    /// MORROWIND-H. When the last frame was, for the motion clock.
+    ///
+    /// The editor shell has had one of these since Phase 27-C
+    /// (`UiManager::last_frame_at`) and a game canvas did not, which meant a
+    /// game's tweens never advanced — `render` laid out and drew and never
+    /// ticked. The same class of bug as MORROWIND-E2 itself: the capability
+    /// existed, the runtime path to it did not.
+    last_frame_at: Option<std::time::Instant>,
     /// Pixels per world unit for a [`CanvasMode::World`] canvas.
     ///
     /// A world canvas renders to an offscreen target of `size *
@@ -50,6 +58,7 @@ impl UiCanvas {
             font_id: 0,
             canvas: Canvas::screen(),
             world_pixels_per_unit: 100.0,
+            last_frame_at: None,
         }
     }
 
@@ -148,6 +157,44 @@ impl UiCanvas {
         &mut self.ui
     }
 
+    /// The motion driver, for a game that builds its own transitions.
+    ///
+    /// MORROWIND-H. Register a CONTROL-K curve here and the [`CurveId`] it
+    /// returns is usable as an `Easing` anywhere in this canvas.
+    ///
+    /// [`CurveId`]: crate::motion::CurveId
+    pub fn motion(&self) -> &crate::motion::Animator {
+        &self.ui.draw_ctx.motion
+    }
+
+    /// The motion driver, mutably.
+    pub fn motion_mut(&mut self) -> &mut crate::motion::Animator {
+        &mut self.ui.draw_ctx.motion
+    }
+
+    /// Advance motion by an explicit `dt_ms` instead of by the wall clock.
+    ///
+    /// [`UiCanvas::render`] ticks from its own `Instant`, which is right for a
+    /// HUD and wrong for two cases a game actually has: a **fixed-timestep**
+    /// simulation, where UI motion should advance with the simulation and not
+    /// with the frame; and a **paused** game whose pause menu must still
+    /// animate while nothing else does. Calling this makes `render`'s own tick
+    /// the smaller of the two rather than a double advance — the clock is reset
+    /// each time, so an explicit tick and the automatic one cannot both charge
+    /// the same milliseconds.
+    pub fn tick_motion(&mut self, dt_ms: f32) -> bool {
+        self.last_frame_at = Some(std::time::Instant::now());
+        self.ui.draw_ctx.motion.tick(dt_ms)
+    }
+
+    /// Whether anything in this canvas is animating.
+    ///
+    /// A game that only redraws on change asks this; a game that draws every
+    /// frame anyway can ignore it.
+    pub fn is_animating(&self) -> bool {
+        !self.ui.draw_ctx.motion.is_idle()
+    }
+
     pub fn font_id(&self) -> u8 {
         self.font_id
     }
@@ -189,6 +236,18 @@ impl UiCanvas {
         self.ui.set_ui_scale(ui_scale);
         self.ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
         self.ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
+
+        // MORROWIND-H. Advance motion before layout, so a track that finished
+        // this frame settles into the layout it produced rather than one frame
+        // late. A stalled frame — a breakpoint, a minimised window — must not
+        // teleport every track to its end state, hence the 100 ms clamp, which
+        // is the same number the editor shell uses.
+        let now = std::time::Instant::now();
+        if let Some(previous) = self.last_frame_at {
+            let dt_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
+            self.ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+        }
+        self.last_frame_at = Some(now);
 
         let _ = self.ui.update();
         self.ui.perform_layout();
@@ -467,6 +526,57 @@ mod tests {
             (right_edges[0] - right_edges[1]).abs() < 1.0,
             "distance from the right edge changed with resolution: {right_edges:?}"
         );
+    }
+
+    // ── MORROWIND-H ────────────────────────────────────────────────────────
+
+    /// The bug: a game canvas laid out and drew and never ticked, so a game's
+    /// tweens sat at their origin forever.
+    #[test]
+    fn a_game_canvas_advances_its_own_motion() {
+        use crate::motion::{Easing, Motion, MotionKey, MotionProperty};
+
+        let mut canvas = UiCanvas::new(640.0, 360.0);
+        let key = MotionKey::new(1, MotionProperty::HoverWash);
+        canvas
+            .motion_mut()
+            .start_with(key, 0.0, 1.0, Motion::timed(100.0, Easing::Linear));
+        assert!(canvas.is_animating());
+        assert_eq!(canvas.motion().value_or(key, -1.0), 0.0);
+
+        canvas.tick_motion(50.0);
+        let half = canvas.motion().value_or(key, -1.0);
+        assert!(
+            (half - 0.5).abs() < 1e-3,
+            "half way should be 0.5, got {half}"
+        );
+
+        canvas.tick_motion(60.0);
+        assert_eq!(canvas.motion().value_or(key, -1.0), 1.0);
+        assert!(!canvas.is_animating(), "a finished track was left running");
+    }
+
+    /// A spring on a game canvas, through the public surface only — the shape
+    /// a pause menu sliding in actually has.
+    #[test]
+    fn a_game_canvas_can_drive_a_spring_through_its_public_surface() {
+        use crate::motion::{Motion, MotionKey, MotionProperty, Spring};
+
+        let mut canvas = UiCanvas::new(640.0, 360.0);
+        let key = MotionKey::new(2, MotionProperty::Scale);
+        canvas
+            .motion_mut()
+            .start_with(key, 0.0, 1.0, Motion::Spring(Spring::SNAPPY));
+        let mut ticks = 0;
+        while canvas.is_animating() && ticks < 1000 {
+            canvas.tick_motion(1000.0 / 120.0);
+            ticks += 1;
+        }
+        assert!(
+            ticks > 1,
+            "a spring that finished in one tick is not a spring"
+        );
+        assert_eq!(canvas.motion().value_or(key, -1.0), 1.0);
     }
 
     /// `GameUiFrame` counts what it drew, so "the hook ran" is checkable. The

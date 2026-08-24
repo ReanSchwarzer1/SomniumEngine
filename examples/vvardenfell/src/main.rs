@@ -158,6 +158,21 @@ impl GameApp for Vvardenfell {
     /// Returning `true` consumes it, which is how a game says *"that click was
     /// mine"* before the editor's viewport tools see it.
     fn on_os_event(&mut self, _ctx: &mut EngineContext, event: &somnium_core::WindowEvent) -> bool {
+        // MORROWIND-H. Tab hides the HUD, the way a screenshot key or a
+        // cutscene would. It is here rather than in `on_update` because it is
+        // the smallest honest demonstration that the two halves of the hook
+        // work together: an event arrives through `on_os_event`, starts a
+        // transition, and `on_render_ui` draws the frames of it.
+        if let somnium_core::WindowEvent::KeyboardInput { event: key, .. } = event {
+            let pressed = key.state == winit_state_pressed();
+            if pressed && key.physical_key == tab_key() {
+                if let Some(hud) = self.hud.as_mut() {
+                    let shown = hud.shown();
+                    hud.set_shown(!shown);
+                }
+                return true;
+            }
+        }
         self.hud
             .as_mut()
             .is_some_and(|hud| hud.canvas_mut().process_os_event(event))
@@ -166,6 +181,21 @@ impl GameApp for Vvardenfell {
     fn on_shutdown(&mut self) {
         println!("vvardenfell: {} frames.", self.frames);
     }
+}
+
+/// `winit`'s pressed state, named so the match above reads as intent.
+///
+/// The slice reaches `winit` through `somnium_core`'s re-exports and does not
+/// depend on it directly — MORROWIND-AE's `somnium_input` is the right way to
+/// ask "did the player press confirm", and this is deliberately *not* that: a
+/// debug key that hides the HUD is not a game action and should not consume an
+/// action-map binding.
+fn winit_state_pressed() -> somnium_core::ElementState {
+    somnium_core::ElementState::Pressed
+}
+
+fn tab_key() -> somnium_core::PhysicalKey {
+    somnium_core::PhysicalKey::Code(somnium_core::KeyCode::Tab)
 }
 
 fn main() {

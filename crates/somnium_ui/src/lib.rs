@@ -47,6 +47,10 @@ pub use editor_event::{
 };
 pub use node::CursorKind;
 pub use runtime::{GameUi, GameUiFrame, UiCanvas};
+// MORROWIND-H. The runtime motion vocabulary, at the top level beside the
+// canvas that drives it: a game reaching for a spring should not have to know
+// which module Phase 27 happened to put the animator in.
+pub use motion::{CurveId, Easing, Motion, Spring, Transition, TransitionStep};
 
 pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};

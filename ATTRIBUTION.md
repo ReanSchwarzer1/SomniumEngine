@@ -2214,3 +2214,26 @@ decomposition, which is the part that is hard to get right by inspection.
   extractor must find the strings that *never became keys*, not only the keys
   that exist, because a translation-file check cannot see the former.
   `somnium_i18n/src/extract.rs` does both.
+
+### 13H.14 LyShine and the spring literature — MORROWIND-H
+
+*Read for pattern only; O3DE is Apache-2.0.* `Gems/LyShine/Code/Source/Animation/`
+(`AnimNode`, `AnimSequence`, `AnimSplineTrack`) is the plan's named reference for
+a **track-based** UI animation system. **MORROWIND-H did not build one**, and
+the entry is here to record that: §8 states the track-based variant is
+MORROWIND-L's fifth consumer, so building half a timeline in the motion
+sub-phase would have left L with two to reconcile. What was taken from reading
+it is the negative result — that a track model and a transition model are
+different things and that Somnium wants the second one first.
+
+The spring is not from a repository. Damped harmonic motion integrated with
+semi-implicit (symplectic) Euler is textbook, and the two Somnium-specific parts
+are its own: the sub-step ceiling that keeps a stiff spring stable across a
+stalled frame, and the arrived-*and*-stopped termination test. The
+critical-damping identity `c = 2 * sqrt(k * m)` is what `Spring::overshoots()`
+checks, and it caught a preset that had shipped its first draft underdamped.
+
+CONTROL-K's `Curve` (`crates/somnium_ecs/src/curve.rs`) is a Somnium type and is
+consumed, not referenced — `Easing::Curve` holds an index into an animator's
+library so the same curve an author drags in the editor is the one a widget
+eases along.
