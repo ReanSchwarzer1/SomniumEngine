@@ -1128,6 +1128,17 @@ engine is only the shape of the solution.
 | Frame interpolation / optical flow / swapchain proxy | **Not ported.** Needs DX12/Vulkan swapchain replace; wgpu/winit cannot host it | — |
 | `GenerateReactive` | **Unimplemented** in wgpu-ffx | water/transparents may ghost; documented, not a water retune |
 
+**Local modification (2026-08-23).** The upstream `fsr_smoke` and
+`fsr_dispatch_smoke` tests hard-`expect` an adapter and then create shader
+modules through `create_shader_module_passthrough`. Because the shaders are
+precompiled SPIR-V, that path is Vulkan-only, so on any machine resolving to
+DX12/WARP or GL — every hosted CI runner — the tests fail with *"Generic shader
+passthrough does not contain any code compatible with this backend"*, which is
+a property of the machine rather than a defect. Somnium adds `fsr_test_device()`
+in `third_party/wgpu-ffx/src/lib.rs`, which skips with a printed reason in that
+case; `SOMNIUM_REQUIRE_FSR=1` turns the skip back into a hard failure for a
+runner that is supposed to have Vulkan. No upstream behaviour is changed.
+
 ### 13B.4 O3DE — terrain material blending (Phases 25D, 25E)
 
 **Source:** `example_repo/o3de-development/.../Gems/Terrain/`

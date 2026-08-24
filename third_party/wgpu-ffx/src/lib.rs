@@ -953,24 +953,73 @@ impl FrameKind {
     }
 }
 
-#[test]
-fn fsr_smoke() {
+/// A device that can actually run FSR, or `None` with the reason printed.
+///
+/// **Somnium local modification.** These two smoke tests hard-`expect`ed an
+/// adapter and then created shader modules through
+/// `create_shader_module_passthrough`. The shaders this crate ships are
+/// precompiled **SPIR-V**, and passthrough SPIR-V is only accepted by the
+/// Vulkan backend — so on a machine that resolves to DX12/WARP or GL the tests
+/// died with
+///
+/// > Generic shader passthrough does not contain any code compatible with this
+/// > backend
+///
+/// which is a property of the machine, not a defect in the code. A hosted CI
+/// runner has no GPU and lands there every time. Reporting that as a failing
+/// test trains people to ignore a red build, so it is a skip.
+///
+/// A skip that nobody notices is its own hazard, so it is loud, and
+/// `SOMNIUM_REQUIRE_FSR=1` turns it back into a hard failure — set that on any
+/// runner that is *supposed* to have Vulkan, and the tests become a real gate
+/// again rather than silently vacuous.
+#[cfg(test)]
+fn fsr_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    fn give_up(reason: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
+        if std::env::var("SOMNIUM_REQUIRE_FSR").as_deref() == Ok("1") {
+            panic!("SOMNIUM_REQUIRE_FSR=1 but FSR cannot run here: {reason}");
+        }
+        eprintln!("SKIP: FSR smoke test — {reason}");
+        None
+    }
+
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
-        .expect("Failed to find an appropriate adapter");
+    let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default())).ok()
+    else {
+        return give_up("no graphics adapter is available");
+    };
 
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    // The only gate that matters. Everything else about the adapter is fine;
+    // it is the passthrough path that is Vulkan-only.
+    let info = adapter.get_info();
+    if info.backend != wgpu::Backend::Vulkan {
+        return give_up(&format!(
+            "this crate ships SPIR-V, and passthrough needs Vulkan (got {:?} on {:?})",
+            info.backend, info.device_type
+        ));
+    }
+
+    match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: adapter.features(),
         required_limits: adapter.limits(),
         memory_hints: wgpu::MemoryHints::default(),
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         trace: wgpu::Trace::Off,
         label: None,
-    }))
-    .expect("Failed to create device");
+    })) {
+        Ok(pair) => Some(pair),
+        Err(error) => give_up(&format!("the Vulkan adapter refused a device: {error}")),
+    }
+}
+
+#[test]
+fn fsr_smoke() {
+    let Some((device, queue)) = fsr_test_device() else {
+        return;
+    };
 
     let fsr_context = FsrContext::new(FsrContextInfo {
         device: device.clone(),
@@ -982,23 +1031,9 @@ fn fsr_smoke() {
 
 #[test]
 fn fsr_dispatch_smoke() {
-    // Setup device and queue
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
-        .expect("Failed to find an appropriate adapter");
-
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features(),
-        required_limits: adapter.limits(),
-        memory_hints: wgpu::MemoryHints::default(),
-        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-        trace: wgpu::Trace::Off,
-        label: None,
-    }))
-    .expect("Failed to create device");
+    let Some((device, queue)) = fsr_test_device() else {
+        return;
+    };
 
     // Setup resolution parameters
     let render_size = [640u32, 360u32];
