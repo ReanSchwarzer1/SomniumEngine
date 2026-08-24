@@ -15,3 +15,9 @@ publish = false
 # example problem (plan preamble, second-example rule).
 [dependencies]
 somnium_core = { workspace = true }
+# MORROWIND-E. The second crate the slice needs, and the point of naming it
+# here: a HUD is laid out through `somnium_ui`'s public surface, not through
+# the engine's. If a later track cannot reach its own feature from this list
+# without adding a reach-through, that track's API is wrong.
+somnium_ui = { workspace = true }
+glam = { workspace = true }

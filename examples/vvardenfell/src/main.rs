@@ -31,7 +31,7 @@
 //!
 //! | Track | What it adds |
 //! |---|---|
-//! | 1 — VIVEC | a screen-space HUD canvas and a world-space marker |
+//! | 1 — VIVEC | **a screen-space HUD canvas and a world-space marker — landed, MORROWIND-E** |
 //! | 3 — HLAALU | a prefab instanced a few times |
 //! | 4 — SILT STRIDER | the cooked-asset path and a streamed cell |
 //! | 5 — DWEMER | one skinned character with a walk cycle |
@@ -42,7 +42,11 @@
 //! `hello_engine`'s scaffolding would defeat the purpose — the emptiness is the
 //! measurement.
 
+mod hud;
+
+use hud::Hud;
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp};
+use somnium_ui::runtime::canvas::SafeArea;
 
 /// The slice's game state.
 ///
@@ -55,11 +59,43 @@ struct Vvardenfell {
     /// Frames drawn. The only observable behaviour this program has, and it
     /// exists so "it ran" is a checkable claim rather than an impression.
     frames: u64,
+    /// MORROWIND-E. The HUD's anchoring, resolved per frame against whatever
+    /// the window currently is.
+    hud: Hud,
 }
 
 impl GameApp for Vvardenfell {
-    fn on_init(&mut self, _ctx: &mut EngineContext) {
-        println!("vvardenfell: the slice is open and empty (MORROWIND-A).");
+    fn on_init(&mut self, ctx: &mut EngineContext) {
+        // A real safe area comes from the platform. Nothing in the tree reports
+        // one yet, so the slice hard-codes a phone-shaped inset: the value is a
+        // placeholder, the *path* is not, and a HUD that has never been laid
+        // out against a notch is a HUD that has not been tested.
+        self.hud = Hud::new(SafeArea {
+            top: 44.0,
+            bottom: 34.0,
+            left: 0.0,
+            right: 0.0,
+        });
+
+        let (w, h) = ctx.config.window_size;
+        let layout = self.hud.layout(glam::Vec2::new(w as f32, h as f32));
+        println!(
+            "vvardenfell: HUD on a {:.0}x{:.0} canvas at {:.2}x",
+            layout.canvas.logical_size.x, layout.canvas.logical_size.y, layout.canvas.scale
+        );
+        println!("  health bar {:?}", layout.health_bar);
+        println!("  minimap    {:?}", layout.minimap);
+        println!("  crosshair  {:?}", layout.crosshair);
+
+        // A world-space name-plate over a point in the world. Sized in metres,
+        // so it shrinks with distance the way a label attached to a thing
+        // should — see the world-space decision in `somnium_ui::runtime::canvas`.
+        let plate = hud::name_plate(glam::Vec3::new(3.0, 1.8, -12.0), 1.2);
+        let plate_layout = plate.layout(glam::Vec2::new(w as f32, h as f32), 100.0);
+        println!(
+            "  name-plate {:.0}x{:.0} px offscreen target",
+            plate_layout.logical_size.x, plate_layout.logical_size.y
+        );
     }
 
     fn on_update(&mut self, _ctx: &mut EngineContext) {

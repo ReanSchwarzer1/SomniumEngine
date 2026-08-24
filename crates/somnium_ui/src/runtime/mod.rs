@@ -4,6 +4,12 @@
 //! game can build a widget tree (HUD, pause, menus) and draw it through the
 //! same GPU pass the editor uses. Nine-slice lives on [`DrawingContext`].
 
+pub mod anchor;
+pub mod canvas;
+
+pub use anchor::{Anchoring, Anchors, Offsets, Pivot};
+pub use canvas::{Canvas, CanvasLayout, CanvasMode, CanvasScaler, Layer, SafeArea};
+
 use crate::{
     message::NodeHandle,
     pass::UiPass,
@@ -20,6 +26,18 @@ pub struct UiCanvas {
     ui: UserInterface,
     pass: Option<UiPass>,
     font_id: u8,
+    /// MORROWIND-E. What space this tree lives in, how it scales, what it must
+    /// keep clear of, and which layer it draws on.
+    canvas: Canvas,
+    /// Pixels per world unit for a [`CanvasMode::World`] canvas.
+    ///
+    /// A world canvas renders to an offscreen target of `size *
+    /// world_pixels_per_unit`, so this is the knob that trades a name-plate's
+    /// text crispness against its memory. It is per-canvas on purpose: the
+    /// world-space decision in `canvas.rs` names raising it for one canvas as
+    /// the mitigation for resampled text, and a global would make that a
+    /// whole-project trade.
+    world_pixels_per_unit: f32,
 }
 
 impl UiCanvas {
@@ -28,7 +46,64 @@ impl UiCanvas {
             ui: UserInterface::new(width, height),
             pass: None,
             font_id: 0,
+            canvas: Canvas::screen(),
+            world_pixels_per_unit: 100.0,
         }
+    }
+
+    /// Build a canvas in an explicit mode.
+    ///
+    /// The size is derived from the canvas rather than passed in, because for
+    /// every mode except `Screen` the canvas already knows it — and a caller
+    /// that supplies both can supply two that disagree.
+    #[must_use]
+    pub fn with_canvas(canvas: Canvas, viewport: glam::Vec2) -> Self {
+        let layout = canvas.layout(viewport, 100.0);
+        let mut out = Self::new(layout.logical_size.x, layout.logical_size.y);
+        out.canvas = canvas;
+        out
+    }
+
+    /// The canvas root.
+    #[must_use]
+    pub fn canvas(&self) -> &Canvas {
+        &self.canvas
+    }
+
+    /// Change the canvas root. Takes effect at the next layout.
+    pub fn set_canvas(&mut self, canvas: Canvas) {
+        self.canvas = canvas;
+    }
+
+    /// Pixels per world unit for a world-space canvas.
+    pub fn set_world_pixels_per_unit(&mut self, pixels: f32) {
+        self.world_pixels_per_unit = pixels.max(1.0);
+    }
+
+    /// Resolve this canvas against a viewport, in logical pixels.
+    #[must_use]
+    pub fn layout_for(&self, viewport: glam::Vec2) -> CanvasLayout {
+        self.canvas.layout(viewport, self.world_pixels_per_unit)
+    }
+
+    /// Where an anchored child lands, inside the safe area.
+    ///
+    /// The call a game HUD makes: give it an [`Anchoring`] and it comes back
+    /// with a rect that already respects the resolution policy and the notch.
+    #[must_use]
+    pub fn place(&self, viewport: glam::Vec2, anchoring: &Anchoring) -> crate::types::Rect {
+        self.canvas.place(&self.layout_for(viewport), anchoring)
+    }
+
+    /// Apply the canvas's resolution policy to the widget tree.
+    ///
+    /// Called by [`Self::render`] before layout; exposed so a headless caller —
+    /// a test, or a game laying out before its first frame — gets the same
+    /// result without a GPU.
+    pub fn apply_canvas(&mut self, viewport: glam::Vec2) -> CanvasLayout {
+        let layout = self.layout_for(viewport);
+        self.ui.screen_size = layout.logical_size;
+        layout
     }
 
     pub fn ui(&self) -> &UserInterface {
@@ -69,6 +144,14 @@ impl UiCanvas {
         output_format: wgpu::TextureFormat,
     ) {
         let ui_scale = window.scale_factor() as f32;
+        // MORROWIND-E: the canvas decides the logical size, not the window.
+        // A `ConstantPixel` canvas resolves to exactly the window's logical
+        // size, so this is a no-op for every pre-E caller.
+        let physical_size = window.inner_size();
+        self.apply_canvas(glam::Vec2::new(
+            (physical_size.width.max(1) as f32) / ui_scale,
+            (physical_size.height.max(1) as f32) / ui_scale,
+        ));
         self.ui.set_ui_scale(ui_scale);
         self.ui.draw_ctx.font_atlas.set_render_scale(ui_scale);
         self.ui.draw_ctx.icon_atlas.set_render_scale(ui_scale);
