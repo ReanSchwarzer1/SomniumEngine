@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/somnium_core",
     "crates/somnium_ecs",
+    "crates/somnium_input",
     "crates/somnium_jobs",
     "crates/somnium_shader",
     "crates/somnium_script",
@@ -42,6 +43,7 @@ authors = ["Somnium Engine Contributors"]
 # -- Internal crates --------------------------------------------------------
 somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }
+somnium_input    = { path = "crates/somnium_input" }
 somnium_jobs     = { path = "crates/somnium_jobs" }
 somnium_shader   = { path = "crates/somnium_shader" }
 somnium_script   = { path = "crates/somnium_script" }

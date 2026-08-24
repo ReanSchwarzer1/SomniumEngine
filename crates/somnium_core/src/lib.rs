@@ -56,6 +56,7 @@ pub mod context;
 pub mod editor_commands;
 pub mod error;
 pub mod event;
+pub mod input_actions;
 pub mod jobs;
 pub mod landscape;
 pub mod light_units;

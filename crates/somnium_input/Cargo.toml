@@ -1,0 +1,26 @@
+[package]
+name        = "somnium_input"
+description = "Action maps, bindings, processors and rebinding. Seam 5."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# `winit` for the one thing this crate needs from a window system: the keycode
+# and button enums. It appears in `device.rs` and nowhere else, which is Seam
+# 5's whole point -- "keycodes appear in exactly one place: the device layer
+# that resolves a `ControlPath` to a hardware control."
+#
+# `glam` for the 2D vector an Analog2D action produces. `serde` because an
+# action map is a file a player edits and a rebinding is a setting that has to
+# survive a restart.
+[dependencies]
+winit = { workspace = true }
+glam  = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# The round-trip tests: a binding is a file, so proving it survives one is
+# part of the contract rather than a nicety.
+serde_json = { workspace = true }

@@ -10,7 +10,7 @@ pub mod nav;
 
 pub use anchor::{Anchoring, Anchors, Offsets, Pivot};
 pub use canvas::{Canvas, CanvasLayout, CanvasMode, CanvasScaler, Layer, SafeArea};
-pub use nav::{Direction, InputSource, NavAction, NavCandidate, NavLinks};
+pub use nav::{Direction, InputSource, NavAction, NavActions, NavCandidate, NavLinks};
 
 use crate::{
     message::NodeHandle,

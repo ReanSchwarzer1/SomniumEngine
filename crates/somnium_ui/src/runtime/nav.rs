@@ -128,11 +128,19 @@ impl InputSource {
 /// > rebound 'confirm' works in menus. This is a forward dependency and Track 8
 /// > must land AE before F closes."*
 ///
-/// So F defines the verbs and the routing; AE supplies the bindings. Until AE
-/// lands, [`NavAction::from_key`] is a hard-coded keyboard default — which is
-/// deliberately a *free function taking a key*, not a match buried in the
-/// widget tree, so AE replaces one call site rather than hunting for keycodes.
-/// Seam 5's whole point is that keycodes appear in exactly one place.
+/// So F defines the verbs and the routing; AE supplies the bindings.
+///
+/// **MORROWIND-AE has landed, and this resolves through it.** `somnium_input`'s
+/// default UI map binds `Navigate`, `Confirm`, `Cancel`, `Next` and `Previous`
+/// -- the names in [`action_names`], deliberately -- and
+/// [`NavAction::from_actions`] reads them. A player who rebinds Confirm to
+/// their pad's east button gets it in menus, which is what item 5 asked for.
+///
+/// [`NavAction::from_key`] survives as the keyboard-only path, for a caller
+/// with no input system: the editor shell runs before a game's `InputSystem`
+/// exists, and refusing it a fallback would mean the editor could not be
+/// navigated at all. It is still the *only* place in `somnium_ui` that names a
+/// keycode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavAction {
     /// Move focus.
@@ -148,12 +156,93 @@ pub enum NavAction {
     Previous,
 }
 
+/// The action names `somnium_input`'s default UI map binds.
+///
+/// Named constants rather than string literals at the call site: two crates
+/// have to agree on these five words, and a typo in one of them is a menu that
+/// silently stops responding to a pad. `somnium_input`'s
+/// `the_default_maps_name_the_verbs_the_engine_hard_coded` asserts the map side.
+pub mod action_names {
+    /// A 2D navigation vector: d-pad, arrows or left stick.
+    pub const NAVIGATE: &str = "Navigate";
+    /// Activate the focused widget.
+    pub const CONFIRM: &str = "Confirm";
+    /// Dismiss, or leave the current focus scope.
+    pub const CANCEL: &str = "Cancel";
+    /// Next focus stop in the linear order.
+    pub const NEXT: &str = "Next";
+    /// Previous focus stop.
+    pub const PREVIOUS: &str = "Previous";
+}
+
+/// Something that can report whether a named action fired this frame.
+///
+/// A trait rather than a direct dependency on `somnium_input`, deliberately:
+/// `somnium_ui` is drawn by the editor, by a game and by tests, and a hard
+/// dependency would make the UI crate un-testable without an input system while
+/// putting a crate edge where none is needed. `somnium_core` wires the two
+/// together, which is where a wiring decision belongs.
+pub trait NavActions {
+    /// Whether `action` became active this frame.
+    fn just_activated(&self, action: &str) -> bool;
+    /// `action` as a 2D vector, for `Navigate`.
+    fn vec2(&self, action: &str) -> glam::Vec2;
+}
+
 impl NavAction {
-    /// The default keyboard binding.
+    /// Resolve from the player's bindings (MORROWIND-AE).
     ///
-    /// **Temporary by design.** MORROWIND-AE replaces this with a lookup
-    /// through the player's action map; the signature stays, so the widget tree
-    /// never learns what a keycode is.
+    /// Returns at most one verb per call. A frame in which the player both
+    /// nudges the stick and presses Confirm resolves to `Confirm`: acting on
+    /// the confirm and *then* moving focus off the thing that was confirmed is
+    /// the surprising order, and this is the one place to decide it rather than
+    /// leaving each widget to.
+    ///
+    /// `deadzone` is the magnitude the navigate vector must reach. It is an
+    /// argument because a stick at rest reads slightly non-zero, and a menu
+    /// that steps focus on stick drift is unusable in a way that reads as
+    /// hardware failure.
+    #[must_use]
+    pub fn from_actions(actions: &dyn NavActions, deadzone: f32) -> Option<Self> {
+        if actions.just_activated(action_names::CONFIRM) {
+            return Some(Self::Confirm);
+        }
+        if actions.just_activated(action_names::CANCEL) {
+            return Some(Self::Cancel);
+        }
+        if actions.just_activated(action_names::NEXT) {
+            return Some(Self::Next);
+        }
+        if actions.just_activated(action_names::PREVIOUS) {
+            return Some(Self::Previous);
+        }
+        if actions.just_activated(action_names::NAVIGATE) {
+            let v = actions.vec2(action_names::NAVIGATE);
+            if v.length() < deadzone {
+                return None;
+            }
+            // The dominant axis, so a diagonal push picks one direction rather
+            // than firing two and moving focus twice.
+            return Some(Self::Move(if v.x.abs() >= v.y.abs() {
+                if v.x > 0.0 {
+                    Direction::Right
+                } else {
+                    Direction::Left
+                }
+            } else if v.y > 0.0 {
+                Direction::Down
+            } else {
+                Direction::Up
+            }));
+        }
+        None
+    }
+
+    /// The keyboard-only path, for a caller with no input system.
+    ///
+    /// The editor shell runs before a game's `InputSystem` exists, so refusing
+    /// it a fallback would mean the editor could not be navigated at all. This
+    /// is the only place in `somnium_ui` that names a keycode.
     #[must_use]
     pub fn from_key(key: winit::keyboard::KeyCode, shift: bool) -> Option<Self> {
         use winit::keyboard::KeyCode;
@@ -624,5 +713,98 @@ mod tests {
             Some(NavAction::Cancel)
         );
         assert_eq!(NavAction::from_key(KeyCode::KeyQ, false), None);
+    }
+
+    /// **What closes MORROWIND-F.** A rebound Confirm works in menus.
+    #[test]
+    fn navigation_verbs_resolve_through_the_players_bindings() {
+        struct Bound(&'static str, glam::Vec2);
+        impl NavActions for Bound {
+            fn just_activated(&self, action: &str) -> bool {
+                action == self.0
+            }
+            fn vec2(&self, _: &str) -> glam::Vec2 {
+                self.1
+            }
+        }
+
+        assert_eq!(
+            NavAction::from_actions(&Bound(action_names::CONFIRM, glam::Vec2::ZERO), 0.5),
+            Some(NavAction::Confirm)
+        );
+        assert_eq!(
+            NavAction::from_actions(&Bound(action_names::CANCEL, glam::Vec2::ZERO), 0.5),
+            Some(NavAction::Cancel)
+        );
+        assert_eq!(
+            NavAction::from_actions(
+                &Bound(action_names::NAVIGATE, glam::Vec2::new(0.0, 1.0)),
+                0.5
+            ),
+            Some(NavAction::Move(Direction::Down))
+        );
+        assert_eq!(
+            NavAction::from_actions(&Bound("Nothing", glam::Vec2::ZERO), 0.5),
+            None
+        );
+    }
+
+    /// **A stick at rest must not step focus.**
+    ///
+    /// A stick reads slightly non-zero when untouched, and a menu that walks on
+    /// drift is unusable in a way that reads as hardware failure.
+    #[test]
+    fn a_stick_below_the_deadzone_does_not_navigate() {
+        struct Drift(glam::Vec2);
+        impl NavActions for Drift {
+            fn just_activated(&self, action: &str) -> bool {
+                action == action_names::NAVIGATE
+            }
+            fn vec2(&self, _: &str) -> glam::Vec2 {
+                self.0
+            }
+        }
+        assert_eq!(
+            NavAction::from_actions(&Drift(glam::Vec2::new(0.05, 0.02)), 0.5),
+            None
+        );
+        assert!(NavAction::from_actions(&Drift(glam::Vec2::new(0.9, 0.0)), 0.5).is_some());
+    }
+
+    /// A diagonal push moves focus once, not twice.
+    #[test]
+    fn a_diagonal_push_picks_the_dominant_axis() {
+        struct Diagonal(glam::Vec2);
+        impl NavActions for Diagonal {
+            fn just_activated(&self, action: &str) -> bool {
+                action == action_names::NAVIGATE
+            }
+            fn vec2(&self, _: &str) -> glam::Vec2 {
+                self.0
+            }
+        }
+        assert_eq!(
+            NavAction::from_actions(&Diagonal(glam::Vec2::new(0.9, 0.4)), 0.3),
+            Some(NavAction::Move(Direction::Right))
+        );
+        assert_eq!(
+            NavAction::from_actions(&Diagonal(glam::Vec2::new(0.4, -0.9)), 0.3),
+            Some(NavAction::Move(Direction::Up))
+        );
+    }
+
+    /// Confirm beats a simultaneous navigate.
+    #[test]
+    fn confirm_wins_over_a_simultaneous_navigate() {
+        struct Both;
+        impl NavActions for Both {
+            fn just_activated(&self, action: &str) -> bool {
+                action == action_names::CONFIRM || action == action_names::NAVIGATE
+            }
+            fn vec2(&self, _: &str) -> glam::Vec2 {
+                glam::Vec2::new(0.0, 1.0)
+            }
+        }
+        assert_eq!(NavAction::from_actions(&Both, 0.5), Some(NavAction::Confirm));
     }
 }
