@@ -13,6 +13,7 @@ members = [
     "crates/somnium_asset",
     "crates/somnium_voxel",
     "examples/hello_engine",
+    "examples/vvardenfell",
 ]
 
 # The `example_repo/` directory contains reference source code from

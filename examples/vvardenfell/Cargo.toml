@@ -1,0 +1,17 @@
+[package]
+name    = "vvardenfell"
+version = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+publish = false
+
+# The second example, opened by MORROWIND-A.
+#
+# The dependency list is the point of this program. `hello_engine` names nine
+# `somnium_*` crates because it is the demo, the test harness, the input layer
+# and the scene setup at once; this one starts at two and each track adds
+# exactly the crate its public API lives in. A track that cannot be exercised
+# here without adding a `pub(crate)` reach-through has an API problem, not an
+# example problem (plan preamble, second-example rule).
+[dependencies]
+somnium_core = { workspace = true }

@@ -1981,3 +1981,145 @@ file-by-file mapping.
 | Unreal *Volumetric Cloud Component* docs and the UE 5.6 regression thread — <https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine>, <https://forums.unrealengine.com/t/volumetric-cloud-temporal-artifacts-from-volumetric-render-target-reconstruction/2649937> | Beer Shadow Maps vs ray-marched cloud shadows; the `r.VolumetricRenderTarget` trace/reconstruct/upsample trade-offs; and a shipped regression in exactly that reconstruction stage | CONTROL-M's shadow model, its quality modes, and its named fast-camera-occlusion capture case |
 | Lagarde, *Water drop 3a / 3b — Physically based wet surfaces* (2013) — <https://seblagarde.wordpress.com/2013/03/19/water-drop-3a-physically-based-wet-surfaces/> | Non-linear IOR-dependent albedo darkening; porosity as the discriminating authored channel; BRDF-parameter tweaking rather than separate wet texture sets, with an accumulated-water term flattening the normal; and **specular recovering faster than diffuse during drying** | CONTROL-N's two-time-constant wetness model. *Read via fxguide's summary; the original posts refused fetching and must be opened before implementation — plan §16* |
 | WCAG 2.4.3 Focus Order (Level A) and WCAG 2.2 SC 2.4.11 | Sequential focus preserving meaning; focus moving into new UI and **returning to the invoking control** on dismissal; a ≥ 3:1 focus indicator | CONTROL-A1's traversal, focus-into-view and modal focus trap |
+
+---
+
+## 13H. Phase MORROWIND — NetImmerse (the engine half, 2026-08-24)
+
+Opened by **MORROWIND-A**. §13E and §13F belong to Phase 27 and §13G to Phase
+CONTROL; **this phase edits none of them.**
+
+Phase MORROWIND builds the half of an engine Somnium does not have: a runtime
+UI, animation, a cook and a stream, prefabs, navigation, input, audio and a game
+framework. Its reconnaissance is recorded in `dev records/phase_MORROWIND.md`
+§6, and the two audits MORROWIND-A produced are
+`dev records/phase MORROWIND/MORROWIND-A_fyrox_diff.md` and
+`MORROWIND-A_license_audit.md`.
+
+### 13H.0 The provenance tier table, as measured rather than assumed
+
+MORROWIND-A read the license file at the root of every reference this phase
+names, and then the header of the specific files it intends to read. **That
+second step changed two verdicts**, and the rule it produced is the one worth
+carrying forward: *check the header of the file you are actually reading.*
+
+| Reference | Measured license | Tier | Consequence for this phase |
+|---|---|---|---|
+| `UnrealEngine-release` | Epic EULA, proprietary | **Strict** | Architecture only; implement from public literature; never cite a file path in shipped code. |
+| `FlaxEngine-master` | Flax EULA, proprietary — `LICENSE.md` is a pointer to <https://flaxengine.com/licensing> | **Strict — reclassified by MORROWIND-A** | The plan's §6.6 implied Flax was permissive. It is not. Seam 4a's canvas idea and Seam 8a's graph surface are both re-sourced to permissive references (Godot `GraphEdit`, Fyrox `absm/`), with Flax demoted to a secondary architectural read. |
+| `Daemon-master` | Root `LICENSE.txt` is BSD-3-Clause; `src/engine/renderer/gl_shader.cpp` carries its own **GPL-2.0-or-later** header | **Strict** | Readable for MORROWIND-C's permutation manager; nothing transcribed. `terra-main/rshader` (Apache-2.0) is the primary reference instead. |
+| `luanti-master` | LGPL-2.1+ | **Strict** | Track 4's block emerge and streaming. Read only. |
+| `korge-main` | Mixed, declared per-library at the root | **Strict until the subtree is checked** | MORROWIND-N checks the specific subtree it reads. |
+| `fyrox/Fyrox-master` | MIT | Permissive | The primary reference for Tracks 1 and 2. |
+| `Esoterica-main` | MIT | Permissive | Track 5's animation node list. |
+| `stride-master` | MIT | Permissive | GHOSTFENCE's golden-image model. |
+| `godot-4.7.1-stable`, `WickedEngine-master` | MIT | Permissive | |
+| `o3de-development` | Apache-2.0 or MIT | Permissive | Seam 1's deadline and priority contract. |
+| `terra-main`, `bevy/bevy-main` | Apache-2.0 (bevy: or MIT) | Permissive | Seams 1 and 3. |
+
+### 13H.1 Fyrox — the ancestor, diffed module by module
+
+*Read 2026-08-24; MIT (`fyrox/Fyrox-master/LICENSE.md`).* `somnium_ui` is a fork
+of Fyrox's widget architecture — the generational pool, the message bus and the
+widget/draw split, already cited in §13.13–§13.18. MORROWIND-A diffed all
+~66 modules of `fyrox-ui/src/` against `crates/somnium_ui/src/`.
+
+| Fyrox module | Concept taken forward | Somnium sub-phase |
+|---|---|---|
+| `screen.rs` | A UI root that owns a coordinate space rather than inheriting the window's | MORROWIND-E (Seam 4a) |
+| `vector_image.rs` | Vector paths as first-class widget-tree content | MORROWIND-D (Seam 4b) |
+| `nine_patch.rs` | The nine-slice *widget* Somnium's existing `push_nine_slice` draw call has never had | MORROWIND-D |
+| `bbcode.rs`, `formatted_text/` | Markup parsed into styled runs; run-based text layout | MORROWIND-G |
+| `font/` | Atlas eviction, so a fallback face cannot overflow a fixed atlas | MORROWIND-G |
+| `navigation.rs` | Directional focus navigation as pure geometry over widget bounds | MORROWIND-F |
+| `dock/`, `window.rs`, `messagebox.rs` | Tiles, splitters, floating windows, modal results | MORROWIND-J |
+| `list_view.rs`, `tree.rs` | Row recycling for virtualised lists | MORROWIND-M |
+| `absm/` | A state-machine editor built on the engine's own graph surface — the *second consumer* that proves Seam 8 | MORROWIND-K / V |
+| `animation.rs` | Track-based animation over widget properties | MORROWIND-H |
+| `test.rs` | Driving a UI tree headlessly | GHOSTFENCE |
+
+**Deliberately refused**, recorded so nobody re-opens them: `draw.rs` (Phase 27
+replaced the paint layer, and Fyrox's tessellated command list is the wrong
+mental model for a 100-byte analytic instance), `style/` (Phase 26-Zeta owns
+theming with certified contrast pairs), `file_browser/` (CONTROL-C shipped the
+asset seam), `input.rs` (Seam 5 puts input behind an action map), `uuid.rs`
+(Somnium identifies by `StableId`), `decorator.rs`, `brush.rs`, `bit.rs`,
+`utils.rs`, `loader.rs`.
+
+### 13H.2 Stride — the golden-image regression harness
+
+*Read 2026-08-24; MIT (`stride-master/LICENSE.md`).* Somnium had 1,211 tests and
+**zero image assertions**: every visual claim in every phase record rested on a
+human looking at a screenshot. Stride's
+`sources/engine/Stride.Graphics.Regression/` — `ImageTester.cs`,
+`ImageThreshold.cs`, `TestResultImage.cs`, `GameTestBase.cs`,
+`FrameGameSystem.cs` — is the shape of the fix.
+
+**Concept taken:** a fixed camera at a fixed frame index, a stored reference
+image, a *perceptual* threshold rather than byte equality, and a failure that
+writes the diff so a human sees *what* moved rather than being told a number
+changed.
+
+**Implemented independently** in `tools/ghostfence/golden.py` as
+`Threshold { channel_tolerance, failing_fraction, max_channel }`. The two-sided
+threshold is Somnium's own reasoning rather than Stride's: `max_channel` catches
+a small area moving a lot (a widget drifting a pixel), `failing_fraction`
+catches a large area moving a little (a tone-map or gamma drift), and either one
+alone sleeps through the other's case. The PNG codec in `tools/ghostfence/png.py`
+is written from the PNG specification, standard library only, so the gate cannot
+be skipped for a missing dependency.
+
+### 13H.3 O3DE — the deadline and priority contract for background work
+
+*Read 2026-08-24; Apache-2.0 or MIT (`o3de-development/LICENSE.txt`).*
+`AzCore/IO/Streamer/` is the reference for Seam 1: **priority and deadline are
+declared by the submitter, not inferred by the scheduler**, and a request whose
+deadline has passed while it was queued is dropped rather than run. That single
+property is what separates a job system from a thread pool, and it is what makes
+streaming thrash bounded when a camera turns around.
+
+**Concept taken:** declared priority + declared deadline + first-class
+cancellation. **Not taken:** O3DE's file-request model, its virtual filesystem
+layering, or any of its identifiers.
+
+### 13H.4 Bevy — the Rust shape of a task pool, and pipeline specialisation
+
+*Read 2026-08-24; Apache-2.0 or MIT (`bevy/bevy-main/LICENSE-APACHE`,
+`LICENSE-MIT`).* `crates/bevy_tasks/` for the idiomatic Rust shape of a scoped
+worker pool; `bevy_render`'s pipeline specialisation for Seam 3's "a variant is
+a key, and the key is hashed once" model.
+`bevy-plugins/bevy_mod_outline-master/src/pipeline_key.rs` is that key written
+as a small idiomatic Rust type and is the closest single file to what
+`somnium_shader`'s `ShaderKey` wants to be.
+
+### 13H.5 terra — hot shaders in development, baked variants in release
+
+*Read 2026-08-24; Apache-2.0 (`terra-main/LICENSE`).* `terra-main/rshader/src/`
+is three files — `lib.rs`, `dynamic_shaders.rs`, `static_shaders.rs` — and is
+MORROWIND-C's items 3 and 5 already working: a file-watching, recompiling
+implementation in development and a baked one in release, behind one interface,
+selected by `cfg`. **This is the primary reference for `somnium_shader`**, and
+it displaces Daemon's GPL `gl_shader.cpp` to a secondary read.
+
+### 13H.6 Ogre-Next HLMS — the architecture `hlms.rs` described and never built
+
+Already cited in §5. Recorded here because
+`crates/somnium_renderer/src/material/hlms.rs` was 29 lines under a doc comment
+describing Ogre's HLMS, with an unread `_pipeline_cache` field and a trailing
+comment beginning *"In a full implementation, this would…"*. **MORROWIND-C
+builds what that comment describes and deletes the file.**
+
+### 13H.7 Panda3D — the alternative answer, read before committing to a key
+
+*Read for pattern only; BSD-3-Clause.* `pgraph/renderState.cxx`,
+`renderAttribRegistry.cxx` and `stateMunger.cxx` are the *other* answer to
+Seam 3: interned, composed, cached state objects instead of a permutation key.
+Read and not taken — Somnium's pass list is explicit and small, and a key hashes
+to a pipeline in one step where an interned state graph has to be composed
+first. Recorded so the decision is visible rather than accidental.
+
+`pipeline/pipelineCyclerTrueImpl.cxx` + `cycleData.cxx` is the principled fix
+for single-threaded render recording: one copy of scene state per pipeline stage,
+so App, Cull and Draw read consistent snapshots without locks. It is a change to
+every piece of scene state in the engine and is **explicitly out of Phase
+MORROWIND** (plan §14.8), recorded here so it is not half-started.

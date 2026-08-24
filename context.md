@@ -176,8 +176,22 @@
 >   the four parallel command lists are gone. The registry lives in
 >   `somnium_ui` because `somnium_core` already depends on UI and the Appendix
 >   A suggestion would create a Cargo cycle.
-> - **Phase MORROWIND — NetImmerse (PLAN ONLY, nothing in tree):**
+> - **Phase MORROWIND — NetImmerse (IN PROGRESS — Track 0 started 2026-08-24):**
 >   `dev records/phase_MORROWIND.md` — written 2026-08-23 against `7c0b66f`.
+>   **MORROWIND-A is complete:** the census is a script
+>   (`tools/census/generate.py` → `dev records/phase MORROWIND/MORROWIND-A_census.md`),
+>   GHOSTFENCE is a gate that can fail (`tools/ghostfence/`, with a
+>   standard-library PNG codec and a two-sided perceptual threshold — Somnium's
+>   first image assertions), the Fyrox diff and the license audit are in
+>   `dev records/phase MORROWIND/`, `ATTRIBUTION.md` §13H is open, §17.6's
+>   numbering is retired below, and `examples/vvardenfell` exists as the second
+>   example. **The license audit reclassified Flax as proprietary**, which the
+>   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
+>   re-sourced to Godot and Fyrox as a result.
+>   The census supersedes the measured figures in this entry: the tree is
+>   **141,221 lines and 1,211 tests**, not 113,892 and 945; the top three crates
+>   are 85.5%; there are 51 renderer WGSL files at 13,286 lines and 28 component
+>   schemas. Every *absence* below re-measured at zero.
 >   **The engine-half phase**, and the one that **retires §17.6's numbering**
 >   (see §1.3 there: Phase 26 shipped as the editor's IA and Phase 27 as its
 >   paint layer, so the numbers 26/27 are spent and 30–38 are absorbed into
@@ -2618,6 +2632,41 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 ---
 
 ## 17.6 Phases 26-33 — the systems Somnium does not have (plan)
+
+> ### RETIRED — the numbering, not the finding (MORROWIND-A, 2026-08-24)
+>
+> **The numbers below are spent and this section is history.** Phase 26 shipped
+> as *Metaphor*, the editor's information architecture, and Phase 27 shipped as
+> *Hades*, the editor's paint layer — neither is the UI framework or the
+> skeletal animation this section assigned those numbers to. Re-using 26 and 27
+> for animation and the asset pipeline now would make `dev records/` unreadable.
+>
+> **From here, systems work is planned under codenames**, as DOOM, CR, DF, VV,
+> XV, IV, PORTAL and CONTROL already are. The successor is
+> [`dev records/phase_MORROWIND.md`](dev%20records/phase_MORROWIND.md) — eight
+> tracks, thirty-six sub-phases — and every number below maps into it:
+>
+> | Old number | Absorbed by |
+> |---|---|
+> | 26 (runtime UI framework) | **Track 1 — VIVEC** (MORROWIND-D…I) |
+> | 27 (skeletal animation) | **Track 5 — DWEMER** (MORROWIND-U…W2) |
+> | 28 (cook, hot reload, streaming) | **Track 4 — SILT STRIDER** (MORROWIND-Q…T) |
+> | 29 (profiler) | Stays as shipped (§17.7); Track 7 extends it, Phase PORTAL owns the harness |
+> | 30 (navigation and AI) | **Track 6 — SIXTH HOUSE** (MORROWIND-X, Y) |
+> | 31 (GPU particles and VFX) | **Track 7 — RED MOUNTAIN**, MORROWIND-AA |
+> | 32 (networking) | **Explicitly out of scope** — MORROWIND §3.1. Seams 2 and 6 are chosen to be network-compatible so it stays possible. |
+> | 33 (input, localization, video) | **Track 8 — ALMSIVI** (MORROWIND-AE…AH) |
+> | 34 (prefabs) | **Track 3 — HLAALU**, MORROWIND-O |
+> | 35 (rule-driven scattering) | **Track 3 — HLAALU**, MORROWIND-P2 |
+> | 36 (cinematics and sequencer) | **Track 2 — CONSTRUCTION SET**, MORROWIND-L |
+> | 37 (cloth and hair) | Deferred — MORROWIND §14.3 states why |
+> | 38 (game framework) | **Track 8 — ALMSIVI** |
+>
+> **The finding below is not retired.** §26.1's imbalance — a renderer close to
+> Flax's beside nine subsystems at zero — is exactly what Phase MORROWIND
+> exists to close, and MORROWIND-A's regenerable census
+> (`dev records/phase MORROWIND/MORROWIND-A_census.md`, produced by
+> `tools/census/generate.py`) is the version of it that cannot rot.
 
 ### 26.1 What the survey actually showed
 
