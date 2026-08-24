@@ -559,6 +559,9 @@ pub struct Engine<G: GameApp> {
     /// enabled. Recomputed every frame and never persisted — it is a cache of
     /// one evaluation, not state.
     day_state: Option<crate::time_of_day::DayState>,
+    /// Fingerprint of the content root at the last inventory scan. `None`
+    /// forces one, which is what every explicit invalidation point sets.
+    asset_scan_stamp: Option<(u64, u64)>,
     /// CONTROL-N: the live weather. Unlike [`Self::day_state`] this genuinely
     /// *is* state — the two wetness scalars integrate over time — but it is
     /// still never saved: a scene reloads dry and wets again, which is the
@@ -712,6 +715,7 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_accumulator: 0.0,
             scene_dirty: false,
             day_state: None,
+            asset_scan_stamp: None,
             weather_state: crate::weather::WeatherState::default(),
             precipitation_entity: None,
             ui_wants_exit: false,
@@ -1320,6 +1324,7 @@ impl<G: GameApp> Engine<G> {
         if root != self.config.content_root {
             self.config.content_root = root;
             self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
         }
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.set_tooltip_delay_ms(self.settings.editor().tooltip_delay_ms);
@@ -3548,6 +3553,7 @@ impl<G: GameApp> Engine<G> {
                         let _ = ui.deliver_thumbnail(&path, &preview);
                     }
                     self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
                 }
                 Err(error) => self.report_content_error(&path, &error),
             }
@@ -3618,7 +3624,31 @@ impl<G: GameApp> Engine<G> {
         }
 
         let now = std::time::Instant::now();
-        if self.asset_scan.is_none() && now >= self.next_asset_scan {
+        // The poll is 350 ms, and it used to submit a scan on every tick
+        // whether or not anything on disk had moved. Three background jobs a
+        // second is invisible on the CPU and very visible in the chrome: the
+        // status bar's Cancel chip blinked on and off at ~3 Hz, the status text
+        // was overwritten with "Asset inventory — 0%" and never restored, and
+        // the Jobs panel tore down and rebuilt its rows each cycle because the
+        // job id changes every time.
+        //
+        // A cheap stamp over the content root's directory mtimes settles that:
+        // an idle project scans once and then stops. Every explicit
+        // invalidation point already sets `next_asset_scan = now`, and those
+        // now clear the stamp too, so an edit the stamp cannot see still
+        // rescans immediately.
+        // A guard, not an early return: everything below this block —
+        // thumbnail requests, preview jobs, external imports — has to keep
+        // running on a frame where the inventory has nothing to do.
+        let due = self.asset_scan.is_none() && now >= self.next_asset_scan;
+        let changed = due && {
+            let stamp = content_root_stamp(&self.config.content_root);
+            let moved = self.asset_scan_stamp != Some(stamp);
+            self.asset_scan_stamp = Some(stamp);
+            self.next_asset_scan = now + std::time::Duration::from_millis(350);
+            moved
+        };
+        if changed {
             let root = self.config.content_root.clone();
             match self
                 .jobs
@@ -3632,7 +3662,6 @@ impl<G: GameApp> Engine<G> {
                 Ok(handle) => self.asset_scan = Some(handle),
                 Err(error) => warn!(?error, "asset scan queue is full"),
             }
-            self.next_asset_scan = now + std::time::Duration::from_millis(350);
         }
 
         let requests = self
@@ -3733,6 +3762,7 @@ impl<G: GameApp> Engine<G> {
                         crate::editor_commands::FileImportCmd::new(destinations),
                     ));
                     self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
                     if let Some(ui) = self.ui_manager.as_mut() {
                         ui.push_toast("Files imported");
                     }
@@ -3742,9 +3772,16 @@ impl<G: GameApp> Engine<G> {
         }
         let active = self.jobs.active();
         if let Some(ui) = self.ui_manager.as_mut() {
+            // Housekeeping does not get the status bar. The chip is a
+            // *cancellation* affordance for work a person started and might
+            // want to stop; a background inventory sweep is neither, and
+            // flashing it there taught people to ignore the one place an
+            // import or a bake reports itself. The Jobs panel below still
+            // lists everything, which is where CONTROL-I said it belonged.
             let status: Vec<_> = active
                 .iter()
                 .rev()
+                .filter(|job| job.priority != crate::jobs::JobPriority::Background)
                 .map(|job| somnium_ui::UiJobStatus {
                     id: job.id,
                     name: job.name,
@@ -4472,6 +4509,7 @@ impl<G: GameApp> Engine<G> {
         info!("Imported {} ({} mesh nodes)", path_str, count);
         self.scene_dirty = true;
         self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.push_toast("Import finished");
         }
@@ -4594,6 +4632,14 @@ impl<G: GameApp> Engine<G> {
             settings.coverage = coverage;
         }
         renderer.cloud_pass.settings = settings;
+        // The march target's size is part of the authored quality, so pushing
+        // settings has to be followed by a resize. `resize` compares extents
+        // and returns immediately when nothing changed, so this is free on
+        // every frame that is not a quality change.
+        if let Some(ctx) = self.render_ctx.as_ref() {
+            let (rw, rh) = renderer.scene_extent();
+            renderer.cloud_pass.resize(&ctx.device, rw, rh);
+        }
         // The wind advances on wall-clock time rather than on the day cycle's
         // timescale: a paused editor should still let you watch the sky move
         // while you author it, and a 60× timescale should not turn the clouds
@@ -5913,6 +5959,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(()) => {
                         self.config.content_root = folder;
                         self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Project opened");
                         }
@@ -7207,6 +7254,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(_) => {
                         info!("Created {}", path.display());
                         self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
                         self.after_content_change(&format!(
                             "Created {}",
                             path.file_name().unwrap_or_default().to_string_lossy()
@@ -7302,6 +7350,7 @@ impl<G: GameApp> Engine<G> {
                             live: false,
                         });
                         self.next_asset_scan = std::time::Instant::now();
+        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Made unique asset copy");
                         }
@@ -7552,6 +7601,37 @@ impl<G: GameApp> Engine<G> {
 /// Tube / Cube at (0,0,0) looks like the feature never spawned. `look` is the
 /// camera forward (the direction a disc/spot/rect should emit); `right` is the
 /// camera's horizontal axis (a tube's length so it reads as a line in view).
+/// A cheap fingerprint of the content root: entry count and newest mtime,
+/// one directory level deep plus the root itself.
+///
+/// Not a hash of every file — that would cost more than the scan it is
+/// avoiding. It catches a file added, removed or written, which is every way
+/// the drawer's contents change from outside the editor. Changes the stamp
+/// cannot see are covered by the explicit invalidation points, which clear it.
+fn content_root_stamp(root: &std::path::Path) -> (u64, u64) {
+    fn fold(dir: &std::path::Path, depth: u32, count: &mut u64, newest: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            *count += 1;
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        *newest = (*newest).max(age.as_secs());
+                    }
+                }
+                if meta.is_dir() && depth > 0 {
+                    fold(&entry.path(), depth - 1, count, newest);
+                }
+            }
+        }
+    }
+    let (mut count, mut newest) = (0_u64, 0_u64);
+    fold(root, 2, &mut count, &mut newest);
+    (count, newest)
+}
+
 fn camera_spawn_basis(
     renderer: Option<&SomniumRenderer>,
     distance: f32,

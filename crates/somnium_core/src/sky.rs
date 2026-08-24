@@ -83,6 +83,18 @@ pub struct SkyComponent {
     pub max_distance: f32,
     /// Placement seed for the weather field. Changing it reshuffles the sky.
     pub seed: i32,
+    /// Render quality: `0` quarter resolution, `1` half, `2` full.
+    ///
+    /// Three named steps rather than a raw divisor, because "1/3 resolution" is
+    /// not a thing anybody wants to choose. This is the knob that actually
+    /// fixes a hard-edged cloud silhouette; [`Self::max_steps`] cannot, because
+    /// no number of steps adds pixels the buffer does not have.
+    pub quality: i32,
+    /// Advance the jitter pattern every frame.
+    ///
+    /// Off by default: TAA has no motion vector for a sky pixel, so a pattern
+    /// that moves every frame is shimmer rather than dithering.
+    pub temporal_jitter: bool,
 }
 
 impl Component for SkyComponent {}
@@ -111,6 +123,8 @@ impl Default for SkyComponent {
             light_steps: 6,
             max_distance: 60_000.0,
             seed: 1337,
+            quality: 0,
+            temporal_jitter: false,
         }
     }
 }
@@ -147,8 +161,18 @@ impl SkyComponent {
             max_distance: self.max_distance.max(1.0),
             #[allow(clippy::cast_sign_loss)]
             seed: self.seed.max(0) as u32,
+            resolution_divisor: match self.quality {
+                1 => 2,
+                2 => 1,
+                _ => 4,
+            },
+            temporal_jitter: self.temporal_jitter,
         }
     }
+
+    /// The names the Details combo box shows for [`Self::quality`].
+    pub const QUALITY_NAMES: &'static [&'static str] =
+        &["Quarter Resolution", "Half Resolution", "Full Resolution"];
 
     /// Apply a named preset by id, returning false for an unknown one.
     ///
@@ -299,6 +323,58 @@ mod tests {
         let s = SkyComponent::default().to_settings();
         let d = somnium_renderer::pass::clouds::CloudSettings::default();
         assert_eq!(s, d, "the two defaults must not drift apart");
+    }
+
+    /// The quality setting is the one knob that changes how many pixels are
+    /// marched, and `max_steps` cannot substitute for it: no number of steps
+    /// adds pixels the buffer does not have.
+    #[test]
+    fn quality_selects_the_march_resolution() {
+        let divisor = |quality| {
+            SkyComponent {
+                quality,
+                ..SkyComponent::default()
+            }
+            .to_settings()
+            .resolution_divisor
+        };
+        assert_eq!(divisor(0), 4, "quarter is the shipped default");
+        assert_eq!(divisor(1), 2);
+        assert_eq!(divisor(2), 1);
+        // An out-of-range value from a file written by a newer build must fall
+        // back to the cheapest setting, never to something unbounded.
+        assert_eq!(divisor(-3), 4);
+        assert_eq!(divisor(97), 4);
+        assert_eq!(QUALITY_NAMES_LEN, 3);
+    }
+
+    const QUALITY_NAMES_LEN: usize = SkyComponent::QUALITY_NAMES.len();
+
+    /// The panel must show the three names, not a spinner reading `0`.
+    #[test]
+    fn quality_reaches_details_as_a_named_choice() {
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry
+            .by_name("somnium.Sky")
+            .expect("Sky is registered");
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.name == "quality")
+            .expect("Sky declares quality");
+        assert_eq!(
+            field.ty,
+            somnium_ecs::reflect::FieldType::Enum(SkyComponent::QUALITY_NAMES),
+            "quality is an integer in Rust and a named choice in the panel"
+        );
+    }
+
+    /// Temporal jitter ships off: TAA cannot average a moving pattern on a sky
+    /// pixel, so it reads as shimmer.
+    #[test]
+    fn temporal_jitter_is_off_by_default() {
+        assert!(!SkyComponent::default().temporal_jitter);
+        assert!(!SkyComponent::default().to_settings().temporal_jitter);
     }
 
     /// A preset must change the look and must not change whether the pass is

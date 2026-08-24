@@ -712,7 +712,7 @@ fn time_of_day_schema() -> ComponentSchema {
 /// whose whole authoring surface is a schema block, with no `SOMNIUM_*`
 /// variable left as the only way to reach any of it.
 fn sky_schema() -> ComponentSchema {
-    component_schema! {
+    let mut schema = component_schema! {
         crate::sky::SkyComponent as "somnium.Sky", display "Sky", version 1,
         fields {
             enabled { group: "Clouds" },
@@ -748,8 +748,24 @@ fn sky_schema() -> ComponentSchema {
                 advanced: true },
             max_distance { min: 1000.0, soft_max: 200000.0, step: 1000.0, unit: "m",
                 group: "Quality", display_name: "Max Distance", advanced: true },
+            quality { min: 0, max: 2, group: "Clouds", display_name: "Cloud Quality" },
+            temporal_jitter { group: "Quality", display_name: "Temporal Jitter",
+                advanced: true },
         }
+    };
+    // `quality` is an integer in Rust and a named choice in the panel. The
+    // macro derives `ty` from the Rust type, which is right for every other
+    // field and cannot know about a variant list — so the one enum field is
+    // re-tagged here, the same way `MeshKind` is built by hand. Names live on
+    // `SkyComponent` so the combo box and the conversion cannot disagree.
+    if let Some(field) = schema
+        .fields
+        .iter_mut()
+        .find(|field| field.name == "quality")
+    {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(crate::sky::SkyComponent::QUALITY_NAMES);
     }
+    schema
 }
 
 /// CONTROL-N. Weather as a set of causes, not a pile of sliders.

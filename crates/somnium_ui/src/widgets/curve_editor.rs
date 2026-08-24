@@ -315,12 +315,16 @@ impl Control for CurveEditor {
         CursorKind::Default
     }
 
-    /// Keyboard reaches this widget while it is focused, which is what makes
-    /// `Delete` work. It also means editor shortcuts do not fire over a curve
-    /// being edited — the same trade `TextBox` makes, and the right one: `X`
-    /// should delete a key, not the selected entity.
+    /// Claim the keyboard **only while a key is selected**.
+    ///
+    /// Focused widgets that report true here swallow every key before the game
+    /// sees it, which is right for a `TextBox` and wrong for a curve nobody is
+    /// editing: a curve row that had been clicked once went on eating WASD, and
+    /// the symptom was the fly-cam not responding. With a selection the
+    /// keyboard genuinely belongs here — `Delete` removes, the arrows nudge,
+    /// the digits apply a preset — and without one there is nothing to take.
     fn is_text_input(&self) -> bool {
-        true
+        self.selected.is_some()
     }
 
     fn handle_routed_message(

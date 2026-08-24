@@ -694,6 +694,28 @@ impl UserInterface {
         self.modal_focus.map(|m| m.root)
     }
 
+    /// Hand the keyboard back to the game.
+    ///
+    /// Sends `Unfocus` to whatever held focus and clears it. A modal scope is
+    /// left alone: a dialog that has trapped focus must keep it, or `Esc` and
+    /// `Tab` stop meaning anything inside it.
+    ///
+    /// Returns whether anything was actually released, so a caller can tell a
+    /// no-op from a real hand-off.
+    pub fn release_keyboard(&mut self) -> bool {
+        if self.modal_focus.is_some() || !self.focused_ih.is_some() {
+            return false;
+        }
+        let previous = to_nh(self.focused_ih);
+        self.focused_ih = IH::NONE;
+        self.send(UiMessage::new(
+            previous,
+            MessageDirection::ToWidget,
+            WidgetMessage::Unfocus,
+        ));
+        true
+    }
+
     /// Current modifiers at the OS boundary. Programmatic input can use this
     /// to preserve the same self-contained message contract.
     pub fn modifiers(&self) -> Modifiers {
@@ -1411,6 +1433,17 @@ impl UserInterface {
                 if *button == winit::event::MouseButton::Right {
                     let over_viewport = !hit.is_some() || hit == self.viewport_handle;
                     if over_viewport {
+                        // Right-press over the viewport starts the fly-cam, and
+                        // the fly-cam needs WASD. Whatever in the chrome held
+                        // the keyboard has to let go here, or every key goes on
+                        // being consumed by a text field the user has visibly
+                        // stopped using — which presents as the camera simply
+                        // not responding. Left-press already unfocuses a few
+                        // lines below; this is the same rule for the button
+                        // that actually takes the camera.
+                        if matches!(state, ElementState::Pressed) {
+                            self.release_keyboard();
+                        }
                         return false;
                     }
                 }
@@ -1741,6 +1774,81 @@ mod overlay_order_tests {
 #[cfg(test)]
 mod input_contract_tests {
     use super::*;
+
+    /// Right-pressing the viewport hands the keyboard back to the game.
+    ///
+    /// Reported from a live session: clicking a curve row in Details and then
+    /// holding right-mouse in the viewport left `W`/`A`/`S`/`D` being eaten by
+    /// the focused widget, so the fly-cam simply did not respond. Left-press
+    /// already unfocused; right-press — the button that actually takes the
+    /// camera — did not.
+    #[test]
+    fn a_right_press_on_the_viewport_releases_the_keyboard() {
+        use crate::widget::WidgetBuilder;
+        use crate::widgets::text_box::TextBoxBuilder;
+
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let viewport = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(
+                WidgetBuilder::new().with_width(800.0).with_height(600.0),
+            )
+            .build(),
+            root,
+        );
+        ui.set_viewport_handle(viewport);
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(20.0)).build(),
+            root,
+        );
+        ui.perform_layout();
+
+        ui.set_focus(field);
+        assert!(
+            ui.has_text_focus(),
+            "a focused text field owns the keyboard, which is the state the bug started from"
+        );
+
+        ui.cursor_pos = glam::Vec2::new(400.0, 400.0);
+        let consumed = ui.process_os_event(&winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Right,
+        });
+        assert!(
+            !consumed,
+            "the viewport's right-press still belongs to the game, not to the UI"
+        );
+        assert!(
+            !ui.has_text_focus(),
+            "starting the fly-cam must release the keyboard"
+        );
+    }
+
+    /// A modal has trapped focus deliberately; a stray right-press must not
+    /// steal it, or `Esc` and `Tab` stop working inside the dialog.
+    #[test]
+    fn a_modal_keeps_the_keyboard_through_a_right_press() {
+        use crate::widget::WidgetBuilder;
+        use crate::widgets::text_box::TextBoxBuilder;
+
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let dialog = ui.add_node(
+            crate::widgets::canvas::CanvasBuilder::new(WidgetBuilder::new()).build(),
+            root,
+        );
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(20.0)).build(),
+            dialog,
+        );
+        ui.perform_layout();
+        ui.enter_modal(dialog, field);
+
+        assert!(!ui.release_keyboard(), "a modal scope refuses the hand-off");
+        assert!(ui.has_text_focus());
+    }
+
     use crate::message::{MessageDirection, UiMessage};
     use crate::widget::WidgetBuilder;
     use crate::widgets::{

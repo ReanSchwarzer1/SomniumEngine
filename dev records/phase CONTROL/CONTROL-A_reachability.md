@@ -7,8 +7,8 @@
 
 - Distinct `SOMNIUM_*` identifiers in executable/example Rust sources: **108**.
 - Knobs with an unexplained route: **0** (CONTROL-H's exit condition is zero).
-- Reflected component schemas: **23**; editable fields: **231**.
-- Editable schema fields credited to the generated inspector path: **231**.
+- Reflected component schemas: **23**; editable fields: **233**.
+- Editable schema fields credited to the generated inspector path: **233**.
 - Current Details hand-wiring census: **0** identifiers.
 
 The environment inventory includes identifiers in executable code and documented command examples. Meaning, type, and default are conservative source inferences; ambiguous fallbacks say so. The `Route` column is CONTROL-H's classification, checked against the live schemas, settings overrides and command registry rather than inferred from the name.
@@ -21,10 +21,10 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_AERIAL_HERO` | `crates/somnium_renderer/src/renderer.rs:868` | Aerial hero | bool | off (unset/other) | command | `editor.view.pipeline.aerial_hero` |
 | `SOMNIUM_AERIAL_SPLIT` | `crates/somnium_renderer/src/pass/classify.rs:245` | SOMNIUM_AERIAL_SPLIT exists for one specific job: pushing it past the far plane makes every terrain tile take the near (full) pipeline, which turns the binned path into an exact re… | text/selector | 150.0 | harness | Forces every terrain tile onto the near pipeline for an A/B timing run. |
 | `SOMNIUM_ANALYTIC_GRAD` | `crates/somnium_core/src/lib.rs:1028` | Analytic grad | bool | on (unset/other) | schema | `somnium.PostProcess.analytic_grad` |
-| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1461` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
+| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1467` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
 | `SOMNIUM_AUDIT_LOG` | `crates/somnium_renderer/src/renderer.rs:3984` | Audit log | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: where the renderer audit log is written. |
 | `SOMNIUM_AUDIT_SELECT_ENTITY` | `examples/hello_engine/src/main.rs:1370` | Audit select entity | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which entity to select before capture. |
-| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1499` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
+| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1505` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
 | `SOMNIUM_AUDIT_WINDOW_SIZE` | `examples/hello_engine/src/main.rs:2723` | Audit window size | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: the exact logical size to capture at. |
 | `SOMNIUM_AUDIT_YAW_JUMP_DEGREES` | `examples/hello_engine/src/main.rs:1692` | Audit yaw jump degrees | float | 1.0 | harness | Recorded fast-camera repro: the yaw step to inject. |
 | `SOMNIUM_AUDIT_YAW_JUMP_FRAME` | `examples/hello_engine/src/main.rs:1687` | Audit yaw jump frame | integer | unset / source-defined fallback | harness | Recorded fast-camera repro: the frame to inject it on. |
@@ -44,8 +44,8 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_CAS` | `crates/somnium_core/src/lib.rs:975` | Cas | bool | on (unset/other) | schema | `somnium.PostProcess.cas_enabled` |
 | `SOMNIUM_CASCADE_CULL` | `crates/somnium_renderer/src/renderer.rs:4201` | Cascade cull | bool | unset / source-defined fallback | command | `editor.view.pipeline.cascade_cull` |
 | `SOMNIUM_CENSUS` | `crates/somnium_renderer/src/pass/census.rs:245` | Census | bool | off (unset/other) | command | `editor.view.pipeline.pixel_census` |
-| `SOMNIUM_CLOUDS` | `crates/somnium_renderer/src/pass/clouds.rs:646` | Clouds | bool | off (unset/other) | schema | `somnium.Sky.enabled` |
-| `SOMNIUM_CLOUD_JITTER` | `crates/somnium_renderer/src/pass/clouds.rs:653` | Cloud jitter | bool | on (unset/other) | command | `editor.view.pipeline.cloud_jitter` |
+| `SOMNIUM_CLOUDS` | `crates/somnium_renderer/src/pass/clouds.rs:667` | Clouds | bool | off (unset/other) | schema | `somnium.Sky.enabled` |
+| `SOMNIUM_CLOUD_JITTER` | `crates/somnium_renderer/src/pass/clouds.rs:674` | Cloud jitter | bool | on (unset/other) | command | `editor.view.pipeline.cloud_jitter` |
 | `SOMNIUM_CONTENT_ROOT` | `crates/somnium_core/src/config.rs:63` | Content root | text/selector | assets | setting | `somnium.ProjectSettings.content_root` |
 | `SOMNIUM_CPU_FRUSTUM` | `crates/somnium_core/src/lib.rs:1280` | Cpu frustum | bool | on (unset/other) | schema | `somnium.CameraSettings.frustum_cull` |
 | `SOMNIUM_CULL_STATS` | `crates/somnium_renderer/src/renderer.rs:829` | Cull stats | bool | unset / source-defined fallback | command | `editor.view.pipeline.cull_stats` |
@@ -63,7 +63,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_LIGHT_SHAFTS` | `crates/somnium_core/src/lib.rs:982` | Light shafts | bool | on (unset/other) | schema | `somnium.PostProcess.light_shafts` |
 | `SOMNIUM_LOD_MORPH` | `crates/somnium_renderer/src/terrain/mod.rs:510` | Lod morph | bool | off (unset/other) | command | `editor.view.pipeline.terrain_lod_morph` |
 | `SOMNIUM_MAP` | `examples/hello_engine/src/main.rs:354` | Map | path/text | unset / source-defined fallback | harness | Startup scene for a headless run; the editor route is File > Open. |
-| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1975` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
+| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1980` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
 | `SOMNIUM_MESH_SDF` | `crates/somnium_core/src/lib.rs:1025` | Mesh sdf | bool | off (unset/other) | schema | `somnium.PostProcess.mesh_sdf` |
 | `SOMNIUM_MOTION_BLUR` | `crates/somnium_core/src/lib.rs:978` | Motion blur | bool | off (unset/other) | schema | `somnium.PostProcess.motion_blur_enabled` |
 | `SOMNIUM_NO_MESHLETS` | `crates/somnium_renderer/src/renderer.rs:836` | No meshlets | bool | unset / source-defined fallback | command | `editor.view.pipeline.meshlets` |
@@ -89,8 +89,8 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_SPD` | `crates/somnium_renderer/src/pass/hiz.rs:157` | Spd | bool | on (unset/other) | command | `editor.view.pipeline.spd` |
 | `SOMNIUM_SPECULAR_GI` | `crates/somnium_core/src/lib.rs:1019` | Specular gi | bool | off (unset/other) | schema | `somnium.PostProcess.specular_gi` |
 | `SOMNIUM_STARTUP_SCENE` | `crates/somnium_core/src/settings.rs:168` | Startup scene | text/selector | unset / source-defined fallback | setting | `somnium.ProjectSettings.startup_scene` |
-| `SOMNIUM_SUN_AZIMUTH` | `crates/somnium_core/src/app.rs:4526` | Sun azimuth | float | SOMNIUM_SUN_AZIMUTH | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
-| `SOMNIUM_SUN_ELEVATION` | `crates/somnium_core/src/app.rs:4523` | Sun elevation | float | 35.0 | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
+| `SOMNIUM_SUN_AZIMUTH` | `crates/somnium_core/src/app.rs:4564` | Sun azimuth | float | SOMNIUM_SUN_AZIMUTH | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
+| `SOMNIUM_SUN_ELEVATION` | `crates/somnium_core/src/app.rs:4561` | Sun elevation | float | 35.0 | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
 | `SOMNIUM_TAA` | `crates/somnium_renderer/src/pass/taa.rs:188` | Taa | bool | on (unset/other) | schema | `somnium.PostProcess.taa_enabled` |
 | `SOMNIUM_TAA_DEBUG` | `crates/somnium_renderer/src/pass/taa.rs:193` | Taa debug | integer | 0 | command | `editor.view.pipeline.taa_debug` |
 | `SOMNIUM_TAA_DILATE_EPS` | `crates/somnium_renderer/src/pass/taa.rs:189` | Taa dilate eps | float | 4.0 | harness | Numerical epsilon held for a recorded TAA repro. |
@@ -117,7 +117,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_TIME_QUIT` | `examples/hello_engine/src/main.rs:1737` | Time quit | bool | on (unset/other) | harness | `.somtime` harness: exit once the run completes. |
 | `SOMNIUM_TIME_VIEW` | `examples/hello_engine/src/main.rs:349` | Time view | path/text | unset / source-defined fallback | harness | Chooses the pose a `.somtime` run measures from. The editor route is the camera bookmarks. |
 | `SOMNIUM_TIME_WARMUP` | `crates/somnium_renderer/src/timing.rs:304` | Time warmup | integer | DEFAULT_WARMUP | harness | `.somtime` harness: frames discarded before measuring. |
-| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:704` | Viewport res | integer | 0 | harness | Fixed render resolution for capture; the editor route is dynamic resolution. |
+| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:707` | Viewport res | integer | 0 | harness | Fixed render resolution for capture; the editor route is dynamic resolution. |
 | `SOMNIUM_VOLUMETRICS` | `crates/somnium_core/src/lib.rs:969` | Volumetrics | bool | on (unset/other) | schema | `somnium.PostProcess.volumetrics_enabled` |
 | `SOMNIUM_WATER_PITCH` | `examples/hello_engine/src/main.rs:814` | Water pitch | float | underwater | harness | Recorded water repro: the fixed camera pitch it was measured at. |
 | `SOMNIUM_WATER_SPECTRUM` | `crates/somnium_renderer/src/pass/water_spectrum.rs:273` | Water spectrum | bool | on (unset/other) | schema | `somnium.Water.spectrum_blend` |
@@ -164,7 +164,7 @@ Every variable is classified in `tools/reachability/env_routes.py`, and the gate
 | `RetainedUnknowns` | `crates/somnium_core/src/lib.rs` | 4 | no | 0 | 0 | 0 | 0 | 0 |
 | `RigidBodyComponent` | `crates/somnium_core/src/character.rs` | 4 | `somnium.RigidBody` | 4 | 2 | 0 | 0 | 2 |
 | `ScriptSet` | `crates/somnium_script/src/attachment.rs` | 1 | no | 0 | 0 | 0 | 0 | 0 |
-| `SkyComponent` | `crates/somnium_core/src/sky.rs` | 21 | `somnium.Sky` | 21 | 21 | 0 | 0 | 21 |
+| `SkyComponent` | `crates/somnium_core/src/sky.rs` | 23 | `somnium.Sky` | 23 | 23 | 0 | 0 | 23 |
 | `TerrainComponent` | `crates/somnium_core/src/lib.rs` | 6 | `somnium.Terrain` | 6 | 6 | 0 | 0 | 6 |
 | `TimeOfDayComponent` | `crates/somnium_core/src/time_of_day.rs` | 11 | `somnium.TimeOfDay` | 11 | 11 | 0 | 0 | 11 |
 | `Transform` | `crates/somnium_core/src/lib.rs` | 3 | `somnium.Transform` | 3 | 3 | 0 | 0 | 3 |

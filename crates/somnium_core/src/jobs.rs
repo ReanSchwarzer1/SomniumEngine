@@ -70,6 +70,12 @@ pub struct JobSnapshot {
     pub progress: f32,
     /// Whether cancellation can still be requested.
     pub cancellable: bool,
+    /// Scheduling class it was submitted with.
+    ///
+    /// Carried so a surface can tell work a person started from housekeeping
+    /// that runs on its own — the status bar's Cancel chip shows the former
+    /// and not the latter.
+    pub priority: JobPriority,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,16 +96,18 @@ pub enum JobError {
 struct JobState {
     id: u64,
     name: &'static str,
+    priority: JobPriority,
     status: AtomicU8,
     progress: AtomicU32,
     cancelled: AtomicBool,
 }
 
 impl JobState {
-    fn new(id: u64, name: &'static str) -> Self {
+    fn new(id: u64, name: &'static str, priority: JobPriority) -> Self {
         Self {
             id,
             name,
+            priority,
             status: AtomicU8::new(0),
             progress: AtomicU32::new(0),
             cancelled: AtomicBool::new(false),
@@ -117,6 +125,7 @@ impl JobState {
                 status,
                 JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
             ),
+            priority: self.priority,
         }
     }
 }
@@ -282,7 +291,7 @@ impl JobRegistry {
         F: FnOnce(JobContext) -> Result<T, String> + Send + 'static,
     {
         let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
-        let state = Arc::new(JobState::new(id, name));
+        let state = Arc::new(JobState::new(id, name, priority));
         let (sender, receiver) = sync_channel(1);
         let task_state = Arc::clone(&state);
         let wrapped = Box::new(move |context: JobContext| {
@@ -493,6 +502,39 @@ mod tests {
         while handle.try_take().is_none() {
             std::thread::yield_now();
         }
+    }
+
+    /// A snapshot carries the class it was submitted with.
+    ///
+    /// The status bar's Cancel chip reads this to tell work a person started
+    /// from housekeeping that runs on its own. Without it the chip blinked
+    /// three times a second on the background inventory sweep, which taught
+    /// people to ignore the one place an import reports itself.
+    #[test]
+    fn a_snapshot_reports_the_priority_it_was_submitted_with() {
+        let mut jobs = JobRegistry::with_workers_and_capacity(1, 8);
+        let (release_tx, release_rx) = sync_channel::<()>(0);
+        let blocker = jobs
+            .submit("test.blocker", JobPriority::User, move |_| {
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let sweep = jobs
+            .submit("test.sweep", JobPriority::Background, |_| Ok(()))
+            .unwrap();
+
+        assert_eq!(blocker.snapshot().priority, JobPriority::User);
+        assert_eq!(sweep.snapshot().priority, JobPriority::Background);
+        assert!(
+            jobs.active()
+                .iter()
+                .any(|job| job.priority == JobPriority::Background),
+            "the panel still lists housekeeping even though the chip will not"
+        );
+
+        release_tx.send(()).unwrap();
+        drop(blocker);
     }
 
     #[test]

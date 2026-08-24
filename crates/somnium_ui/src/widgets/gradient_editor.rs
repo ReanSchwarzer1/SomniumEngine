@@ -239,10 +239,10 @@ impl Control for GradientEditor {
         CursorKind::EwResize
     }
 
-    /// Focused keyboard, so `Delete` removes the selected stop. Same trade as
-    /// `CurveEditor`.
+    /// Claim the keyboard only while a stop is selected — see
+    /// `CurveEditor::is_text_input` for why an unconditional claim is a bug.
     fn is_text_input(&self) -> bool {
-        true
+        self.selected.is_some()
     }
 
     fn handle_routed_message(

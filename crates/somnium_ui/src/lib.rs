@@ -498,10 +498,13 @@ struct EditorLayout {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
-    post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
+    /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
+    /// the others — a dropdown nothing knows about stays open behind the next
+    /// one.
+    snap_grid_popup: NodeHandle,
+    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -721,10 +724,13 @@ pub struct UiManager {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    post_tonemap_combo: NodeHandle,
     foliage_kind_popup: NodeHandle,
-    post_tonemap_popup: NodeHandle,
     viewport_res_popup: NodeHandle,
+    /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
+    /// the others — a dropdown nothing knows about stays open behind the next
+    /// one.
+    snap_grid_popup: NodeHandle,
+    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -1328,10 +1334,10 @@ impl UiManager {
             outliner_search: layout.outliner_search,
             inspector_search: layout.inspector_search,
             foliage_kind_combo: layout.foliage_kind_combo,
-            post_tonemap_combo: layout.post_tonemap_combo,
             foliage_kind_popup: layout.foliage_kind_popup,
-            post_tonemap_popup: layout.post_tonemap_popup,
             viewport_res_popup: layout.viewport_res_popup,
+            snap_grid_popup: layout.snap_grid_popup,
+            snap_angle_popup: layout.snap_angle_popup,
             save_button: layout.save_button,
             palette_button: layout.palette_button,
             palette_popup: layout.palette_popup,
@@ -2304,16 +2310,34 @@ impl UiManager {
     }
 
     /// Show the highest-priority active job and expose cancellation.
+    ///
+    /// Idempotent: called every frame, and does nothing at all when the job
+    /// has not changed. `set_visibility` invalidates its ancestors
+    /// unconditionally, so re-sending the same value re-measured the whole
+    /// status bar sixty times a second.
     pub fn update_jobs(&mut self, jobs: &[UiJobStatus]) {
         let job = jobs.first();
-        self.status_cancel_job = job.map(|job| job.id);
-        self.native_ui
-            .set_visibility(self.status_cancel, job.is_some());
-        if let Some(job) = job {
-            self.native_ui.send(TextMessage::set_text(
-                self.status_text,
-                format!("{} — {:.0}%", job.name, job.progress * 100.0),
-            ));
+        let next = job.map(|job| job.id);
+        let changed = next != self.status_cancel_job;
+        self.status_cancel_job = next;
+        if changed {
+            self.native_ui
+                .set_visibility(self.status_cancel, job.is_some());
+        }
+        match job {
+            Some(job) => {
+                self.native_ui.send(TextMessage::set_text(
+                    self.status_text,
+                    format!("{} — {:.0}%", job.name, job.progress * 100.0),
+                ));
+            }
+            // The status line borrowed by a job has to be given back, or it
+            // keeps reporting work that finished.
+            None if changed => {
+                self.native_ui
+                    .send(TextMessage::set_text(self.status_text, "Ready"));
+            }
+            None => {}
         }
     }
 
@@ -2828,11 +2852,12 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
-    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 3] {
+    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 4] {
         [
             (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.post_tonemap_combo, self.post_tonemap_popup),
             (self.viewport_res_combo, self.viewport_res_popup),
+            (self.snap_grid_combo, self.snap_grid_popup),
+            (self.snap_angle_combo, self.snap_angle_popup),
         ]
     }
 
@@ -3653,6 +3678,13 @@ impl UiManager {
                 self.toggle_preferences();
             }
             self.preferences_query = "snap".into();
+            // The query has to reach the box too, or Preferences opens
+            // filtered with an empty-looking search field and reads as broken.
+            self.native_ui.send(UiMessage::new(
+                self.preferences.search,
+                MessageDirection::ToWidget,
+                crate::widgets::search_box::SearchBoxMessage::SetText("snap".into()),
+            ));
             self.settings_signature.clear();
             return true;
         }

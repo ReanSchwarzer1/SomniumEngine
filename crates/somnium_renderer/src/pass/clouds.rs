@@ -40,7 +40,12 @@ const DETAIL_SIZE: u32 = 32;
 const WEATHER_SIZE: u32 = 512;
 /// World-XZ cloud shadow resolution.
 const SHADOW_SIZE: u32 = 512;
-/// Fraction of the scene resolution the march runs at.
+/// Default fraction of the scene resolution the march runs at.
+///
+/// Overridable per scene through [`CloudSettings::resolution_divisor`] — the
+/// authored quality setting. Quarter is the shipped default because it is what
+/// the budget in §8 was written against; a user who would rather spend the
+/// milliseconds can say so.
 pub const MARCH_DIVISOR: u32 = 4;
 
 /// Everything the sky's authoring surface can change, in renderer terms.
@@ -92,6 +97,20 @@ pub struct CloudSettings {
     pub max_distance: f32,
     /// Placement seed for the weather field.
     pub seed: u32,
+    /// Scene pixels per marched pixel: 1 is full resolution, 4 is quarter.
+    ///
+    /// The single biggest quality *and* cost knob, and the one the step counts
+    /// cannot substitute for: no number of steps fixes a hard-edged cloud
+    /// silhouette reconstructed from a buffer a quarter as wide.
+    pub resolution_divisor: u32,
+    /// Advance the jitter pattern every frame.
+    ///
+    /// Default **off**. The clouds ride in the buffer TAA resolves, but TAA has
+    /// no motion vector for a sky pixel, so it cannot average a pattern that
+    /// moves — an advancing offset reads as shimmer rather than as dithering.
+    /// On, it is the classic temporal-dither trade and wants a history filter
+    /// to be worth it.
+    pub temporal_jitter: bool,
 }
 
 impl Default for CloudSettings {
@@ -117,6 +136,8 @@ impl Default for CloudSettings {
             light_steps: 6,
             max_distance: 60_000.0,
             seed: 1337,
+            resolution_divisor: MARCH_DIVISOR,
+            temporal_jitter: false,
         }
     }
 }
@@ -345,7 +366,7 @@ impl CloudPass {
         });
         let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let march_size = Self::march_extent(width, height);
+        let march_size = Self::march_extent(width, height, MARCH_DIVISOR);
         let scatter_view = Self::make_scatter(device, march_size);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -684,11 +705,9 @@ impl CloudPass {
         }
     }
 
-    fn march_extent(width: u32, height: u32) -> (u32, u32) {
-        (
-            (width / MARCH_DIVISOR).max(1),
-            (height / MARCH_DIVISOR).max(1),
-        )
+    fn march_extent(width: u32, height: u32, divisor: u32) -> (u32, u32) {
+        let divisor = divisor.clamp(1, 8);
+        ((width / divisor).max(1), (height / divisor).max(1))
     }
 
     fn make_scatter(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
@@ -718,8 +737,12 @@ impl CloudPass {
 
     /// Rebuild the scene-sized resources. Both bind groups are dropped, so the
     /// next `ensure_bind_groups` rebuilds them against the new views.
+    ///
+    /// Also the path a **quality change** takes: the divisor is part of the
+    /// extent, so raising quality is a resize, and calling this every frame is
+    /// free when nothing moved.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let size = Self::march_extent(width, height);
+        let size = Self::march_extent(width, height, self.settings.resolution_divisor);
         if size == self.march_size {
             return;
         }
@@ -1065,8 +1088,15 @@ impl CloudPass {
                 ambient: s.ambient.max(0.0),
                 precipitation: s.precipitation.clamp(0.0, 1.0),
                 jitter_enabled: f32::from(u8::from(self.jitter)),
+                // Zero unless temporal jitter is on, which makes the offset
+                // spatially varying but frame-stable — no shimmer, and the
+                // banding the jitter exists to break is still broken.
                 #[allow(clippy::cast_precision_loss)]
-                frame: (self.frame % 4096) as f32,
+                frame: if s.temporal_jitter {
+                    (self.frame % 4096) as f32
+                } else {
+                    0.0
+                },
                 #[allow(clippy::cast_precision_loss)]
                 max_steps: s.max_steps.clamp(8, 256) as f32,
                 #[allow(clippy::cast_precision_loss)]
@@ -1232,10 +1262,17 @@ mod tests {
 
     #[test]
     fn the_march_runs_at_a_quarter_of_the_scene() {
-        assert_eq!(CloudPass::march_extent(1920, 1080), (480, 270));
+        assert_eq!(CloudPass::march_extent(1920, 1080, 4), (480, 270));
         // Never zero, however small the window gets: a zero dispatch is a
         // validation error, not a no-op.
-        assert_eq!(CloudPass::march_extent(2, 2), (1, 1));
+        assert_eq!(CloudPass::march_extent(2, 2, 4), (1, 1));
+        // The authored quality setting is what moves it, and it is clamped so
+        // no scene value can ask for a target bigger than the screen or for a
+        // division by zero.
+        assert_eq!(CloudPass::march_extent(1920, 1080, 1), (1920, 1080));
+        assert_eq!(CloudPass::march_extent(1920, 1080, 2), (960, 540));
+        assert_eq!(CloudPass::march_extent(1920, 1080, 0), (1920, 1080));
+        assert_eq!(CloudPass::march_extent(1920, 1080, 99), (240, 135));
     }
 
     /// The brush stamp, exercised without a device.

@@ -212,7 +212,10 @@ fn beer_powder(optical_depth: f32) -> f32 {
 /// and the error shows up as a cloud lit as though it were alone in the sky.
 fn light_march(origin: vec3<f32>, sun: vec3<f32>) -> f32 {
     let steps = max(i32(cp.light_steps), 1);
-    let step_len = cp.layer_thickness / f32(steps) * 1.5;
+    // Spread across the layer rather than across the ray, for the same reason
+    // the primary march does: a light ray at a shallow sun angle must not
+    // sample the cloud more coarsely than one at noon.
+    let step_len = max(cp.layer_thickness / f32(steps) * 1.5, 1.0);
     var optical_depth = 0.0;
     var t = 0.0;
     for (var i = 0; i < steps; i = i + 1) {
@@ -336,12 +339,37 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let span = interval.y - interval.x;
     let steps = max(i32(cp.max_steps), 8);
-    let long_step = span / f32(steps);
-    let short_step = long_step * 0.35;
 
-    // Toft & Bowles' jitter, behind a switch. Their measurement is that this
-    // can cost 2.3 → 7.5 ms through texture-cache incoherence, so whether it
-    // pays is a number this engine takes rather than a belief it inherits.
+    // **The step is a distance in metres, derived from the layer's own
+    // thickness — not `span / steps`.**
+    //
+    // The first cut divided the whole ray, and the whole ray is enormous: a
+    // shallow ray through a slab 2 km thick can span 60 km, so `span / 48` was
+    // a coarse step over a kilometre long and a cloud got sampled three or
+    // four times through its entire depth. That is what the blocky,
+    // stair-stepped cloud edges were — not the quarter-resolution buffer, which
+    // was the obvious suspect and the wrong one.
+    //
+    // Sampling density is now constant in metres however the ray is angled, so
+    // a cloud on the horizon is shaded like a cloud overhead. The cost is
+    // bounded by the iteration cap and the transmittance early-out rather than
+    // by the step count, which is the right way round: a ray that leaves the
+    // slab immediately does almost no work whatever `max_steps` says.
+    let long_step = max(cp.layer_thickness / f32(steps) * 3.0, 1.0);
+    let short_step = long_step * 0.35;
+    // Enough iterations to cross the layer several times at the fine step,
+    // capped so a grazing ray cannot run away.
+    let iteration_cap = steps * 6;
+
+    // Toft & Bowles' jitter. Their measurement is that this can cost
+    // 2.3 → 7.5 ms through texture-cache incoherence, so whether it pays is a
+    // number this engine takes rather than a belief it inherits.
+    //
+    // `cp.frame` is zero unless *temporal* jitter is on, and it defaults off.
+    // With no cloud-history filter — the clouds ride in the TAA buffer, and TAA
+    // has no motion vector for a sky pixel to reproject — a pattern that moved
+    // every frame was not dithering, it was visible shimmer. Frame-stable
+    // spatial jitter still breaks up the banding it was added for.
     var t = interval.x;
     if cp.jitter_enabled > 0.5 {
         t += ign(vec2<f32>(gid.xy), cp.frame) * long_step;
@@ -371,7 +399,7 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
     var depth_accum = 0.0;
     var depth_weight = 0.0;
 
-    for (var i = 0; i < steps * 2; i = i + 1) {
+    for (var i = 0; i < iteration_cap; i = i + 1) {
         if t >= interval.y || transmittance < CLOUD_MIN_TRANSMITTANCE {
             break;
         }
