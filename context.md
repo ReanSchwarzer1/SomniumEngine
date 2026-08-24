@@ -86,7 +86,10 @@
 > default **off**. Terrain hex/parallax now default **off** on both maps.
 > Previously: Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
-> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
+> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu **30**, winit 0.30  
+> *(wgpu 29 -> 30 by MORROWIND-A2, 2026-08-24. The frozen line is enforced by
+> `tools/ghostfence/run.py`'s `toolchain` row, which reads `FROZEN_TOOLCHAIN`
+> in that file and fails when a manifest disagrees with it.)*  
 >
 > Phase IV-K, the ocean fidelity pass against
 > [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), closed on
@@ -502,7 +505,7 @@ hello_engine
         ├── somnium_ecs          (no external deps beyond std)
         ├── somnium_renderer
         │     ├── somnium_asset  (Vertex type, future glTF)
-        │     └── wgpu 29
+        │     └── wgpu 30
         ├── somnium_ui
         │     └── fontdue 0.7  (glyph atlas)
         ├── somnium_physics

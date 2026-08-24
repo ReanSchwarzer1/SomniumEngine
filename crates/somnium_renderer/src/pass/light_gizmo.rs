@@ -296,7 +296,7 @@ impl LightGizmoPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: VERTEX_SIZE,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -311,7 +311,7 @@ impl LightGizmoPass {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

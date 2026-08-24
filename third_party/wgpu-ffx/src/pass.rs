@@ -27,7 +27,14 @@ impl FsrPass {
             unsafe {
                 device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                     label: Some(kind.label()),
-                    num_workgroups: (0, 0, 0),
+                    // wgpu 30 replaced the single `num_workgroups: (0, 0, 0)`
+                    // with a per-entry-point list. FSR's SPIR-V has one entry
+                    // point, `main`; `workgroup_size` is Metal-only and this
+                    // path is SPIR-V, so it keeps the zeroes 29 passed.
+                    entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint {
+                        name: Cow::Borrowed("main"),
+                        workgroup_size: (0, 0, 0),
+                    }]),
                     spirv: Some(Cow::Borrowed(bytemuck::cast_slice(kind.shader(shaders)))),
                     dxil: None,
                     msl: None,

@@ -309,6 +309,7 @@ impl GizmoPass {
             });
             buf.slice(..)
                 .get_mapped_range_mut()
+                .expect("mapped_at_creation")
                 .copy_from_slice(bytemuck::bytes_of(&identity));
             buf.unmap();
             buf
@@ -342,6 +343,7 @@ impl GizmoPass {
             });
             buf.slice(..)
                 .get_mapped_range_mut()
+                .expect("mapped_at_creation")
                 .copy_from_slice(vb_data);
             buf.unmap();
             buf
@@ -357,6 +359,7 @@ impl GizmoPass {
             });
             buf.slice(..)
                 .get_mapped_range_mut()
+                .expect("mapped_at_creation")
                 .copy_from_slice(ib_data);
             buf.unmap();
             buf
@@ -380,7 +383,7 @@ impl GizmoPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: VERTEX_SIZE,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -395,7 +398,7 @@ impl GizmoPass {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

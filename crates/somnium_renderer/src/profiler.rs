@@ -803,7 +803,8 @@ impl GpuProfiler {
                 let view = self.frames[i]
                     .readback
                     .slice(0..Self::TOTAL_BYTES)
-                    .get_mapped_range();
+                    .get_mapped_range()
+                    .expect("timestamp frame is only read once its map callback fired");
                 let mut ticks = self.scratch.lock().expect("profiler scratch");
                 ticks.clear();
                 ticks.extend(

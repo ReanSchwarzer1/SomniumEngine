@@ -383,7 +383,11 @@ impl CensusPass {
                 continue;
             }
             {
-                let view = self.slots[i].readback.slice(..).get_mapped_range();
+                let view = self.slots[i]
+                    .readback
+                    .slice(..)
+                    .get_mapped_range()
+                    .expect("census slot is only read once its map callback fired");
                 let mut counts = self.scratch.lock().expect("census scratch");
                 for (bin, chunk) in view.chunks_exact(4).take(BIN_COUNT).enumerate() {
                     counts[bin] = u32::from_le_bytes(chunk.try_into().expect("4 bytes"));

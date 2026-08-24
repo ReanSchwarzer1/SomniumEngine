@@ -309,11 +309,11 @@ impl UiPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: Primitive::STRIDE,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &Primitive::VERTEX_ATTRS,
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,

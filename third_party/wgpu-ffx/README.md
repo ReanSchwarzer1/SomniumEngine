@@ -18,7 +18,7 @@ be used at a 1:1 ratio for temporal anti-aliasing (TAA) without upscaling.
 
 ## Requirements
 
-- **wgpu 29**
+- **wgpu 30**
 
 ## Usage
 

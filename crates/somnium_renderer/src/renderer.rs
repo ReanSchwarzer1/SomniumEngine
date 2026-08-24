@@ -1494,7 +1494,9 @@ impl SomniumRenderer {
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
             {
-                let data = slice.get_mapped_range();
+                let data = slice
+                    .get_mapped_range()
+                    .expect("indirect readback mapped by the poll above");
                 // DrawIndirectArgs: vertex_count, instance_count, first_vertex,
                 // first_instance — instance_count is the second u32.
                 for a in data.chunks_exact(16) {
@@ -4028,7 +4030,10 @@ impl SomniumRenderer {
                 }
             }
         }
-        output.present();
+        // wgpu 30 moved presentation from the surface texture to the queue,
+        // so the present is ordered against submitted work explicitly rather
+        // than implicitly by the texture's lifetime.
+        ctx.queue.present(output);
 
         self.clear_frame_queues();
     }
