@@ -367,6 +367,103 @@ impl ShapedBuffers {
     }
 }
 
+impl ShapedBuffers {
+    /// The topmost shape containing `point`, in screen space (MORROWIND-F).
+    ///
+    /// Walks in **reverse paint order**, so the answer is the shape a person
+    /// can see rather than the first one drawn. Each candidate's transform is
+    /// inverted to bring the point into the shape's local space, where the
+    /// containment test is a point-in-triangle over geometry that is already
+    /// there -- no second representation to keep in step with the drawn one.
+    ///
+    /// # What this does not test
+    ///
+    /// **The mask texture.** A masked shape's alpha lives on the GPU, and
+    /// reading it back to answer a hit test would cost a stall per pointer
+    /// move. So a circular avatar built from a rectangle plus an alpha mask
+    /// hit-tests as its rectangle.
+    ///
+    /// That is a real limitation, stated rather than hidden. The fix where it
+    /// matters is to build the shape as a *path* -- `Path::circle` and
+    /// `push_path` -- which hit-tests exactly, because then the geometry is the
+    /// shape. Masks are for the cases where that is impractical, and those are
+    /// the cases where a rectangular hit region is usually fine.
+    #[must_use]
+    pub fn hit_test(&self, point: Vec2) -> Option<u32> {
+        let mut vertex = self.vertices.len();
+        while vertex >= 3 {
+            vertex -= 3;
+            let triangle = &self.vertices[vertex..vertex + 3];
+            let index = triangle[0].instance;
+            let Some(instance) = self.instances.get(index as usize) else {
+                continue;
+            };
+            // A singular transform draws nothing, so it cannot be hit. Without
+            // this the inverse is a NaN, every comparison is false, and the
+            // widget reads as present but unclickable.
+            let Some(inverse) = instance.invert() else {
+                continue;
+            };
+            let local = inverse.apply(point);
+            if point_in_triangle(
+                local,
+                Vec2::from(triangle[0].pos),
+                Vec2::from(triangle[1].pos),
+                Vec2::from(triangle[2].pos),
+            ) {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    /// Every shape containing `point`, topmost first.
+    ///
+    /// For a caller that needs to walk past a shape which declines the hit: a
+    /// transparent overlay, or a widget with hit testing switched off.
+    #[must_use]
+    pub fn hit_test_all(&self, point: Vec2) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::new();
+        let mut vertex = self.vertices.len();
+        while vertex >= 3 {
+            vertex -= 3;
+            let triangle = &self.vertices[vertex..vertex + 3];
+            let index = triangle[0].instance;
+            let Some(instance) = self.instances.get(index as usize) else {
+                continue;
+            };
+            let Some(inverse) = instance.invert() else {
+                continue;
+            };
+            let local = inverse.apply(point);
+            if point_in_triangle(
+                local,
+                Vec2::from(triangle[0].pos),
+                Vec2::from(triangle[1].pos),
+                Vec2::from(triangle[2].pos),
+            ) && !out.contains(&index)
+            {
+                out.push(index);
+            }
+        }
+        out
+    }
+}
+
+/// Inclusive point-in-triangle, winding-agnostic.
+///
+/// Inclusive on the edges so a point exactly on the seam between the two
+/// triangles of a quad hits rather than falling through. An exclusive test
+/// there leaves a one-pixel dead line across the middle of every stroked
+/// shape, which is maddening to diagnose.
+fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+    let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
+    let d1 = cross(b - a, p - a);
+    let d2 = cross(c - b, p - b);
+    let d3 = cross(a - c, p - c);
+    (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +622,89 @@ mod tests {
         // authored value for "a dot" is genuinely zero often enough to matter.
         let inst = ShapedInstance::identity([0; 4]).with_radial_gradient([1; 4], Vec2::ZERO, 0.0);
         assert!(inst.grad[2] > 0.0);
+    }
+
+    // -- MORROWIND-F: hit testing -------------------------------------------
+
+    fn square(size: f32) -> [Vec2; 6] {
+        [
+            Vec2::ZERO,
+            Vec2::new(size, 0.0),
+            Vec2::new(size, size),
+            Vec2::ZERO,
+            Vec2::new(size, size),
+            Vec2::new(0.0, size),
+        ]
+    }
+
+    #[test]
+    fn a_point_inside_an_untransformed_shape_hits() {
+        let mut buffers = ShapedBuffers::default();
+        buffers.push_shape(ShapedInstance::default(), &square(10.0), None);
+        assert_eq!(buffers.hit_test(Vec2::new(5.0, 5.0)), Some(0));
+        assert_eq!(buffers.hit_test(Vec2::new(15.0, 5.0)), None);
+    }
+
+    /// **The reason this exists.** A rotated shape is hit where it looks like
+    /// it is, not where its untransformed bounds are.
+    #[test]
+    fn hit_testing_follows_the_transform() {
+        let mut buffers = ShapedBuffers::default();
+        let spun = ShapedInstance::identity([255; 4])
+            .rotated(std::f32::consts::FRAC_PI_4, Vec2::splat(50.0))
+            .translated(Vec2::new(100.0, 100.0));
+        buffers.push_shape(spun, &square(100.0), None);
+
+        // The shape's own centre, wherever the transform put it.
+        let centre = spun.apply(Vec2::splat(50.0));
+        assert_eq!(buffers.hit_test(centre), Some(0));
+
+        // A corner of the *untransformed* bounds, which the rotation moved out
+        // from under the pointer. A bounds-based hit test would say yes here.
+        assert_eq!(
+            buffers.hit_test(Vec2::new(100.0, 100.0)),
+            None,
+            "an untransformed-bounds hit test would wrongly hit here"
+        );
+    }
+
+    /// The topmost shape wins, which is the one a person can see.
+    #[test]
+    fn hit_testing_walks_in_reverse_paint_order() {
+        let mut buffers = ShapedBuffers::default();
+        buffers.push_shape(ShapedInstance::identity([1; 4]), &square(50.0), None);
+        buffers.push_shape(ShapedInstance::identity([2; 4]), &square(50.0), None);
+        assert_eq!(buffers.hit_test(Vec2::splat(25.0)), Some(1));
+        assert_eq!(buffers.hit_test_all(Vec2::splat(25.0)), vec![1, 0]);
+    }
+
+    /// A singular shape draws nothing and cannot be hit.
+    #[test]
+    fn a_singular_shape_is_not_hit() {
+        let mut buffers = ShapedBuffers::default();
+        buffers.push_shape(
+            ShapedInstance::identity([1; 4]).scaled(Vec2::new(1.0, 0.0)),
+            &square(50.0),
+            None,
+        );
+        assert_eq!(buffers.hit_test(Vec2::splat(10.0)), None);
+    }
+
+    /// A point on the seam between a quad's two triangles still hits.
+    #[test]
+    fn the_diagonal_seam_of_a_quad_is_not_a_dead_line() {
+        let mut buffers = ShapedBuffers::default();
+        buffers.push_shape(ShapedInstance::default(), &square(10.0), None);
+        for t in [0.25f32, 0.5, 0.75] {
+            let on_seam = Vec2::splat(10.0 * t);
+            assert_eq!(buffers.hit_test(on_seam), Some(0), "missed at t={t}");
+        }
+    }
+
+    #[test]
+    fn hit_testing_an_empty_frame_finds_nothing() {
+        let buffers = ShapedBuffers::default();
+        assert_eq!(buffers.hit_test(Vec2::ZERO), None);
+        assert!(buffers.hit_test_all(Vec2::ZERO).is_empty());
     }
 }
