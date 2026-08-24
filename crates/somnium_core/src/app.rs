@@ -96,20 +96,145 @@ fn synchronize_path_trace_pause(
 /// must also reach the game input state. Otherwise Ctrl+S followed by RMB leaves
 /// the fly camera unaware that `S` is held until the user releases and presses it
 /// again.
+/// The editor action a key press should run, if any.
+///
+/// Extracted so the rule is testable without a window. The engine's dispatcher
+/// runs **before** the UI is consulted and every arm of it returns, so a key it
+/// claims never reaches the game — which is why `game_owns_keyboard` has to be
+/// part of the decision rather than a check somewhere downstream.
+fn shortcut_action_for(
+    code: winit::keyboard::KeyCode,
+    modifiers: somnium_ui::message::Modifiers,
+    game_owns_keyboard: bool,
+) -> Option<somnium_ui::commands::CommandAction> {
+    somnium_ui::commands::Chord::from_winit(
+        code,
+        modifiers.command(),
+        modifiers.shift,
+        modifiers.alt,
+        false,
+    )
+    // While the game owns the keyboard — flying the viewport, or in a play
+    // session — an unmodified shortcut stands down and the key falls through.
+    // Modified chords are unaffected: `Ctrl+S` is unambiguous and should still
+    // save mid-flight and mid-play.
+    .filter(|chord| !game_owns_keyboard || chord.has_modifier())
+    .and_then(|chord| somnium_ui::commands::registry().binding(chord))
+    .map(|command| command.action)
+}
+
 fn shortcut_preserves_game_key(action: somnium_ui::commands::CommandAction) -> bool {
     matches!(action, somnium_ui::commands::CommandAction::SaveScene)
 }
 
 #[cfg(test)]
 mod shortcut_input_tests {
-    use super::shortcut_preserves_game_key;
+    use super::{shortcut_action_for, shortcut_preserves_game_key};
     use somnium_ui::commands::CommandAction;
+    use somnium_ui::message::Modifiers;
+    use winit::keyboard::KeyCode;
 
     #[test]
     fn save_keeps_the_physical_s_transition_for_viewport_flight() {
         assert!(shortcut_preserves_game_key(CommandAction::SaveScene));
         assert!(!shortcut_preserves_game_key(CommandAction::Undo));
         assert!(!shortcut_preserves_game_key(CommandAction::Redo));
+    }
+
+    /// The reported bug, as a test.
+    ///
+    /// `S` is bound to the Scale tool *and* is the fly-cam's "move backward".
+    /// This dispatcher runs before the UI and returns, so when it claimed the
+    /// key the camera never saw it — and the two-or-three-second delay before
+    /// movement started was OS auto-repeat slipping past the `!repeat` guard,
+    /// not a stall.
+    #[test]
+    fn an_unmodified_shortcut_stands_down_while_the_viewport_is_flying() {
+        let none = Modifiers::default();
+
+        // Grounded: `S` is the Scale tool, which is what makes this a conflict
+        // at all. If this assertion ever fails the binding moved and the rest
+        // of the test is measuring nothing.
+        assert_eq!(
+            shortcut_action_for(KeyCode::KeyS, none, false),
+            Some(CommandAction::SetGizmoMode(2)),
+        );
+
+        // Flying: nothing is claimed, so the key reaches the camera.
+        assert_eq!(shortcut_action_for(KeyCode::KeyS, none, true), None);
+    }
+
+    /// The rule is "unmodified", not "all". A modified chord is unambiguous and
+    /// must keep working mid-flight, or flying would silently disable Save.
+    #[test]
+    fn a_modified_shortcut_still_fires_while_flying() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            shortcut_action_for(KeyCode::KeyS, ctrl, true),
+            Some(CommandAction::SaveScene),
+        );
+    }
+
+    /// The same rule, reached the other way: a play session.
+    ///
+    /// Reported after the fly-cam fix landed — walking a character backwards
+    /// with `S` had the identical two-or-three-second delay, because the
+    /// character is not flying the viewport and the latch was never set. Both
+    /// contexts end at this dispatcher, so both belong in the same predicate.
+    #[test]
+    fn an_unmodified_shortcut_stands_down_during_a_play_session() {
+        let none = Modifiers::default();
+        assert_eq!(shortcut_action_for(KeyCode::KeyS, none, false), Some(CommandAction::SetGizmoMode(2)));
+        assert_eq!(shortcut_action_for(KeyCode::KeyS, none, true), None);
+    }
+
+    /// Stopping a play session must not depend on a suppressed key.
+    ///
+    /// Play, Pause and Stop are declared with no chord at all — they are
+    /// toolbar commands — so suppressing unmodified keys during a session
+    /// cannot trap anybody in one. If somebody ever binds a bare key to Stop,
+    /// this fails and says why.
+    #[test]
+    fn the_transport_is_not_reachable_by_an_unmodified_key() {
+        for command in somnium_ui::commands::registry().commands() {
+            if matches!(
+                command.action,
+                CommandAction::Play | CommandAction::Pause | CommandAction::Stop
+            ) {
+                assert!(
+                    command
+                        .default_binding
+                        .is_none_or(somnium_ui::commands::Chord::has_modifier),
+                    "{} has an unmodified binding, which play-session suppression would eat",
+                    command.id
+                );
+            }
+        }
+    }
+
+    /// Every fly-cam key must be free of an unmodified binding while the game
+    /// owns the keyboard — `S` was the one that showed, but the rule has to
+    /// hold for all of them or the next report is `Q`.
+    #[test]
+    fn no_fly_cam_key_is_claimed_while_flying() {
+        let none = Modifiers::default();
+        for key in [
+            KeyCode::KeyW,
+            KeyCode::KeyA,
+            KeyCode::KeyS,
+            KeyCode::KeyD,
+            KeyCode::KeyQ,
+            KeyCode::KeyE,
+        ] {
+            assert_eq!(
+                shortcut_action_for(key, none, true),
+                None,
+                "{key:?} is a fly-cam key and must fall through while flying"
+            );
+        }
     }
 }
 
@@ -2104,20 +2229,41 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── 1. Registered editor shortcuts FIRST (never array-position dispatch) ──
+        //
+        // **This dispatcher runs before the UI is consulted**, and every arm
+        // below `return`s — so a key it claims never reaches the game at all.
+        // That is what made bare `S` unusable for viewport flight: `S` is bound
+        // to the Scale tool, `SetGizmoMode` returned, and `move_backward` never
+        // latched. It appeared to work a couple of seconds later only because
+        // the `!key_ev.repeat` guard lets OS auto-repeat through, so the camera
+        // started moving exactly when the keyboard began repeating.
+        //
+        // While the fly-cam is driving, an *unmodified* shortcut stands down
+        // and the key falls through. Modified chords are unaffected: `Ctrl+S`
+        // is unambiguous and should still save mid-flight, which is also why
+        // `shortcut_preserves_game_key` continues to forward its key
+        // transition.
+        // Two ways the game owns the keyboard: the fly-cam is driving, or a
+        // play session is running. Both were reported as the same symptom —
+        // `S` moving backward only after two or three seconds — because both
+        // end at the same place: this dispatcher claims the key and returns.
+        //
+        // `play_session_active` is read from the engine's own flag rather than
+        // the UI's, so the rule still holds in a headless or UI-less run.
+        let game_owns_keyboard = self.play_session_active
+            || self
+                .ui_manager
+                .as_ref()
+                .is_some_and(somnium_ui::UiManager::viewport_camera_active);
         if let WindowEvent::KeyboardInput { event: key_ev, .. } = &event {
             if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
                 use winit::keyboard::PhysicalKey;
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
-                    let chord = somnium_ui::commands::Chord::from_winit(
+                    let action = shortcut_action_for(
                         code,
-                        self.shortcut_modifiers.command(),
-                        self.shortcut_modifiers.shift,
-                        self.shortcut_modifiers.alt,
-                        false,
+                        self.shortcut_modifiers,
+                        game_owns_keyboard,
                     );
-                    let action = chord
-                        .and_then(|chord| somnium_ui::commands::registry().binding(chord))
-                        .map(|command| command.action);
                     use somnium_ui::commands::CommandAction as A;
                     match action {
                         Some(A::NewScene) => {

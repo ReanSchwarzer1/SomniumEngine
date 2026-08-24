@@ -759,6 +759,10 @@ pub struct UiManager {
     /// CONTROL-L: the hour the context bar last displayed, so the label is
     /// rewritten only when it changes rather than sixty times a second.
     time_shown: Option<f32>,
+    /// True while a play session exists — playing or paused. Set from
+    /// [`Self::update_simulation_controls`], the one place every transport
+    /// transition passes through.
+    play_session_active: bool,
     name_popup: NodeHandle,
     name_title: NodeHandle,
     name_input: NodeHandle,
@@ -1364,6 +1368,7 @@ impl UiManager {
             time_label: layout.time_label,
             time_slider: layout.time_slider,
             time_shown: None,
+            play_session_active: false,
             name_popup: layout.name_popup,
             name_title: layout.name_title,
             name_input: layout.name_input,
@@ -1851,18 +1856,20 @@ impl UiManager {
                 // the registry claimed first, because the registry intercepts a
                 // layer above it. This is the same rule applied where the
                 // interception actually happens.
-                if pressed
-                    && !key_ev.repeat
-                    && !self.native_ui.has_text_focus()
-                    && !self.native_ui.viewport_camera_active()
-                {
-                    if let Some(chord) = crate::commands::Chord::from_winit(
+                if pressed && !key_ev.repeat && !self.native_ui.has_text_focus() {
+                    let chord = crate::commands::Chord::from_winit(
                         code,
                         self.native_ui.modifiers().command(),
                         self.native_ui.modifiers().shift,
                         self.native_ui.modifiers().alt,
                         false,
-                    ) {
+                    )
+                    // Same rule as the engine's dispatcher, and it has to be
+                    // here too: the *rebindable* lookup lives on this side, so
+                    // a user-rebound bare key would otherwise still be eaten
+                    // while the game has the keyboard.
+                    .filter(|chord| !self.game_owns_keyboard() || chord.has_modifier());
+                    if let Some(chord) = chord {
                         // CONTROL-H: a rebinding editor is only real if the
                         // override is what dispatch consults. The registry's
                         // declared chord is the fallback, not the authority.
@@ -4576,6 +4583,32 @@ impl UiManager {
         self.native_ui.has_text_focus()
     }
 
+    /// Whether a right-drag over the viewport is currently flying the camera.
+    ///
+    /// The engine's own shortcut dispatcher runs *before* the UI is consulted,
+    /// so it has to ask.
+    #[must_use]
+    pub fn viewport_camera_active(&self) -> bool {
+        self.native_ui.viewport_camera_active()
+    }
+
+    /// Whether a play session is running — playing or paused.
+    #[must_use]
+    pub fn play_session_active(&self) -> bool {
+        self.play_session_active
+    }
+
+    /// Whether the game currently owns the keyboard.
+    ///
+    /// True while the fly-cam is driving *or* a play session is running. In
+    /// both cases an unmodified single-key editor shortcut must stand down:
+    /// bare `S` is the Scale tool and is also "move backward", and whichever
+    /// dispatcher claims it first stops the key reaching the game at all.
+    #[must_use]
+    pub fn game_owns_keyboard(&self) -> bool {
+        self.viewport_camera_active() || self.play_session_active
+    }
+
     // ── Editor event queue ────────────────────────────────────────────────────
 
     /// Drain one EditorEvent per call; returns None when queue is empty.
@@ -4639,6 +4672,11 @@ impl UiManager {
     /// Keep the UE-style transport controls visually synchronized with the
     /// engine-owned simulation state.
     pub fn update_simulation_controls(&mut self, state: u8) {
+        // Every transport transition comes through here, which makes it the
+        // one place that knows a play session is running. `0` is stopped; `1`
+        // playing and `2` paused are both "a session exists", and during one
+        // the keyboard belongs to the game.
+        self.play_session_active = state != 0;
         let play = match state {
             1 => "Playing",
             2 => "Paused",

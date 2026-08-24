@@ -53,6 +53,17 @@ pub struct Chord {
 }
 
 impl Chord {
+    /// Whether this chord carries any modifier.
+    ///
+    /// The line between a shortcut that may fire while the viewport is flying
+    /// and one that may not. `Ctrl+S` is unambiguous and should still save;
+    /// bare `S` is also "move backward", and a dispatcher that fires it eats
+    /// the camera's key.
+    #[must_use]
+    pub const fn has_modifier(self) -> bool {
+        self.ctrl || self.shift || self.alt || self.command
+    }
+
     /// Start a chord with no modifiers.
     pub const fn press(key: CommandKey) -> Self {
         Self {

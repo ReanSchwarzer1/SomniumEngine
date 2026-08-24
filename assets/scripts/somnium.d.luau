@@ -256,6 +256,8 @@ export type SomniumSky = {
 	max_steps: number,
 	light_steps: number,
 	max_distance: number,
+	quality: number --[[ Quarter Resolution | Half Resolution | Full Resolution ]],
+	temporal_jitter: boolean,
 }
 
 --- `somnium.Terrain` (schema version 1).

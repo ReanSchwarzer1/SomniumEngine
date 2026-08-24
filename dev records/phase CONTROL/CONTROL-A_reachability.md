@@ -21,10 +21,10 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_AERIAL_HERO` | `crates/somnium_renderer/src/renderer.rs:868` | Aerial hero | bool | off (unset/other) | command | `editor.view.pipeline.aerial_hero` |
 | `SOMNIUM_AERIAL_SPLIT` | `crates/somnium_renderer/src/pass/classify.rs:245` | SOMNIUM_AERIAL_SPLIT exists for one specific job: pushing it past the far plane makes every terrain tile take the near (full) pipeline, which turns the binned path into an exact re… | text/selector | 150.0 | harness | Forces every terrain tile onto the near pipeline for an A/B timing run. |
 | `SOMNIUM_ANALYTIC_GRAD` | `crates/somnium_core/src/lib.rs:1028` | Analytic grad | bool | on (unset/other) | schema | `somnium.PostProcess.analytic_grad` |
-| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1467` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
+| `SOMNIUM_AUDIT_CONTENT_PATH` | `crates/somnium_ui/src/lib.rs:1472` | Audit content path | path/text | unset / source-defined fallback | harness | CONTROL-A capture driver: which drawer folder to open. |
 | `SOMNIUM_AUDIT_LOG` | `crates/somnium_renderer/src/renderer.rs:3984` | Audit log | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: where the renderer audit log is written. |
 | `SOMNIUM_AUDIT_SELECT_ENTITY` | `examples/hello_engine/src/main.rs:1370` | Audit select entity | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which entity to select before capture. |
-| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1505` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
+| `SOMNIUM_AUDIT_UI_STATE` | `crates/somnium_ui/src/lib.rs:1510` | Audit ui state | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: which editor surface to open before capture. |
 | `SOMNIUM_AUDIT_WINDOW_SIZE` | `examples/hello_engine/src/main.rs:2723` | Audit window size | text/selector | unset / source-defined fallback | harness | CONTROL-A capture driver: the exact logical size to capture at. |
 | `SOMNIUM_AUDIT_YAW_JUMP_DEGREES` | `examples/hello_engine/src/main.rs:1692` | Audit yaw jump degrees | float | 1.0 | harness | Recorded fast-camera repro: the yaw step to inject. |
 | `SOMNIUM_AUDIT_YAW_JUMP_FRAME` | `examples/hello_engine/src/main.rs:1687` | Audit yaw jump frame | integer | unset / source-defined fallback | harness | Recorded fast-camera repro: the frame to inject it on. |
@@ -63,7 +63,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_LIGHT_SHAFTS` | `crates/somnium_core/src/lib.rs:982` | Light shafts | bool | on (unset/other) | schema | `somnium.PostProcess.light_shafts` |
 | `SOMNIUM_LOD_MORPH` | `crates/somnium_renderer/src/terrain/mod.rs:510` | Lod morph | bool | off (unset/other) | command | `editor.view.pipeline.terrain_lod_morph` |
 | `SOMNIUM_MAP` | `examples/hello_engine/src/main.rs:354` | Map | path/text | unset / source-defined fallback | harness | Startup scene for a headless run; the editor route is File > Open. |
-| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:1980` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
+| `SOMNIUM_MAXIMIZE` | `crates/somnium_core/src/app.rs:2105` | Maximize | bool | off (unset/other) | harness | Window state at startup, before any editor surface exists. |
 | `SOMNIUM_MESH_SDF` | `crates/somnium_core/src/lib.rs:1025` | Mesh sdf | bool | off (unset/other) | schema | `somnium.PostProcess.mesh_sdf` |
 | `SOMNIUM_MOTION_BLUR` | `crates/somnium_core/src/lib.rs:978` | Motion blur | bool | off (unset/other) | schema | `somnium.PostProcess.motion_blur_enabled` |
 | `SOMNIUM_NO_MESHLETS` | `crates/somnium_renderer/src/renderer.rs:836` | No meshlets | bool | unset / source-defined fallback | command | `editor.view.pipeline.meshlets` |
@@ -89,8 +89,8 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_SPD` | `crates/somnium_renderer/src/pass/hiz.rs:157` | Spd | bool | on (unset/other) | command | `editor.view.pipeline.spd` |
 | `SOMNIUM_SPECULAR_GI` | `crates/somnium_core/src/lib.rs:1019` | Specular gi | bool | off (unset/other) | schema | `somnium.PostProcess.specular_gi` |
 | `SOMNIUM_STARTUP_SCENE` | `crates/somnium_core/src/settings.rs:168` | Startup scene | text/selector | unset / source-defined fallback | setting | `somnium.ProjectSettings.startup_scene` |
-| `SOMNIUM_SUN_AZIMUTH` | `crates/somnium_core/src/app.rs:4564` | Sun azimuth | float | SOMNIUM_SUN_AZIMUTH | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
-| `SOMNIUM_SUN_ELEVATION` | `crates/somnium_core/src/app.rs:4561` | Sun elevation | float | 35.0 | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
+| `SOMNIUM_SUN_AZIMUTH` | `crates/somnium_core/src/app.rs:4710` | Sun azimuth | float | SOMNIUM_SUN_AZIMUTH | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
+| `SOMNIUM_SUN_ELEVATION` | `crates/somnium_core/src/app.rs:4707` | Sun elevation | float | 35.0 | harness | Headless sun placement; CONTROL-L gives the sun a real control. |
 | `SOMNIUM_TAA` | `crates/somnium_renderer/src/pass/taa.rs:188` | Taa | bool | on (unset/other) | schema | `somnium.PostProcess.taa_enabled` |
 | `SOMNIUM_TAA_DEBUG` | `crates/somnium_renderer/src/pass/taa.rs:193` | Taa debug | integer | 0 | command | `editor.view.pipeline.taa_debug` |
 | `SOMNIUM_TAA_DILATE_EPS` | `crates/somnium_renderer/src/pass/taa.rs:189` | Taa dilate eps | float | 4.0 | harness | Numerical epsilon held for a recorded TAA repro. |
@@ -117,7 +117,7 @@ The environment inventory includes identifiers in executable code and documented
 | `SOMNIUM_TIME_QUIT` | `examples/hello_engine/src/main.rs:1737` | Time quit | bool | on (unset/other) | harness | `.somtime` harness: exit once the run completes. |
 | `SOMNIUM_TIME_VIEW` | `examples/hello_engine/src/main.rs:349` | Time view | path/text | unset / source-defined fallback | harness | Chooses the pose a `.somtime` run measures from. The editor route is the camera bookmarks. |
 | `SOMNIUM_TIME_WARMUP` | `crates/somnium_renderer/src/timing.rs:304` | Time warmup | integer | DEFAULT_WARMUP | harness | `.somtime` harness: frames discarded before measuring. |
-| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:707` | Viewport res | integer | 0 | harness | Fixed render resolution for capture; the editor route is dynamic resolution. |
+| `SOMNIUM_VIEWPORT_RES` | `crates/somnium_core/src/app.rs:832` | Viewport res | integer | 0 | harness | Fixed render resolution for capture; the editor route is dynamic resolution. |
 | `SOMNIUM_VOLUMETRICS` | `crates/somnium_core/src/lib.rs:969` | Volumetrics | bool | on (unset/other) | schema | `somnium.PostProcess.volumetrics_enabled` |
 | `SOMNIUM_WATER_PITCH` | `examples/hello_engine/src/main.rs:814` | Water pitch | float | underwater | harness | Recorded water repro: the fixed camera pitch it was measured at. |
 | `SOMNIUM_WATER_SPECTRUM` | `crates/somnium_renderer/src/pass/water_spectrum.rs:273` | Water spectrum | bool | on (unset/other) | schema | `somnium.Water.spectrum_blend` |
