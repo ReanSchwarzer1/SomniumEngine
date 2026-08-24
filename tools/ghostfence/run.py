@@ -56,7 +56,7 @@ FROZEN_TOOLCHAIN = {
 # gets faked (plan §A.7). Each exemption is a file plus the reason it is not a
 # second thread pool; anything not listed here fails the row.
 SPAWN_EXEMPTIONS = {
-    "crates/somnium_jobs/src/worker.rs": "the job system's own worker pool — this is the one place.",
+    "crates/somnium_jobs/": "the job system itself — this is the one place a pool is allowed.",
     "crates/somnium_ui/src/theme.rs": "a single-shot test asserting the theme is visible from another thread.",
 }
 
@@ -173,10 +173,19 @@ def row_one_job_system(args: argparse.Namespace) -> Result:
     pattern = re.compile(r"\bthread::spawn\b")
     for path in rust_sources():
         relative = rel(path)
-        if relative in SPAWN_EXEMPTIONS:
+        # Exemptions are matched as prefixes, so an entry can name one file or
+        # a whole crate. `somnium_jobs/` is the second kind: a pool inside the
+        # job system is the job system, not a second one.
+        if any(relative.startswith(prefix) for prefix in SPAWN_EXEMPTIONS):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, line in enumerate(text.splitlines(), 1):
+            # A comment explaining the rule is not a violation of it. Without
+            # this, the doc comment in somnium_jobs that describes the ban trips
+            # the ban, and the first thing anyone does about a gate that flags
+            # its own documentation is turn it off.
+            if line.lstrip().startswith("//"):
+                continue
             if pattern.search(line):
                 offenders.append(f"{relative}:{number}")
     if offenders:

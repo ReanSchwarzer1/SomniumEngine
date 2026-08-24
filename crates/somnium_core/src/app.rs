@@ -26,7 +26,7 @@ use crate::editor_commands::{
 };
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
-use crate::jobs::{JobHandle, JobPriority, JobRegistry};
+use crate::jobs::{JobHandle, JobPriority, JobSystem};
 use crate::time::TimeState;
 use crate::{
     CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
@@ -527,10 +527,19 @@ pub struct Engine<G: GameApp> {
     renderer: Option<SomniumRenderer>,
     ui_manager: Option<UiManager>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
-    jobs: JobRegistry,
+    jobs: JobSystem,
     asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
     next_asset_scan: std::time::Instant,
+    /// This frame's background-work telemetry, folded by job name.
+    ///
+    /// MORROWIND-B. Refreshed by `pump_jobs` once per frame and read by the
+    /// profiler panel; `phase_MORROWIND.md` §8 makes job visibility a
+    /// requirement rather than a nicety, because a job system without it turns
+    /// one mystery (a stall) into a harder one (a stall inside a thread pool).
+    job_profile: Vec<crate::jobs::JobProfileRow>,
+    /// Zones the telemetry ring had to drop for capacity since the last frame.
+    job_zones_dropped: usize,
     preview_jobs: std::collections::HashMap<
         std::path::PathBuf,
         JobHandle<Option<somnium_asset::preview::PreparedPreview>>,
@@ -778,10 +787,12 @@ impl<G: GameApp + 'static> Engine<G> {
             render_ctx: None,
             renderer: None,
             ui_manager: None,
-            jobs: JobRegistry::default(),
+            jobs: JobSystem::default(),
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             next_asset_scan: std::time::Instant::now(),
+            job_profile: Vec::new(),
+            job_zones_dropped: 0,
             preview_jobs: std::collections::HashMap::new(),
             preview_ready: std::collections::VecDeque::new(),
             material_documents: std::collections::HashMap::new(),
@@ -3236,6 +3247,44 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             depth: 1,
                         });
                     }
+                    // MORROWIND-B: background work, folded by name and
+                    // sorted worst-wait first. Only shown when something ran,
+                    // so an idle editor does not carry an empty heading.
+                    if !self.job_profile.is_empty() {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: "— Jobs (CPU, background) —".to_string(),
+                            value: String::new(),
+                            depth: 0,
+                        });
+                        for job in &self.job_profile {
+                            rows.push(somnium_ui::ProfilerRow {
+                                label: format!("{} x{}", job.name, job.count),
+                                // Queue wait first, because it is the number
+                                // that explains a stall: run time says the work
+                                // was slow, queue wait says the pool was busy,
+                                // and those have different fixes.
+                                value: format!(
+                                    "wait {:.1} ms · ran {:.1} ms · {:?}{}",
+                                    job.worst_queued_ms,
+                                    job.ran_ms,
+                                    job.priority,
+                                    if job.expired > 0 {
+                                        format!(" · {} expired", job.expired)
+                                    } else {
+                                        String::new()
+                                    }
+                                ),
+                                depth: 1,
+                            });
+                        }
+                        if self.job_zones_dropped > 0 {
+                            rows.push(somnium_ui::ProfilerRow {
+                                label: format!("and {} more", self.job_zones_dropped),
+                                value: String::new(),
+                                depth: 1,
+                            });
+                        }
+                    }
                     rows.push(somnium_ui::ProfilerRow {
                         label: "— Graph —".to_string(),
                         value: String::new(),
@@ -3322,6 +3371,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.pump_jobs();
         self.update_asset_pipeline();
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
@@ -3709,6 +3759,24 @@ impl<G: GameApp> Engine<G> {
     /// Poll immutable asset scans and worker previews without doing file IO in
     /// the frame loop. A periodic 350 ms scan is the portable watcher fallback;
     /// the two-sample gate debounces partial external writes.
+    /// Apply finished background work and collect its telemetry. Once a frame.
+    ///
+    /// MORROWIND-B, Seam 1's third property: the worker produces data, the main
+    /// thread installs it, and the installation is budgeted. Two milliseconds
+    /// out of a 16.6 ms frame is the starting number — enough to install a
+    /// handful of decodes, small enough that a burst of sixty cannot become a
+    /// hitch. `drain_completions` returning with work outstanding is the
+    /// mechanism working, not a fault, and the remainder lands next frame.
+    fn pump_jobs(&mut self) {
+        const COMPLETION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        self.jobs.drain_completions(COMPLETION_BUDGET);
+        let (zones, dropped) = self.jobs.take_zones();
+        if !zones.is_empty() {
+            self.job_profile = crate::jobs::profile_rows(&zones);
+            self.job_zones_dropped = dropped;
+        }
+    }
+
     fn update_asset_pipeline(&mut self) {
         let finished_material_textures: Vec<_> = self
             .material_texture_jobs
@@ -3842,7 +3910,25 @@ impl<G: GameApp> Engine<G> {
                 JobPriority::Background
             };
             let key = request.path.clone();
-            match self.jobs.submit("Asset preview", priority, move |ctx| {
+            // MORROWIND-B, the deadline's first real customer.
+            //
+            // An off-screen preview is speculative prefetch: the drawer might
+            // scroll to it, and might not. One that is still queued five
+            // seconds after it was asked for is almost certainly for a tile
+            // nobody is looking at any more, and running it makes the queue
+            // *further* behind for the tiles somebody is looking at. Dropping
+            // it is what lets a fast scroll through a large folder settle.
+            //
+            // Visible previews get no deadline: somebody is waiting at a
+            // spinner, and late is better than never. Cancellation, not
+            // expiry, is the right tool when a visible tile scrolls away.
+            const SPECULATIVE_PREVIEW_BUDGET: std::time::Duration =
+                std::time::Duration::from_secs(5);
+            let mut desc = crate::jobs::JobDesc::new("Asset preview").priority(priority);
+            if !request.visible {
+                desc = desc.within(SPECULATIVE_PREVIEW_BUDGET);
+            }
+            match self.jobs.submit_with(desc, move |ctx| {
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
                 let result = somnium_asset::preview::prepare_preview(&record, &cache_root)?;

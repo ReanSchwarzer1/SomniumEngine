@@ -9,6 +9,8 @@ authors.workspace     = true
 
 [dependencies]
 somnium_ecs = { workspace = true }
+# Seam 1. MORROWIND-B promoted this crate's own `JobRegistry` into it.
+somnium_jobs = { workspace = true }
 somnium_script = { workspace = true }
 # Phase 16-C. The backend is named here, once, so `ScriptHost` can install
 # it — and nowhere else. Every other crate, and every other module in this
