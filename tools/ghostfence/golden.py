@@ -52,6 +52,33 @@ class Threshold:
 
 
 @dataclass(frozen=True)
+class Region:
+    """A sub-rectangle of the capture to compare, and nothing else.
+
+    MORROWIND-E2b. The editor capture is the whole swapchain *after* the UI
+    pass, which is what makes it good evidence and also what makes whole-image
+    comparison useless: it contains a ReSTIR-lit viewport (stochastic), an fps
+    counter (changes every frame) and whatever toast happened to be up. None of
+    those is the paint layer, and all of them would drown it.
+
+    So a golden entry names the chrome it is evidence *for*. A region that
+    accidentally includes the viewport will fail on the second run and say so,
+    which is the correct failure - a mis-drawn region is a bad reference, not a
+    bad gate.
+    """
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+    def clamped(self, width: int, height: int) -> "Region":
+        x = max(0, min(self.x, width))
+        y = max(0, min(self.y, height))
+        return Region(x, y, min(self.w, width - x), min(self.h, height - y))
+
+
+@dataclass(frozen=True)
 class Comparison:
     passed: bool
     reason: str
@@ -71,6 +98,7 @@ def compare(
     candidate: Path,
     threshold: Threshold = Threshold(),
     diff_path: Path | None = None,
+    region: Region | None = None,
 ) -> Comparison:
     """Compare two PNGs, writing a diff image on failure.
 
@@ -94,7 +122,18 @@ def compare(
             mean_channel_delta=255.0,
         )
 
-    total = ref.width * ref.height
+    box = region.clamped(ref.width, ref.height) if region else Region(0, 0, ref.width, ref.height)
+    if box.w <= 0 or box.h <= 0:
+        return Comparison(
+            passed=False,
+            reason=f"region {region} is empty against a {ref.width}x{ref.height} capture",
+            total_pixels=0,
+            failing_pixels=0,
+            max_channel_delta=255,
+            mean_channel_delta=255.0,
+        )
+
+    total = box.w * box.h
     failing = 0
     max_delta = 0
     sum_delta = 0
@@ -102,8 +141,10 @@ def compare(
     # beyond the two decoded images.
     diff = bytearray(total * 3)
 
-    for y in range(ref.height):
-        for x in range(ref.width):
+    for row in range(box.h):
+        y = box.y + row
+        for col in range(box.w):
+            x = box.x + col
             r0, g0, b0 = ref.rgb(x, y)
             r1, g1, b1 = cand.rgb(x, y)
             dr, dg, db = abs(r0 - r1), abs(g0 - g1), abs(b0 - b1)
@@ -111,7 +152,7 @@ def compare(
             sum_delta += dr + dg + db
             if worst > max_delta:
                 max_delta = worst
-            i = (y * ref.width + x) * 3
+            i = (row * box.w + col) * 3
             if worst > threshold.channel_tolerance:
                 failing += 1
                 # Magenta scaled by severity: visible against every scene
@@ -149,7 +190,7 @@ def compare(
 
     written = None
     if diff_path is not None:
-        png.write_rgb(diff_path, ref.width, ref.height, bytes(diff))
+        png.write_rgb(diff_path, box.w, box.h, bytes(diff))
         written = diff_path
 
     return Comparison(

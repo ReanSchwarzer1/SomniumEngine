@@ -115,6 +115,59 @@ def test_size_change_is_a_failure_not_a_crash() -> None:
         assert "size changed" in result.reason
 
 
+# ── MORROWIND-E2b: regions ──────────────────────────────────────────────────
+
+
+def test_a_region_ignores_drift_outside_it() -> None:
+    """The whole point: the viewport moves, the chrome must not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pixels = bytearray(solid(32, 32, (20, 20, 20)))
+        a = write(Path(tmp) / "a.png", 32, 32, bytes(pixels))
+        # Repaint the right half white — a stochastic viewport, in miniature.
+        for y in range(32):
+            for x in range(16, 32):
+                i = (y * 32 + x) * 3
+                pixels[i] = pixels[i + 1] = pixels[i + 2] = 255
+        b = write(Path(tmp) / "b.png", 32, 32, bytes(pixels))
+
+        whole = golden.compare(a, b)
+        assert not whole.passed, "a half-white image must fail a whole-image compare"
+
+        left = golden.compare(a, b, region=golden.Region(0, 0, 16, 32))
+        assert left.passed, f"the untouched left half failed: {left.reason}"
+        assert left.total_pixels == 16 * 32, "the region did not shrink the pixel count"
+
+
+def test_a_region_still_catches_drift_inside_it() -> None:
+    """A gate that cannot fail is not a gate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pixels = bytearray(solid(32, 32, (20, 20, 20)))
+        a = write(Path(tmp) / "a.png", 32, 32, bytes(pixels))
+        # One glyph's worth of drift, inside the region under test.
+        for y in range(4, 8):
+            for x in range(4, 8):
+                i = (y * 32 + x) * 3
+                pixels[i] = pixels[i + 1] = pixels[i + 2] = 200
+        b = write(Path(tmp) / "b.png", 32, 32, bytes(pixels))
+
+        inside = golden.compare(a, b, region=golden.Region(0, 0, 16, 16))
+        assert not inside.passed, "16 changed pixels in a 256-pixel region must fail"
+        assert inside.max_channel_delta == 180, inside.max_channel_delta
+
+        elsewhere = golden.compare(a, b, region=golden.Region(16, 16, 16, 16))
+        assert elsewhere.passed, "a region away from the change must not fail"
+
+
+def test_a_region_larger_than_the_capture_clamps() -> None:
+    """A mis-typed region is a bad reference, not a crash."""
+    with tempfile.TemporaryDirectory() as tmp:
+        a = write(Path(tmp) / "a.png", 16, 16, solid(16, 16, (9, 9, 9)))
+        b = write(Path(tmp) / "b.png", 16, 16, solid(16, 16, (9, 9, 9)))
+        result = golden.compare(a, b, region=golden.Region(8, 8, 999, 999))
+        assert result.passed
+        assert result.total_pixels == 8 * 8, result.total_pixels
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

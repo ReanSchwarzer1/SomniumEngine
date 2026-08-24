@@ -274,10 +274,8 @@ def row_golden_images(args: argparse.Namespace) -> Result:
         return Result(
             "golden-images",
             Outcome.SKIP,
-            "no reference set yet - capture one with "
-            "`SOMNIUM_CAPTURE_UI_PNG=<path> SOMNIUM_CAPTURE_FRAME=120 SOMNIUM_CAPTURE_QUIT=1 "
-            "cargo run -p hello_engine`, then record it in "
-            f"{rel(GOLDEN_MANIFEST)}",
+            "no reference set yet - take one with "
+            "`python tools/ghostfence/capture.py --reference`",
         )
 
     manifest = json.loads(GOLDEN_MANIFEST.read_text(encoding="utf-8"))
@@ -289,6 +287,7 @@ def row_golden_images(args: argparse.Namespace) -> Result:
         if not candidate.is_absolute():
             candidate = ROOT / candidate
         threshold = golden.Threshold(**entry.get("threshold", {}))
+        region = golden.Region(**entry["region"]) if entry.get("region") else None
         if not reference.exists():
             failures.append(f"{name}: reference {rel(reference)} is missing")
             continue
@@ -296,7 +295,11 @@ def row_golden_images(args: argparse.Namespace) -> Result:
             skips.append(f"{name}: no candidate at {rel(candidate)}")
             continue
         result = golden.compare(
-            reference, candidate, threshold, diff_path=CANDIDATE_DIR / f"{name}.diff.png"
+            reference,
+            candidate,
+            threshold,
+            diff_path=CANDIDATE_DIR / f"{name}.diff.png",
+            region=region,
         )
         if result.passed:
             passes += 1

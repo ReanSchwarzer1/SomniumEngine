@@ -1,0 +1,67 @@
+{
+  "_note": [
+    "GHOSTFENCE golden references. MORROWIND-E2b.",
+    "",
+    "One capture, several regions. The capture is the whole swapchain after the",
+    "UI pass, which is what makes it evidence for the paint layer and also what",
+    "makes whole-image comparison worthless: it contains a ReSTIR-lit viewport",
+    "that is stochastic by construction, an fps counter that changes every",
+    "frame, and whatever toast happened to be up. Every region below is chrome",
+    "and only chrome.",
+    "",
+    "Regenerate:  python tools/ghostfence/capture.py --reference --yes",
+    "Candidate:   python tools/ghostfence/capture.py",
+    "Compare:     python tools/ghostfence/run.py --only golden-images",
+    "",
+    "Thresholds are tight but not exact. Byte-identity is the right bar for a",
+    "draw list (GHOSTFENCE row 1 asserts that separately, on instance counts);",
+    "it is the wrong bar for a rasterised image, where a driver update can move",
+    "a subpixel without anything being wrong."
+  ],
+  "capture": "editor_shell_1280x720.png",
+  "images": [
+    {
+      "name": "menu-bar",
+      "reference": "editor_shell_1280x720.png",
+      "candidate": "target/ghostfence/editor_shell_1280x720.png",
+      "region": { "x": 0, "y": 0, "w": 430, "h": 32 },
+      "threshold": { "channel_tolerance": 2, "failing_fraction": 0.002, "max_channel": 24 },
+      "why": [
+        "The logo, the wordmark and six menu labels. Pure text and one SDF icon,",
+        "on a flat fill — which makes it the most sensitive region in the shell",
+        "to a change in glyph rasterisation, and therefore the region that",
+        "decides the MORROWIND-G shaper A/B (plan Appendix A.5, item 2).",
+        "Deliberately stops at x=430, well left of the command palette, because",
+        "the palette carries a focus ring whose state is not load-deterministic."
+      ]
+    },
+    {
+      "name": "sculpt-panel",
+      "reference": "editor_shell_1280x720.png",
+      "candidate": "target/ghostfence/editor_shell_1280x720.png",
+      "region": { "x": 0, "y": 70, "w": 168, "h": 200 },
+      "threshold": { "channel_tolerance": 2, "failing_fraction": 0.002, "max_channel": 24 },
+      "why": [
+        "Six tool rows: an SDF icon, a label, a row background and the selected",
+        "row's wash. This is the Phase 27 paint contract's rounded / washed /",
+        "lifted primitives in one place, at the size they actually ship at.",
+        "Stops at h=200 rather than running to the bottom of the panel because",
+        "the lower rows sit against the content drawer's top edge, which moves",
+        "with the drawer's remembered height."
+      ]
+    },
+    {
+      "name": "toolbar",
+      "reference": "editor_shell_1280x720.png",
+      "candidate": "target/ghostfence/editor_shell_1280x720.png",
+      "region": { "x": 0, "y": 38, "w": 540, "h": 30 },
+      "threshold": { "channel_tolerance": 2, "failing_fraction": 0.002, "max_channel": 24 },
+      "why": [
+        "Save / Select / Landscape / Foliage and the four play-control glyphs.",
+        "Icon-and-label pairs at toolbar size, where a half-pixel of icon",
+        "drift is visible and a half-pixel of text drift is not — the two",
+        "failure modes the block-origin snapping rule trades between."
+      ]
+    }
+  ]
+}

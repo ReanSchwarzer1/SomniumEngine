@@ -67,6 +67,23 @@ dev records/phase CONTROL/CONTROL-A_baseline/*
 !dev records/phase CONTROL/CONTROL-A_baseline/*.png
 !dev records/phase CONTROL/CONTROL-A_terrain_open.somtime
 
+# Phase MORROWIND, same reasoning, and it should have been here from
+# MORROWIND-A. The whole `phase MORROWIND/` folder was ignored for eleven
+# sub-phases: the census, the Fyrox diff, the license audit, GHOSTFENCE's
+# golden references and every per-sub-phase record existed only on one disk.
+# The golden PNGs are the sharp end of it - a reference nobody else has is not
+# a reference, and the gate that compares against it is unrunnable on a fresh
+# clone. Found by MORROWIND-E2b, when `git add` of a golden refused.
+!dev records/phase_MORROWIND.md
+!dev records/phase MORROWIND/
+dev records/phase MORROWIND/*
+!dev records/phase MORROWIND/README.md
+!dev records/phase MORROWIND/MORROWIND-*.md
+!dev records/phase MORROWIND/golden/
+dev records/phase MORROWIND/golden/*
+!dev records/phase MORROWIND/golden/manifest.json
+!dev records/phase MORROWIND/golden/*.png
+
 # Stray build output from a cargo invocation with the wrong working
 # directory. `target/` at the root is already ignored; this catches the
 # per-crate ones.
