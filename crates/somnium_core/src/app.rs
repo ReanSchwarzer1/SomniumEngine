@@ -559,6 +559,14 @@ pub struct Engine<G: GameApp> {
     /// enabled. Recomputed every frame and never persisted — it is a cache of
     /// one evaluation, not state.
     day_state: Option<crate::time_of_day::DayState>,
+    /// CONTROL-N: the live weather. Unlike [`Self::day_state`] this genuinely
+    /// *is* state — the two wetness scalars integrate over time — but it is
+    /// still never saved: a scene reloads dry and wets again, which is the
+    /// only honest answer when the file records causes rather than history.
+    weather_state: crate::weather::WeatherState,
+    /// The entity carrying the rain emitter, spawned on demand and despawned
+    /// when the weather stops.
+    precipitation_entity: Option<somnium_ecs::Entity>,
     /// Title-bar close requested a shutdown.
     ui_wants_exit: bool,
     /// Map load completed this frame; game code seeds fly-cam / boat after ECS reset.
@@ -704,6 +712,8 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_accumulator: 0.0,
             scene_dirty: false,
             day_state: None,
+            weather_state: crate::weather::WeatherState::default(),
+            precipitation_entity: None,
             ui_wants_exit: false,
             pending_map_load: None,
             scripts: crate::script_host::ScriptHost::default(),
@@ -3221,6 +3231,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
         self.submit_terrains();
         self.submit_foliage();
+        self.submit_decals();
         self.sync_terrain_colliders();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
@@ -3230,6 +3241,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
         self.apply_time_of_day(dt);
+        self.apply_sky(dt);
+        self.apply_weather(dt);
         self.publish_time_of_day();
         self.apply_post_process();
         self.apply_camera_settings();
@@ -3835,6 +3848,70 @@ impl<G: GameApp> Engine<G> {
 
     /// World-space cursor ray (origin, direction) from the camera through
     /// the current cursor position.
+    /// CONTROL-O: the terrain's surface normal at a world position.
+    ///
+    /// Four vertical raycasts around the point, because the terrain exposes a
+    /// raycast and not a normal query and adding one would mean deciding what
+    /// a normal means at a chunk seam. Called **once**, when a decal is
+    /// created — not from the per-frame drop probe, which stays a single ray.
+    ///
+    /// Falls back to straight up, which is the right answer for the common
+    /// case and a harmless one for the rest: a decal can be rotated.
+    fn terrain_normal_at(&mut self, position: glam::Vec3) -> glam::Vec3 {
+        const STEP: f32 = 0.5;
+        let sample = |engine: &mut Self, x: f32, z: f32| -> Option<f32> {
+            let origin = glam::Vec3::new(x, position.y + 500.0, z);
+            let terrains: Vec<_> = engine
+                .world
+                .entities()
+                .filter_map(|entity| {
+                    let component = engine.world.get::<TerrainComponent>(entity)?;
+                    let model = engine
+                        .world
+                        .get::<Transform>(entity)
+                        .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+                    Some((component.terrain_id, model))
+                })
+                .collect();
+            let renderer = engine.renderer.as_mut()?;
+            for (id, model) in terrains {
+                let Some(terrain) = renderer.terrain_mut(id) else {
+                    continue;
+                };
+                terrain.model = model;
+                if let Some(hit) = terrain.raycast(origin, glam::Vec3::NEG_Y) {
+                    return Some(hit.y);
+                }
+            }
+            None
+        };
+
+        let (Some(east), Some(west), Some(north), Some(south)) = (
+            sample(self, position.x + STEP, position.z),
+            sample(self, position.x - STEP, position.z),
+            sample(self, position.x, position.z + STEP),
+            sample(self, position.x, position.z - STEP),
+        ) else {
+            return glam::Vec3::Y;
+        };
+        // Central differences. The cross product of the two tangents is the
+        // normal; written out rather than crossed so the sign is visible.
+        glam::Vec3::new(west - east, 2.0 * STEP, south - north).normalize_or(glam::Vec3::Y)
+    }
+
+    /// The renderer pool slot a material asset currently occupies, or zero.
+    ///
+    /// Zero is the default material, which is what a decal referencing an
+    /// asset the pool has not loaded yet should show: a flat tint rather than
+    /// whatever happened to be in slot `n`.
+    fn material_runtime_id(&self, asset: somnium_asset::database::AssetId) -> u32 {
+        self.world
+            .entities()
+            .filter_map(|entity| self.world.get::<MaterialComponent>(entity))
+            .find(|component| component.asset == asset)
+            .map_or(0, |component| component.runtime_id)
+    }
+
     fn viewport_terrain_drop_hit(&mut self) -> Option<[f32; 3]> {
         let (origin, direction) = self.cursor_ray()?;
         let terrains: Vec<_> = self
@@ -4373,6 +4450,7 @@ impl<G: GameApp> Engine<G> {
                 mesh_kind: None,
                 is_particle_emitter: false,
                 environment: false,
+                decal: None,
                 terrain: None,
                 voxel_terrain: None,
                 foliage: None,
@@ -4484,6 +4562,323 @@ impl<G: GameApp> Engine<G> {
         // scene reproduces them exactly. A day cycle that made a scene dirty by
         // existing would make "unsaved changes" meaningless.
         self.day_state = Some(state);
+    }
+
+    /// CONTROL-M: push the authored sky to the renderer.
+    ///
+    /// Runs after [`Self::apply_time_of_day`] so the day cycle's cloud-coverage
+    /// track can override the authored coverage — which is the chain §6.3 asks
+    /// for, and the reason coverage is a track on the clock rather than a
+    /// second slider on the sky.
+    fn apply_sky(&mut self, dt: f32) {
+        let sky = self
+            .world
+            .entities()
+            .find_map(|e| self.world.get::<crate::sky::SkyComponent>(e).copied());
+        let coverage_override = self.day_state.and_then(|state| state.cloud_coverage);
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let Some(sky) = sky else {
+            // No Environment: the pass stays exactly as the environment
+            // variable left it, which is how a scene with no sky component
+            // still honours `SOMNIUM_CLOUDS=1` for a capture.
+            return;
+        };
+        renderer.cloud_pass.enabled = renderer
+            .cloud_pass
+            .env_override
+            .unwrap_or(sky.enabled);
+        let mut settings = sky.to_settings();
+        if let Some(coverage) = coverage_override {
+            settings.coverage = coverage;
+        }
+        renderer.cloud_pass.settings = settings;
+        // The wind advances on wall-clock time rather than on the day cycle's
+        // timescale: a paused editor should still let you watch the sky move
+        // while you author it, and a 60× timescale should not turn the clouds
+        // into a blur.
+        renderer.cloud_pass.advance_wind(dt);
+    }
+
+    /// CONTROL-O: collect this frame's decals and bin them.
+    ///
+    /// Runs beside `submit_foliage` and for the same reason: the renderer
+    /// should be handed a flat list, not asked to walk an ECS. The texture
+    /// indices come out of the material pool, so a decal and the mesh beside
+    /// it resolve the same material through the same slot — there is no second
+    /// path from an `AssetId` to a bindless index.
+    fn submit_decals(&mut self) {
+        let collected: Vec<(glam::Mat4, crate::decal::DecalComponent, Option<u32>)> = self
+            .world
+            .entities()
+            .filter_map(|entity| {
+                let decal = self.world.get::<crate::decal::DecalComponent>(entity)?;
+                if !decal.enabled || decal.opacity <= 0.001 {
+                    return None;
+                }
+                let transform = self.world.get::<Transform>(entity)?;
+                let material = self
+                    .world
+                    .get::<MaterialComponent>(entity)
+                    .map(|m| m.runtime_id);
+                Some((transform.to_matrix(), *decal, material))
+            })
+            .collect();
+
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        renderer.decals.clear();
+        for (transform, decal, material) in collected {
+            let source = material.and_then(|id| renderer.materials_pool.get(id));
+            let (base, albedo, normal, orm) = source.map_or(
+                ([1.0, 1.0, 1.0, 1.0], -1, -1, -1),
+                |m| (m.base_color, m.albedo_map, m.normal_map, m.metallic_roughness_map),
+            );
+            renderer.decals.push(somnium_renderer::pass::decal::GpuDecal::new(
+                transform,
+                [
+                    base[0],
+                    base[1],
+                    base[2],
+                    base[3] * decal.opacity.clamp(0.0, 1.0),
+                ],
+                albedo,
+                normal,
+                orm,
+                decal.priority,
+                decal.angle_fade_degrees,
+                decal.normal_strength,
+                decal.roughness,
+            ));
+        }
+    }
+
+    /// CONTROL-N: step the weather and push it everywhere it is read.
+    ///
+    /// Runs after [`Self::apply_sky`] so the sky's wind is the one this
+    /// overwrites rather than the other way round — §6.3's "wind becomes one
+    /// global vector" only means anything if there is a single last writer.
+    ///
+    /// Nothing here sets `scene_dirty`. Every value written is derived from
+    /// fields that are themselves saved, and a world that got dirty by raining
+    /// would make "unsaved changes" meaningless.
+    fn apply_weather(&mut self, dt: f32) {
+        let weather = self
+            .world
+            .entities()
+            .find_map(|e| self.world.get::<crate::weather::WeatherComponent>(e).copied());
+        let Some(weather) = weather else {
+            self.weather_state = crate::weather::WeatherState::default();
+            return;
+        };
+        self.weather_state = weather.step(self.weather_state, dt);
+        let state = self.weather_state;
+
+        // ── The one wind ─────────────────────────────────────────────────────
+        //
+        // Clouds, the ocean spectrum and precipitation shear all read this.
+        // Written only while the weather is enabled, so a scene with weather
+        // off keeps every authored wind exactly as it was.
+        if weather.enabled {
+            let speed = (state.wind[0] * state.wind[0] + state.wind[1] * state.wind[1]).sqrt();
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.cloud_pass.settings.wind = state.wind;
+                renderer.water_pass.rain_ripple = state.ripples;
+            }
+            // The sea roughens because the wind does, through the spectrum the
+            // water already had — not through a second "storminess" knob.
+            let bodies: Vec<somnium_ecs::Entity> = self
+                .world
+                .entities()
+                .filter(|e| self.world.get::<WaterComponent>(*e).is_some())
+                .collect();
+            for entity in bodies {
+                if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                    water.wind_speed = speed;
+                }
+            }
+        } else if let Some(renderer) = self.renderer.as_mut() {
+            renderer.water_pass.rain_ripple = 0.0;
+        }
+
+        // ── Wetness ──────────────────────────────────────────────────────────
+        if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+            // Meshes, through the one uniform `shading.wgsl` reads. Written
+            // every frame including when the weather is off, so the uniform
+            // can never hold a stale wetness from weather that has stopped.
+            renderer.shading_pass.set_weather(
+                &ctx.queue,
+                state.wet_diffuse,
+                state.wet_specular,
+                state.puddles,
+            );
+            // Terrain, through XV-H's existing uniform. Driven rather than
+            // replaced: `SOMNIUM_TERRAIN_WETNESS` and the Terrain tool's own
+            // slider still author the value when the weather is off.
+            if weather.enabled {
+                for terrain in &mut renderer.terrains {
+                    terrain.wetness = state.wet_diffuse;
+                }
+            }
+        }
+
+        self.apply_precipitation(weather, state);
+    }
+
+    /// CONTROL-N: keep the rain emitter in step with the weather.
+    ///
+    /// The existing `ParticleEmitter`, camera-anchored and wind-sheared, rather
+    /// than a second particle system — which is what CONTROL-K's
+    /// `velocity_bias` and `spawn_extents` were added for.
+    fn apply_precipitation(
+        &mut self,
+        weather: crate::weather::WeatherComponent,
+        state: crate::weather::WeatherState,
+    ) {
+        use crate::weather::Precipitation;
+
+        let falling = weather.enabled && state.rate > 0.01;
+        if !falling {
+            if let Some(entity) = self.precipitation_entity.take() {
+                // Despawned rather than left with a zero rate: an emitter with
+                // no particles is still an outliner row somebody has to
+                // wonder about.
+                let _ = self.world.despawn(entity);
+            }
+            return;
+        }
+
+        let camera = self
+            .renderer
+            .as_ref()
+            .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
+        let snow = state.precipitation == Precipitation::Snow;
+
+        // Snow falls at about 1 m/s and drifts; rain at about 9 and shears
+        // hard. The same emitter, two sets of numbers.
+        let fall_speed = if snow { -1.2 } else { -9.0 };
+        let shear = if snow { 0.35 } else { 0.12 };
+        let colour = if snow {
+            somnium_ecs::curve::Gradient::ramp([0.9, 0.93, 1.0, 0.85], [0.9, 0.93, 1.0, 0.0])
+        } else {
+            somnium_ecs::curve::Gradient::ramp([0.62, 0.70, 0.82, 0.55], [0.62, 0.70, 0.82, 0.0])
+        };
+        // A box overhead, wide enough that the far edge is out of frame and
+        // tall enough that a particle lives long enough to be seen falling.
+        let extents = [26.0_f32, 12.0, 26.0];
+        let emitter = crate::ParticleEmitter {
+            max_particles: 20_000,
+            spawn_rate: weather.particle_rate.max(0.0) * state.rate,
+            lifetime: 3.0,
+            initial_speed: 0.0,
+            spread_angle: 0.0,
+            size_start: if snow { 0.09 } else { 0.035 },
+            size_end: if snow { 0.09 } else { 0.035 },
+            color_over_life: colour,
+            gravity: 0.0,
+            velocity_bias: [
+                state.wind[0] * shear,
+                fall_speed,
+                state.wind[1] * shear,
+            ],
+            spawn_extents: extents,
+            ..crate::ParticleEmitter::default()
+        };
+        let origin = Transform::from_translation(camera + glam::Vec3::new(0.0, 14.0, 0.0));
+
+        match self.precipitation_entity {
+            Some(entity) if self.world.is_alive(entity) => {
+                if let Some(transform) = self.world.get_mut::<Transform>(entity) {
+                    *transform = origin;
+                }
+                if let Some(existing) = self.world.get_mut::<crate::ParticleEmitter>(entity) {
+                    // The live particle list is kept: rewriting the whole
+                    // component every frame would restart the rain sixty times
+                    // a second.
+                    let particles = std::mem::take(&mut existing.particles);
+                    let accum = existing.spawn_accum;
+                    *existing = emitter;
+                    existing.particles = particles;
+                    existing.spawn_accum = accum;
+                }
+            }
+            _ => {
+                let entity = self.world.spawn((
+                    origin,
+                    Name::new("Precipitation"),
+                    WorldTransform::identity(),
+                    emitter,
+                ));
+                self.precipitation_entity = Some(entity);
+            }
+        }
+    }
+
+    /// Snapshot a component value through its schema, without a live entity.
+    ///
+    /// A scratch world rather than a hand-built `ReflectObject`: the record has
+    /// to come from the schema, or a preset would be a second description of
+    /// the component's field order — exactly what Seam 1 exists to prevent.
+    fn stage_component<C: somnium_ecs::Component + Clone>(
+        value: C,
+    ) -> Option<somnium_ecs::reflect::ReflectObject> {
+        let mut scratch = somnium_ecs::World::new();
+        let entity = scratch.spawn((value,));
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry
+            .iter()
+            .find(|schema| schema.component_id == somnium_ecs::ComponentId::of::<C>())?;
+        (schema.snapshot)(&scratch, entity)
+    }
+
+    /// Build the command that applies a named sky preset, or `None`.
+    fn sky_preset_command(
+        &self,
+        id: &str,
+    ) -> Option<Box<dyn crate::editor_commands::EditorCommand>> {
+        let entity = self
+            .world
+            .entities()
+            .find(|e| self.world.get::<crate::sky::SkyComponent>(*e).is_some())?;
+        let mut next = self.world.get::<crate::sky::SkyComponent>(entity).copied()?;
+        if !next.apply_preset(id) {
+            return None;
+        }
+        let values = Self::stage_component(next)?;
+        crate::editor_commands::SetComponentCmd::new(
+            &self.world,
+            entity,
+            somnium_ecs::reflect::StableId::new("somnium.Sky"),
+            values,
+            "Sky preset",
+        )
+        .ok()
+        .map(|command| Box::new(command) as Box<dyn crate::editor_commands::EditorCommand>)
+    }
+
+    /// Push one or more component writes as a single named undo entry.
+    fn push_environment_preset(
+        &mut self,
+        commands: Vec<Box<dyn crate::editor_commands::EditorCommand>>,
+        description: String,
+    ) {
+        if commands.is_empty() {
+            return;
+        }
+        // `CommandGroup` wants a `&'static str`; a preset's label is built at
+        // runtime from the registry's table, so it is leaked once per click.
+        // The alternative is a history that reads "Change" — Stride's rule
+        // again, and the leak is a handful of bytes per authoring action.
+        let description: &'static str = Box::leak(description.into_boxed_str());
+        let group = crate::editor_commands::CommandGroup::new(description, commands);
+        self.undo_stack.push(
+            Box::new(group),
+            &mut self.world,
+            &mut self.selection.primary,
+        );
+        self.scene_dirty = true;
     }
 
     /// CONTROL-L: publish the clock to the viewport context bar.
@@ -5216,6 +5611,27 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::CompleteDrop(request) => {
                 use somnium_ui::DropRequest;
                 match request {
+                    DropRequest::CreateDecal { asset, at } => {
+                        let position = glam::Vec3::from(at);
+                        let normal = self.terrain_normal_at(position);
+                        let transform = crate::decal::placement(position, normal);
+                        let runtime_id = self.material_runtime_id(asset);
+                        let snapshot = EntitySnapshot {
+                            transform: Some(transform),
+                            name: Some(Name::new("Decal")),
+                            wt: Some(WorldTransform::identity()),
+                            decal: Some(crate::decal::DecalComponent::default()),
+                            mat: Some(MaterialComponent { asset, runtime_id }),
+                            ..EntitySnapshot::default()
+                        };
+                        // One drop, one undo step — CONTROL-E's rule, and this
+                        // is the eighth route through it.
+                        let cmd = Box::new(CreateEntityCmd::new(snapshot));
+                        self.undo_stack
+                            .push(cmd, &mut self.world, &mut self.selection.primary);
+                        self.scene_dirty = true;
+                        info!("Created decal");
+                    }
                     DropRequest::AssignMaterial { asset, entities } => {
                         self.handle_editor_event(EditorEvent::AssignMaterial { entities, asset });
                     }
@@ -5764,6 +6180,7 @@ impl<G: GameApp> Engine<G> {
                     mat: None,
                     wt: Some(WorldTransform::identity()),
                     environment: false,
+                    decal: None,
                     mesh_kind: None,
                     is_particle_emitter: false,
                     terrain: None,
@@ -5903,7 +6320,8 @@ impl<G: GameApp> Engine<G> {
                                     emissive: [0.0; 3],
                                     emissive_map: -1,
                                     terrain_index: -1,
-                                    _pad: [0.0; 2],
+                                    porosity: 0.5,
+                        _pad: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -5960,6 +6378,7 @@ impl<G: GameApp> Engine<G> {
                     mat,
                     wt: Some(world),
                     environment: false,
+                    decal: None,
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
@@ -6153,6 +6572,75 @@ impl<G: GameApp> Engine<G> {
                     gesture: GestureId(u64::MAX - 2),
                     live,
                 });
+            }
+
+            // CONTROL-M / CONTROL-N. Both presets take the same route: mutate
+            // a copy, snapshot it through the schema, and push one named
+            // `SetComponentCmd`. A weather preset carries its sky with it,
+            // because CONTROL-N's exit criterion is *one* preset closing the
+            // clouds and starting the rain.
+            EditorEvent::SetSkyPreset(id) => {
+                let label = somnium_ui::commands::SKY_PRESETS
+                    .iter()
+                    .find(|(preset, _)| *preset == id)
+                    .map_or(id, |(_, label)| *label);
+                match self.sky_preset_command(id) {
+                    Some(command) => self.push_environment_preset(
+                        vec![command],
+                        format!("Sky preset: {label}"),
+                    ),
+                    None => warn!(%id, "no Sky component, or unknown sky preset"),
+                }
+            }
+
+            EditorEvent::SetWeatherPreset(id) => {
+                let label = somnium_ui::commands::WEATHER_PRESETS
+                    .iter()
+                    .find(|(preset, _)| *preset == id)
+                    .map_or(id, |(_, label)| *label);
+                let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::new();
+                let Some(entity) = self
+                    .world
+                    .entities()
+                    .find(|e| self.world.get::<crate::weather::WeatherComponent>(*e).is_some())
+                else {
+                    warn!("no Weather component in the scene");
+                    return;
+                };
+                let Some(current) = self
+                    .world
+                    .get::<crate::weather::WeatherComponent>(entity)
+                    .copied()
+                else {
+                    return;
+                };
+                let mut next = current;
+                if !next.apply_preset(id) {
+                    warn!(%id, "unknown weather preset");
+                    return;
+                }
+                let Some(values) = Self::stage_component(next) else {
+                    return;
+                };
+                match crate::editor_commands::SetComponentCmd::new(
+                    &self.world,
+                    entity,
+                    somnium_ecs::reflect::StableId::new("somnium.Weather"),
+                    values,
+                    format!("Weather preset: {label}"),
+                ) {
+                    Ok(command) => commands.push(Box::new(command)),
+                    Err(error) => {
+                        warn!(%error, "rejected weather preset");
+                        return;
+                    }
+                }
+                if let Some(command) = crate::weather::sky_preset_for(id)
+                    .and_then(|sky| self.sky_preset_command(sky))
+                {
+                    commands.push(command);
+                }
+                self.push_environment_preset(commands, format!("Weather preset: {label}"));
             }
 
             EditorEvent::SetTerrainToolValue {
@@ -6397,6 +6885,7 @@ impl<G: GameApp> Engine<G> {
                         mat,
                         wt: Some(WorldTransform::identity()),
                         environment: false,
+                        decal: None,
                         mesh_kind,
                         is_particle_emitter,
                         // Terrains are not duplicated — two entities sharing

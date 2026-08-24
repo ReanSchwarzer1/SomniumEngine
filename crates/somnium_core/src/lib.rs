@@ -49,6 +49,8 @@ pub mod app;
 pub mod autosave;
 pub mod character;
 pub mod clipboard;
+/// Phase CONTROL-O: deferred decals.
+pub mod decal;
 pub mod config;
 pub mod context;
 pub mod editor_commands;
@@ -75,6 +77,10 @@ pub mod script_cook;
 pub mod script_decls;
 pub mod script_host;
 pub mod script_input;
+/// Phase CONTROL-M: the sky and its cloud layer.
+pub mod sky;
+/// Phase CONTROL-N: weather and the wetness it leaves.
+pub mod weather;
 pub mod selection;
 pub mod settings;
 pub mod sun;
@@ -1543,6 +1549,20 @@ pub struct ParticleEmitter {
     pub color_over_life: somnium_ecs::curve::Gradient,
     /// Downward gravity acceleration (m/s²).
     pub gravity: f32,
+    /// Phase CONTROL-N: a constant velocity added to every particle at birth.
+    ///
+    /// The cone spawn is right for a fountain and useless for rain, which
+    /// falls in one direction and is *sheared* by wind. One vector turns the
+    /// same emitter into both, which is the plan's "precipitation through the
+    /// existing particle emitter" rather than a second particle system.
+    pub velocity_bias: [f32; 3],
+    /// Phase CONTROL-N: half-extents of a box particles spawn in, around the
+    /// emitter's origin.
+    ///
+    /// Zero is the point emitter every existing scene has. Non-zero makes the
+    /// emitter a volume, which is what rain needs: a camera-anchored box
+    /// overhead, so precipitation exists where the player is and nowhere else.
+    pub spawn_extents: [f32; 3],
 
     // ── Runtime state (not user-facing) ──────────────────────────────────────
     /// Live particles owned by this emitter.
@@ -1565,6 +1585,8 @@ impl Default for ParticleEmitter {
                 [1.0, 0.4, 0.1, 1.0],
                 [0.2, 0.0, 0.0, 0.0],
             ),
+            velocity_bias: [0.0; 3],
+            spawn_extents: [0.0; 3],
             gravity: 1.0,
             particles: Vec::new(),
             spawn_accum: 0.0,
@@ -1634,9 +1656,20 @@ pub fn simulate_particles(
             let r2 = ((seed >> 17) & 0xFFFF) as f32 / 65535.0 * 2.0 * std::f32::consts::PI;
             let theta = r1 * spread;
             let dir = glam::Vec3::new(theta.sin() * r2.cos(), theta.cos(), theta.sin() * r2.sin());
+            // CONTROL-N: a spawn volume and a constant velocity, both zero for
+            // every emitter authored before this existed.
+            let extents = glam::Vec3::from(emitter.spawn_extents);
+            let jitter = if extents == glam::Vec3::ZERO {
+                glam::Vec3::ZERO
+            } else {
+                let r3 = ((seed >> 5) & 0xFFFF) as f32 / 65535.0;
+                let r4 = ((seed >> 41) & 0xFFFF) as f32 / 65535.0;
+                let r5 = ((seed >> 23) & 0xFFFF) as f32 / 65535.0;
+                (glam::Vec3::new(r3, r4, r5) * 2.0 - glam::Vec3::ONE) * extents
+            };
             emitter.particles.push(ParticleState {
-                position: origin,
-                velocity: dir * speed,
+                position: origin + jitter,
+                velocity: dir * speed + glam::Vec3::from(emitter.velocity_bias),
                 age: 0.0,
                 lifetime,
             });

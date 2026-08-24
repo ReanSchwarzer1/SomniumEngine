@@ -309,6 +309,17 @@ pub struct SomniumRenderer {
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
+    /// Phase CONTROL-M: volumetric clouds. Public because the editor drives
+    /// every one of its parameters from `SkyComponent`.
+    pub cloud_pass: crate::pass::clouds::CloudPass,
+    /// Phase CONTROL-O: deferred decals, binned through the same froxel grid
+    /// as the local lights.
+    pub decal_grid: crate::pass::decal::DecalGrid,
+    /// This frame's decals, pushed by the engine layer and cleared after
+    /// binning — the same lifecycle `local_lights` has, and for the same
+    /// reason: the binning must use the *render's* view matrix, not whatever
+    /// the matrix was when the ECS was walked.
+    pub decals: Vec<crate::pass::decal::GpuDecal>,
     /// Phases 24U/25I: froxel volume carrying aerial perspective and fog.
     pub volumetric_pass: crate::pass::volumetric::VolumetricPass,
 
@@ -395,6 +406,7 @@ impl SomniumRenderer {
         self.aerial_split_enabled = on("aerial");
         self.aerial_hero_bank = on("aerial_hero");
         self.census_pass.enabled = on("pixel_census");
+        self.cloud_pass.jitter = on("cloud_jitter");
         self.classify_pass.enabled = on("shading_bins");
 
         let hex = on("hex_tiling");
@@ -610,6 +622,19 @@ impl SomniumRenderer {
         );
         let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
 
+        // Phase CONTROL-M. Built before the shading pass because shading binds
+        // its cloud-shadow field, and the field must exist before the bind
+        // group that names it.
+        let cloud_pass = crate::pass::clouds::CloudPass::new(
+            &ctx.device,
+            ctx.config.width,
+            ctx.config.height,
+        );
+
+        // Phase CONTROL-O. Built before the shading pass, like the clouds and
+        // for the same reason: shading binds its buffers.
+        let decal_grid = crate::pass::decal::DecalGrid::new(&ctx.device);
+
         let shading_pass = ShadingPass::new(
             &ctx.device,
             &global_pool.layout,
@@ -632,6 +657,9 @@ impl SomniumRenderer {
             lighting_extra_pass.aux_view(),
             lighting_extra_pass.volume_view(),
             lighting_extra_pass.sh_buffer(),
+            &cloud_pass.shadow_view,
+            &cloud_pass.shadow_params,
+            &decal_grid,
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -793,6 +821,9 @@ impl SomniumRenderer {
             single_sided_args: 0,
             ibl_pass,
             volumetric_pass,
+            cloud_pass,
+            decal_grid,
+            decals: Vec::new(),
             hiz_pass,
             hiz_ready: false,
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
@@ -1054,7 +1085,8 @@ impl SomniumRenderer {
                         emissive: mat.emissive,
                         emissive_map: resolve_tex(mat.emissive_map),
                         terrain_index: -1,
-                        _pad: [0.0; 2],
+                        porosity: 0.5,
+                        _pad: 0.0,
                         // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                         // and BLEND goes to the forward pass, so a cutoff on either
                         // would punch holes in geometry that should be solid.
@@ -1599,6 +1631,10 @@ impl SomniumRenderer {
             self.restir_pass.resize(&ctx.device, width, height);
             self.restir_gi_pass.resize(&ctx.device, width, height);
             self.lighting_extra_pass.resize(&ctx.device, width, height);
+            // CONTROL-M: the quarter-res march target follows the scene, and
+            // dropping its bind groups here is what makes the next frame
+            // rebuild them against the new depth view rather than the old one.
+            self.cloud_pass.resize(&ctx.device, width, height);
             self.shading_pass.resize(
                 &ctx.device,
                 &self.vis_pass.view,
@@ -1938,7 +1974,8 @@ impl SomniumRenderer {
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: terrain.terrain_index as i32,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -2079,6 +2116,25 @@ impl SomniumRenderer {
             shading_mode,
         );
         self.local_lights.clear();
+
+        // Phase CONTROL-O: the same grid geometry, the same matrices, the same
+        // near and far. Binned here rather than where the ECS is walked so a
+        // decal and a light in the same froxel genuinely are in the same
+        // froxel — a submission-time binning would be one frame stale, which
+        // shows as decals popping at tile boundaries under a fast camera.
+        let decals = std::mem::take(&mut self.decals);
+        self.decal_grid.assign_and_upload(
+            &ctx.queue,
+            &decals,
+            self.view_matrix,
+            self.proj_matrix,
+            self.render_width,
+            self.render_height,
+            0.1,
+            1000.0,
+        );
+        self.decals = decals;
+        self.decals.clear();
         // ── 0. Upload view buffer ────────────────────────────────────────────
         self.write_view_buffer(&ctx.queue, self.view_proj);
 
@@ -2793,6 +2849,33 @@ impl SomniumRenderer {
         self.shading_pass
             .set_volumetric_range(&ctx.queue, self.volumetric_pass.max_distance());
 
+        // ── 6.9 Volumetric clouds (Phase CONTROL-M) ──────────────────────────
+        //
+        // Marched here rather than after shading because it reads the froxel
+        // volume for its own aerial perspective, and because a compute
+        // dispatch issued before the shading draw can overlap with it. The
+        // *composite* has to wait until shading has drawn the sky, and does —
+        // see 7.4 below.
+        self.profiler.begin(&mut encoder, "Clouds");
+        self.cloud_pass.ensure_bind_groups(
+            &ctx.device,
+            self.atmosphere_pass.transmittance_view(),
+            self.atmosphere_pass.multiscatter_view(),
+            self.atmosphere_pass.sampler(),
+            &self.vis_pass.depth_view,
+            &self.volumetric_pass.view,
+        );
+        self.cloud_pass.record(
+            &mut encoder,
+            &ctx.queue,
+            self.view_proj_unjittered.inverse(),
+            self.camera_pos,
+            self.light_direction,
+            self.light_color,
+            self.volumetric_pass.max_distance(),
+        );
+        self.profiler.end(&mut encoder);
+
         // ── 6.95 Terrain clipmap generate (Phase DF) ─────────────────────────
         // World XZ, no FSR jitter. Generate paints array layers as color
         // attachments; shade samples the same images (group 2).
@@ -3245,6 +3328,18 @@ impl SomniumRenderer {
         // perspective reaching it for the first time — and with one copy of
         // `sample_shadow` and the cluster lookup instead of two. It still
         // writes depth before the water pass, because the visibility pass does.
+
+        // ── 7.4 Cloud composite (Phase CONTROL-M) ────────────────────────────
+        //
+        // After the sky is in the HDR target and before water and transparents,
+        // so a cloud is behind a wave and in front of the sky, which is where
+        // clouds are. Before TAA too: the clouds land in the buffer TAA already
+        // resolves, so they inherit 24F's jittered-matrix reprojection instead
+        // of growing a second, naive history.
+        self.profiler.begin(&mut encoder, "Cloud composite");
+        self.cloud_pass
+            .composite(&mut encoder, &self.postprocess_pass.hdr_view);
+        self.profiler.end(&mut encoder);
 
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         self.water_pass.clear_surface(&mut encoder);

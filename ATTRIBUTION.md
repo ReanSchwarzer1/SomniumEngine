@@ -1940,9 +1940,25 @@ visible-tile promotion; Godot's mtime-then-content-hash invalidation; NeoAxis's
 render-large, auto-crop, downsample mesh preview; Unreal's generator frequency;
 Lumina's decline/fall-through registry; and Flax's cancellable progress surface.
 
+### 13G.5b CONTROL-K/L/M/N/O implementation mapping (2026-08-23)
+
+No third-party code was copied. Patterns studied and applied, file by file:
+
+| Somnium file | Pattern, and whose |
+|---|---|
+| `somnium_ecs/src/curve.rs` | Per-key interpolation and value-per-time tangents — the convention Unity, Unreal and Fyrox share. `SliderCurve` is NeoAxis's *convenient distribution* (`ConvenientDistribution`), rebuilt from its stated behaviour. |
+| `somnium_ui/src/widgets/curve_editor.rs` | Fyrox `fyrox-ui/src/curve/mod.rs` — zoom and pan as widget state rather than authored data, key hit-testing by screen radius, the right-click interpolation cycle. Flax `Source/Editor/GUI/CurveEditor.cs` — re-finding the selection after every mutation, which is what keeps a drag alive past a neighbour. |
+| `somnium_ui/src/widgets/gradient_editor.rs` | Godot's `GradientEditor` — the handle strip below the ramp, and the rule that a new stop takes the colour already there so adding one never changes the gradient. Unity's `GradientEditor` — alpha against a checkerboard. |
+| `somnium_core/src/time_of_day.rs` | NOAA *Solar Calculation Details* (fractional year, equation of time, declination, hour angle), as the analytic model Unreal's SunSky also uses. The one-driver/named-presets/curves shape is the convergence §6.3 records across every surveyed engine. Ultra Dynamic Sky supplied the *anti*-pattern — a "Refresh Settings" button — which §5.3 names and this phase refuses. |
+| `somnium_renderer/src/shaders/clouds_noise.wgsl`, `clouds.wgsl` | Schneider & Vos (SIGGRAPH 2015) — Perlin *remapped by* Worley for the base, higher-frequency Worley erosion, per-cloud-type height gradients, Beer's law with the powder term, cone-sampled shadow taps. Schneider, *Nubis* (2017) — the weather map as a top-down field sampled by world XZ. Toft & Bowles (arXiv:1609.05344) — the adaptive step, the transmittance early-out, and the jitter kept behind a switch because they measured it costing more than it saved. Hillaire (EGSR 2020) — the shared transmittance/multiscatter LUTs the march reuses rather than duplicating. |
+| `somnium_renderer/src/pass/clouds.rs` | Epic's Volumetric Cloud documentation — Beer Shadow Maps as the ground-level cloud-shadow model, and the trace/reconstruct/upsample trade-off whose reconstruction stage regressed in UE 5.6, which is why the composite's bilateral upsample has a documented bypass. **The 128³/32³ resolutions and the coverage/type/precipitation channel split are Somnium's own decision and are labelled as such in the shader**, per §6.3's refusal to launder an unverifiable community reconstruction; Unity HDRP's cloud map is cited only as independent corroboration that a top-down coverage-and-type field is the right shape. |
+| `somnium_core/src/weather.rs`, `shading.wgsl`'s `apply_wetness` | Lagarde, *Water drop 3a/3b* — two time constants, specular recovering before diffuse, porosity as the discriminating **material** channel, and BRDF-parameter tweaking with an accumulated-water term instead of a separate wet texture set. Ultra Dynamic Sky — weather as named states with an explicit transition duration. |
+| `somnium_renderer/src/cluster.rs`, `pass/decal.rs`, `shading.wgsl`'s `apply_decals` | The froxel binning is Somnium's own (Phase 13C); CONTROL-O generalised it behind a `ClusterVolume` trait rather than copying it. The decal model — inverse-transform into a unit box, edge fade, and an authored **angle fade** against the projection axis — is the standard deferred-decal formulation as described in Unreal's and Frostbite's public material on the subject. |
+
 ### 13G.6 External literature — the rendering half
 
-Studied for CONTROL-M / N / L; nothing implemented.
+Studied for CONTROL-M / N / L; **implemented 2026-08-23** — see 13G.5b for the
+file-by-file mapping.
 
 | Reference | Contribution | Somnium plan |
 |---|---|---|

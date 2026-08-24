@@ -2160,7 +2160,12 @@ impl UiManager {
         };
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
         let acceptance =
-            match crate::drag_drop::semantic_request(&self.asset_db, &payload, &candidate) {
+            match crate::drag_drop::semantic_request(
+                &self.asset_db,
+                &payload,
+                &candidate,
+                self.native_ui.modifiers(),
+            ) {
                 Ok(_) => candidate,
                 Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
             };
@@ -2173,7 +2178,12 @@ impl UiManager {
         let Some(drop) = self.native_ui.take_completed_drop() else {
             return;
         };
-        match crate::drag_drop::semantic_request(&self.asset_db, &drop.payload, &drop.acceptance) {
+        match crate::drag_drop::semantic_request(
+            &self.asset_db,
+            &drop.payload,
+            &drop.acceptance,
+            self.native_ui.modifiers(),
+        ) {
             Ok(request @ crate::drag_drop::DropRequest::LoadScene { .. }) => {
                 self.prompt_unsaved_action(EditorEvent::CompleteDrop(request));
             }
@@ -3866,6 +3876,12 @@ impl UiManager {
                 .push_back(EditorEvent::ToggleOrbitSelection),
             // CONTROL-L. The hour comes from the registry's own table, so a
             // preset row and the hour it means cannot disagree.
+            A::SetSkyPreset(id) => self
+                .editor_events
+                .push_back(EditorEvent::SetSkyPreset(id)),
+            A::SetWeatherPreset(id) => self
+                .editor_events
+                .push_back(EditorEvent::SetWeatherPreset(id)),
             A::SetTimeOfDay(id) => {
                 if let Some((_, _, hour)) = crate::commands::TIME_PRESETS
                     .iter()

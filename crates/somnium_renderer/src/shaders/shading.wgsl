@@ -36,6 +36,212 @@
 // x = flags (bit0 cache, 1 specular, 2 path tracer, 3 sdf, 4 probes)
 // y = cache intensity, z = cell size metres, w = volume half-extent cells
 @group(1) @binding(16) var<storage, read> sh_probes: array<vec4<f32>>;
+/// CONTROL-M: a world-XZ field of how much sun reaches the ground through the
+/// cloud layer. One scalar per column, sampled by every surface the sun lights
+/// — terrain, water and meshes alike — so a cloud's shadow crosses a beach onto
+/// the sea without either surface knowing what a cloud is.
+@group(1) @binding(17) var cloud_shadow_tex: texture_2d<f32>;
+/// `[centre_x, centre_z, extent_metres, strength]`. Strength zero means the
+/// pass is off and the texture must not be read; that is what keeps a disabled
+/// cloud pass free rather than merely cheap.
+@group(1) @binding(18) var<uniform> cloud_shadow_params: vec4<f32>;
+/// CONTROL-N: `[wet_diffuse, wet_specular, puddles, unused]`.
+///
+/// All zero when no weather is driving, and `apply_wetness` returns
+/// immediately in that case — so a scene with no Weather component shades
+/// bit-identically to how it did before this binding existed.
+@group(1) @binding(19) var<uniform> weather: vec4<f32>;
+
+/// Phase CONTROL-O: one deferred decal. Mirrors `pass::decal::GpuDecal`.
+struct Decal {
+    inv_transform: mat4x4<f32>,
+    position_ws: vec3<f32>,
+    radius: f32,
+    base_color: vec4<f32>,
+    albedo_map: i32,
+    normal_map: i32,
+    orm_map: i32,
+    priority: i32,
+    angle_fade_cos: f32,
+    normal_strength: f32,
+    roughness: f32,
+    _pad: f32,
+}
+
+@group(1) @binding(20) var<storage, read> decals: array<Decal>;
+/// Per-froxel `(offset, count)` into `decal_indices`. The froxel *geometry* is
+/// the light grid's, read from `cluster_params`, so a pixel that has already
+/// worked out its froxel for lighting reuses the answer here.
+@group(1) @binding(21) var<storage, read> decal_offsets: array<ClusterOffset>;
+@group(1) @binding(22) var<storage, read> decal_indices: array<u32>;
+/// `[count, 0, 0, 0]`. Zero skips the whole path, so a scene with no decals
+/// pays one uniform read.
+@group(1) @binding(23) var<uniform> decal_params: vec4<u32>;
+
+/// Sun visibility through the cloud layer at a world position.
+///
+/// Returns 1 — no shadow at all — when the cloud pass is off, when the point
+/// falls outside the field, or when the strength is zero. Outside rather than
+/// clamped: the field is centred on the camera and clamping would smear the
+/// edge texel across the whole horizon, which reads as a permanent shadow
+/// wall at the edge of the world.
+fn cloud_shadow_at(world_pos: vec3<f32>) -> f32 {
+    let strength = cloud_shadow_params.w;
+    if strength <= 0.0 {
+        return 1.0;
+    }
+    let extent = max(cloud_shadow_params.z, 1.0);
+    let local = (world_pos.xz - cloud_shadow_params.xy) / extent;
+    if any(abs(local) > vec2<f32>(1.0)) {
+        return 1.0;
+    }
+    let uv = local * 0.5 + 0.5;
+    return clamp(textureSampleLevel(cloud_shadow_tex, default_sampler, uv, 0.0).r, 0.0, 1.0);
+}
+
+/// CONTROL-N: what rain does to a surface, following Lagarde's *Water drop 3b*.
+///
+/// Three effects, one authored material channel (`porosity`) and two driven
+/// scalars, applied in place on the shading surface:
+///
+/// 1. **Albedo darkens non-linearly.** `albedo^(1 + k)` rather than
+///    `albedo * (1 - k)`. A multiply darkens white as hard as black; water does
+///    not — a wet white wall stays nearly white while wet asphalt goes almost
+///    to pitch. The exponent form has that behaviour for free and it cannot
+///    push a channel out of `0..1`.
+/// 2. **Specular rises and roughness falls.** A water film is a smooth
+///    dielectric layer over the surface, so `f0` moves toward water's 0.02 and
+///    the microfacet roughness collapses toward it. Driven by the *specular*
+///    scalar, which recovers before the diffuse one.
+/// 3. **Standing water flattens the normal.** The accumulated-water term
+///    interpolates the shading normal toward straight up, with a mirror-flat
+///    puddle as the limit case. No separate puddle material, no second texture
+///    set — §6.3's rule, and the reason porosity is what scales all of it.
+///
+/// A sealed surface (`porosity = 0`) is untouched by every one of these, which
+/// is why a car parked in the rain does not go matte with the pavement.
+fn apply_wetness(surface: ptr<function, Surface>, porosity: f32) {
+    let wet_diffuse = weather.x;
+    let wet_specular = weather.y;
+    if wet_diffuse <= 0.001 && wet_specular <= 0.001 {
+        return;
+    }
+    let uptake = clamp(porosity, 0.0, 1.0);
+
+    // 1. Non-linear darkening. Capped at a doubling of the exponent, which is
+    //    roughly the darkest a real porous surface gets.
+    let darkening = 1.0 + uptake * wet_diffuse;
+    (*surface).albedo = pow(max((*surface).albedo, vec3<f32>(0.0)), vec3<f32>(darkening));
+
+    // 2. Water's own Fresnel, and a smoother microfacet distribution. Both are
+    //    scaled by uptake: a sealed surface already has its own film.
+    let film = uptake * wet_specular;
+    (*surface).f0 = mix((*surface).f0, max((*surface).f0, vec3<f32>(0.02)), film);
+    (*surface).roughness = mix((*surface).roughness, (*surface).roughness * 0.25, film)
+        + 0.0;
+    (*surface).roughness = clamp((*surface).roughness, 0.015, 1.0);
+
+    // 3. Standing water. Independent of porosity — a puddle sits on top of a
+    //    sealed surface just as happily as on a porous one.
+    let puddle = clamp(weather.z, 0.0, 1.0);
+    if puddle > 0.001 {
+        (*surface).normal = normalize(mix(
+            (*surface).normal, vec3<f32>(0.0, 1.0, 0.0), puddle * wet_specular));
+        (*surface).roughness = mix((*surface).roughness, 0.02, puddle * wet_specular);
+    }
+}
+
+/// Phase CONTROL-O: project this froxel's decals onto the surface.
+///
+/// A deferred decal is a box. A pixel is inside one when its position, taken
+/// into the decal's own space, lies within the unit cube — which is one
+/// matrix multiply and three comparisons, and is why the *inverse* transform is
+/// what the buffer carries.
+///
+/// Two fades, both necessary:
+///
+/// - **Edge fade** toward the box's faces, so a decal does not end on a hard
+///   line at the limit of its own volume.
+/// - **Angle fade** against the decal's own -Y axis. Without it a projection
+///   aimed at the floor smears down every wall inside its box, which is the
+///   characteristic failure of naïve deferred decals and the reason
+///   `angle_fade_cos` is authored rather than fixed.
+///
+/// Applied in ascending priority so the highest-priority decal is applied last
+/// and wins; the CPU sorts, so the shader does not have to.
+fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u32) {
+    let count = decal_params.x;
+    if count == 0u {
+        return;
+    }
+    let bucket = decal_offsets[froxel];
+    if bucket.count == 0u {
+        return;
+    }
+    let geometric_normal = (*surface).normal;
+
+    for (var i = 0u; i < bucket.count; i = i + 1u) {
+        let index = decal_indices[bucket.offset + i];
+        if index >= count {
+            continue;
+        }
+        let decal = decals[index];
+
+        let local = (decal.inv_transform * vec4<f32>(world_pos, 1.0)).xyz;
+        if any(abs(local) > vec3<f32>(0.5)) {
+            continue;
+        }
+
+        // The decal projects along its own -Y, so its UVs are the other two
+        // axes and its facing is +Y in decal space taken back to the world.
+        let axis = normalize((decal.inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
+        let facing = dot(geometric_normal, axis);
+        if facing <= decal.angle_fade_cos {
+            continue;
+        }
+        let angle_weight = smoothstep(
+            decal.angle_fade_cos, min(decal.angle_fade_cos + 0.25, 1.0), facing);
+
+        // Edge fade: strongest at the centre of the box, zero at its faces.
+        let edge = (vec3<f32>(0.5) - abs(local)) * 2.0;
+        let edge_weight = smoothstep(0.0, 0.35, min(edge.x, min(edge.y, edge.z)));
+
+        let uv = local.xz + vec2<f32>(0.5);
+        var colour = decal.base_color;
+        if decal.albedo_map >= 0 {
+            colour *= textureSampleLevel(
+                textures[decal.albedo_map], default_sampler, uv, 0.0);
+        }
+        let alpha = clamp(colour.a * angle_weight * edge_weight, 0.0, 1.0);
+        if alpha <= 0.001 {
+            continue;
+        }
+
+        (*surface).albedo = mix((*surface).albedo, colour.rgb, alpha);
+        (*surface).roughness = mix((*surface).roughness, decal.roughness, alpha);
+        if decal.orm_map >= 0 {
+            let orm = textureSampleLevel(
+                textures[decal.orm_map], default_sampler, uv, 0.0);
+            (*surface).roughness = mix((*surface).roughness, orm.g, alpha);
+            (*surface).metallic = mix((*surface).metallic, orm.b, alpha);
+        }
+        if decal.normal_map >= 0 && decal.normal_strength > 0.0 {
+            let tangent_normal =
+                textureSampleLevel(textures[decal.normal_map], default_sampler, uv, 0.0).xyz
+                * 2.0 - 1.0;
+            // Built against the decal's own frame rather than the surface's:
+            // a decal's normal map describes the decal, and re-deriving a
+            // tangent basis from the surface would rotate it with whatever it
+            // happened to land on.
+            let n = axis;
+            let t = normalize((decal.inv_transform * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz);
+            let b = cross(n, t);
+            let mapped = normalize(t * tangent_normal.x + n * tangent_normal.z + b * tangent_normal.y);
+            (*surface).normal = normalize(mix(
+                (*surface).normal, mapped, alpha * decal.normal_strength));
+        }
+    }
+}
 
 /// Highest mip index of the environment map (must match `IblPass::MIP_COUNT - 1`).
 const ENV_MAX_MIP: f32 = 5.0;
@@ -1200,9 +1406,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
+    // CONTROL-O. Before `f0` is derived, because a decal changes base colour
+    // and metallic and `f0` is a function of both — deriving it first and
+    // then painting over the albedo would leave a decal with the surface's
+    // Fresnel response instead of its own.
+    if decal_params.x > 0u {
+        let decal_view_pos = view.view * vec4<f32>(hit_point, 1.0);
+        let decal_tile = vec2<u32>(in.clip_pos.xy) / vec2(cluster_params.tile_size);
+        let decal_slice = compute_depth_slice(max(-decal_view_pos.z, 0.0));
+        let decal_froxel = decal_tile.x
+            + decal_tile.y * cluster_params.grid_width
+            + decal_slice * cluster_params.grid_width * cluster_params.grid_height;
+        apply_decals(&surface, hit_point, decal_froxel);
+    }
+
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
     if material.terrain_index >= 0 {
         surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
+    } else {
+        // CONTROL-N. Meshes only: terrain already has XV-H's own wetness
+        // path, driven by the same weather state one level up, and applying
+        // both would darken the ground twice.
+        apply_wetness(&surface, material.porosity);
     }
 
     // ── Shadow factor ────────────────────────────────────────────────────────
@@ -1228,6 +1453,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy)
             * terrain_parallax_shadow_factor;
     }
+    // CONTROL-M. Folded into `shadow_factor` rather than applied separately,
+    // so every consumer of the sun's visibility — direct, transmitted and the
+    // cel path — picks it up from one place and none of them can be missed.
+    shadow_factor *= cloud_shadow_at(hit_point);
 
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
     // Material-path probes: a surface that renders black is either unlit or

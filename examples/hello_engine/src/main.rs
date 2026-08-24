@@ -503,7 +503,8 @@ impl VoxelTerrain {
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: -1,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         );
 
@@ -1881,7 +1882,8 @@ impl GameApp for HelloGame {
                         emissive: [0.0; 3],
                         emissive_map: -1,
                         terrain_index: -1,
-                        _pad: [0.0; 2],
+                        porosity: 0.5,
+                        _pad: 0.0,
                     },
                 );
 
@@ -2557,7 +2559,8 @@ fn spawn_procedural_scene(
             emissive: [0.0; 3],
             emissive_map: -1,
             terrain_index: -1,
-            _pad: [0.0; 2],
+            porosity: 0.5,
+            _pad: 0.0,
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -2576,7 +2579,8 @@ fn spawn_procedural_scene(
             emissive: [0.0; 3],
             emissive_map: -1,
             terrain_index: -1,
-            _pad: [0.0; 2],
+            porosity: 0.5,
+            _pad: 0.0,
         },
     );
 
@@ -2660,7 +2664,8 @@ fn spawn_procedural_scene(
                 emissive: [0.0; 3],
                 emissive_map: -1,
                 terrain_index: -1,
-                _pad: [0.0; 2],
+                porosity: 0.5,
+                _pad: 0.0,
             },
         )
     };

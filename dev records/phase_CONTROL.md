@@ -10,7 +10,14 @@
 > from its systems, and it is the game that made ray-traced reflections
 > mainstream. This phase is a UI phase with a rendering half, in that order.
 >
-> **Status:** **IN PROGRESS — Track 0 and CONTROL-B/C/D complete 2026-08-23.** CONTROL-A's
+> **Status:** **COMPLETE — CONTROL-A through CONTROL-O in tree 2026-08-23.**
+> Every track is finished, including the two §9 called a reasonable stopping
+> point and the one §8 marked an explicit stretch. What is **owed** is the
+> visual and timing evidence for Track 2 and Track 3: captures and `.somtime`
+> rows need a windowed GPU run, and each sub-phase's record says exactly
+> which ones. The cloud pass, the weather driver and decals therefore ship
+> **default off**, which is the arrangement §12 asks for until the numbers
+> exist. CONTROL-A's
 > regenerable audit, red gates, two-width surface captures, and terrain timing are in tree;
 > CONTROL-A1's input seam and CONTROL-A2's command registry are complete.
 > CONTROL-B's schema-generated production Details path covers all 160 editable
@@ -2670,16 +2677,17 @@ deleted.** Two things are owed and stated: the thumbnail's *pixels* (the
 plumbing is complete, but the renderer has no non-capture readback path), and
 `RetainedUnknowns` travelling through the clipboard.
 
-**Track 1 is complete.** Track 2 and Track 3 have not started; §9.1 records
-that they are not optional, because CONTROL-K is a hard dependency of
-MORROWIND-H, MORROWIND-L and MORROWIND-AG.
+**Track 1 is complete**, and so — as of 2026-08-23 — are Tracks 2 and 3,
+CONTROL-O's optional stretch included. §9.1 recorded that Track 2 was not
+optional because CONTROL-K is a hard dependency of MORROWIND-H, MORROWIND-L and
+MORROWIND-AG; it shipped, and they are unblocked.
 
 ### Track 2 — Author
 
 **Gate:** Track 2 does not start until CONTROL-B is in tree, because both
 sub-phases below are new `FieldType`s and both would otherwise be hand-wired.
 
-#### CONTROL-K — Curve and gradient editing
+#### CONTROL-K — Curve and gradient editing — **COMPLETE 2026-08-23**
 
 - `CurveEditor`: keyframes, linear/smooth/step tangents, zoom/pan, snap,
   presets, and a compact inline form for a `PropertyRow` (Fyrox `fyrox-ui/src/curve/`,
@@ -2701,7 +2709,21 @@ sub-phases below are new `FieldType`s and both would otherwise be hand-wired.
 **Exit:** a curve authored in the editor round-trips through `scene_schema` and
 drives a shader uniform, with no restart and no refresh button.
 
-#### CONTROL-L — Time of day
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-K_curves.md`](phase%20CONTROL/CONTROL-K_curves.md).
+`Curve`, `Gradient` and `SliderCurve` are `somnium_ecs::curve` value types, and
+`FieldType::{Curve, Gradient}` / `ReflectValue::{Curve, Gradient}` put them in
+Seam 1's vocabulary — so a curve gets the generated row, the scoped undo entry,
+the drag-scrub coalescing, the scene round trip and the script visibility for
+free, and none of those four consumers learns what a keyframe is. Both editors
+are registered `PropertyEditorKind`s; the gradient reuses the existing
+`ColorPicker` rather than growing a second colour surface, which collapsed three
+duplicated write-back matches into one `write_color_target`. Exit met through
+`PostProcessComponent::response_curve`, sampled every frame into
+`PostParams.response` — there is no refresh step because the table is rebuilt
+unconditionally. Owed: draggable tangent handles, and presets are keyboard-only.
+
+#### CONTROL-L — Time of day — **COMPLETE 2026-08-23**
 
 - `TimeOfDayComponent`: hour, day of year, latitude, longitude, timescale, with a
   schema block and therefore a free inspector.
@@ -2728,13 +2750,28 @@ parameters currently authored only in code.
 existing 25M night path, captures at four times of day are in the evidence
 folder, and the LUT cost per scrub frame is a number in the record.
 
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-L_time_of_day.md`](phase%20CONTROL/CONTROL-L_time_of_day.md).
+`TimeOfDayComponent` is six scalars and five CONTROL-K tracks in one schema
+block. `solar_position` is NOAA's formulation — Unreal's SunSky choice — and
+the time zone is derived from longitude rather than authored, so the two cannot
+disagree. The driver writes the first *directional light*'s rotation, colour
+and intensity (not an entity named `SunLight`: a name is not a type), pushes fog
+and exposure straight to the renderer rather than fighting `PostProcess`, and
+never sets `scene_dirty`. Reachable from Details, from a `HH:MM` scrub on the
+viewport context bar, and from six generated preset commands. The env vars are
+now overrides of a real system and still win, per Seam 4. **Owed: the four
+captures and the LUT-cost row**, both of which need a windowed run; the LUTs are
+built once at startup and the driver does not force a rebuild, but that is an
+observation from reading the pass, not a measurement.
+
 ### Track 3 — Sky
 
 **Gate:** Track 3 does not start until CONTROL-B, C and G are in tree. It is the
 phase's proof, not its content, and shipping it early would reproduce exactly the
 failure this phase exists to fix.
 
-#### CONTROL-M — Volumetric clouds
+#### CONTROL-M — Volumetric clouds — **COMPLETE 2026-08-23**
 
 - **Shape.** A low-frequency Perlin–Worley base eroded by high-frequency Worley
   detail, generated once at build or first run into a cached 3D texture, plus a
@@ -2788,7 +2825,25 @@ captures (clear, scattered, overcast, storm), a fast-camera occlusion capture,
 cloud shadows visible on terrain and water, and every parameter above reachable
 from Details.
 
-#### CONTROL-N — Weather and wetness
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-M_clouds.md`](phase%20CONTROL/CONTROL-M_clouds.md).
+Twenty-one parameters, one `component_schema!` block, **zero** new environment
+variables that are the only route to anything — which is the test §1 set this
+sub-phase. Perlin–Worley base eroded by Worley detail, a top-down weather map,
+a quarter-res adaptive march with early-out and depth occlusion, dual-lobe HG
+with Beer-powder and cone-sampled shadow taps, ambient from the sky's own
+multiscatter LUT. Aerial perspective is applied **inside** the march at the
+cloud's transmittance-weighted depth, and the composite is a fixed-function
+`One`/`SrcAlpha` blend into the HDR buffer TAA already resolves — no private
+history. Cloud shadows are a world-XZ field folded into `shadow_factor`, so
+terrain, water and meshes read one source. The weather map is paintable
+engine-side. The resolutions and channel split are labelled **Somnium's
+decision** in the shader, per §6.3's refusal to launder a community
+reconstruction. **Owed: all four evidence items**, which need a windowed run —
+and until the `.somtime` row exists the pass ships off, which is what §12 asks.
+Also owed: the painter's viewport gesture, and a cloud debug view.
+
+#### CONTROL-N — Weather and wetness — **COMPLETE 2026-08-23**
 
 One sub-phase rather than three, because the chain is the point: coverage drives
 precipitation, precipitation drives wetness, wetness drives the surface.
@@ -2826,7 +2881,27 @@ controls; mesh wetness and porosity become authored material properties.
 light drops, rain falls, terrain and meshes darken, the sea roughens — with no
 env var touched and every step undoable.
 
-#### CONTROL-O — Deferred decals *(stretch, explicitly optional)*
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-N_weather.md`](phase%20CONTROL/CONTROL-N_weather.md).
+All four of Lagarde's findings are load-bearing: two time constants, specular
+recovering before diffuse, porosity as a **material** channel (in
+`GpuMaterial`'s existing padding, so the struct is unchanged), and no separate
+wet texture set — non-linear albedo darkening, a specular boost, and standing
+water flattening the normal. Every approach is `1 - exp(-dt/tau)`, so wetness
+behaves the same at 30 Hz and 240 Hz. Snow is gated on the *kind*, not the rate.
+The exit criterion's "one preset" is real: `editor.weather.storm` applies the
+weather **and its sky** in one `CommandGroup` undo entry, because rain falling
+out of a clear sky would meet the letter of the sub-phase and fail its point.
+Wind is one vector with three consumers — cloud advection, the ocean spectrum
+and precipitation shear. Rain ripples are a per-frame slope term in
+`water.wgsl`; precipitation is the existing `ParticleEmitter` plus two new
+generally-useful fields. **Owed: the capture sequence, and occlusion fade under
+cover** — the cloud shadow is a GPU texture and the emitter is CPU-simulated, so
+that wants MORROWIND-P's GPU particles rather than a readback. The plan also
+names foliage sway as a wind consumer; **there is no foliage sway in this
+engine**, so there was nothing to unify.
+
+#### CONTROL-O — Deferred decals *(stretch)* — **COMPLETE 2026-08-23**
 
 Included because it is the cheapest remaining renderer gap with an obvious
 authoring surface, and marked optional because the phase is already large.
@@ -2842,6 +2917,22 @@ authoring surface, and marked optional because the phase is already large.
 **Exit criterion if attempted:** it ships with the drag gesture, or it does not
 ship. **If any earlier track slips, this is the first thing cut**, and cutting it
 is not a failure of the phase.
+
+**Implementation record, 2026-08-23.** Evidence:
+[`CONTROL-O_decals.md`](phase%20CONTROL/CONTROL-O_decals.md).
+It ships with the drag gesture. `cluster.rs` grew a `ClusterVolume` trait and
+its counting sort became generic, so decals are genuinely the second consumer of
+13C's binning rather than a copy of it — and the decal grid is binned inside
+`render()` beside the light grid, with the same matrices, so the two agree about
+what a froxel is. A decal is the entity's `Transform` (the box, projecting along
+its own -Y, with the middle axis as projection *depth*) plus an ordinary
+`MaterialComponent`, so it reuses all of CONTROL-D. Applied in `shading.wgsl`
+before `f0` is derived, with an edge fade and an authored **angle fade** —
+without which a projection aimed at the floor smears down every wall inside its
+box. `Alt` + drag a material into the viewport creates one, oriented to the
+terrain normal, as one undo step: the eighth route through CONTROL-E's seam, and
+expressible at all only because of A1. **Owed: captures, mesh-surface drops (the
+probe returns terrain points), a decal debug view, and emissive decals.**
 ---
 
 ## 9. Sequencing
@@ -2889,6 +2980,30 @@ that happens; do not silently drop them and declare CONTROL complete.**
 **Phase CONTROL runs first and completes in full. Phase MORROWIND is next.**
 That is a decision, not a preference, and both documents record it so neither can
 drift.
+
+> **Status, 2026-08-23: CONTROL is complete and MORROWIND is unblocked.**
+> CONTROL-K shipped, so MORROWIND-H, MORROWIND-L and MORROWIND-AG have the
+> curve editor they depend on. Point 3 below asked that any seam whose shipped
+> signature differs from §7 be named here, and three did:
+>
+> - **Seam 1 grew two `FieldType`s** — `Curve` and `Gradient` — and `FieldSchema`
+>   grew a `slider: SliderCurve`. MORROWIND-O's prefab overrides travel as the
+>   same `(StableId, FieldId, ReflectValue)` triple; they now have to be able to
+>   carry a heap-backed value, which `ReflectValue` already does for `Str` and
+>   `Array` but which is worth knowing before designing the patch format.
+> - **Seam 6's `CommandAction` grew three id-carrying variants**
+>   (`SetTimeOfDay`, `SetSkyPreset`, `SetWeatherPreset`) and two id/label tables
+>   live in `commands.rs` with their *values* in `somnium_core`. MORROWIND-K's
+>   node-graph palette inherits that split; it works, and the tests that keep
+>   the two tables in step are the pattern to copy.
+> - **`EntitySnapshot` is no longer `Copy`**, and neither are
+>   `PostProcessComponent` or `FoliageComponent`. Anything in MORROWIND that
+>   assumed a snapshot could be copied cheaply should clone deliberately.
+>
+> One thing CONTROL did **not** do on MORROWIND's behalf, and deliberately:
+> precipitation is CPU-simulated through the existing emitter, and its
+> occlusion fade is left owed rather than solved with a GPU readback, because
+> MORROWIND-P owns GPU particles and solving it twice would be waste.
 
 The successor is [`phase_MORROWIND.md`](phase_MORROWIND.md) — NetImmerse, the
 engine-half phase: the runtime (game-facing) UI, skeletal animation, prefabs, the
@@ -2992,9 +3107,9 @@ those two changes are versioned, tested, and stated in the record.
 | 14 | `file:line:col` click opens the source **at the line** | capture |
 | 15 | Save → quit → open returns the same scene | test |
 | 16 | A scene loaded by a build missing a component, then saved, **still contains that component's data** | test |
-| 17 | Curves are live — no refresh step anywhere | capture |
-| 18 | Clouds: pass timing **with and without jitter**, four captures, a fast-camera occlusion capture, cloud shadows, all params in Details | `.somtime` + captures |
-| 19 | Weather chain end-to-end from one preset | capture sequence |
+| 17 | Curves are live — no refresh step anywhere | **met**: `PostParams.response` is re-sampled every frame from the authored curve, so there is no refresh step to find. Capture owed |
+| 18 | Clouds: pass timing **with and without jitter**, four captures, a fast-camera occlusion capture, cloud shadows, all params in Details | **params met** (21 fields, one schema block, zero new env-var-only knobs); cloud shadows implemented and folded into `shadow_factor`. **`.somtime` row and all four captures owed** — they need a windowed run, and the pass ships off until the row exists |
+| 19 | Weather chain end-to-end from one preset | **met in code**: `editor.weather.storm` applies the weather *and* its sky in one undo entry, driving cloud coverage, terrain and mesh wetness, water wind and rain ripples. Capture sequence owed |
 | 20 | All eleven §5.2 craft defects closed, each with the test or capture named in its sub-phase | per-sub-phase record |
 | 21 | Zeta redlines unchanged: tokens, contrast pairs, 68 px, focus order | diff against A's baselines |
 | 22 | Phase 27's paint contract unchanged | diff against A's baselines |

@@ -301,6 +301,12 @@ pub const TOGGLES: &[Toggle] = &[
         help: "Cut the aerial pipeline's layer scan to the hero bank.",
     },
     Toggle {
+        id: "cloud_jitter",
+        label: "Cloud Ray Jitter",
+        env: "SOMNIUM_CLOUD_JITTER",
+        help: "Offset each cloud ray's start by blue noise. Measured both ways \u{2014} see CONTROL-M.",
+    },
+    Toggle {
         id: "hex_tiling",
         label: "Hex Tiling",
         env: "SOMNIUM_HEXTILE",

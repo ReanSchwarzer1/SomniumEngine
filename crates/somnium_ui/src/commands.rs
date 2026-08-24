@@ -289,6 +289,11 @@ pub enum CommandAction {
     /// the hour itself rather than an index into a table, so a rearranged
     /// preset list cannot silently change what a persisted keybinding does.
     SetTimeOfDay(&'static str),
+    /// CONTROL-M: apply a named sky preset. Id, not an index, for the same
+    /// reason as above.
+    SetSkyPreset(&'static str),
+    /// CONTROL-N: apply a named weather state.
+    SetWeatherPreset(&'static str),
 }
 
 /// One editor command declaration.
@@ -463,6 +468,30 @@ pub const TIME_PRESETS: [(&str, &str, f32); 6] = [
     ("night", "Night", 1.0),
 ];
 
+/// CONTROL-M's named skies: `(id, label)`.
+///
+/// Ids only. The *values* a preset writes are engine data and live in
+/// `somnium_core::sky`, which resolves an id from this list; a test there
+/// asserts that every id here resolves, so a menu row cannot name a preset the
+/// engine does not have.
+pub const SKY_PRESETS: [(&str, &str); 4] = [
+    ("clear", "Clear"),
+    ("scattered", "Scattered"),
+    ("overcast", "Overcast"),
+    ("storm", "Storm"),
+];
+
+/// CONTROL-N's named weather states: `(id, label)`.
+///
+/// Ids only, for the same reason as [`SKY_PRESETS`]: the values are engine
+/// data and live in `somnium_core::weather`.
+pub const WEATHER_PRESETS: [(&str, &str); 4] = [
+    ("clear", "Clear"),
+    ("drizzle", "Drizzle"),
+    ("storm", "Storm"),
+    ("snow", "Snow"),
+];
+
 /// The command family built from [`TIME_PRESETS`].
 fn time_of_day_commands() -> Vec<Command> {
     TIME_PRESETS
@@ -476,6 +505,44 @@ fn time_of_day_commands() -> Vec<Command> {
                 format!("Set the scene's day cycle to {label} ({hour:.2} h).").into_boxed_str(),
             ),
             action: CommandAction::SetTimeOfDay(id),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        })
+        .collect()
+}
+
+/// CONTROL-M's sky presets, from [`SKY_PRESETS`].
+fn sky_commands() -> Vec<Command> {
+    SKY_PRESETS
+        .iter()
+        .map(|(id, label)| Command {
+            id: leak_id("editor.sky.", id),
+            label: Box::leak(format!("Sky: {label}").into_boxed_str()),
+            category: "Environment",
+            default_binding: None,
+            help: Box::leak(
+                format!("Set the scene's cloud layer to {label}.").into_boxed_str(),
+            ),
+            action: CommandAction::SetSkyPreset(id),
+            surfaces: VIEW_MENU,
+            enabled: always,
+        })
+        .collect()
+}
+
+/// CONTROL-N's weather presets, from [`WEATHER_PRESETS`].
+fn weather_commands() -> Vec<Command> {
+    WEATHER_PRESETS
+        .iter()
+        .map(|(id, label)| Command {
+            id: leak_id("editor.weather.", id),
+            label: Box::leak(format!("Weather: {label}").into_boxed_str()),
+            category: "Environment",
+            default_binding: None,
+            help: Box::leak(
+                format!("Transition the scene's weather to {label}.").into_boxed_str(),
+            ),
+            action: CommandAction::SetWeatherPreset(id),
             surfaces: VIEW_MENU,
             enabled: always,
         })
@@ -1234,6 +1301,8 @@ pub fn registry() -> &'static CommandRegistry {
         commands.extend(view_mode_commands());
         commands.extend(camera_commands());
         commands.extend(time_of_day_commands());
+        commands.extend(sky_commands());
+        commands.extend(weather_commands());
         CommandRegistry::new(commands)
     })
 }

@@ -78,6 +78,17 @@ pub enum DropRequest {
         asset: AssetId,
         entities: Vec<Entity>,
     },
+    /// CONTROL-O: `Alt`-dragging a material into the viewport creates a decal
+    /// where it lands rather than assigning it to whatever was under the
+    /// cursor.
+    ///
+    /// The surface normal is deliberately **not** carried: the core derives it
+    /// once at creation from the terrain it landed on, and the drop probe that
+    /// runs every frame of the drag stays a single raycast.
+    CreateDecal {
+        asset: AssetId,
+        at: [f32; 3],
+    },
     AttachScripts {
         assets: Vec<AssetId>,
         entity: Entity,
@@ -233,6 +244,7 @@ pub fn semantic_request(
     db: &somnium_asset::database::AssetDbSnapshot,
     payload: &DragPayload,
     acceptance: &DropAcceptance,
+    mods: crate::message::Modifiers,
 ) -> Result<DropRequest, String> {
     let accepted_assets = || -> Vec<AssetId> {
         match payload {
@@ -325,6 +337,17 @@ pub fn semantic_request(
                     assets,
                     at: terrain_hit.ok_or("Point at terrain to place this model")?,
                 }),
+                // CONTROL-O's gesture. `Alt` is expressible here at all only
+                // because CONTROL-A1 put modifiers on the input message; the
+                // 2026-08-22 audit found `MouseDown` carried `pos` and
+                // `button` and nothing else, and this is one of the four
+                // sub-phases §7 Seam 5 named as blocked on it.
+                Some(somnium_asset::database::AssetKind::Material) if mods.alt => {
+                    Ok(DropRequest::CreateDecal {
+                        asset: first,
+                        at: terrain_hit.ok_or("Point at terrain to place this decal")?,
+                    })
+                }
                 Some(somnium_asset::database::AssetKind::Material) => {
                     Ok(DropRequest::AssignMaterial {
                         asset: first,
@@ -504,6 +527,7 @@ mod tests {
         std::fs::write(root.join("ship.glb"), b"glb").unwrap();
         std::fs::write(root.join("hull.glb"), b"glb").unwrap();
         std::fs::write(root.join("polished.sommat"), b"{}").unwrap();
+        std::fs::write(root.join("scorch.sommat"), b"{}").unwrap();
         std::fs::write(root.join("spin.luau"), b"return {}").unwrap();
         std::fs::write(root.join("rock.png"), b"png").unwrap();
         std::fs::write(root.join("level.somnium"), b"{}").unwrap();
@@ -522,14 +546,18 @@ mod tests {
     /// Every route resolves the *same* request the highlight promised, and the
     /// one that cannot be satisfied says why rather than silently doing
     /// nothing. Cursor, adorner and execution all read this one function.
+    ///
+    /// Seven routes at CONTROL-E; eight since CONTROL-O added `Alt`-drag to
+    /// create a decal. Renamed rather than left saying "seven", because a test
+    /// whose name has stopped being true is a comment that lies.
     #[test]
-    fn seven_routes_resolve_to_exactly_one_semantic_request() {
+    fn every_route_resolves_to_exactly_one_semantic_request() {
         let (root, db) = route_fixture();
         let mut world = somnium_ecs::World::new();
         let entity = world.spawn((Marker,));
         let drop = |payload: DragPayload, target: DropTarget| {
             let acceptance = acceptance_for(&db, &payload, target);
-            semantic_request(&db, &payload, &acceptance)
+            semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default())
         };
 
         // .glb into the viewport, at the terrain hit.
@@ -546,6 +574,45 @@ mod tests {
                 at: [1.0, 2.0, 3.0],
             })
         );
+
+        // CONTROL-O: the same material, into the viewport with `Alt` held,
+        // creates a decal instead of assigning it. The eighth route, and the
+        // one that exists only because CONTROL-A1 put modifiers on the input
+        // message.
+        let alt = crate::message::Modifiers {
+            alt: true,
+            ..crate::message::Modifiers::default()
+        };
+        let payload = DragPayload::Assets(vec![id("scorch.sommat")]);
+        let target = DropTarget::Viewport {
+            entity: Some(entity),
+            terrain_hit: Some([4.0, 0.0, -2.0]),
+        };
+        let acceptance = acceptance_for(&db, &payload, target.clone());
+        assert_eq!(
+            semantic_request(&db, &payload, &acceptance, alt),
+            Ok(DropRequest::CreateDecal {
+                asset: id("scorch.sommat"),
+                at: [4.0, 0.0, -2.0],
+            })
+        );
+        // Without `Alt` the very same drop is the ordinary assignment, which is
+        // the half that would break silently if the modifier leaked.
+        assert_eq!(
+            semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default()),
+            Ok(DropRequest::AssignMaterial {
+                asset: id("scorch.sommat"),
+                entities: vec![entity],
+            })
+        );
+        // And a decal needs somewhere to land: pointing at nothing says so
+        // rather than dropping the gesture on the floor.
+        let empty = DropTarget::Viewport {
+            entity: None,
+            terrain_hit: None,
+        };
+        let empty_acceptance = acceptance_for(&db, &payload, empty);
+        assert!(semantic_request(&db, &payload, &empty_acceptance, alt).is_err());
 
         // .sommat onto an Outliner row.
         assert_eq!(
@@ -676,7 +743,7 @@ mod tests {
         assert_eq!(acceptance.accepted, vec![0, 1]);
         assert_eq!(acceptance.effect, DropEffect::Copy);
         assert_eq!(acceptance.reason.as_deref(), Some("2 of 5 \u{b7} Copy"));
-        let request = semantic_request(&db, &payload, &acceptance).unwrap();
+        let request = semantic_request(&db, &payload, &acceptance, crate::message::Modifiers::default()).unwrap();
         let DropRequest::SpawnModels { assets, .. } = request else {
             panic!("a mesh drop must spawn models");
         };

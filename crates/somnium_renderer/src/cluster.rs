@@ -42,7 +42,7 @@ pub const MAX_LIGHT_INDICES: usize = 256 * 1024;
 /// Must be ≥ `grid_w * grid_h * NUM_DEPTH_SLICES` for any supported resolution,
 /// otherwise froxels past the end would read stale GPU data. 262 144 covers 4K
 /// at `TILE_SIZE = 32` (120 × 68 × 24 = 195 840) with headroom.
-const MAX_FROXELS: usize = 262_144;
+pub const MAX_FROXELS: usize = 262_144;
 
 // ─── GPU structs ─────────────────────────────────────────────────────────────
 
@@ -167,13 +167,36 @@ struct FroxelBounds {
     slice_max: u32,
 }
 
-/// Compute the froxel span a light covers, or `None` if it is off-screen or
+/// Something with a world-space bounding sphere that can be binned into the
+/// froxel grid.
+///
+/// Phase CONTROL-O. The binning was written for lights in 13C and the plan
+/// (§8, CONTROL-O) names decals as "the second consumer it was shaped for", so
+/// the *code* is what gets reused rather than being copied with two words
+/// changed. One trait, two implementations, one counting sort.
+pub trait ClusterVolume {
+    /// World-space centre of the bounding sphere.
+    fn centre_ws(&self) -> [f32; 3];
+    /// Radius of the bounding sphere, metres.
+    fn bounding_radius(&self) -> f32;
+}
+
+impl ClusterVolume for GpuLocalLight {
+    fn centre_ws(&self) -> [f32; 3] {
+        self.position_ws
+    }
+    fn bounding_radius(&self) -> f32 {
+        self.range
+    }
+}
+
+/// Compute the froxel span a volume covers, or `None` if it is off-screen or
 /// entirely behind the camera.
 ///
 /// Split out of the assignment loop so it can be unit-tested without a GPU.
 #[allow(clippy::too_many_arguments)]
-fn light_froxel_bounds(
-    light: &GpuLocalLight,
+fn volume_froxel_bounds<V: ClusterVolume>(
+    light: &V,
     view: glam::Mat4,
     proj: glam::Mat4,
     sw: f32,
@@ -183,18 +206,14 @@ fn light_froxel_bounds(
     grid_w: u32,
     grid_h: u32,
 ) -> Option<FroxelBounds> {
-    let pos_ws = glam::Vec4::new(
-        light.position_ws[0],
-        light.position_ws[1],
-        light.position_ws[2],
-        1.0,
-    );
+    let centre = light.centre_ws();
+    let pos_ws = glam::Vec4::new(centre[0], centre[1], centre[2], 1.0);
 
     // In a right-handed view matrix the camera looks along -Z, so `depth`
     // (positive into the screen) is `-pos_vs.z`.
     let pos_vs = view * pos_ws;
     let depth = -pos_vs.z;
-    let range = light.range;
+    let range = light.bounding_radius();
 
     // Entirely behind the camera.
     if depth + range < near {
@@ -241,6 +260,57 @@ fn light_froxel_bounds(
     })
 }
 
+/// The three reusable buffers a binning pass fills.
+///
+/// Phase CONTROL-O pulled these off `ClusterGrid` into their own struct so a
+/// second consumer — the decal grid — can own a set without owning a light
+/// buffer it has no use for. `ClusterGrid` keeps its fields inline; this is
+/// the shape the generic entry point takes.
+#[derive(Default)]
+pub struct BinScratch {
+    /// Per-froxel count, then reused as the per-froxel write cursor.
+    pub counts: Vec<u32>,
+    /// Per-froxel `(offset, count)` table uploaded to the GPU.
+    pub offsets: Vec<ClusterOffset>,
+    /// Flattened froxel → volume index list.
+    pub index_list: Vec<u32>,
+}
+
+/// Bin any [`ClusterVolume`] list into froxels.
+///
+/// The public face of the counting sort below, so decals get the same binning
+/// as lights rather than a second implementation of it.
+#[allow(clippy::too_many_arguments)]
+pub fn bin_volumes<V: ClusterVolume>(
+    volumes: &[V],
+    view: glam::Mat4,
+    proj: glam::Mat4,
+    sw: f32,
+    sh: f32,
+    near: f32,
+    far: f32,
+    grid_w: u32,
+    grid_h: u32,
+    total_froxels: usize,
+    scratch: &mut BinScratch,
+) {
+    assign_froxels(
+        volumes,
+        view,
+        proj,
+        sw,
+        sh,
+        near,
+        far,
+        grid_w,
+        grid_h,
+        total_froxels,
+        &mut scratch.counts,
+        &mut scratch.offsets,
+        &mut scratch.index_list,
+    );
+}
+
 /// Bin `lights` into froxels using a counting sort.
 ///
 /// Fills `counts` (used as scratch, ends up holding each froxel's write
@@ -248,8 +318,8 @@ fn light_froxel_bounds(
 /// `index_list` (the flattened froxel -> light indices). All three are reused
 /// across frames, so this performs no heap allocation in the steady state.
 #[allow(clippy::too_many_arguments)]
-fn assign_froxels(
-    lights: &[GpuLocalLight],
+fn assign_froxels<V: ClusterVolume>(
+    lights: &[V],
     view: glam::Mat4,
     proj: glam::Mat4,
     sw: f32,
@@ -268,7 +338,7 @@ fn assign_froxels(
     counts.resize(total_froxels, 0);
 
     for light in lights {
-        let Some(b) = light_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
+        let Some(b) = volume_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
         else {
             continue;
         };
@@ -311,7 +381,7 @@ fn assign_froxels(
     index_list.resize(total_indices, 0);
 
     for (light_idx, light) in lights.iter().enumerate() {
-        let Some(b) = light_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
+        let Some(b) = volume_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
         else {
             continue;
         };
@@ -511,7 +581,7 @@ mod tests {
     ) -> (Vec<u32>, Vec<ClusterOffset>) {
         let mut froxel_lists: Vec<Vec<u32>> = vec![Vec::new(); total_froxels];
         for (light_idx, l) in lights.iter().enumerate() {
-            let Some(b) = light_froxel_bounds(l, view, proj, sw, sh, near, far, grid_w, grid_h)
+            let Some(b) = volume_froxel_bounds(l, view, proj, sw, sh, near, far, grid_w, grid_h)
             else {
                 continue;
             };
@@ -587,7 +657,7 @@ mod tests {
     fn no_lights_produces_no_indices() {
         let (view, proj) = test_view_proj();
         let (mut counts, mut offsets, mut index_list) = (Vec::new(), Vec::new(), Vec::new());
-        assign_froxels(
+        assign_froxels::<GpuLocalLight>(
             &[],
             view,
             proj,

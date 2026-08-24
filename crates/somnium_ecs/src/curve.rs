@@ -31,6 +31,12 @@ use std::fmt;
 // Interpolation
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// A named starting shape, and the constructor that builds it.
+///
+/// Spelled out as a type so [`Curve::PRESETS`] and [`Gradient`]'s eventual
+/// equivalent read as a table rather than as a signature.
+pub type NamedCurve = (&'static str, fn() -> Curve);
+
 /// How the segment *leaving* a key reaches the next one.
 ///
 /// Stored per key rather than per curve because the useful shapes are mixed:
@@ -169,7 +175,7 @@ impl Curve {
     /// five are the shapes every tool ships, they are two keys each, and a
     /// preset *library* is a content problem that would need a file format,
     /// a browser and a naming rule to be worth having.
-    pub const PRESETS: [(&'static str, fn() -> Self); 5] = [
+    pub const PRESETS: [NamedCurve; 5] = [
         ("Linear", || Self::ramp(0.0, 1.0)),
         ("Ease In", || {
             Self::from_keys(vec![
@@ -234,9 +240,14 @@ impl Curve {
     pub fn insert(&mut self, key: CurveKey) -> usize {
         self.keys.push(key);
         self.sanitize();
+        // Exact comparison, deliberately: this is re-finding the value that
+        // was just written, not comparing two computed floats. A tolerance
+        // here would match a *neighbouring* key and silently move the
+        // selection onto it.
+        #[allow(clippy::float_cmp)]
         self.keys
             .iter()
-            .position(|k| (k.t - key.t).abs() < f32::EPSILON && (k.v - key.v).abs() < f32::EPSILON)
+            .position(|k| k.t == key.t && k.v == key.v)
             .unwrap_or(0)
     }
 
@@ -259,6 +270,7 @@ impl Curve {
         key.v = v;
         self.keys[index] = key;
         self.sanitize();
+        #[allow(clippy::float_cmp)]
         self.keys
             .iter()
             .position(|k| *k == key)
@@ -492,9 +504,11 @@ impl Gradient {
     pub fn insert(&mut self, stop: GradientStop) -> usize {
         self.stops.push(stop);
         self.sanitize();
+        // Exact, for the same reason as `Curve::insert`.
+        #[allow(clippy::float_cmp)]
         self.stops
             .iter()
-            .position(|s| (s.t - stop.t).abs() < f32::EPSILON && s.color == stop.color)
+            .position(|s| s.t == stop.t && s.color == stop.color)
             .unwrap_or(0)
     }
 
@@ -519,6 +533,7 @@ impl Gradient {
         };
         self.stops[index] = stop;
         self.sanitize();
+        #[allow(clippy::float_cmp)]
         self.stops
             .iter()
             .position(|s| *s == stop)
@@ -560,8 +575,8 @@ impl Gradient {
                 }
                 let u = (t - a.t) / span;
                 let mut out = [0.0_f32; 4];
-                for c in 0..4 {
-                    out[c] = a.color[c] + (b.color[c] - a.color[c]) * u;
+                for (slot, (lo, hi)) in out.iter_mut().zip(a.color.iter().zip(b.color.iter())) {
+                    *slot = lo + (hi - lo) * u;
                 }
                 out
             }

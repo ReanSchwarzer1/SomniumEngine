@@ -29,6 +29,20 @@ export type Vec3 = vector
 --- Linear RGB.
 export type Color = vector
 
+--- CONTROL-K. One key of an authored curve. Read-only from a script: the
+--- editor authors curves, and a script that assigned a table back would be
+--- rejected by the field's declared type rather than silently accepted.
+export type CurveKey = {
+    t: number,
+    v: number,
+    inTangent: number,
+    outTangent: number,
+    interpolation: string,
+}
+
+--- CONTROL-K. One stop of an authored colour ramp. Read-only, as above.
+export type GradientStop = { t: number, color: Color, alpha: number }
+
 -- ── Components, generated from the type registry ──────────────
 
 --- `somnium.BuoyantVessel` (schema version 1).
@@ -51,6 +65,22 @@ export type SomniumCameraSettings = {
 	dynamic_floor: number,
 }
 
+--- `somnium.Decal` (schema version 1).
+export type SomniumDecal = {
+	enabled: boolean,
+	opacity: number,
+	priority: number,
+	angle_fade_degrees: number,
+	normal_strength: number,
+	roughness: number,
+}
+
+--- `somnium.EditorFlags` (schema version 1).
+export type SomniumEditorFlags = {
+	hidden: boolean,
+	locked: boolean,
+}
+
 --- `somnium.Foliage` (schema version 1).
 export type SomniumFoliage = {
 	enabled: boolean,
@@ -63,6 +93,7 @@ export type SomniumFoliage = {
 	scale_max: number,
 	radius: number,
 	cull_distance: number,
+	lod_falloff: { CurveKey },
 	foliage_shadow_distance: number,
 	lod_distance: number,
 	impostor_distance: number,
@@ -84,9 +115,10 @@ export type SomniumLight = {
 	area_height: number,
 }
 
---- `somnium.Material` (schema version 1).
+--- `somnium.Material` (schema version 2).
 export type SomniumMaterial = {
-	id: number,
+	asset: Asset?,
+	runtime_id: number, -- engine-owned; reading only
 }
 
 --- `somnium.Mesh` (schema version 1).
@@ -120,9 +152,10 @@ export type SomniumParticleEmitter = {
 	spread_angle: number,
 	size_start: number,
 	size_end: number,
-	color_start: Vec4,
-	color_end: Vec4,
+	color_over_life: { GradientStop },
 	gravity: number,
+	velocity_bias: Vec3,
+	spawn_extents: Vec3,
 }
 
 --- `somnium.PostProcess` (schema version 1).
@@ -143,6 +176,7 @@ export type SomniumPostProcess = {
 	lift: number,
 	gamma: number,
 	grain: number,
+	response_curve: { CurveKey },
 	bloom_enabled: boolean,
 	bloom_intensity: number,
 	gtao_enabled: boolean,
@@ -199,6 +233,31 @@ export type SomniumRigidBody = {
 	script_driven: boolean,
 }
 
+--- `somnium.Sky` (schema version 1).
+export type SomniumSky = {
+	enabled: boolean,
+	coverage: number,
+	cloud_type: number,
+	density: number,
+	altitude: number,
+	thickness: number,
+	wind: Vec2,
+	precipitation: number,
+	weather_scale: number,
+	seed: number,
+	detail_strength: number,
+	shape_scale: number,
+	ambient: number,
+	phase_forward: number,
+	phase_backward: number,
+	phase_blend: number,
+	shadow_strength: number,
+	shadow_extent: number,
+	max_steps: number,
+	light_steps: number,
+	max_distance: number,
+}
+
 --- `somnium.Terrain` (schema version 1).
 export type SomniumTerrain = {
 	terrain_id: number,
@@ -207,6 +266,21 @@ export type SomniumTerrain = {
 	grid_z: number,
 	cell_size: number,
 	height_scale: number,
+}
+
+--- `somnium.TimeOfDay` (schema version 1).
+export type SomniumTimeOfDay = {
+	enabled: boolean,
+	hour: number,
+	day_of_year: number,
+	latitude: number,
+	longitude: number,
+	timescale: number,
+	sun_color: { GradientStop },
+	sun_intensity: { CurveKey },
+	fog_density: { CurveKey },
+	exposure_compensation: { CurveKey },
+	cloud_coverage: { CurveKey },
 }
 
 --- `somnium.Transform` (schema version 1).
@@ -262,10 +336,29 @@ export type SomniumWater = {
 	underwater_enabled: boolean,
 }
 
+--- `somnium.Weather` (schema version 1).
+export type SomniumWeather = {
+	enabled: boolean,
+	precipitation: number,
+	temperature_c: number,
+	wind_speed: number,
+	wind_direction_deg: number,
+	wetness_target: number,
+	wetting_seconds: number,
+	drying_seconds: number,
+	specular_dry_ratio: number,
+	puddles: number,
+	ripple_strength: number,
+	transition_seconds: number,
+	particle_rate: number,
+}
+
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
+	decal: SomniumDecal?,
+	editorFlags: SomniumEditorFlags?,
 	foliage: SomniumFoliage?,
 	light: SomniumLight?,
 	material: SomniumMaterial?,
@@ -276,10 +369,13 @@ export type SelfComponents = {
 	particleEmitter: SomniumParticleEmitter?,
 	postProcess: SomniumPostProcess?,
 	rigidBody: SomniumRigidBody?,
+	sky: SomniumSky?,
 	terrain: SomniumTerrain?,
+	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
+	weather: SomniumWeather?,
 }
 
 --- Input as a fixed step sees it. Letters and digits are their uppercase

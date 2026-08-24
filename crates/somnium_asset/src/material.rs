@@ -115,6 +115,14 @@ pub struct MaterialAsset {
     pub emissive: LinearColor,
     pub emissive_intensity: f32,
     pub transmission: f32,
+    /// Phase CONTROL-N: how much water this surface takes up, `0..1`.
+    ///
+    /// Lagarde's porosity. Zero is sealed — glass, painted metal, a puddle's
+    /// own surface — and one is bare concrete. It is the reason rain reads
+    /// differently on a pavement and on a car parked on it, and it is a
+    /// *material* property rather than a weather one because it does not
+    /// change when the rain stops.
+    pub porosity: f32,
     pub alpha_mode: AlphaMode,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
@@ -140,6 +148,10 @@ impl Default for MaterialAsset {
             emissive: LinearColor([0.0; 3]),
             emissive_intensity: 1.0,
             transmission: 0.0,
+            // Half-porous by default: most authored surfaces are neither
+            // sealed nor bare, and a default of zero would make the whole
+            // feature invisible until somebody found the slider.
+            porosity: 0.5,
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
@@ -167,6 +179,8 @@ pub fn material_asset_schema() -> ComponentSchema {
             roughness { min: 0.0, max: 1.0, step: 0.01, group: "Surface" },
             emissive { group: "Emission" },
             emissive_intensity { min: 0.0, step: 0.1, group: "Emission" },
+            porosity { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Surface",
+                doc: "How much water this surface takes up when it rains." },
             transmission { min: 0.0, max: 1.0, step: 0.01, group: "Transmission" },
             alpha_mode { group: "Raster" },
             alpha_cutoff { min: 0.0, max: 1.0, step: 0.01, group: "Raster" },
@@ -425,7 +439,7 @@ mod tests {
     #[test]
     fn schema_is_complete_and_texture_slots_reject_non_textures() {
         let schema = material_asset_schema();
-        assert_eq!(schema.fields.len(), 16);
+        assert_eq!(schema.fields.len(), 17);
         let texture_fields: Vec<_> = schema
             .fields
             .iter()

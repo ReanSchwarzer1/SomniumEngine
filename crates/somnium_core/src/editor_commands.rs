@@ -456,6 +456,91 @@ impl FieldUndoSnapshot {
     }
 }
 
+/// Replace every field of one registered component in a single undo step.
+///
+/// Added by CONTROL-M, for presets. A preset touches six fields at once, and
+/// six undo entries for one click is not a history anybody wants to walk back
+/// through — Stride's `$"Update property {DisplayPath}"` rule (§6.2.3) says an
+/// entry should be named after what the user did, and "Apply sky preset" is
+/// what the user did.
+///
+/// Deliberately built on the same reflection path as [`SetFieldCmd`] rather
+/// than storing the Rust value: the component is snapshotted and reapplied
+/// through its schema, so a component that grows a field does not grow a
+/// second place to remember it.
+pub struct SetComponentCmd {
+    entity: Entity,
+    component: StableId,
+    after: ReflectObject,
+    before: ReflectObject,
+    description: String,
+}
+
+impl SetComponentCmd {
+    /// Snapshot `entity`'s `component` and stage `values` in its place.
+    ///
+    /// # Errors
+    ///
+    /// Names the component when it is unregistered or absent from the entity,
+    /// and the field when a staged value fails its own validation — the
+    /// preset, not the user, is at fault in that case and the message should
+    /// say which field it got wrong.
+    pub fn new(
+        world: &World,
+        entity: Entity,
+        component: StableId,
+        values: ReflectObject,
+        description: impl Into<String>,
+    ) -> Result<Self, String> {
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry
+            .by_stable_id(component)
+            .ok_or_else(|| format!("unknown component {component}"))?;
+        let before = (schema.snapshot)(world, entity)
+            .ok_or_else(|| format!("entity has no {component}"))?;
+        for (id, value) in &values {
+            let field = schema
+                .field(*id)
+                .ok_or_else(|| format!("{component} has no field #{}", id.0))?;
+            field.validate(value).map_err(|error| error.to_string())?;
+        }
+        Ok(Self {
+            entity,
+            component,
+            after: values,
+            before,
+            description: description.into(),
+        })
+    }
+
+    fn write(&self, world: &mut World, values: &ReflectObject) {
+        let registry = crate::reflect_registry::editor_registry();
+        if let Some(schema) = registry.by_stable_id(self.component) {
+            let _ = (schema.apply)(world, self.entity, values);
+        }
+    }
+}
+
+impl EditorCommand for SetComponentCmd {
+    fn execute(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.write(world, &self.after.clone());
+    }
+
+    fn undo(&mut self, world: &mut World, _selected: &mut Option<Entity>) {
+        self.write(world, &self.before.clone());
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// A preset that changes nothing must not enter the history: clicking
+    /// "Clear" twice should not cost two undo steps.
+    fn is_no_op(&self) -> bool {
+        self.after == self.before
+    }
+}
+
 pub struct SetFieldCmd {
     entity: Entity,
     component: StableId,
@@ -653,6 +738,9 @@ pub struct EntitySnapshot {
     /// A flag rather than three `Option`s because they are created, deleted
     /// and restored together as one authored object.
     pub environment: bool,
+    /// CONTROL-O. A decal is a `Transform`, a `MaterialComponent` and this;
+    /// the first two already round-trip, so only the third is new here.
+    pub decal: Option<crate::decal::DecalComponent>,
     pub terrain: Option<TerrainComponent>,
     pub voxel_terrain: Option<VoxelTerrainComponent>,
     pub foliage: Option<crate::FoliageComponent>,
@@ -676,6 +764,7 @@ impl EntitySnapshot {
             environment: world
                 .get::<crate::time_of_day::TimeOfDayComponent>(entity)
                 .is_some(),
+            decal: world.get::<crate::decal::DecalComponent>(entity).copied(),
             terrain: world.get::<TerrainComponent>(entity).copied(),
             voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
             foliage: world.get::<crate::FoliageComponent>(entity).cloned(),
@@ -697,12 +786,21 @@ impl EntitySnapshot {
             return world.spawn((transform, name, wt, crate::ParticleEmitter::default()));
         }
 
+        if let Some(decal) = self.decal {
+            return match self.mat {
+                Some(mat) => world.spawn((transform, name, wt, decal, mat)),
+                None => world.spawn((transform, name, wt, decal)),
+            };
+        }
+
         if self.environment {
             return world.spawn((
                 transform,
                 name,
                 wt,
                 crate::time_of_day::TimeOfDayComponent::default(),
+                crate::sky::SkyComponent::default(),
+                crate::weather::WeatherComponent::default(),
             ));
         }
 
@@ -1850,6 +1948,101 @@ fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entit
 mod landscape_tests {
     use super::*;
 
+    /// CONTROL-L/M/N: one Create row, one entity, three components.
+    ///
+    /// The archetype ECS takes every component at spawn time, so a missing arm
+    /// in `respawn` does not error — it silently produces an Environment with
+    /// no weather, and the first thing anybody notices is that the rain
+    /// preset says "no Weather component in the scene".
+    #[test]
+    fn an_environment_respawns_with_all_three_of_its_components() {
+        let mut world = World::new();
+        let entity = EntitySnapshot {
+            name: Some(Name::new("Environment")),
+            environment: true,
+            ..EntitySnapshot::default()
+        }
+        .respawn(&mut world);
+
+        assert!(world.get::<crate::time_of_day::TimeOfDayComponent>(entity).is_some());
+        assert!(world.get::<crate::sky::SkyComponent>(entity).is_some());
+        assert!(world.get::<crate::weather::WeatherComponent>(entity).is_some());
+
+        // And capture must see it, or delete-then-undo loses the environment.
+        let captured = EntitySnapshot::capture(&world, entity);
+        assert!(captured.environment);
+    }
+
+    /// CONTROL-M's preset path: six fields, one entry, and an exact undo.
+    ///
+    /// The alternative — six `SetFieldCmd`s — was measured against the plan's
+    /// own rule that a history reading "Change" twenty times is not a history,
+    /// and lost.
+    #[test]
+    fn a_whole_component_edit_is_one_named_undo_step() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut undo = UndoStack::new(8);
+        let entity = world.spawn((crate::sky::SkyComponent::default(),));
+
+        let component = StableId::new("somnium.Sky");
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry.by_stable_id(component).expect("Sky is registered");
+
+        let before = (schema.snapshot)(&world, entity).expect("Sky is on the entity");
+        let staged = {
+            let mut scratch = World::new();
+            let mut storm = crate::sky::SkyComponent::default();
+            assert!(storm.apply_preset("storm"));
+            let temp = scratch.spawn((storm,));
+            (schema.snapshot)(&scratch, temp).expect("staged Sky snapshots")
+        };
+        assert_ne!(before, staged);
+
+        undo.push(
+            Box::new(
+                SetComponentCmd::new(&world, entity, component, staged.clone(), "Sky preset: Storm")
+                    .expect("staged values validate"),
+            ),
+            &mut world,
+            &mut selected,
+        );
+        assert_eq!((schema.snapshot)(&world, entity), Some(staged));
+        let (entries, position) = undo.history();
+        assert_eq!(entries.last().copied(), Some("Sky preset: Storm"));
+        assert_eq!(position, entries.len());
+
+        undo.undo(&mut world, &mut selected);
+        assert_eq!(
+            (schema.snapshot)(&world, entity),
+            Some(before),
+            "undo restores every field, not only the ones the preset happened to change"
+        );
+
+        undo.redo(&mut world, &mut selected);
+        assert_eq!(
+            (schema.snapshot)(&world, entity)
+                .and_then(|values| values.get(&FieldId(1)).cloned()),
+            Some(ReflectValue::F64(1.0)),
+            "redo puts the storm back"
+        );
+    }
+
+    /// Applying the same preset twice must not cost a second undo step.
+    #[test]
+    fn a_component_edit_that_changes_nothing_is_a_no_op() {
+        let mut world = World::new();
+        let entity = world.spawn((crate::sky::SkyComponent::default(),));
+        let component = StableId::new("somnium.Sky");
+        let registry = crate::reflect_registry::editor_registry();
+        let schema = registry.by_stable_id(component).expect("Sky is registered");
+        let same = (schema.snapshot)(&world, entity).expect("Sky is on the entity");
+
+        let command = SetComponentCmd::new(&world, entity, component, same, "Sky preset: Clear")
+            .expect("identical values validate");
+        assert!(command.is_no_op());
+    }
+
     /// Every CONTROL-E route places a sentinel history entry beneath the drop
     /// and proves one undo removes only the drop. This is the model-node case:
     /// a glTF that spawns four entities is still one gesture, and the sentinel
@@ -2369,6 +2562,7 @@ mod landscape_tests {
             mat: None,
             wt: Some(WorldTransform::identity()),
             environment: false,
+            decal: None,
             mesh_kind: None,
             is_particle_emitter: false,
             terrain: Some(TerrainComponent {
@@ -2398,6 +2592,7 @@ mod landscape_tests {
             mat: None,
             wt: Some(WorldTransform::identity()),
             environment: false,
+            decal: None,
             mesh_kind: None,
             is_particle_emitter: false,
             terrain: None,

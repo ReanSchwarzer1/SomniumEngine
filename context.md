@@ -1,9 +1,9 @@
 # Somnium Engine — Project Context
 
 > **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **Track 0 and CONTROL-B
-> through CONTROL-J complete 2026-08-23. Track 1 is finished; Track 2
-> (CONTROL-K/L/M/N) and Track 3 have not started.**
+> **Current phase:** Phase CONTROL (Northlight) — **COMPLETE 2026-08-23.
+> CONTROL-A through CONTROL-O are in tree; every track is finished, including
+> CONTROL-O's declared stretch.**
 >
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and opt-in completeness gates;
@@ -30,9 +30,11 @@
 > CONTROL-H ships Seam 4: preferences as schema-backed properties with the
 > `default → project.toml → editor.toml → SOMNIUM_*` order, the generated
 > Preferences window, a sparse keybinding override store, recent scenes and the
-> unblocked project picker. **All 106 `SOMNIUM_*` variables now have a verified
-> route — 24 schema, 6 setting, 23 command, 53 harness-with-a-reason, zero
-> unexplained — enforced by an opt-in gate.** CONTROL-I ships the Output Log's
+> unblocked project picker. At CONTROL-H all 106 `SOMNIUM_*` variables had a
+> verified route; the count is now **108** — 25 schema, 6 setting, 24 command,
+> 53 harness-with-a-reason, **zero unexplained** — still enforced by the same
+> gate, and the two CONTROL-M added went in as routes rather than as
+> exceptions. CONTROL-I ships the Output Log's
 > severity chips, category filter, search, pins, jump-to-source and job panel,
 > with persistent error toasts. CONTROL-J ships scene lifecycle: `LoadScene`
 > routes by format at last, unknown components and fields are retained verbatim
@@ -40,10 +42,39 @@
 > a header thumbnail the drawer reads without parsing the body, autosave and
 > crash recovery are in, and the undo history is a list you can click into.
 >
-> **Next: CONTROL-K** (curve and gradient editing), which is a hard dependency
-> of MORROWIND-H, MORROWIND-L and MORROWIND-AG. Track 2 and Track 3 are **not**
-> optional: §9.1 records that dropping them would silently remove a
-> prerequisite from three MORROWIND sub-phases.
+> CONTROL-K makes curves and colour gradients **reflected values** —
+> `FieldType::{Curve, Gradient}` in Seam 1's vocabulary — so a curve gets the
+> generated Details row, the scoped undo entry, the drag-scrub coalescing and
+> the scene round trip for free. Two editor widgets, five presets, an
+> exponential slider response declared per field, and three live consumers: the
+> post-process tone response (into a shader uniform, re-sampled every frame, no
+> refresh button), the particle colour ramp and foliage LOD falloff.
+> CONTROL-L makes the sun analytic (NOAA solar position, Unreal's SunSky
+> choice), the day a cycle of five curve tracks, and the clock reachable from
+> Details, a viewport-context-bar scrub and six preset commands; the sun env
+> vars become Seam 4 overrides of a real system. CONTROL-M ships volumetric
+> clouds whose **entire** authoring surface is one 21-field schema block:
+> Perlin–Worley shape, a paintable weather map, a quarter-res adaptive march
+> with jitter behind a measurable switch, aerial perspective applied to the
+> cloud layer at its own transmittance-weighted depth, a bilateral upsample, and
+> world-XZ cloud shadows folded into `shadow_factor` so terrain, water and
+> meshes read one source. CONTROL-N ships the coverage → precipitation →
+> wetness chain on Lagarde's two time constants, with porosity as a material
+> channel, one global wind vector, rain ripples on water, and precipitation
+> through the existing particle emitter; **one preset takes the scene from clear
+> to storm, sky included, in one undo step.** CONTROL-O ships deferred decals
+> through the *same* froxel binning as the local lights — `cluster.rs` grew a
+> `ClusterVolume` trait rather than a copy — with the `Alt`-drag gesture its
+> exit criterion demanded.
+>
+> **Owed, and stated in each record:** the captures and `.somtime` rows for
+> Tracks 2 and 3 need a windowed GPU run. Until the cloud pass's row exists it
+> ships **off**, and so do the weather driver and the sky — §3 forbids changing
+> what an existing scene draws.
+>
+> **Next: [Phase MORROWIND](dev%20records/phase_MORROWIND.md)** (NetImmerse).
+> §9.1 of the CONTROL plan records the three seam signatures that shipped
+> differently from its §7, which is MORROWIND-A's first reconciliation job.
 > Previously: Phase 27 (Hades) — **27-A..G in tree 2026-08-18**; the paint
 > layer, motion, elevation, the second theme and the first-impression surfaces.
 > Deferred: the project picker, 27-D's backdrop blur, `cosmic-text`, 27-H/I/J.

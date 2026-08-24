@@ -139,6 +139,12 @@ fn spawn_sun_post_camera(world: &mut World, preset: &DefaultLandscapePreset) {
             hour: 14.0,
             ..crate::time_of_day::TimeOfDayComponent::default()
         },
+        // CONTROL-M: the sky rides on the same entity, also off. §3 forbids
+        // changing what an existing scene draws; a cloud layer that appeared
+        // over Coastal on its own would be exactly that.
+        crate::sky::SkyComponent::default(),
+        // CONTROL-N: and the weather, also off. Same reasoning again.
+        crate::weather::WeatherComponent::default(),
     ));
     world.spawn((
         Transform {

@@ -44,13 +44,20 @@ pub struct GpuMaterial {
     /// `shading.wgsl` takes the terrain path when it is non-negative. Occupies
     /// what was padding, so the struct's size and alignment are unchanged.
     pub terrain_index: i32,
+    /// Phase CONTROL-N: how much water this surface takes up, `0..1`.
+    ///
+    /// Lagarde's discriminating channel. Not a wetness-only input — the same
+    /// number governs ageing and pollution — which is why it lives on the
+    /// material beside roughness rather than on the weather. Occupies what was
+    /// padding, so the struct's size and alignment are unchanged.
+    pub porosity: f32,
     /// Explicit tail padding to a 16-byte multiple.
     ///
     /// WGSL requires the array stride of a storage-buffer element to be a
     /// multiple of its alignment, which is 16 here because of `base_color`.
     /// Adding a single f32 took the struct from 48 to 52 bytes, so the padding
     /// is spelled out rather than left to the compiler to insert silently.
-    pub _pad: [f32; 2],
+    pub _pad: f32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -100,7 +107,8 @@ impl GpuMaterial {
             emissive: emissive.to_array(),
             emissive_map: resolve_texture(asset.emissive_map),
             terrain_index: -1,
-            _pad: [0.0; 2],
+            porosity: asset.porosity,
+            _pad: 0.0,
         }
     }
 }

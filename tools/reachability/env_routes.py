@@ -52,6 +52,12 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_SPECULAR_GI": ("schema", "somnium.PostProcess.specular_gi"),
     "SOMNIUM_TAA": ("schema", "somnium.PostProcess.taa_enabled"),
     "SOMNIUM_VOLUMETRICS": ("schema", "somnium.PostProcess.volumetrics_enabled"),
+    # CONTROL-M. The switch is a schema field; the variable is Seam 4's
+    # override of it, and it wins so recorded captures keep working.
+    "SOMNIUM_CLOUDS": ("schema", "somnium.Sky.enabled"),
+    # CONTROL-M. Toft & Bowles' jitter, as a named pipeline toggle so the
+    # with-and-without .somtime row is two runs rather than two builds.
+    "SOMNIUM_CLOUD_JITTER": ("command", "editor.view.pipeline.cloud_jitter"),
     "SOMNIUM_WORLD_CACHE": ("schema", "somnium.PostProcess.world_cache"),
     "SOMNIUM_CPU_FRUSTUM": ("schema", "somnium.CameraSettings.frustum_cull"),
     "SOMNIUM_DYNRES": ("schema", "somnium.CameraSettings.dynamic_resolution"),

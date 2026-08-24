@@ -162,6 +162,17 @@ pub struct ShadingPass {
     world_volume_view: wgpu::TextureView,
     lighting_extra: wgpu::Buffer,
     sh_probes: wgpu::Buffer,
+    /// CONTROL-M's world-XZ cloud shadow, kept so a resize can rebuild the
+    /// bind group without threading it back through the caller.
+    cloud_shadow_view: wgpu::TextureView,
+    cloud_shadow_params: wgpu::Buffer,
+    /// CONTROL-N: `[wet_diffuse, wet_specular, puddles, unused]`. All zero
+    /// when no weather is driving, which makes the wetness path free rather
+    /// than merely cheap.
+    weather: wgpu::Buffer,
+    /// CONTROL-O: the decal grid's four buffers, cloned so a resize can
+    /// rebuild the bind group without threading the grid back through.
+    decal_buffers: [wgpu::Buffer; 4],
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
     clipmap_layout: wgpu::BindGroupLayout,
@@ -191,6 +202,9 @@ impl ShadingPass {
         lighting_aux_view: &wgpu::TextureView,
         world_volume_view: &wgpu::TextureView,
         sh_probes: &wgpu::Buffer,
+        cloud_shadow_view: &wgpu::TextureView,
+        cloud_shadow_params: &wgpu::Buffer,
+        decals: &crate::pass::decal::DecalGrid,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shading Pass Bind Group Layout"),
@@ -363,6 +377,85 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                // CONTROL-M: the world-XZ cloud shadow field, and the vec4
+                // that says where it is. Terrain and water both read it here
+                // rather than each growing their own copy, which is what makes
+                // a cloud's shadow cross a beach onto the sea.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // CONTROL-N: `[wet_diffuse, wet_specular, puddles, unused]`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 19,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // CONTROL-O: the decal list, its per-froxel table and its
+                // index list, then the count. The froxel *geometry* is the
+                // light grid's, read from `cluster_params`, so decals cost
+                // four buffers and not a second grid.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 20,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 21,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 22,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 23,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -404,6 +497,20 @@ impl ShadingPass {
             mapped_at_creation: false,
         });
 
+        let weather = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Weather wetness params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let decal_buffers = [
+            decals.decal_buffer.clone(),
+            decals.offset_buffer.clone(),
+            decals.index_buffer.clone(),
+            decals.params_buffer.clone(),
+        ];
+
         let bind_group = Self::make_bind_group(
             device,
             &bind_group_layout,
@@ -424,6 +531,10 @@ impl ShadingPass {
             world_volume_view,
             &lighting_extra,
             sh_probes,
+            cloud_shadow_view,
+            cloud_shadow_params,
+            &weather,
+            &decal_buffers,
         );
 
         let shader_source = format!(
@@ -560,6 +671,10 @@ impl ShadingPass {
             world_volume_view: world_volume_view.clone(),
             lighting_extra,
             sh_probes: sh_probes.clone(),
+            cloud_shadow_view: cloud_shadow_view.clone(),
+            cloud_shadow_params: cloud_shadow_params.clone(),
+            weather,
+            decal_buffers,
             clipmap_layout,
             clipmap_sampler,
             clipmap_bind_group,
@@ -896,6 +1011,10 @@ impl ShadingPass {
         world_volume_view: &wgpu::TextureView,
         lighting_extra: &wgpu::Buffer,
         sh_probes: &wgpu::Buffer,
+        cloud_shadow_view: &wgpu::TextureView,
+        cloud_shadow_params: &wgpu::Buffer,
+        weather: &wgpu::Buffer,
+        decals: &[wgpu::Buffer; 4],
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -968,6 +1087,34 @@ impl ShadingPass {
                 wgpu::BindGroupEntry {
                     binding: 16,
                     resource: sh_probes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(cloud_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: cloud_shadow_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: weather.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: decals[0].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: decals[1].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: decals[2].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: decals[3].as_entire_binding(),
                 },
             ],
         })
@@ -1157,6 +1304,26 @@ impl ShadingPass {
             &self.world_volume_view,
             &self.lighting_extra,
             &self.sh_probes,
+            &self.cloud_shadow_view,
+            &self.cloud_shadow_params,
+            &self.weather,
+            &self.decal_buffers,
+        );
+    }
+
+    /// Publish this frame's wetness. All zero leaves shading bit-identical to
+    /// what it was before CONTROL-N, which is what "off by default" has to
+    /// mean for a surface property.
+    pub fn set_weather(&self, queue: &wgpu::Queue, wet_diffuse: f32, wet_specular: f32, puddles: f32) {
+        queue.write_buffer(
+            &self.weather,
+            0,
+            bytemuck::bytes_of(&[
+                wet_diffuse.clamp(0.0, 1.0),
+                wet_specular.clamp(0.0, 1.0),
+                puddles.clamp(0.0, 1.0),
+                0.0_f32,
+            ]),
         );
     }
 

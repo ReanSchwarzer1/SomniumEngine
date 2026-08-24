@@ -175,6 +175,7 @@ fn landscape_snapshots(
         mat: None,
         wt: Some(WorldTransform::identity()),
         environment: false,
+        decal: None,
         mesh_kind: None,
         is_particle_emitter: false,
         terrain: Some(TerrainComponent {
@@ -199,6 +200,7 @@ fn landscape_snapshots(
         mat: None,
         wt: Some(WorldTransform::identity()),
         environment: false,
+        decal: None,
         // Retained only for old scene compatibility; rendering is selected by
         // WaterComponent and the allocation is a finite wet-cell mesh.
         mesh_kind: Some(MeshKind::Plane),

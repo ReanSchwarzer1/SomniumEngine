@@ -406,6 +406,7 @@ pub fn component_registry() -> TypeRegistry {
 
     registry.register(buoyant_vessel_schema());
     registry.register(camera_settings_schema());
+    registry.register(decal_schema());
     registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
@@ -417,11 +418,13 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(particle_emitter_schema());
     registry.register(post_process_schema());
     crate::character::register(&mut registry);
+    registry.register(sky_schema());
     registry.register(terrain_schema());
     registry.register(time_of_day_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
     registry.register(water_schema());
+    registry.register(weather_schema());
 
     registry
 }
@@ -464,6 +467,10 @@ fn particle_emitter_schema() -> ComponentSchema {
             size_end { min: 0.0, step: 0.01, group: "Particle", unit: "m" },
             color_over_life { group: "Appearance", display_name: "Colour over Life" },
             gravity { step: 0.1, group: "Forces", unit: "m/s²" },
+            velocity_bias { step: 0.1, precision: 2, group: "Forces", unit: "m/s",
+                display_name: "Velocity Bias" },
+            spawn_extents { min: 0.0, step: 0.5, precision: 2, group: "Emission", unit: "m",
+                display_name: "Spawn Volume" },
         }
     }
 }
@@ -699,6 +706,104 @@ fn time_of_day_schema() -> ComponentSchema {
     }
 }
 
+/// CONTROL-M. Every number the cloud march reads, in one block.
+///
+/// The claim the phase's rendering half exists to test: a renderer feature
+/// whose whole authoring surface is a schema block, with no `SOMNIUM_*`
+/// variable left as the only way to reach any of it.
+fn sky_schema() -> ComponentSchema {
+    component_schema! {
+        crate::sky::SkyComponent as "somnium.Sky", display "Sky", version 1,
+        fields {
+            enabled { group: "Clouds" },
+            coverage { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Clouds" },
+            cloud_type { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Clouds",
+                display_name: "Cloud Type" },
+            density { min: 0.0, soft_max: 4.0, step: 0.01, precision: 2, group: "Clouds" },
+            altitude { min: 100.0, soft_max: 8000.0, step: 10.0, unit: "m", group: "Layer" },
+            thickness { min: 100.0, soft_max: 8000.0, step: 10.0, unit: "m", group: "Layer" },
+            wind { step: 0.5, precision: 2, unit: "m/s", group: "Weather" },
+            precipitation { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Weather" },
+            weather_scale { min: 100.0, soft_max: 80000.0, step: 100.0, unit: "m",
+                group: "Weather", display_name: "Weather Scale" },
+            seed { min: 0, group: "Weather" },
+            detail_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shape",
+                display_name: "Detail Strength" },
+            shape_scale { min: 100.0, soft_max: 40000.0, step: 100.0, unit: "m",
+                group: "Shape", display_name: "Shape Scale" },
+            ambient { min: 0.0, soft_max: 4.0, step: 0.01, precision: 2, group: "Lighting" },
+            phase_forward { min: 0.0, max: 0.95, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Forward Scattering" },
+            phase_backward { min: -0.95, max: 0.0, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Backward Scattering" },
+            phase_blend { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Lighting",
+                display_name: "Lobe Blend" },
+            shadow_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shadows",
+                display_name: "Shadow Strength" },
+            shadow_extent { min: 100.0, soft_max: 20000.0, step: 100.0, unit: "m",
+                group: "Shadows", display_name: "Shadow Extent" },
+            max_steps { min: 8, max: 256, group: "Quality", display_name: "March Steps",
+                advanced: true },
+            light_steps { min: 1, max: 16, group: "Quality", display_name: "Light Steps",
+                advanced: true },
+            max_distance { min: 1000.0, soft_max: 200000.0, step: 1000.0, unit: "m",
+                group: "Quality", display_name: "Max Distance", advanced: true },
+        }
+    }
+}
+
+/// CONTROL-N. Weather as a set of causes, not a pile of sliders.
+fn weather_schema() -> ComponentSchema {
+    component_schema! {
+        crate::weather::WeatherComponent as "somnium.Weather", display "Weather", version 1,
+        fields {
+            enabled { group: "Weather" },
+            precipitation { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Weather" },
+            temperature_c { min: -50.0, max: 60.0, step: 0.5, precision: 1, unit: "C",
+                group: "Weather", display_name: "Temperature" },
+            wind_speed { min: 0.0, soft_max: 45.0, step: 0.5, precision: 2, unit: "m/s",
+                group: "Wind", display_name: "Wind Speed" },
+            wind_direction_deg { min: 0.0, max: 360.0, step: 1.0, precision: 1,
+                group: "Wind", display_name: "Wind Direction" },
+            wetness_target { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness",
+                display_name: "Wetness Target" },
+            wetting_seconds { min: 0.1, soft_max: 120.0, step: 0.5, precision: 2, unit: "s",
+                group: "Wetness", display_name: "Wetting Time" },
+            drying_seconds { min: 0.1, soft_max: 600.0, step: 1.0, precision: 2, unit: "s",
+                group: "Wetness", display_name: "Drying Time" },
+            specular_dry_ratio { min: 0.1, soft_max: 10.0, step: 0.1, precision: 2,
+                group: "Wetness", display_name: "Specular Dries Faster By" },
+            puddles { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness" },
+            ripple_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Water",
+                display_name: "Rain Ripples" },
+            transition_seconds { min: 0.1, soft_max: 60.0, step: 0.5, precision: 2, unit: "s",
+                group: "Weather", display_name: "Transition" },
+            particle_rate { min: 0.0, soft_max: 40000.0, step: 100.0, group: "Precipitation",
+                display_name: "Particles per Second", advanced: true },
+        }
+    }
+}
+
+/// CONTROL-O. The box is the entity's `Transform`; these are the six things
+/// about the projection that the transform cannot say.
+fn decal_schema() -> ComponentSchema {
+    component_schema! {
+        crate::decal::DecalComponent as "somnium.Decal", display "Decal", version 1,
+        fields {
+            enabled { group: "Decal" },
+            opacity { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Decal" },
+            priority { group: "Decal",
+                doc: "Higher wins where two decals overlap." },
+            angle_fade_degrees { min: 0.0, max: 89.0, step: 1.0, precision: 1,
+                group: "Projection", display_name: "Angle Fade",
+                doc: "How far a surface may tip from the projection axis before the decal fades out." },
+            normal_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2,
+                group: "Projection", display_name: "Normal Strength" },
+            roughness { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Projection" },
+        }
+    }
+}
+
 fn voxel_terrain_schema() -> ComponentSchema {
     component_schema! {
         VoxelTerrainComponent as "somnium.VoxelTerrain", display "Voxel Terrain", version 1,
@@ -802,13 +907,14 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 18);
+        assert_eq!(registry.len(), 21);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
+                "somnium.Decal",
                 "somnium.EditorFlags",
                 "somnium.Foliage",
                 "somnium.Light",
@@ -820,11 +926,13 @@ mod tests {
                 "somnium.ParticleEmitter",
                 "somnium.PostProcess",
                 "somnium.RigidBody",
+                "somnium.Sky",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
+                "somnium.Weather",
             ],
             "iteration is sorted by stable id, not by registration order"
         );

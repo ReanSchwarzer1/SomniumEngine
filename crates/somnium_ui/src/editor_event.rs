@@ -317,6 +317,15 @@ pub enum EditorEvent {
         hour: f32,
         live: bool,
     },
+    /// CONTROL-M: apply a named sky preset to the scene's Sky component.
+    ///
+    /// One event carrying an id rather than one per preset: the core owns what
+    /// the name means, and adding a fifth sky must not add a fifth variant
+    /// here, a fifth arm in the dispatcher and a fifth row in the menu.
+    SetSkyPreset(&'static str),
+    /// CONTROL-N: apply a named weather state to the scene's Weather
+    /// component. The transition itself is the driver's job, not this event's.
+    SetWeatherPreset(&'static str),
     /// `live` marks an in-progress drag-scrub: apply it to the scene, but do
     /// not record an undo entry yet. The gesture ends with one non-live event
     /// carrying the final value, and that is what becomes a single undo step.
