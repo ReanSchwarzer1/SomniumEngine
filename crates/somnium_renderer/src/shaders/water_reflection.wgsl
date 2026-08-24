@@ -1,3 +1,13 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "rt_hit.wgsl"
+//!include "global_pool.wgsl"
+//!include "brdf.wgsl"
+//!include "hextile.wgsl"
+//!include "terrain_material.wgsl"
+
 enable wgpu_ray_query;
 
 // Phase VV — Halcyon: hardware ray-traced water reflections.

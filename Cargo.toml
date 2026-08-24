@@ -4,6 +4,7 @@ members = [
     "crates/somnium_core",
     "crates/somnium_ecs",
     "crates/somnium_jobs",
+    "crates/somnium_shader",
     "crates/somnium_script",
     "crates/somnium_script_luau",
     "crates/somnium_renderer",
@@ -42,6 +43,7 @@ authors = ["Somnium Engine Contributors"]
 somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }
 somnium_jobs     = { path = "crates/somnium_jobs" }
+somnium_shader   = { path = "crates/somnium_shader" }
 somnium_script   = { path = "crates/somnium_script" }
 somnium_script_luau = { path = "crates/somnium_script_luau" }
 somnium_renderer = { path = "crates/somnium_renderer" }

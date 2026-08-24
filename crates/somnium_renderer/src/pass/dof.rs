@@ -40,15 +40,14 @@ pub struct DofPass {
 impl DofPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/sampling.wgsl"),
-            include_str!("../shaders/dof.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `dof.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("dof.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dof.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -134,12 +134,10 @@ pub struct VolumetricPass {
 }
 
 impl VolumetricPass {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/atmosphere.wgsl"),
-            include_str!("../shaders/volumetric.wgsl"),
-        );
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
+        // MORROWIND-C: composition is declared in `volumetric.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("volumetric.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("volumetric.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -57,6 +57,7 @@ impl FxaaPass {
     /// since that pass renders into `ldr_view`.
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
@@ -122,7 +123,7 @@ impl FxaaPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FXAA Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fxaa.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("fxaa.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

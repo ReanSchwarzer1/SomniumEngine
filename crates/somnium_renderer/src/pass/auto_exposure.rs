@@ -49,10 +49,10 @@ pub struct AutoExposurePass {
 }
 
 impl AutoExposurePass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auto_exposure.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/auto_exposure.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("auto_exposure.wgsl").into()),
         });
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

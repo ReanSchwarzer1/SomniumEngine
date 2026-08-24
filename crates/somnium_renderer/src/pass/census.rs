@@ -127,13 +127,14 @@ pub struct CensusPass {
 impl CensusPass {
     const BYTES: u64 = (BIN_COUNT * std::mem::size_of::<u32>()) as u64;
 
-    pub fn new(device: &wgpu::Device, global_layout: &wgpu::BindGroupLayout) -> Self {
-        let source = format!(
-            "{}\n{}\n{}",
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/pixel_class.wgsl"),
-            include_str!("../shaders/census.wgsl"),
-        );
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        global_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        // MORROWIND-C: composition is declared in `census.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("census.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("census.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

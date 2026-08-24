@@ -15,6 +15,7 @@
 
 pub mod bindless;
 pub mod capability;
+pub mod shaders;
 pub mod capture;
 pub mod cluster;
 pub mod command;

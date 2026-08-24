@@ -269,6 +269,7 @@ impl GizmoPass {
     /// - `view_buffer`:    the 208-byte global view buffer.
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         view_buffer: &wgpu::Buffer,
     ) -> Self {
@@ -367,7 +368,7 @@ impl GizmoPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Gizmo Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/gizmo.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("gizmo.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

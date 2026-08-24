@@ -1,45 +1,43 @@
 //! Parse and validate every shader module the renderer builds.
 //!
 //! wgpu compiles WGSL when the pipeline is created, which is at startup on a
-//! machine with a GPU — so until now a typo, a stale struct mirror or an
-//! out-of-order declaration surfaced as a first-frame crash and nowhere in CI.
-//! naga is wgpu's own front end, so running it over the same concatenations the
-//! passes assemble catches that class of error in `cargo test`.
+//! machine with a GPU — so a typo, a stale struct mirror or an out-of-order
+//! declaration would surface as a first-frame crash and nowhere in CI. naga is
+//! wgpu's own front end, so running it over the sources the passes assemble
+//! catches that class of error in `cargo test`.
 //!
-//! This validates the *modules*, not the pipelines: bind-group layout mismatches
-//! and vertex-format disagreements still need a device.
+//! This validates the *modules*, not the pipelines: bind-group layout
+//! mismatches and vertex-format disagreements still need a device.
+//!
+//! # What MORROWIND-C changed here, and why it matters
+//!
+//! Every composed module used to be a `format!` in this file **mirroring** a
+//! `format!` in a pass constructor. Two copies of an ordering that had to
+//! agree, with nothing enforcing that they did — and `restir_gi.rs`'s own
+//! comment said *"`tests/shaders_validate.rs` pins this exact concatenation"*,
+//! which is a description of a convention, not a mechanism.
+//!
+//! Composition now lives in the `.wgsl` files as `//!include` directives, and
+//! this file resolves them through the same [`Shaders`] registry the renderer
+//! uses. **There is one description of what a shader is made of**, and this
+//! test validates it rather than a copy of it. A `//!include` that names a
+//! missing file, a cycle, or a typo in a `//!if` fails here.
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
+use somnium_renderer::shaders::Shaders;
 
-const GLOBAL_POOL: &str = include_str!("../src/shaders/global_pool.wgsl");
-const RESTIR_GI: &str = include_str!("../src/shaders/restir_gi.wgsl");
-const LIGHTING_EXTRA: &str = include_str!("../src/shaders/lighting_extra.wgsl");
-const RT_HIT: &str = include_str!("../src/shaders/rt_hit.wgsl");
-const WATER_REFLECTION: &str = include_str!("../src/shaders/water_reflection.wgsl");
+// Modules that compose nothing still validate on their own, so their text is
+// still read directly. Everything with dependencies goes through `Shaders`.
 const SPD: &str = include_str!("../src/shaders/spd.wgsl");
 const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
 const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
 const CAS: &str = include_str!("../src/shaders/cas.wgsl");
 const PRESENT: &str = include_str!("../src/shaders/present.wgsl");
-const BRDF: &str = include_str!("../src/shaders/brdf.wgsl");
-const SAMPLING: &str = include_str!("../src/shaders/sampling.wgsl");
-const ATMOSPHERE: &str = include_str!("../src/shaders/atmosphere.wgsl");
-const ATMOSPHERE_VOL: &str = include_str!("../src/shaders/volumetric.wgsl");
-const HEXTILE: &str = include_str!("../src/shaders/hextile.wgsl");
-const TERRAIN_MATERIAL: &str = include_str!("../src/shaders/terrain_material.wgsl");
-const CLIPMAP_GEN: &str = include_str!("../src/shaders/clipmap_gen.wgsl");
-const CLIPMAP_SHADE: &str = include_str!("../src/shaders/clipmap_shade.wgsl");
-const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
 const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
 const SHADOW: &str = include_str!("../src/shaders/shadow.wgsl");
-const TRANSPARENT: &str = include_str!("../src/shaders/transparent.wgsl");
 const WATER: &str = include_str!("../src/shaders/water.wgsl");
 const WATER_SPECTRUM: &str = include_str!("../src/shaders/water_spectrum.wgsl");
 const UNDERWATER: &str = include_str!("../src/shaders/underwater.wgsl");
-const CENSUS: &str = include_str!("../src/shaders/census.wgsl");
-const PIXEL_CLASS: &str = include_str!("../src/shaders/pixel_class.wgsl");
-const CLASSIFY: &str = include_str!("../src/shaders/classify.wgsl");
-const CLOUDS: &str = include_str!("../src/shaders/clouds.wgsl");
 const CLOUDS_NOISE: &str = include_str!("../src/shaders/clouds_noise.wgsl");
 const CLOUDS_COMPOSITE: &str = include_str!("../src/shaders/clouds_composite.wgsl");
 
@@ -58,75 +56,153 @@ fn check(label: &str, source: &str) {
     }
 }
 
-#[test]
-fn the_shading_module_validates() {
-    // The exact concatenation `ShadingPass::new` builds. Phase 25A-2 added
-    // terrain_material.wgsl to it, which is also the check that terrain's
-    // material functions can see `textures` and `default_sampler` even though
-    // those are declared in a later file — module-scope declarations in WGSL
-    // are order-independent, and this is what proves it rather than assuming.
-    check(
-        "shading",
-        &format!(
-            "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
-        ),
-    );
+/// Resolve a composed root through the same registry the renderer uses.
+fn composed(name: &str) -> String {
+    Shaders::new().source_or_panic(name)
 }
 
-/// Phase CONTROL-M. Three modules: the noise generators stand alone, the
-/// march is concatenated after the atmosphere exactly as `CloudPass::new`
-/// builds it, and the composite stands alone. The march is the one that
-/// matters — it reuses `sample_transmittance`, `sample_multiscatter` and
-/// `ray_hits_ground`, and this is what proves the clouds and the sky read the
-/// same atmosphere rather than each carrying a copy.
+/// **Every composed root validates.**
+///
+/// This is MORROWIND-C's acceptance test and it replaces thirteen hand-written
+/// concatenations that mirrored thirteen others. Adding a shader is one line in
+/// `shaders.rs` and its `//!include` header; nothing here has to be updated to
+/// match, which is the point — the previous arrangement could drift and this
+/// one cannot.
+#[test]
+fn every_composed_root_validates() {
+    let shaders = Shaders::new();
+    for root in [
+        "shading.wgsl",
+        "restir_gi.wgsl",
+        "lighting_extra.wgsl",
+        "water_reflection.wgsl",
+        "census.wgsl",
+        "classify.wgsl",
+        "clipmap_gen.wgsl",
+        "volumetric.wgsl",
+        "clouds.wgsl",
+        "atmosphere_lut.wgsl",
+        "ibl_gen.wgsl",
+        "dof.wgsl",
+        "gtao.wgsl",
+    ] {
+        check(root, &shaders.source_or_panic(root));
+    }
+}
+
+/// The shading module, kept as its own test because it is the acceptance case.
+///
+/// Phase 25A-2 added `terrain_material.wgsl` to the composition, which is also
+/// the check that terrain's material functions can see `textures` and
+/// `default_sampler` even though those are declared in a different file —
+/// module-scope declarations in WGSL are order-independent, and this is what
+/// proves it rather than assuming.
+#[test]
+fn the_shading_module_validates() {
+    check("shading", &composed("shading.wgsl"));
+}
+
+/// Phase CONTROL-M. The march reuses `sample_transmittance`,
+/// `sample_multiscatter` and `ray_hits_ground`, which is what proves the clouds
+/// and the sky read the same atmosphere rather than each carrying a copy — now
+/// declared by `//!include "atmosphere.wgsl"` at the top of `clouds.wgsl`
+/// rather than by the order of two `include_str!` calls in `CloudPass::new`.
 #[test]
 fn the_cloud_modules_validate() {
     check("clouds_noise", CLOUDS_NOISE);
-    check("clouds", &format!("{ATMOSPHERE}
-{CLOUDS}"));
+    check("clouds", &composed("clouds.wgsl"));
     check("clouds_composite", CLOUDS_COMPOSITE);
 }
 
+/// Phase DOOM-B/C. The census and the classifier share `pixel_class.wgsl`,
+/// which is the structural guarantee that a tile is routed by the same test
+/// that counted it — and both read `instances`, `materials` and `view` from the
+/// same global pool the shading pass does, so a census cannot classify a pixel
+/// differently from the pass it is describing.
 #[test]
-fn the_census_module_validates() {
-    // Phase DOOM-B. Also the check that the census reads `instances`,
-    // `materials` and `view` from the same global pool the shading pass does —
-    // a census resolving the scene through its own copy of those declarations
-    // could classify a pixel differently from the pass it is describing.
-    check("census", &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CENSUS}"));
-}
-
-#[test]
-fn the_classify_module_validates() {
-    // Phase DOOM-C. Shares `pixel_class.wgsl` with the census above, which is
-    // the structural guarantee that a tile is routed by the same test that
-    // counted it.
-    check(
-        "classify",
-        &format!("{GLOBAL_POOL}\n{PIXEL_CLASS}\n{CLASSIFY}"),
-    );
+fn the_census_and_classify_modules_validate() {
+    check("census", &composed("census.wgsl"));
+    check("classify", &composed("classify.wgsl"));
 }
 
 #[test]
 fn the_clipmap_generate_module_validates() {
-    check(
-        "clipmap_gen",
-        &format!("{GLOBAL_POOL}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_GEN}"),
-    );
+    check("clipmap_gen", &composed("clipmap_gen.wgsl"));
+}
+
+/// The froxel volume for aerial perspective and fog (24U/25I), which composes
+/// the atmosphere so it reuses its density, phase and LUT helpers rather than
+/// defining a second atmosphere.
+#[test]
+fn the_volumetric_module_validates() {
+    check("volumetric", &composed("volumetric.wgsl"));
+}
+
+/// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
+/// does, which is the point: a ray hit and a visibility-buffer hit resolve
+/// through one description of the scene, not two that could drift apart.
+///
+/// `enable wgpu_ray_query;` is hoisted by the resolver, so the old requirement
+/// that `restir_gi.wgsl` be concatenated *first* has stopped being a rule
+/// somebody has to remember.
+#[test]
+fn the_restir_gi_module_validates() {
+    check("restir_gi", &composed("restir_gi.wgsl"));
 }
 
 #[test]
-fn the_volumetric_module_validates() {
-    // The froxel volume for aerial perspective and fog (24U/25I), which is
-    // concatenated after the atmosphere so it can reuse its density, phase and
-    // LUT helpers rather than defining a second atmosphere.
-    check(
-        "volumetric",
-        &format!(
-            "{ATMOSPHERE}
-{ATMOSPHERE_VOL}"
-        ),
-    );
+fn the_lighting_extra_module_validates() {
+    check("lighting_extra", &composed("lighting_extra.wgsl"));
+}
+
+/// Phase VV. Same modules `WaterReflectionPass::new` builds, now declared in
+/// `water_reflection.wgsl` itself.
+#[test]
+fn the_water_reflection_module_validates() {
+    check("water_reflection", &composed("water_reflection.wgsl"));
+}
+
+/// The standalone post and utility modules. Each declares its own bindings
+/// and pulls in nothing, so each validates alone — and every one of them has
+/// already caught something: a reserved keyword in SPD, a reserved parameter
+/// name in the GI module, three struct-field mismatches.
+#[test]
+fn the_standalone_post_modules_validate() {
+    check("spd", SPD);
+    check("velocity", VELOCITY);
+    check("motion_blur", MOTION_BLUR);
+    check("cas", CAS);
+    check("present", PRESENT);
+}
+
+#[test]
+fn the_visibility_module_validates() {
+    check("visibility", VISIBILITY);
+}
+
+#[test]
+fn the_shadow_module_validates() {
+    check("shadow", SHADOW);
+}
+
+/// The forward transparent pass, which composes nothing.
+///
+/// This test used to validate `{BRDF}` concatenated with `{TRANSPARENT}` — a
+/// pairing `TransparentPass::new` never built. It compiles `transparent.wgsl`
+/// alone, and the module calls none of `brdf.wgsl`'s three functions. The test
+/// was over-approximating, and MORROWIND-C found it by making the test resolve
+/// what the pass actually builds. Two descriptions of one shader will drift;
+/// that is the whole argument for having one.
+#[test]
+fn the_transparent_module_validates() {
+    check("transparent", &composed("transparent.wgsl"));
+}
+
+#[test]
+fn the_phase_iv_water_modules_validate() {
+    check("water", WATER);
+    check("water_spectrum", WATER_SPECTRUM);
+    check("underwater", UNDERWATER);
 }
 
 /// The WGSL side of the CPU/GPU struct mirrors, checked against the Rust side.
@@ -139,9 +215,7 @@ fn the_volumetric_module_validates() {
 /// `vec3<u32>` pad, which aligns to 16 in WGSL and to 4 in Rust.
 #[test]
 fn the_terrain_material_struct_matches_the_rust_layout() {
-    let source = format!(
-        "{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}\n{CLIPMAP_SHADE}\n{SHADING}"
-    );
+    let source = composed("shading.wgsl");
     let module = naga::front::wgsl::parse_str(&source).expect("shading module parses");
 
     let (_, ty) = module
@@ -194,77 +268,30 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("clipmap_macro_rings"), 2016);
 }
 
-/// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
-/// does, which is the point: a ray hit and a visibility-buffer hit resolve
-/// through one description of the scene, not two that could drift apart.
+/// The `enable` directives survive composition and end up first.
+///
+/// `restir_gi.wgsl` and `lighting_extra.wgsl` both declare
+/// `enable wgpu_ray_query;`, and WGSL requires every `enable` to precede every
+/// declaration. Before this, the rule was satisfied by concatenating those two
+/// files *first* and leaving a comment explaining why — which is a rule
+/// somebody has to remember, in two places, forever. The resolver hoists them
+/// instead, and this is the check that it does.
 #[test]
-fn the_restir_gi_module_validates() {
-    check(
-        "restir_gi",
-        // GI first, because `enable wgpu_ray_query;` is a directive and
-        // directives must precede every declaration in the module. Declarations
-        // themselves are order-independent, which is what lets the pool it
-        // depends on be concatenated after it.
-        &format!(
-            "{RESTIR_GI}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
-        ),
-    );
-}
-
-/// The standalone post and utility modules. Each declares its own bindings
-/// and pulls in nothing, so each validates alone — and every one of them has
-/// already caught something: a reserved keyword in SPD, a reserved parameter
-/// name in the GI module, three struct-field mismatches.
-#[test]
-fn the_standalone_post_modules_validate() {
-    check("spd", SPD);
-    check("velocity", VELOCITY);
-    check("motion_blur", MOTION_BLUR);
-    check("cas", CAS);
-    check("present", PRESENT);
-}
-
-#[test]
-fn the_visibility_module_validates() {
-    check("visibility", VISIBILITY);
-}
-
-#[test]
-fn the_shadow_module_validates() {
-    check("shadow", SHADOW);
-}
-
-#[test]
-fn the_transparent_module_validates() {
-    check("transparent", &format!("{BRDF}\n{TRANSPARENT}"));
-}
-
-#[test]
-fn the_phase_iv_water_modules_validate() {
-    check("water", WATER);
-    check("water_spectrum", WATER_SPECTRUM);
-    check("underwater", UNDERWATER);
-}
-
-/// Phase VV. Same concatenation `WaterReflectionPass::new` builds: the
-/// reflection compute shader first so `enable wgpu_ray_query;` precedes every
-/// declaration, then shared hit resolution and the pool it shades through.
-#[test]
-fn the_water_reflection_module_validates() {
-    check(
-        "water_reflection",
-        &format!(
-            "{WATER_REFLECTION}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
-        ),
-    );
-}
-
-#[test]
-fn the_lighting_extra_module_validates() {
-    check(
-        "lighting_extra",
-        &format!(
-            "{LIGHTING_EXTRA}\n{RT_HIT}\n{GLOBAL_POOL}\n{BRDF}\n{SAMPLING}\n{ATMOSPHERE}\n{HEXTILE}\n{TERRAIN_MATERIAL}"
-        ),
-    );
+fn enable_directives_are_hoisted_to_the_top_of_a_composed_module() {
+    for root in ["restir_gi.wgsl", "lighting_extra.wgsl", "water_reflection.wgsl"] {
+        let source = composed(root);
+        let first = source
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default();
+        assert!(
+            first.trim_start().starts_with("enable "),
+            "{root}: expected an `enable` first, found `{first}`"
+        );
+        assert_eq!(
+            source.matches("enable wgpu_ray_query;").count(),
+            1,
+            "{root}: a duplicated `enable` is a parse error"
+        );
+    }
 }

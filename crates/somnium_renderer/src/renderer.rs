@@ -1,6 +1,6 @@
 //! The main entry point for the Somnium Renderer.
 //!
-//! Orchestrates the `GlobalResourcePool`, `MaterialSystem`, and rendering passes.
+//! Orchestrates the `GlobalResourcePool`, the shader system, and rendering passes.
 //!
 //! Phase 11 additions:
 //! - `ShadowMapResources` + `ShadowPass` for cascade shadow maps
@@ -16,7 +16,6 @@ use crate::{
     geometry::GeometryPool,
     instance::InstancePool,
     material::{
-        hlms::MaterialSystem,
         pool::{GpuMaterial, MaterialPool},
     },
     pass::{
@@ -62,7 +61,7 @@ pub struct SomniumRenderer {
     /// Global descriptor pool (bindless arrays, includes light buffer at binding 6).
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
-    pub materials: MaterialSystem,
+    pub shaders: crate::shaders::Shaders,
     /// The visibility buffer render pass.
     pub vis_pass: VisibilityBufferPass,
     /// The final shading pass.
@@ -473,18 +472,22 @@ impl SomniumRenderer {
 
         // Phase DOOM-B. Built here rather than in the struct literal because it
         // borrows the global pool's layout, and the literal moves the pool.
-        let census_pass = crate::pass::census::CensusPass::new(&ctx.device, &global_pool.layout);
-        let classify_pass =
-            crate::pass::classify::ClassifyPass::new(&ctx.device, &global_pool.layout);
+        // MORROWIND-C. Every WGSL module in the crate is registered here, once,
+        // and every pass below composes through it. This replaces the 29-line
+        // `MaterialSystem` stub that described Ogre's HLMS and did nothing.
+        let shaders = crate::shaders::Shaders::new();
 
-        let materials = MaterialSystem::new();
+        let census_pass =
+            crate::pass::census::CensusPass::new(&ctx.device, &shaders, &global_pool.layout);
+        let classify_pass =
+            crate::pass::classify::ClassifyPass::new(&ctx.device, &shaders, &global_pool.layout);
 
         // Phase 11.5H: Editor infinite-grid overlay (renders to HDR target).
-        let grid_pass = GridPass::new(&ctx.device, HDR_FORMAT, &global_pool.view_proj_buffer);
+        let grid_pass = GridPass::new(&ctx.device, &shaders, HDR_FORMAT, &global_pool.view_proj_buffer);
 
         // Phase 24A-3: built before the post-process pass, which binds its
         // result buffer.
-        let mut auto_exposure_pass = crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
+        let mut auto_exposure_pass = crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device, &shaders);
 
         // Phase 24J: acceleration structures. Constructed even when the device
         // lacks ray query — the pass then does nothing, which keeps the call
@@ -497,6 +500,7 @@ impl SomniumRenderer {
         // Phase 24K: reservoir-based direct lighting, on top of 24J.
         let restir_pass = crate::pass::restir::RestirPass::new(
             &ctx.device,
+            &shaders,
             raytrace_pass.supported(),
             ctx.config.width,
             ctx.config.height,
@@ -507,6 +511,7 @@ impl SomniumRenderer {
         // the same scene bindings the shading pass rasterises through.
         let restir_gi_pass = crate::pass::restir_gi::RestirGiPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
@@ -514,20 +519,26 @@ impl SomniumRenderer {
         );
         let lighting_extra_pass = crate::pass::lighting_extra::LightingExtraPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
             ctx.config.height,
         );
         let clipmap_pass =
-            crate::pass::terrain_clipmap::TerrainClipmapPass::new(&ctx.device, &global_pool.layout);
+            crate::pass::terrain_clipmap::TerrainClipmapPass::new(
+                &ctx.device,
+                &shaders,
+                &global_pool.layout,
+            );
 
         let rt_debug_pass =
-            crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
+            crate::pass::raytrace::RtDebugPass::new(&ctx.device, &shaders, raytrace_pass.layout());
 
         // Phase 24Z: depth of field, driven by the same aperture as exposure.
         let dof_pass = crate::pass::dof::DofPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -536,6 +547,7 @@ impl SomniumRenderer {
         // Phase 24T: built before the post-process pass, which samples its result.
         let bloom_pass = crate::pass::bloom::BloomPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -544,6 +556,7 @@ impl SomniumRenderer {
         // Phase 11.5K: Post-process pass owns the Rgba16Float HDR render target.
         let postprocess_pass = PostProcessPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             ctx.config.width,
             ctx.config.height,
@@ -554,11 +567,17 @@ impl SomniumRenderer {
 
         // Phase 24I: screen-space occlusion, consumed by the shading pass.
         let gtao_pass =
-            crate::pass::gtao::GtaoPass::new(&ctx.device, ctx.config.width, ctx.config.height);
+            crate::pass::gtao::GtaoPass::new(
+                &ctx.device,
+                &shaders,
+                ctx.config.width,
+                ctx.config.height,
+            );
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let taa_pass = crate::pass::taa::TaaPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -568,6 +587,7 @@ impl SomniumRenderer {
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &global_pool.view_proj_buffer,
         );
@@ -575,16 +595,18 @@ impl SomniumRenderer {
         // Phase 13E: light gizmos (drawn to the swapchain like the transform gizmo).
         let light_gizmo_pass = crate::pass::light_gizmo::LightGizmoPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &global_pool.view_proj_buffer,
         );
 
         // Phase 11.5J: GPU billboard particle pass.
-        let particle_pass = ParticlePass::new(&ctx.device, ctx.config.format);
+        let particle_pass = ParticlePass::new(&ctx.device, &shaders, ctx.config.format);
 
         // Phase 11.5I: Selection outline (stencil-based, renders to swapchain).
         let outline_pass = OutlinePass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &geometry.vertex_buffer,
             &geometry.index_buffer,
@@ -597,36 +619,39 @@ impl SomniumRenderer {
         let shadow_resources = ShadowMapResources::new(&ctx.device);
 
         // Phase 11B: Depth-only shadow pass (4 cascades into the atlas).
-        let shadow_pass = ShadowPass::new(&ctx.device, &ctx.queue, &global_pool.layout);
+        let shadow_pass = ShadowPass::new(&ctx.device, &shaders, &ctx.queue, &global_pool.layout);
 
         // Phase 19: build the environment cubemap before the shading pass, which
         // binds it. Contents are generated on the first frame (and whenever the
         // sun changes), not here.
         // Phase 24C: the atmosphere LUTs must exist before the IBL pass, which
         // binds them to ray-march the sky into the environment cubemap.
-        let atmosphere_pass = crate::pass::atmosphere::AtmospherePass::new(&ctx.device);
-        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &atmosphere_pass);
+        let atmosphere_pass = crate::pass::atmosphere::AtmospherePass::new(&ctx.device, &shaders);
+        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &shaders, &atmosphere_pass);
 
         let vis_pass = VisibilityBufferPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.width,
             ctx.config.height,
             &global_pool.layout,
         );
         let hiz_pass = crate::pass::hiz::HiZPass::new(
             &ctx.device,
+            &shaders,
             &ctx.queue,
             ctx.config.width,
             ctx.config.height,
             &vis_pass.depth_view,
         );
-        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
+        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders);
 
         // Phase CONTROL-M. Built before the shading pass because shading binds
         // its cloud-shadow field, and the field must exist before the bind
         // group that names it.
         let cloud_pass = crate::pass::clouds::CloudPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.width,
             ctx.config.height,
         );
@@ -637,6 +662,7 @@ impl SomniumRenderer {
 
         let shading_pass = ShadingPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             HDR_FORMAT, // shading writes to the Rgba16Float HDR texture
             &vis_pass.view,
@@ -666,6 +692,7 @@ impl SomniumRenderer {
         // needs the global bind group layout and the environment cubemap.
         let transparent_pass = crate::pass::transparent::TransparentPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             &global_pool.layout,
             &ibl_pass.cube_view,
@@ -680,12 +707,14 @@ impl SomniumRenderer {
 
         let water_pass = crate::pass::water::WaterPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
         );
         let water_reflection_pass = crate::pass::water_reflection::WaterReflectionPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
@@ -698,12 +727,13 @@ impl SomniumRenderer {
                 &water_pass.tex_bind_group_layout,
                 water_pass.spectrum.views(),
             ));
-        let underwater_pass = crate::pass::underwater::UnderwaterPass::new(&ctx.device, HDR_FORMAT);
+        let underwater_pass = crate::pass::underwater::UnderwaterPass::new(&ctx.device, &shaders, HDR_FORMAT);
 
         // Phase 24AD. Built here rather than inside the struct literal because
         // it borrows the visibility pass's depth view, which the literal moves.
         let velocity_pass = crate::pass::velocity::VelocityPass::new(
             &ctx.device,
+            &shaders,
             &vis_pass.depth_view,
             ctx.config.width,
             ctx.config.height,
@@ -711,7 +741,6 @@ impl SomniumRenderer {
 
         Self {
             global_pool,
-            materials,
             vis_pass,
             shading_pass,
             shadow_resources,
@@ -750,24 +779,28 @@ impl SomniumRenderer {
             velocity_pass,
             motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
                 &ctx.device,
+                &shaders,
                 HDR_FORMAT,
                 ctx.config.width,
                 ctx.config.height,
             ),
             cas_pass: crate::pass::cas::CasPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
             ),
             present_pass: crate::pass::present::PresentPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
             ),
             fsr_pass: crate::pass::fsr::FsrPass::new(
                 &ctx.device,
+                &shaders,
                 &ctx.queue,
                 ctx.config.width,
                 ctx.config.height,
@@ -797,6 +830,7 @@ impl SomniumRenderer {
             chromatic_aberration: 0.0,
             fxaa_pass: crate::pass::fxaa::FxaaPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
@@ -829,7 +863,7 @@ impl SomniumRenderer {
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
             cull_stats_buffers: None,
             occlusion_off: std::env::var("SOMNIUM_NO_OCCLUSION").is_ok_and(|v| v == "1"),
-            cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
+            cull_pass: crate::pass::cull::CullPass::new(&ctx.device, &shaders),
             cull_aabbs: Vec::with_capacity(256),
             cluster_args: Vec::with_capacity(256),
             instanced_counts: std::collections::HashMap::new(),
@@ -879,6 +913,9 @@ impl SomniumRenderer {
 
             water_textures_bind_group,
             water_bodies: Default::default(),
+            // Last, deliberately: the fields above borrow it, and a struct
+            // literal evaluates its fields in written order.
+            shaders,
         }
     }
 
@@ -1612,8 +1649,13 @@ impl SomniumRenderer {
 
     fn resize_targets(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.vis_pass
-                .resize(&ctx.device, width, height, &self.global_pool.layout);
+            self.vis_pass.resize(
+                &ctx.device,
+                &self.shaders,
+                width,
+                height,
+                &self.global_pool.layout,
+            );
             // Bloom must resize first: PostProcess keeps its result view in the
             // final bind group, and the old view becomes stale here.
             self.bloom_pass.resize(&ctx.device, width, height);
@@ -2037,6 +2079,82 @@ impl SomniumRenderer {
     }
 
     /// Execute the rendering pipeline for the current frame.
+    /// Poll for edited shader files and swap in what compiles (MORROWIND-C).
+    ///
+    /// Debug builds only — `Shaders::poll_reload` is a no-op in release, so the
+    /// call costs one branch in a shipped build.
+    ///
+    /// Returns a message for the toast when something happened, and `None` when
+    /// nothing did. Three rules, in order of how badly each is usually got
+    /// wrong:
+    ///
+    /// 1. **A broken edit shows naga's diagnostic.** Not "shader compilation
+    ///    failed" — the location and the reason, which is the only useful thing
+    ///    in a shader failure and the difference between a two-minute fix and
+    ///    an afternoon.
+    /// 2. **A broken edit changes nothing.** The old source stays registered,
+    ///    the old pipelines stay bound, and the next frame draws exactly what
+    ///    the last one did. Never a black screen, never a silent revert.
+    /// 3. **A good edit swaps atomically.** The new module and pipeline are
+    ///    built before either replaces its predecessor.
+    ///
+    /// Coverage is honest and partial: the shading pass rebuilds, because it is
+    /// the acceptance case and `brdf.wgsl` composes into it. Every other pass
+    /// reports its reload and keeps its existing pipeline until it grows a
+    /// `reload` of its own — `ShadingPass::reload` is the pattern, and the
+    /// message says which passes are waiting so the gap is visible rather than
+    /// mistaken for a shader that did not take.
+    pub fn reload_shaders(&mut self, ctx: &RenderContext) -> Option<String> {
+        let outcome = self.shaders.poll_reload(|module, source| {
+            // Parse only. Full validation needs capability flags that mirror the
+            // device's, and a parse failure is the overwhelming majority of what
+            // a mid-edit save produces; a variant that parses and fails
+            // validation is caught at `create_render_pipeline` below and leaves
+            // the old pipeline in place either way.
+            naga::front::wgsl::parse_str(source)
+                .map(|_| ())
+                .map_err(|error| format!("{module}: {}", error.emit_to_string(source)))
+        });
+
+        if outcome.is_empty() {
+            return None;
+        }
+        if !outcome.failures.is_empty() {
+            for failure in &outcome.failures {
+                tracing::warn!("shader reload rejected: {failure}");
+            }
+            return Some(outcome.summary());
+        }
+
+        let mut rebuilt = 0usize;
+        let shading_dirty = outcome
+            .invalidated
+            .iter()
+            .any(|key| key.module == self.shaders.id("shading.wgsl"));
+        if shading_dirty {
+            match self.shading_pass.reload(&ctx.device, &self.shaders) {
+                Ok(()) => rebuilt += 1,
+                Err(error) => {
+                    tracing::warn!("shading pipeline rebuild failed: {error}");
+                    return Some(format!("Shader reload failed - {error}"));
+                }
+            }
+        }
+
+        let pending = outcome.invalidated.len() - rebuilt;
+        let mut message = format!(
+            "Reloaded {} shader module(s), {rebuilt} pipeline(s) rebuilt",
+            outcome.reloaded.len()
+        );
+        if pending > 0 {
+            message.push_str(&format!(
+                " ({pending} variant(s) awaiting a pass-side reload)"
+            ));
+        }
+        tracing::info!("{message}");
+        Some(message)
+    }
+
     pub fn render(&mut self, ctx: &RenderContext, ui: &mut UiManager, window: &Window) {
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters

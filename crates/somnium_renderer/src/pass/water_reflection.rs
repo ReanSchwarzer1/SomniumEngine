@@ -61,6 +61,7 @@ pub struct WaterReflectionPass {
 impl WaterReflectionPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         global_layout: &wgpu::BindGroupLayout,
         supported: bool,
         width: u32,
@@ -97,15 +98,9 @@ impl WaterReflectionPass {
             return pass;
         }
 
-        let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
-            include_str!("../shaders/water_reflection.wgsl"),
-            include_str!("../shaders/rt_hit.wgsl"),
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/brdf.wgsl"),
-            include_str!("../shaders/hextile.wgsl"),
-            include_str!("../shaders/terrain_material.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `water_reflection.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("water_reflection.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water_reflection.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

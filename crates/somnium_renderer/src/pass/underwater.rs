@@ -24,7 +24,9 @@ pub struct UnderwaterPass {
 }
 
 impl UnderwaterPass {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders, format: wgpu::TextureFormat) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Underwater bind group layout"),
             entries: &[
@@ -54,7 +56,7 @@ impl UnderwaterPass {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Underwater shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/underwater.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("underwater.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Underwater pipeline layout"),

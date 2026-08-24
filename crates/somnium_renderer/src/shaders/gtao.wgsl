@@ -1,3 +1,9 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "sampling.wgsl"
+
 // Phase 24I: ground-truth ambient occlusion with bent normals.
 //
 // Phase 17I wired *baked* occlusion, so anything without an AO map — all

@@ -41,6 +41,7 @@ pub struct HiZPass {
 impl HiZPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
@@ -48,7 +49,7 @@ impl HiZPass {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Hi-Z Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("hiz.wgsl").into()),
         });
 
         let copy_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -137,7 +138,7 @@ impl HiZPass {
         let spd_supported = device.limits().max_storage_textures_per_shader_stage
             >= crate::pass::spd::MIPS_PER_DISPATCH;
         let spd = if spd_supported {
-            let mut p = crate::pass::spd::SpdPass::new(device);
+            let mut p = crate::pass::spd::SpdPass::new(device, shaders);
             p.build(
                 device,
                 queue,

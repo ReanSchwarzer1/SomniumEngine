@@ -133,6 +133,29 @@ def row_census(args: argparse.Namespace) -> Result:
     return Result("census", Outcome.FAIL, (proc.stderr or proc.stdout).strip())
 
 
+def row_shader_budget(args: argparse.Namespace) -> Result:
+    """No module's variant space has outgrown its key (plan S8 item 4).
+
+    A module with six independent defines has 64 possible variants. Past the
+    budget in `tools/shadercook/generate.py` the key is too coarse, and the fix
+    is splitting the module rather than growing the cache -- a design error
+    worth catching here rather than as a startup stall on someone's machine.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "shadercook" / "generate.py"), "--check"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if proc.returncode == 0:
+        summary = next(
+            (line for line in proc.stdout.splitlines() if "variants possible" in line),
+            "within budget",
+        )
+        return Result("shader-budget", Outcome.PASS, summary.strip())
+    return Result("shader-budget", Outcome.FAIL, (proc.stderr or proc.stdout).strip())
+
+
 def row_toolchain(args: argparse.Namespace) -> Result:
     """rustc / wgpu / winit match the frozen line, which lives in this file."""
     problems = []
@@ -313,6 +336,7 @@ def row_tests(args: argparse.Namespace) -> Result:
 ROWS = {
     "census": row_census,
     "toolchain": row_toolchain,
+    "shader-budget": row_shader_budget,
     "one-job-system": row_one_job_system,
     "no-second-system": row_no_second_system,
     "golden-images": row_golden_images,

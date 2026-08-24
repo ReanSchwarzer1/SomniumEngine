@@ -61,6 +61,7 @@ pub fn casts_shadow(radius: f32, dist_sq: f32, threshold: f32) -> bool {
 impl ShadowPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         queue: &wgpu::Queue,
         global_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -109,7 +110,7 @@ impl ShadowPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("shadow.wgsl").into()),
         });
 
         // Phase 17E: sampler for the alpha-cutout test, so foliage casts a

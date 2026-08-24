@@ -1,3 +1,9 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "atmosphere.wgsl"
+
 // Somnium Engine — Froxel volumetrics: aerial perspective + fog (24U, 25I).
 //
 // Concatenated after atmosphere.wgsl, whose density, extinction, phase and LUT

@@ -34,7 +34,7 @@ pub struct CullPass {
 const INITIAL_CAPACITY: usize = 1024;
 
 impl CullPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Cull Bind Group Layout"),
             entries: &[
@@ -110,7 +110,7 @@ impl CullPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Cull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/cull.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("cull.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

@@ -180,10 +180,10 @@ pub struct WaterSpectrumPass {
 }
 
 impl WaterSpectrumPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water spectrum shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water_spectrum.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("water_spectrum.wgsl").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water spectrum layout"),

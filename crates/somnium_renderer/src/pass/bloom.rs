@@ -38,13 +38,14 @@ pub struct BloomPass {
 impl BloomPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bloom.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/bloom.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("bloom.wgsl").into()),
         });
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

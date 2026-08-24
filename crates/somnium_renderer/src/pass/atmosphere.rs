@@ -31,12 +31,10 @@ pub struct AtmospherePass {
 }
 
 impl AtmospherePass {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/atmosphere.wgsl"),
-            include_str!("../shaders/atmosphere_lut.wgsl"),
-        );
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
+        // MORROWIND-C: composition is declared in `atmosphere_lut.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("atmosphere_lut.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("atmosphere_lut.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -33,6 +33,7 @@ pub struct VelocityPass {
 impl VelocityPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         depth_view: &wgpu::TextureView,
         width: u32,
         height: u32,
@@ -75,7 +76,7 @@ impl VelocityPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Velocity Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/velocity.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("velocity.wgsl").into()),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Velocity PL"),

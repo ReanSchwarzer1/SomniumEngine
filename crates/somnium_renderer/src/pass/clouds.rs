@@ -283,18 +283,21 @@ pub struct CloudPass {
 
 impl CloudPass {
     #[allow(clippy::too_many_lines)]
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let noise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("clouds_noise.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/clouds_noise.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("clouds_noise.wgsl").into()),
         });
         // Concatenated after the atmosphere so the clouds read the same LUTs,
         // the same constants and the same sun colour as the sky above them.
-        let march_source = format!(
-            "{}\n{}",
-            include_str!("../shaders/atmosphere.wgsl"),
-            include_str!("../shaders/clouds.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `clouds.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let march_source = shaders.source_or_panic("clouds.wgsl");
         let march_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("clouds.wgsl"),
             source: wgpu::ShaderSource::Wgsl(march_source.into()),
@@ -302,7 +305,7 @@ impl CloudPass {
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("clouds_composite.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/clouds_composite.wgsl").into(),
+                shaders.source_or_panic("clouds_composite.wgsl").into(),
             ),
         });
 

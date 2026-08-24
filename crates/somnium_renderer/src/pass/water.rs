@@ -265,13 +265,14 @@ pub fn create_default_texture_bind_group(
 impl WaterPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         target_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("water.wgsl").into()),
         });
 
         let view_bind_group_layout =
@@ -641,7 +642,7 @@ impl WaterPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let spectrum = crate::pass::water_spectrum::WaterSpectrumPass::new(device);
+        let spectrum = crate::pass::water_spectrum::WaterSpectrumPass::new(device, shaders);
         Self {
             prepass_pipeline,
             shade_pipeline,

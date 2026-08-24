@@ -18,6 +18,7 @@ impl GridPass {
     /// - `view_buffer`:    the 208-byte global view buffer (same one written by the renderer).
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         view_buffer: &wgpu::Buffer,
     ) -> Self {
@@ -39,7 +40,7 @@ impl GridPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Grid Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/grid.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("grid.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

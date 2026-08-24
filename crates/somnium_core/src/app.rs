@@ -531,6 +531,8 @@ pub struct Engine<G: GameApp> {
     asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
     next_asset_scan: std::time::Instant,
+    /// When shader files were last polled for hot reload (MORROWIND-C).
+    last_shader_poll: std::time::Instant,
     /// This frame's background-work telemetry, folded by job name.
     ///
     /// MORROWIND-B. Refreshed by `pump_jobs` once per frame and read by the
@@ -791,6 +793,7 @@ impl<G: GameApp + 'static> Engine<G> {
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             next_asset_scan: std::time::Instant::now(),
+            last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
             job_zones_dropped: 0,
             preview_jobs: std::collections::HashMap::new(),
@@ -3371,6 +3374,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.pump_shader_reload();
         self.pump_jobs();
         self.update_asset_pipeline();
         if let Some(ui) = &mut self.ui_manager {
@@ -3759,6 +3763,40 @@ impl<G: GameApp> Engine<G> {
     /// Poll immutable asset scans and worker previews without doing file IO in
     /// the frame loop. A periodic 350 ms scan is the portable watcher fallback;
     /// the two-sample gate debounces partial external writes.
+    /// Poll for edited shader files and toast the result (MORROWIND-C).
+    ///
+    /// Throttled to four times a second. A shader edit is a human action and a
+    /// quarter-second is imperceptible against the time it takes to alt-tab;
+    /// polling fifty-odd modification times every frame would be a cost paid
+    /// 240 times per second for a benefit nobody could see.
+    ///
+    /// Release builds return immediately — `Shaders::poll_reload` is a no-op
+    /// there, and a shipped build needs no `.wgsl` files on disk at all.
+    fn pump_shader_reload(&mut self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_shader_poll) < INTERVAL {
+            return;
+        }
+        self.last_shader_poll = now;
+
+        let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) else {
+            return;
+        };
+        // A toast, not a log line: the whole point of hot reload is that the
+        // author is looking at the viewport, not at a terminal. A failed edit
+        // that only writes to stderr is indistinguishable from an edit that
+        // did nothing.
+        if let Some(message) = renderer.reload_shaders(ctx)
+            && let Some(ui) = self.ui_manager.as_mut()
+        {
+            ui.push_toast(&message);
+        }
+    }
+
     /// Apply finished background work and collect its telemetry. Once a frame.
     ///
     /// MORROWIND-B, Seam 1's third property: the worker produces data, the main

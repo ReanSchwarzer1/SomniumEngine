@@ -46,12 +46,15 @@ pub struct GtaoPass {
 }
 
 impl GtaoPass {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/sampling.wgsl"),
-            include_str!("../shaders/gtao.wgsl"),
-        );
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        // MORROWIND-C: composition is declared in `gtao.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("gtao.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gtao.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

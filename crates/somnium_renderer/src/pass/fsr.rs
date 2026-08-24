@@ -53,6 +53,7 @@ pub struct FsrPass {
 impl FsrPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         queue: &wgpu::Queue,
         render_w: u32,
         render_h: u32,
@@ -70,7 +71,7 @@ impl FsrPass {
             );
         }
         let gpu =
-            supported.then(|| alloc_gpu(device, queue, render_w, render_h, display_w, display_h));
+            supported.then(|| alloc_gpu(device, shaders, queue, render_w, render_h, display_w, display_h));
         Self {
             gpu,
             enabled: want && supported,
@@ -307,6 +308,7 @@ fn bind_view<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEn
 
 fn alloc_gpu(
     device: &wgpu::Device,
+    shaders: &crate::shaders::Shaders,
     queue: &wgpu::Queue,
     render_w: u32,
     render_h: u32,
@@ -336,8 +338,8 @@ fn alloc_gpu(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let (sanitize_bgl, sanitize_pipeline) = alloc_sanitize_pipeline(device);
-    let (untonemap_bgl, untonemap_pipeline) = alloc_untonemap_pipeline(device);
+    let (sanitize_bgl, sanitize_pipeline) = alloc_sanitize_pipeline(device, shaders);
+    let (untonemap_bgl, untonemap_pipeline) = alloc_untonemap_pipeline(device, shaders);
     FsrGpu {
         context,
         view,
@@ -405,6 +407,7 @@ fn storage_tex(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayo
 
 fn alloc_sanitize_pipeline(
     device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
 ) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FSR Sanitize BGL"),
@@ -436,7 +439,7 @@ fn alloc_sanitize_pipeline(
     });
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FSR Sanitize"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fsr_sanitize.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("fsr_sanitize.wgsl").into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("FSR Sanitize PL"),
@@ -456,6 +459,7 @@ fn alloc_sanitize_pipeline(
 
 fn alloc_untonemap_pipeline(
     device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
 ) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FSR Untonemap BGL"),
@@ -476,7 +480,7 @@ fn alloc_untonemap_pipeline(
     });
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FSR Untonemap"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fsr_untonemap.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("fsr_untonemap.wgsl").into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("FSR Untonemap PL"),

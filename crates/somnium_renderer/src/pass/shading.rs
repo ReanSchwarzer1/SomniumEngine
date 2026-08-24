@@ -186,6 +186,7 @@ pub struct ShadingPass {
 impl ShadingPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
         visibility_view: &wgpu::TextureView,
@@ -537,26 +538,9 @@ impl ShadingPass {
             &decal_buffers,
         );
 
-        let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            // Phase 24L: the scene bindings, shared with the GI pass so a
-            // traced surface and a rasterised one resolve identically.
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/brdf.wgsl"),
-            // Phase 24G: Vogel disk and gradient noise, used by PCSS.
-            include_str!("../shaders/sampling.wgsl"),
-            // Phase 24C: the background samples the atmosphere-generated
-            // cubemap and adds sharp sky detail analytically.
-            include_str!("../shaders/atmosphere.wgsl"),
-            // Phase 25F: stochastic hex-tiling, used by the terrain material
-            // below to break the visible repetition of a tiled layer.
-            include_str!("../shaders/hextile.wgsl"),
-            // Phase 25A-2: terrain's splat/triplanar material, which is all
-            // that survives of the separate terrain pass.
-            include_str!("../shaders/terrain_material.wgsl"),
-            include_str!("../shaders/clipmap_shade.wgsl"),
-            include_str!("../shaders/shading.wgsl")
-        );
+        // MORROWIND-C: composition is declared in `shading.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let shader_source = shaders.source_or_panic("shading.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shading Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -681,6 +665,54 @@ impl ShadingPass {
             _clipmap_dummy_detail: dummy_detail,
             _clipmap_dummy_macro: dummy_macro,
         }
+    }
+
+    /// Rebuild the shader module and every pipeline built from it.
+    ///
+    /// MORROWIND-C's hot-reload swap, for the acceptance case: `brdf.wgsl` is
+    /// composed into `shading.wgsl`, so editing it lands here.
+    ///
+    /// **Nothing is mutated until the new module exists.** `shaders.source`
+    /// resolves and `create_shader_module` compiles before the first `self.`
+    /// assignment, so a composition failure returns with the pass exactly as it
+    /// was and the old pipeline still bound — which is the rule the plan is
+    /// emphatic about and the specific check Appendix A.7 names for this
+    /// sub-phase.
+    ///
+    /// Note what is *not* guarded here: naga rejecting the source. wgpu reports
+    /// that through an error scope rather than a `Result`, so the renderer
+    /// validates before calling this (see `SomniumRenderer::reload_shaders`),
+    /// and by the time control arrives the source is known to parse.
+    pub fn reload(
+        &mut self,
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+    ) -> Result<(), somnium_shader::ShaderError> {
+        let source = shaders.source("shading.wgsl", somnium_shader::Defines::NONE)?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shading Shader"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipeline = Self::make_pipeline(
+            device,
+            &shader,
+            &self.pipeline_layout,
+            self.hdr_format,
+            self.spec,
+            "vs_main",
+            None,
+        );
+
+        self.pipeline = pipeline;
+        self.shader = shader;
+        // The per-bin and split pipelines are built lazily from `self.shader`
+        // on first use, so dropping them is the whole of their reload. Rebuilding
+        // them eagerly would compile up to eight variants for a scene that may
+        // want none of them this frame.
+        self.bin_pipelines.clear();
+        self.split_near = None;
+        self.split_aerial = None;
+        Ok(())
     }
 
     fn make_pipeline(

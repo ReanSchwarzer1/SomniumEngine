@@ -71,6 +71,7 @@ pub struct OutlinePass {
 impl OutlinePass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         vertex_buf: &wgpu::Buffer,
         index_buf: &wgpu::Buffer,
@@ -79,7 +80,7 @@ impl OutlinePass {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Outline Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/outline.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("outline.wgsl").into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {

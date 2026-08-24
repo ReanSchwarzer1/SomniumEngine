@@ -123,13 +123,14 @@ impl ClassifyPass {
     /// Bytes the indirect argument block occupies.
     const ARGS_BYTES: u64 = (BIN_COUNT * std::mem::size_of::<DrawArgs>()) as u64;
 
-    pub fn new(device: &wgpu::Device, global_layout: &wgpu::BindGroupLayout) -> Self {
-        let source = format!(
-            "{}\n{}\n{}",
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/pixel_class.wgsl"),
-            include_str!("../shaders/classify.wgsl"),
-        );
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        global_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        // MORROWIND-C: composition is declared in `classify.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("classify.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("classify.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

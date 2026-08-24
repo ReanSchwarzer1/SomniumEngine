@@ -62,7 +62,11 @@ pub struct IblPass {
 const ENV_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 impl IblPass {
-    pub fn new(device: &wgpu::Device, atmosphere: &super::atmosphere::AtmospherePass) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        atmosphere: &super::atmosphere::AtmospherePass,
+    ) -> Self {
         let cubemap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Environment Cubemap"),
             size: wgpu::Extent3d {
@@ -241,15 +245,9 @@ impl IblPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("IBL Gen Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}
-{}",
-                    include_str!("../shaders/atmosphere.wgsl"),
-                    include_str!("../shaders/ibl_gen.wgsl"),
-                )
-                .into(),
-            ),
+            // MORROWIND-C: composition is declared in `ibl_gen.wgsl` and
+            // resolved by `somnium_shader`; this site no longer knows the order.
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("ibl_gen.wgsl").into()),
         });
 
         let make_pipeline = |label: &str, bgl: &wgpu::BindGroupLayout, entry: &str| {

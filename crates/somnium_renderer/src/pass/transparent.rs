@@ -31,6 +31,7 @@ pub struct TransparentPass {
 impl TransparentPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         target_format: wgpu::TextureFormat,
         global_layout: &wgpu::BindGroupLayout,
         env_view: &wgpu::TextureView,
@@ -96,7 +97,7 @@ impl TransparentPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Transparent Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/transparent.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("transparent.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

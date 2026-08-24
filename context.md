@@ -188,7 +188,22 @@
 >   first image assertions), the Fyrox diff and the license audit are in
 >   `dev records/phase MORROWIND/`, `ATTRIBUTION.md` §13H is open, §17.6's
 >   numbering is retired below, and `examples/vvardenfell` exists as the second
->   example. **The license audit reclassified Flax as proprietary**, which the
+>   example. **MORROWIND-A2 took the engine to wgpu 30** (29.0.3 -> 30.0.1);
+>   the plan's two predicted breaking changes applied to nothing in the tree and
+>   six others did, all mechanical. **MORROWIND-B promoted CONTROL's
+>   `JobRegistry` into `somnium_jobs`** and added declared deadlines, a budgeted
+>   main-thread completion drain and profiler telemetry; `JobRegistry` is gone
+>   from the tree. **MORROWIND-C built `somnium_shader` and deleted
+>   `material/hlms.rs`**: WGSL composes by `//!include` declared in the shader,
+>   all 51 modules go through one registry, variants are keyed and cached, and a
+>   debug build watches, recomposes, validates with naga and toasts the
+>   diagnostic without ever swapping in a broken shader. **C also found that
+>   A2 had left the `naga` dev-dependency on 29**, so the shader tests were
+>   validating with a different front end from the one that compiles them —
+>   which hid a real wgpu 30 incompatibility (`binding_array` now needs an
+>   explicit `enable`) that would have failed on the first frame. Fixed.
+>   Track 0 is complete; **next: MORROWIND-D** (the paint layer, Seam 4b).
+>   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.
 >   The census supersedes the measured figures in this entry: the tree is

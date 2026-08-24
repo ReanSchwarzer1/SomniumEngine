@@ -11,6 +11,14 @@
 // skipping the clustered-light loop keeps this pass cheap for what is usually
 // a small amount of screen area.
 
+// wgpu 30 requires `binding_array<...>` to be behind an explicit enable
+// directive; wgpu 29 accepted it without one. Found by MORROWIND-C, because
+// MORROWIND-A2 bumped wgpu to 30 and left this crate's `naga` dev-dependency
+// on 29 — so the validation test was checking these files with the *old*
+// front end and passed. The resolver hoists and de-duplicates `enable`
+// lines, so a module that includes this one inherits it.
+enable wgpu_binding_array;
+
 struct Vertex {
     pos_x: f32, pos_y: f32, pos_z: f32,
     norm_x: f32, norm_y: f32, norm_z: f32,

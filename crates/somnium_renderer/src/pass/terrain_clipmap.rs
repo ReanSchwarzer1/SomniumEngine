@@ -20,7 +20,11 @@ pub struct TerrainClipmapPass {
 }
 
 impl TerrainClipmapPass {
-    pub fn new(device: &wgpu::Device, global_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        global_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain clipmap gen BGL"),
             entries: &[
@@ -45,13 +49,9 @@ impl TerrainClipmapPass {
             ],
         });
 
-        let source = format!(
-            "{}\n{}\n{}\n{}",
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/hextile.wgsl"),
-            include_str!("../shaders/terrain_material.wgsl"),
-            include_str!("../shaders/clipmap_gen.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `clipmap_gen.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("clipmap_gen.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain clipmap generate"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -1,3 +1,15 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "global_pool.wgsl"
+//!include "brdf.wgsl"
+//!include "sampling.wgsl"
+//!include "atmosphere.wgsl"
+//!include "hextile.wgsl"
+//!include "terrain_material.wgsl"
+//!include "clipmap_shade.wgsl"
+
 // Somnium Engine — Visibility Buffer Shading Pass
 // Phase 12: Clustered Local Lights + Cel-Shading Mode
 
