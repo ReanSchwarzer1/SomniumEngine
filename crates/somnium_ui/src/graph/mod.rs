@@ -35,6 +35,7 @@
 //! whose bugs are *"the wire connected to the wrong pin"* is the half that
 //! matters.
 
+pub mod animation;
 pub mod archetype;
 pub mod catalogues;
 pub mod geometry;
@@ -43,6 +44,11 @@ pub mod serial;
 pub mod surface;
 pub mod widget;
 
+pub use animation::{
+    ANIMATION_STATE_DOCUMENT_VERSION, AnimationGraphCompileError, AnimationStateDocumentError,
+    AnimationStateMachineCompileError, AnimationStateMachineDocument, AuthoredStateTransition,
+    CompiledAnimationGraph, compile_animation, compile_animation_document, compile_state_machine,
+};
 pub use archetype::{
     Catalogue, GroupArchetype, NodeArchetype, NodeElementArchetype, PinArchetype, PinDirection,
     PinType,

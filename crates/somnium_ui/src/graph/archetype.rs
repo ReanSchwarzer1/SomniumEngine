@@ -131,6 +131,12 @@ pub struct PinArchetype {
     /// Default value as text, for an unconnected input. The catalogue's owner
     /// parses it; see [`crate::graph::Node::literals`] for why it is a string.
     pub default: Option<&'static str>,
+    /// Inclusive numeric authoring range, expressed as catalogue-neutral text.
+    pub range: Option<(&'static str, &'static str)>,
+    /// Unit suffix shown beside the literal value.
+    pub unit: Option<&'static str>,
+    /// Context help shown while the literal row is hovered.
+    pub tooltip: Option<&'static str>,
 }
 
 /// One row in a node body.
@@ -177,12 +183,33 @@ impl PinArchetype {
             name,
             ty,
             default: None,
+            range: None,
+            unit: None,
+            tooltip: None,
         }
     }
 
     #[must_use]
     pub const fn with_default(mut self, value: &'static str) -> Self {
         self.default = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_range(mut self, min: &'static str, max: &'static str) -> Self {
+        self.range = Some((min, max));
+        self
+    }
+
+    #[must_use]
+    pub const fn with_unit(mut self, unit: &'static str) -> Self {
+        self.unit = Some(unit);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_tooltip(mut self, tooltip: &'static str) -> Self {
+        self.tooltip = Some(tooltip);
         self
     }
 }

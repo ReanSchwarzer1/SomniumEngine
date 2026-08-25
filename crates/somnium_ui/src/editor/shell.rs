@@ -888,6 +888,75 @@ pub(crate) fn build_editor_layout(
     }
     ui.set_visibility(profiler_panel, false);
 
+    // MORROWIND-K/V: the shipped Animation workspace uses the same reusable
+    // graph control as materials and owns the cyclic state overlay in the
+    // document, not in a parallel editor model. This small untitled document
+    // gives the workspace a useful first-open state until an asset is loaded.
+    let animation_catalogue = crate::graph::catalogues::animation();
+    let mut animation_surface = crate::graph::GraphSurface::new(animation_catalogue.clone());
+    let idle_clip = animation_surface
+        .add("animation.clip", Vec2::new(36.0, 54.0))
+        .expect("the built-in animation catalogue contains Clip");
+    let move_clip = animation_surface
+        .add("animation.clip", Vec2::new(36.0, 250.0))
+        .expect("the built-in animation catalogue contains Clip");
+    let idle_state = animation_surface
+        .add("animation.state", Vec2::new(330.0, 54.0))
+        .expect("the built-in animation catalogue contains State");
+    let move_state = animation_surface
+        .add("animation.state", Vec2::new(330.0, 250.0))
+        .expect("the built-in animation catalogue contains State");
+    let output = animation_surface
+        .add("animation.output", Vec2::new(620.0, 54.0))
+        .expect("the built-in animation catalogue contains Output");
+    animation_surface.set_literal(idle_clip, 0, "1");
+    animation_surface.set_literal(move_clip, 0, "2");
+    animation_surface.set_literal(move_state, 1, "1");
+    animation_surface
+        .connect(
+            crate::graph::PinRef::output(idle_clip, 0),
+            crate::graph::PinRef::input(idle_state, 0),
+        )
+        .expect("Clip pose connects to State pose");
+    animation_surface
+        .connect(
+            crate::graph::PinRef::output(move_clip, 0),
+            crate::graph::PinRef::input(move_state, 0),
+        )
+        .expect("Clip pose connects to State pose");
+    animation_surface
+        .connect(
+            crate::graph::PinRef::output(idle_clip, 0),
+            crate::graph::PinRef::input(output, 0),
+        )
+        .expect("Clip pose connects to Animation Output");
+    animation_surface.graph.node_mut(idle_state).unwrap().title = "Idle".into();
+    animation_surface.graph.node_mut(move_state).unwrap().title = "Move".into();
+    let mut animation_document =
+        crate::graph::AnimationStateMachineDocument::new(animation_surface);
+    animation_document.set_initial(idle_state);
+    animation_document.add_transition(crate::graph::AuthoredStateTransition {
+        from: idle_state,
+        to: move_state,
+        conditions: vec![somnium_anim::Condition::Trigger {
+            parameter: "move".into(),
+        }],
+        blend_seconds: 0.2,
+        sync_track: Some("locomotion".into()),
+    });
+    let animation_graph = crate::graph::GraphEditorBuilder::new(
+        WidgetBuilder::new()
+            .with_visibility(false)
+            .with_tooltip(
+                "Animation Graph — click a value to edit; Alt-click a State to make it initial; Shift-drag between States to add a transition",
+            ),
+        animation_catalogue,
+    )
+    .with_state_machine_document(animation_document)
+    .with_font(font_id)
+    .build();
+    let animation_graph_editor = ui.add_node(animation_graph, viewport_handle);
+
     // Right panel: two sections (outliner top, inspector bottom)
     let right_border = BorderBuilder::new(
         WidgetBuilder::new()
@@ -1643,6 +1712,7 @@ pub(crate) fn build_editor_layout(
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
+        animation_graph_editor,
         vp_overlay: vp_overlay_h,
         vp_overlay_text,
         profiler_panel,

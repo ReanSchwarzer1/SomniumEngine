@@ -556,6 +556,532 @@ fn retained_graph_control_draws_nodes_pins_and_the_bezier_wire() {
 }
 
 #[test]
+fn routed_graph_literal_edit_is_visible_and_undoable() {
+    let (catalogue, graph, scalar, _) = two_node_graph();
+    let mut ui = crate::ui::UserInterface::new(640.0, 360.0);
+    let root = ui.root();
+    let editor = super::GraphEditorBuilder::new(
+        crate::widget::WidgetBuilder::new()
+            .with_width(640.0)
+            .with_height(360.0),
+        catalogue,
+    )
+    .with_graph(graph)
+    .build();
+    let editor = ui.add_node(editor, root);
+
+    ui.send(super::GraphEditorMessage::set_literal(
+        editor, scalar, 0, "0.75",
+    ));
+    let changed = ui
+        .update()
+        .into_iter()
+        .find_map(
+            |message| match message.data::<super::GraphEditorMessage>() {
+                Some(super::GraphEditorMessage::Changed(graph)) => Some(graph.clone()),
+                _ => None,
+            },
+        )
+        .expect("a routed literal edit emits the authored graph");
+    assert_eq!(
+        changed
+            .node(scalar)
+            .unwrap()
+            .literals
+            .get(&0)
+            .map(String::as_str),
+        Some("0.75")
+    );
+
+    ui.send(super::GraphEditorMessage::command(
+        editor,
+        "editor.edit.undo",
+        Vec2::ZERO,
+    ));
+    let undone = ui
+        .update()
+        .into_iter()
+        .find_map(
+            |message| match message.data::<super::GraphEditorMessage>() {
+                Some(super::GraphEditorMessage::Changed(graph)) => Some(graph.clone()),
+                _ => None,
+            },
+        )
+        .expect("literal undo travels through the graph widget");
+    assert!(!undone.node(scalar).unwrap().literals.contains_key(&0));
+}
+
+#[test]
+fn routed_state_overlay_authors_draws_edits_and_undoes_one_document() {
+    let catalogue = catalogues::animation();
+    let mut surface = super::GraphSurface::new(catalogue.clone());
+    let idle = surface
+        .add("animation.state", Vec2::new(40.0, 60.0))
+        .unwrap();
+    let moving = surface
+        .add("animation.state", Vec2::new(360.0, 180.0))
+        .unwrap();
+    let document = super::AnimationStateMachineDocument::new(surface);
+    let mut ui = crate::ui::UserInterface::new(720.0, 420.0);
+    let root = ui.root();
+    let editor = super::GraphEditorBuilder::new(
+        crate::widget::WidgetBuilder::new()
+            .with_width(720.0)
+            .with_height(420.0),
+        catalogue,
+    )
+    .with_state_machine_document(document)
+    .build();
+    let editor = ui.add_node(editor, root);
+    ui.perform_layout();
+    ui.draw();
+    let without_overlay = ui.draw_ctx.shaped.instances.len();
+
+    ui.send(super::GraphEditorMessage::set_initial_state(editor, idle));
+    ui.send(super::GraphEditorMessage::add_state_transition(
+        editor,
+        super::AuthoredStateTransition {
+            from: idle,
+            to: moving,
+            conditions: vec![somnium_anim::Condition::Trigger {
+                parameter: "move".into(),
+            }],
+            blend_seconds: 0.25,
+            sync_track: Some("locomotion".into()),
+        },
+    ));
+    let authored = ui
+        .update()
+        .into_iter()
+        .filter_map(
+            |message| match message.data::<super::GraphEditorMessage>() {
+                Some(super::GraphEditorMessage::StateMachineChanged(document)) => {
+                    Some(document.clone())
+                }
+                _ => None,
+            },
+        )
+        .last()
+        .expect("state authoring emits the complete durable document");
+    assert_eq!(authored.initial(), Some(idle));
+    assert_eq!(authored.transitions().len(), 1);
+
+    ui.perform_layout();
+    ui.draw();
+    assert!(
+        ui.draw_ctx.shaped.instances.len() > without_overlay,
+        "the authored cyclic transition is drawn over the shared graph"
+    );
+
+    let mut edited = authored.transitions()[0].clone();
+    edited.blend_seconds = 0.5;
+    edited.sync_track = None;
+    ui.send(super::GraphEditorMessage::set_state_transition(
+        editor, 0, edited,
+    ));
+    let edited = ui
+        .update()
+        .into_iter()
+        .find_map(
+            |message| match message.data::<super::GraphEditorMessage>() {
+                Some(super::GraphEditorMessage::StateMachineChanged(document)) => {
+                    Some(document.clone())
+                }
+                _ => None,
+            },
+        )
+        .expect("transition editing stays on the routed widget path");
+    assert_eq!(edited.transitions()[0].blend_seconds, 0.5);
+    assert_eq!(edited.transitions()[0].sync_track, None);
+
+    ui.send(super::GraphEditorMessage::undo_state_overlay(editor));
+    let undone = ui
+        .update()
+        .into_iter()
+        .find_map(
+            |message| match message.data::<super::GraphEditorMessage>() {
+                Some(super::GraphEditorMessage::StateMachineChanged(document)) => {
+                    Some(document.clone())
+                }
+                _ => None,
+            },
+        )
+        .expect("overlay undo emits the restored document");
+    assert_eq!(undone.transitions()[0].blend_seconds, 0.25);
+    assert_eq!(
+        undone.transitions()[0].sync_track.as_deref(),
+        Some("locomotion")
+    );
+}
+
+#[test]
+fn canvas_transition_inspector_edits_every_field_and_deletes() {
+    use crate::message::{
+        KeyCode, MessageDirection, Modifiers, MouseButton, UiMessage, WidgetMessage,
+    };
+
+    let catalogue = catalogues::animation();
+    let mut surface = super::GraphSurface::new(catalogue.clone());
+    let idle = surface
+        .add("animation.state", Vec2::new(40.0, 60.0))
+        .unwrap();
+    let moving = surface
+        .add("animation.state", Vec2::new(280.0, 160.0))
+        .unwrap();
+    let mut ui = crate::ui::UserInterface::new(720.0, 420.0);
+    let root = ui.root();
+    let editor = ui.add_node(
+        super::GraphEditorBuilder::new(
+            crate::widget::WidgetBuilder::new()
+                .with_width(720.0)
+                .with_height(420.0),
+            catalogue,
+        )
+        .with_state_machine_document(super::AnimationStateMachineDocument::new(surface))
+        .build(),
+        root,
+    );
+    ui.perform_layout();
+    ui.send(super::GraphEditorMessage::add_state_transition(
+        editor,
+        super::AuthoredStateTransition {
+            from: idle,
+            to: moving,
+            conditions: Vec::new(),
+            blend_seconds: 0.2,
+            sync_track: None,
+        },
+    ));
+    ui.update();
+
+    let click = |position| {
+        UiMessage::new(
+            editor,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseDown {
+                pos: position,
+                button: MouseButton::Left,
+                mods: Modifiers::default(),
+            },
+        )
+    };
+    let text = |value: &str| {
+        UiMessage::new(
+            editor,
+            MessageDirection::ToWidget,
+            WidgetMessage::Text(value.to_owned()),
+        )
+    };
+    let enter = || {
+        UiMessage::new(
+            editor,
+            MessageDirection::ToWidget,
+            WidgetMessage::KeyDown(KeyCode::Enter, Modifiers::default()),
+        )
+    };
+    let changed_document = |messages: Vec<UiMessage>| {
+        messages
+            .into_iter()
+            .find_map(
+                |message| match message.data::<super::GraphEditorMessage>() {
+                    Some(super::GraphEditorMessage::StateMachineChanged(document)) => {
+                        Some(document.clone())
+                    }
+                    _ => None,
+                },
+            )
+            .expect("an inspector edit emits the durable state-machine document")
+    };
+
+    // Panel layout for the fixed 720×420 editor: fields begin at x=510.
+    ui.send(click(Vec2::new(520.0, 75.0)));
+    ui.send(text("0.6"));
+    ui.send(enter());
+    let document = changed_document(ui.update());
+    assert_eq!(document.transitions()[0].blend_seconds, 0.6);
+
+    ui.send(click(Vec2::new(520.0, 105.0)));
+    ui.send(text("locomotion"));
+    ui.send(enter());
+    let document = changed_document(ui.update());
+    assert_eq!(
+        document.transitions()[0].sync_track.as_deref(),
+        Some("locomotion")
+    );
+
+    ui.send(click(Vec2::new(520.0, 135.0)));
+    ui.send(text("float:speed:greater:0.4; trigger:move"));
+    ui.send(enter());
+    let document = changed_document(ui.update());
+    assert!(matches!(
+        document.transitions()[0].conditions.as_slice(),
+        [
+            somnium_anim::Condition::Float {
+                parameter,
+                op: somnium_anim::CompareOp::Greater,
+                value
+            },
+            somnium_anim::Condition::Trigger { parameter: trigger }
+        ] if parameter == "speed" && (*value - 0.4).abs() < f32::EPSILON && trigger == "move"
+    ));
+
+    ui.send(click(Vec2::new(630.0, 182.0)));
+    let document = changed_document(ui.update());
+    assert!(document.transitions().is_empty());
+}
+
+#[test]
+fn animation_catalogue_compiles_to_the_ui_neutral_runtime_graph() {
+    use glam::{Mat4, Quat, Vec3};
+    use somnium_anim::{
+        AnimationClip, ClipId, GraphId, Keyframe, ParameterDefinition, ParameterSchema,
+        ParameterSchemaId, ParameterValue, PoseCache, Skeleton, SkeletonId, Transform,
+        TransformTrack,
+    };
+
+    let skeleton = Skeleton::new(
+        SkeletonId(41),
+        vec!["root".into()],
+        vec![somnium_anim::NO_PARENT],
+        vec![Mat4::IDENTITY],
+        vec![Transform::IDENTITY],
+    )
+    .unwrap()
+    .0;
+    let make_clip = |id, distance| {
+        AnimationClip::new(
+            ClipId(id),
+            &skeleton,
+            1.0,
+            vec![TransformTrack {
+                joint: 0,
+                translation: vec![
+                    Keyframe::new(0.0, Vec3::ZERO),
+                    Keyframe::new(1.0, Vec3::X * distance),
+                ],
+                rotation: vec![Keyframe::new(0.0, Quat::IDENTITY)],
+                scale: vec![],
+            }],
+            vec![],
+        )
+        .unwrap()
+    };
+    let parameters = ParameterSchema::new(
+        ParameterSchemaId(7),
+        vec![ParameterDefinition::new(
+            "speed",
+            ParameterValue::Float(0.5),
+        )],
+    )
+    .unwrap();
+    let mut values = parameters.instantiate();
+    values.set("speed", ParameterValue::Float(0.5)).unwrap();
+
+    let catalogue = catalogues::animation();
+    let mut graph = Graph::new();
+    let slow = graph.add(&catalogue, "animation.clip", Vec2::ZERO).unwrap();
+    let fast = graph
+        .add(&catalogue, "animation.clip", Vec2::new(0.0, 120.0))
+        .unwrap();
+    graph.node_mut(slow).unwrap().literals.insert(0, "1".into());
+    graph.node_mut(fast).unwrap().literals.insert(0, "2".into());
+    let blend = graph
+        .add(&catalogue, "animation.blend1d", Vec2::new(240.0, 60.0))
+        .unwrap();
+    let output = graph
+        .add(&catalogue, "animation.output", Vec2::new(500.0, 60.0))
+        .unwrap();
+    let idle = graph
+        .add(&catalogue, "animation.state", Vec2::new(0.0, 260.0))
+        .unwrap();
+    let moving = graph
+        .add(&catalogue, "animation.state", Vec2::new(240.0, 260.0))
+        .unwrap();
+    graph.node_mut(idle).unwrap().title = "Idle".into();
+    graph.node_mut(idle).unwrap().literals.insert(1, "0".into());
+    graph.node_mut(moving).unwrap().title = "Moving".into();
+    graph
+        .node_mut(moving)
+        .unwrap()
+        .literals
+        .insert(1, "1".into());
+    for (from, to) in [
+        (PinRef::output(slow, 0), PinRef::input(blend, 0)),
+        (PinRef::output(fast, 0), PinRef::input(blend, 1)),
+        (PinRef::output(blend, 0), PinRef::input(output, 0)),
+        (PinRef::output(slow, 0), PinRef::input(idle, 0)),
+        (PinRef::output(fast, 0), PinRef::input(moving, 0)),
+    ] {
+        graph.connect(&catalogue, from, to).unwrap();
+    }
+
+    let compiled = super::compile_animation_document(
+        &graph,
+        &catalogue,
+        GraphId(3),
+        7,
+        &skeleton,
+        vec![make_clip(1, 1.0), make_clip(2, 3.0)],
+        parameters,
+    )
+    .unwrap();
+    let runtime = compiled.asset();
+    let pose = runtime
+        .evaluate(&skeleton, &values, 0.5, 1, &mut PoseCache::default())
+        .unwrap();
+    assert!((pose.local[0].translation.x - 1.0).abs() < 1e-5);
+    assert_eq!(runtime.nodes().len(), 3);
+    assert_eq!(runtime.version(), 7);
+
+    // The cyclic state-machine overlay reuses the same K surface without
+    // weakening the pose graph's acyclic wire invariant. States connect to
+    // durable authored pose nodes, never compiler-generated runtime indices.
+    let mut states = super::GraphSurface::new(catalogue);
+    states.graph = graph;
+    let mut document = super::AnimationStateMachineDocument::new(states);
+    assert!(document.set_initial(idle));
+    assert!(document.add_transition(super::AuthoredStateTransition {
+        from: idle,
+        to: moving,
+        conditions: vec![somnium_anim::Condition::Float {
+            parameter: "speed".into(),
+            op: somnium_anim::CompareOp::Greater,
+            value: 0.4,
+        }],
+        blend_seconds: 0.2,
+        sync_track: None,
+    }));
+    assert_eq!(document.undo_overlay(), Some("Add Animation Transition"));
+    assert_eq!(document.redo_overlay(), Some("Add Animation Transition"));
+    let json = document.to_json().unwrap();
+    let document =
+        super::AnimationStateMachineDocument::from_json(&json, catalogues::animation()).unwrap();
+    assert_eq!(json, document.to_json().unwrap());
+    let machine =
+        super::compile_state_machine(&document, &compiled, somnium_anim::MachineId(8), 1).unwrap();
+    assert_eq!(machine.states()[0].name, "Idle");
+    assert_eq!(machine.transitions().len(), 1);
+    let mut player = somnium_anim::StateMachinePlayer::new(&machine);
+    player
+        .advance(&machine, runtime, &mut values, 0.01)
+        .unwrap();
+    assert!(player.is_transitioning());
+}
+
+#[test]
+fn animation_catalogue_authors_multitriangle_masks_parameters_and_sync_leaders() {
+    use glam::Mat4;
+    use somnium_anim::{
+        AnimNode, AnimationClip, ClipId, GraphId, LayerWeight, ParameterDefinition,
+        ParameterSchema, ParameterSchemaId, ParameterValue, Skeleton, SkeletonId, Transform,
+    };
+
+    let skeleton = Skeleton::new(
+        SkeletonId(42),
+        vec!["root".into(), "hand".into()],
+        vec![somnium_anim::NO_PARENT, 0],
+        vec![Mat4::IDENTITY; 2],
+        vec![Transform::IDENTITY; 2],
+    )
+    .unwrap()
+    .0;
+    let parameters = ParameterSchema::new(
+        ParameterSchemaId(8),
+        vec![
+            ParameterDefinition::new("x", ParameterValue::Float(0.0)),
+            ParameterDefinition::new("y", ParameterValue::Float(0.0)),
+            ParameterDefinition::new("upper", ParameterValue::Float(0.5)),
+        ],
+    )
+    .unwrap();
+    let catalogue = catalogues::animation();
+    let mut graph = Graph::new();
+    let clips: Vec<_> = (0..4)
+        .map(|index| {
+            let node = graph
+                .add(
+                    &catalogue,
+                    "animation.clip",
+                    Vec2::new(0.0, index as f32 * 100.0),
+                )
+                .unwrap();
+            graph
+                .node_mut(node)
+                .unwrap()
+                .literals
+                .insert(0, (index + 1).to_string());
+            node
+        })
+        .collect();
+    let blend = graph
+        .add(&catalogue, "animation.blend2d4", Vec2::new(260.0, 120.0))
+        .unwrap();
+    graph
+        .node_mut(blend)
+        .unwrap()
+        .literals
+        .insert(16, "3".into());
+    let layer = graph
+        .add(&catalogue, "animation.layer", Vec2::new(500.0, 120.0))
+        .unwrap();
+    graph
+        .node_mut(layer)
+        .unwrap()
+        .literals
+        .extend([(3, "upper".into()), (4, "1.0,0.0".into())]);
+    let output = graph
+        .add(&catalogue, "animation.output", Vec2::new(720.0, 120.0))
+        .unwrap();
+    for (index, clip) in clips.iter().copied().enumerate() {
+        graph
+            .connect(
+                &catalogue,
+                PinRef::output(clip, 0),
+                PinRef::input(blend, index as u16),
+            )
+            .unwrap();
+    }
+    for (from, to) in [
+        (PinRef::output(blend, 0), PinRef::input(layer, 0)),
+        (PinRef::output(clips[0], 0), PinRef::input(layer, 1)),
+        (PinRef::output(layer, 0), PinRef::input(output, 0)),
+    ] {
+        graph.connect(&catalogue, from, to).unwrap();
+    }
+    let runtime = super::compile_animation(
+        &graph,
+        &catalogue,
+        GraphId(4),
+        2,
+        &skeleton,
+        clips
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                AnimationClip::new(ClipId(index as u64 + 1), &skeleton, 1.0, vec![], vec![])
+                    .unwrap()
+            })
+            .collect(),
+        parameters,
+    )
+    .unwrap();
+    assert!(matches!(
+        &runtime.nodes()[4],
+        AnimNode::Blend2D {
+            triangles,
+            sync_leader: 3,
+            ..
+        } if triangles == &vec![[0, 1, 2], [0, 2, 3]]
+    ));
+    assert!(matches!(
+        &runtime.nodes()[5],
+        AnimNode::Layer { layers, .. }
+            if matches!(layers[0].weight, LayerWeight::Parameter(ref name) if name == "upper")
+                && layers[0].mask.is_some()
+    ));
+}
+
+#[test]
 fn moving_a_group_moves_every_nested_member_and_serialises_membership() {
     let catalogue = catalogues::material();
     let mut surface = super::GraphSurface::new(catalogue.clone());

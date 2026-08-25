@@ -18,6 +18,7 @@ use somnium_ecs::{Entity, PersistentId, StableId, World};
 use somnium_script::attachment::PropertyBag;
 use somnium_script::backend::{Budget, Callback, ScriptBackend, ScriptError, ScriptSource};
 use somnium_script::command::CommandBuffer;
+use somnium_script::command::{AnimationParameterValue, ScriptCommand};
 use somnium_script::ids::{InstanceUuid, LanguageTag, ScriptAssetId, ScriptInstanceId};
 use somnium_script::order::OrderKey;
 use somnium_script::snapshot::{InputSnapshot, ScriptSnapshot, TimeSnapshot};
@@ -176,6 +177,79 @@ fn an_authored_property_overrides_the_declared_default() {
         (slice.translation().x - 10.0 / 60.0).abs() < 1.0e-5,
         "the authored value must win over the script's default"
     );
+}
+
+#[test]
+fn animation_parameters_cross_luau_as_typed_deferred_commands() {
+    let mut slice = Slice::new(
+        r#"
+        return Script.define({
+            apiVersion = 1,
+            schemaVersion = 1,
+            onFixedUpdate = function(self, ctx)
+                ctx:setAnimationBool(ctx.entity, "grounded", true)
+                ctx:setAnimationFloat(ctx.entity, "speed", 2.5)
+                ctx:setAnimationInt(ctx.entity, "stance", 3)
+                ctx:triggerAnimation(ctx.entity, "jump")
+            end,
+        })
+        "#,
+        PropertyBag::new(),
+    );
+    let snapshot = snapshot(slice.entity, slice.persistent);
+    let mut commands = CommandBuffer::new();
+    {
+        let view = EngineWorldView::new(&slice.world, &slice.registry);
+        slice
+            .backend
+            .invoke(
+                slice.instance,
+                slice.order,
+                Callback::FixedUpdate,
+                &snapshot,
+                &view,
+                &mut commands,
+            )
+            .unwrap();
+    }
+    let commands: Vec<_> = commands
+        .drain_sorted()
+        .into_iter()
+        .map(|queued| queued.command)
+        .collect();
+    assert_eq!(commands.len(), 4);
+    assert!(matches!(
+        &commands[0],
+        ScriptCommand::SetAnimationParameter {
+            name,
+            value: AnimationParameterValue::Bool(true),
+            ..
+        } if name == "grounded"
+    ));
+    assert!(matches!(
+        &commands[1],
+        ScriptCommand::SetAnimationParameter {
+            name,
+            value: AnimationParameterValue::Float(value),
+            ..
+        } if name == "speed" && (*value - 2.5).abs() < f32::EPSILON
+    ));
+    assert!(matches!(
+        &commands[2],
+        ScriptCommand::SetAnimationParameter {
+            name,
+            value: AnimationParameterValue::Int(3),
+            ..
+        } if name == "stance"
+    ));
+    assert!(matches!(
+        &commands[3],
+        ScriptCommand::SetAnimationParameter {
+            name,
+            value: AnimationParameterValue::Trigger,
+            ..
+        } if name == "jump"
+    ));
 }
 
 #[test]

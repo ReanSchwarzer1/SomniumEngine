@@ -1006,6 +1006,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.workspace.animation",
+            "Workspace: Animation",
+            "Window",
+            None,
+            "Open the animation graph and state-machine authoring surface.",
+            A::SetWorkspace(W::Animation),
+            WINDOW,
+            always
+        ),
+        command!(
             "editor.workspace.debug",
             "Workspace: Debug",
             "Window",

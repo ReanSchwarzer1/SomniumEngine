@@ -2338,3 +2338,23 @@ Flax source proprietary even though the phase plan had treated its graph
 surface as a permissive reference. Its architecture remains historical plan
 context only; the implementation was re-sourced to the three permissive
 references above before code was written.
+
+### 13H.18 Esoterica and Fyrox — animation graphs, MORROWIND-V
+
+*Read for pattern only; MIT.* **Esoterica**
+(`Code/Engine/Animation/`) was the phase plan's named runtime reference. Its
+compiled-node inventory and separation between graph definitions, graph
+instances and pose tasks informed Somnium's scope: clips, one- and two-axis
+blends, layers, state machines, synchronisation and cache nodes are runtime
+data, not editor widget types. Somnium's implementation is independent Rust:
+typed fallible constructors, authored triangulations with hull projection,
+stable sync leaders, recursively validated sync branches and cache identities
+containing generation, evaluation lane, graph id, graph version and node id.
+No Esoterica source was copied or translated.
+
+*Read for pattern only; MIT.* **Fyrox** (`editor/src/plugins/absm/`) was the
+permissive retained-mode reference for presenting animation states on a graph
+surface. MORROWIND-V reuses MORROWIND-K's `GraphSurface` for state layout and
+stores cyclic transition overlays separately, preserving the pose graph's DAG
+invariant. The authored document compiles to `somnium_anim::StateMachine`; it
+does not introduce a second widget, object model or serializer.

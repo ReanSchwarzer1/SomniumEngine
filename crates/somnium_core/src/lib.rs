@@ -112,7 +112,10 @@ pub use map::{
     spawn_map,
 };
 pub use scene_serial::{parse_scene, save_scene};
-pub use script_host::{HostServices, ScriptHost, ScriptLogLine, SyncReport};
+pub use script_host::{
+    AnimationParameterRouter, HostServices, ScriptHost, ScriptLogLine, SyncReport,
+    apply_animation_parameter,
+};
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
 pub use time::TimeState;
 

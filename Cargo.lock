@@ -3865,6 +3865,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "somnium_anim",
  "somnium_asset",
  "somnium_audio",
  "somnium_ecs",
@@ -3989,6 +3990,7 @@ dependencies = [
  "resvg",
  "serde",
  "serde_json",
+ "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
  "somnium_shader",
@@ -4613,7 +4615,9 @@ name = "vvardenfell"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "somnium_anim",
  "somnium_core",
+ "somnium_script",
  "somnium_ui",
 ]
 

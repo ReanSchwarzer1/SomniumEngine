@@ -9,6 +9,7 @@ authors.workspace     = true
 
 [dependencies]
 somnium_ecs = { workspace = true }
+somnium_anim = { workspace = true }
 # Seam 1. MORROWIND-B promoted this crate's own `JobRegistry` into it.
 somnium_jobs = { workspace = true }
 # Seam 5. `somnium_core` is where the input system meets the UI's navigation,

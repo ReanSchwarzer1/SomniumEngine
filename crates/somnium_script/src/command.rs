@@ -60,6 +60,23 @@ pub enum LogLevel {
     Error,
 }
 
+/// A typed animation-graph parameter crossing the script boundary.
+///
+/// Kept neutral here so the scripting crate does not depend on the animation
+/// runtime. The core script host routes it to the game's animation instance at
+/// the same deferred safe point as component writes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnimationParameterValue {
+    /// A state-machine boolean.
+    Bool(bool),
+    /// A blend-tree scalar.
+    Float(f32),
+    /// A discrete state-machine value.
+    Int(i64),
+    /// A one-shot transition trigger.
+    Trigger,
+}
+
 /// One thing a script wants done.
 ///
 /// Component reads and writes go through [`StableId`] and a reflected
@@ -116,6 +133,15 @@ pub enum ScriptCommand {
         /// Which of the two it is.
         mode: ForceMode,
     },
+    /// Change one parameter on an entity's animation-graph instance.
+    SetAnimationParameter {
+        /// Entity whose animation instance receives the value.
+        entity: Entity,
+        /// Authored parameter name in the graph schema.
+        name: String,
+        /// Typed value; the graph schema performs the final validation.
+        value: AnimationParameterValue,
+    },
     /// Start a sound.
     PlayAudio {
         /// Sound asset.
@@ -157,6 +183,7 @@ impl ScriptCommand {
             Self::Spawn { .. } => C::SPAWN,
             Self::Despawn { .. } => C::DESPAWN,
             Self::ApplyForce { .. } => C::PHYSICS,
+            Self::SetAnimationParameter { .. } => C::WRITE_FIELDS,
             Self::PlayAudio { .. } => C::AUDIO,
             Self::EmitEvent { .. } => C::EVENTS,
             Self::Log { .. } => C::LOG,
@@ -173,6 +200,7 @@ impl ScriptCommand {
             Self::Spawn { .. } => "spawn",
             Self::Despawn { .. } => "despawn",
             Self::ApplyForce { .. } => "applyForce",
+            Self::SetAnimationParameter { .. } => "setAnimationParameter",
             Self::PlayAudio { .. } => "playAudio",
             Self::EmitEvent { .. } => "emit",
             Self::Log { .. } => "log",

@@ -34,7 +34,7 @@ use somnium_ecs::{Entity, World};
 use somnium_physics::world::PhysicsWorld;
 use somnium_script::attachment::ScriptSet;
 use somnium_script::backend::{Budget, Callback, Diagnostic, Diagnostics, ScriptSource, Severity};
-use somnium_script::command::{CommandBuffer, ForceMode, LogLevel};
+use somnium_script::command::{AnimationParameterValue, CommandBuffer, ForceMode, LogLevel};
 use somnium_script::ids::{InstanceUuid, LanguageTag, ScriptAssetId};
 use somnium_script::lifecycle::LifecycleState;
 use somnium_script::ownership::OwnedResource;
@@ -54,6 +54,72 @@ use crate::script_bridge::{ApplyOutcome, EngineWorldView, apply_commands};
 /// code's. See the module docs.
 pub type ForceRouter =
     Box<dyn FnMut(&World, &mut PhysicsWorld, Entity, glam::Vec3, ForceMode) + Send>;
+
+/// Connects Luau's typed animation-parameter calls to the animation instance
+/// representation chosen by game code.
+///
+/// The router receives `&mut World` at the phase safe point, so it may update a
+/// player component without exposing that component or a pointer to Luau.
+pub type AnimationParameterRouter =
+    Box<dyn FnMut(&mut World, Entity, &str, AnimationParameterValue) -> Result<(), String> + Send>;
+
+/// Apply a neutral script value to a real animation parameter set, preserving
+/// the graph schema's unknown-name and type checks.
+pub fn apply_animation_parameter(
+    parameters: &mut somnium_anim::ParameterSet,
+    name: &str,
+    value: AnimationParameterValue,
+) -> Result<(), somnium_anim::ParameterError> {
+    match value {
+        AnimationParameterValue::Bool(value) => {
+            parameters.set(name, somnium_anim::ParameterValue::Bool(value))
+        }
+        AnimationParameterValue::Float(value) => {
+            parameters.set(name, somnium_anim::ParameterValue::Float(value))
+        }
+        AnimationParameterValue::Int(value) => {
+            parameters.set(name, somnium_anim::ParameterValue::Int(value))
+        }
+        AnimationParameterValue::Trigger => parameters.trigger(name),
+    }
+}
+
+#[cfg(test)]
+mod animation_parameter_tests {
+    use super::*;
+    use somnium_anim::{ParameterDefinition, ParameterSchema, ParameterSchemaId, ParameterValue};
+
+    #[test]
+    fn script_values_reach_the_real_animation_schema() {
+        let schema = ParameterSchema::new(
+            ParameterSchemaId(90),
+            vec![
+                ParameterDefinition::new("speed", ParameterValue::Float(0.0)),
+                ParameterDefinition::new("jump", ParameterValue::Trigger(false)),
+            ],
+        )
+        .unwrap();
+        let mut parameters = schema.instantiate();
+        apply_animation_parameter(
+            &mut parameters,
+            "speed",
+            AnimationParameterValue::Float(2.25),
+        )
+        .unwrap();
+        apply_animation_parameter(&mut parameters, "jump", AnimationParameterValue::Trigger)
+            .unwrap();
+        assert_eq!(parameters.get("speed"), Some(ParameterValue::Float(2.25)));
+        assert_eq!(parameters.get("jump"), Some(ParameterValue::Trigger(true)));
+        assert!(
+            apply_animation_parameter(
+                &mut parameters,
+                "speed",
+                AnimationParameterValue::Bool(true)
+            )
+            .is_err()
+        );
+    }
+}
 
 /// One line a script wrote to the output log.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +220,7 @@ pub struct ScriptHost {
     runtime: ScriptRuntime,
     registry: TypeRegistry,
     force_router: Option<ForceRouter>,
+    animation_parameter_router: Option<AnimationParameterRouter>,
     /// Where each imported script came from, so a reload can re-read it.
     script_paths: BTreeMap<ScriptAssetId, PathBuf>,
     /// What each of those files looked like when it was last loaded, and
@@ -203,6 +270,7 @@ impl ScriptHost {
             runtime,
             registry: component_registry(),
             force_router: None,
+            animation_parameter_router: None,
             script_paths: BTreeMap::new(),
             watched: BTreeMap::new(),
             audio_paths: BTreeMap::new(),
@@ -224,6 +292,7 @@ impl ScriptHost {
             runtime: ScriptRuntime::new(budget),
             registry: component_registry(),
             force_router: None,
+            animation_parameter_router: None,
             script_paths: BTreeMap::new(),
             watched: BTreeMap::new(),
             audio_paths: BTreeMap::new(),
@@ -258,6 +327,11 @@ impl ScriptHost {
     /// Install the game's entity-to-body mapping.
     pub fn set_force_router(&mut self, router: ForceRouter) {
         self.force_router = Some(router);
+    }
+
+    /// Install the game's entity-to-animation-instance mapping.
+    pub fn set_animation_parameter_router(&mut self, router: AnimationParameterRouter) {
+        self.animation_parameter_router = Some(router);
     }
 
     /// Let scripts name a sound asset.
@@ -926,6 +1000,21 @@ impl ScriptHost {
         for event in outcome.events {
             self.runtime
                 .queue_event(event.name, Some(event.source), event.payload);
+        }
+
+        if let Some(router) = self.animation_parameter_router.as_mut() {
+            for (entity, name, value) in outcome.animation_parameters {
+                if let Err(error) = router(world, entity, &name, value) {
+                    self.rejections
+                        .push(format!("setAnimationParameter `{name}`: {error}"));
+                }
+            }
+        } else if !outcome.animation_parameters.is_empty() {
+            self.rejections.push(
+                "setAnimationParameter: no animation parameter router is installed (see \
+                 ScriptHost::set_animation_parameter_router)"
+                    .to_string(),
+            );
         }
 
         if let Some(physics) = services.physics.as_deref_mut() {

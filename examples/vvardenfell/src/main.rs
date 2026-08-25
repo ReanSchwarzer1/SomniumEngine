@@ -58,8 +58,20 @@ mod hud;
 
 use hud::{Hud, HudTree};
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
-use somnium_ui::graph::{Graph, catalogues, material};
+use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
 use somnium_ui::runtime::canvas::SafeArea;
+
+struct WalkCycle {
+    skeleton: somnium_anim::Skeleton,
+    graph: somnium_anim::AnimGraphAsset,
+    animation_entity: somnium_core::Entity,
+    cache: somnium_anim::PoseCache,
+    elapsed: f32,
+    root_x: f32,
+}
+
+struct AnimationParameters(somnium_anim::ParameterSet);
+impl somnium_core::Component for AnimationParameters {}
 
 /// The slice's game state.
 ///
@@ -81,6 +93,10 @@ struct Vvardenfell {
     /// MORROWIND-K. The first graph consumer compiled through public APIs into
     /// the same material asset used by property authoring.
     graph_material: Option<material::CompiledMaterialGraph>,
+    /// MORROWIND-V. A game-owned compiled walk graph evaluated without UI or
+    /// renderer internals. MORROWIND-U already owns the separate pose-to-GPU
+    /// palette seam; this slice records the sampled root for headless evidence.
+    walk: Option<WalkCycle>,
 }
 
 impl GameApp for Vvardenfell {
@@ -153,10 +169,58 @@ impl GameApp for Vvardenfell {
             compiled.wgsl.len()
         );
         self.graph_material = Some(compiled);
+
+        let (mut walk, parameters) = build_walk_cycle();
+        let script_asset = somnium_script::ids::ScriptAssetId::mint();
+        ctx.scripts
+            .load_script(
+                script_asset,
+                "vvardenfell/locomotion.luau",
+                r#"
+                return Script.define({
+                    apiVersion = 1,
+                    schemaVersion = 1,
+                    onStart = function(self, ctx)
+                        ctx:setAnimationFloat(ctx.entity, "speed", 0.7)
+                    end,
+                })
+                "#,
+            )
+            .expect("the slice's strict animation driver compiles");
+        let mut scripts = somnium_script::attachment::ScriptSet::new();
+        scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+            script_asset,
+        ));
+        let animation_entity = ctx.world.spawn((AnimationParameters(parameters), scripts));
+        walk.animation_entity = animation_entity;
+        ctx.scripts
+            .set_animation_parameter_router(Box::new(|world, entity, name, value| {
+                let target = world
+                    .get_mut::<AnimationParameters>(entity)
+                    .ok_or_else(|| "entity has no AnimationParameters component".to_string())?;
+                somnium_core::apply_animation_parameter(&mut target.0, name, value)
+                    .map_err(|error| format!("{error:?}"))
+            }));
+        self.walk = Some(walk);
+        println!("  animation graph -> synced idle/walk/run blend");
     }
 
-    fn on_update(&mut self, _ctx: &mut EngineContext) {
+    fn on_update(&mut self, ctx: &mut EngineContext) {
         self.frames += 1;
+        if let Some(walk) = self.walk.as_mut() {
+            walk.elapsed += ctx.time.delta_time().as_secs_f32();
+            if let Some(parameters) = ctx.world.get::<AnimationParameters>(walk.animation_entity) {
+                if let Ok(pose) = walk.graph.evaluate(
+                    &walk.skeleton,
+                    &parameters.0,
+                    walk.elapsed,
+                    self.frames,
+                    &mut walk.cache,
+                ) {
+                    walk.root_x = pose.local[0].translation.x;
+                }
+            }
+        }
     }
 
     /// Build. MORROWIND-E2's rule: the tree is mutated here, where there is a
@@ -212,8 +276,161 @@ impl GameApp for Vvardenfell {
     }
 
     fn on_shutdown(&mut self) {
-        println!("vvardenfell: {} frames.", self.frames);
+        println!(
+            "vvardenfell: {} frames, walk root {:.3} m.",
+            self.frames,
+            self.walk.as_ref().map_or(0.0, |walk| walk.root_x)
+        );
     }
+}
+
+fn build_walk_cycle() -> (WalkCycle, somnium_anim::ParameterSet) {
+    use glam::{Mat4, Quat, Vec3};
+    use somnium_anim::{
+        AnimationClip, ClipId, GraphId, Keyframe, ParameterDefinition, ParameterSchema,
+        ParameterSchemaId, ParameterValue, Playback, Skeleton, SkeletonId, SyncMarker, SyncTrack,
+        Transform, TransformTrack,
+    };
+
+    let skeleton = Skeleton::new(
+        SkeletonId(1),
+        vec!["root".into()],
+        vec![somnium_anim::NO_PARENT],
+        vec![Mat4::IDENTITY],
+        vec![Transform::IDENTITY],
+    )
+    .expect("the slice's one-joint skeleton is valid")
+    .0;
+    let make_clip = |id, duration, distance| {
+        AnimationClip::new(
+            ClipId(id),
+            &skeleton,
+            duration,
+            vec![TransformTrack {
+                joint: 0,
+                translation: vec![
+                    Keyframe::new(0.0, Vec3::ZERO),
+                    Keyframe::new(duration, Vec3::X * distance),
+                ],
+                rotation: vec![Keyframe::new(0.0, Quat::IDENTITY)],
+                scale: vec![],
+            }],
+            vec![
+                SyncTrack::new(
+                    "locomotion",
+                    duration,
+                    vec![
+                        SyncMarker::new("left_contact", 0.0),
+                        SyncMarker::new("right_contact", duration * 0.5),
+                    ],
+                )
+                .expect("the two foot contacts make a valid sync cycle"),
+            ],
+        )
+        .expect("the slice's clip targets the only joint")
+    };
+    let parameters = ParameterSchema::new(
+        ParameterSchemaId(1),
+        vec![ParameterDefinition::new(
+            "speed",
+            ParameterValue::Float(0.55),
+        )],
+    )
+    .expect("the speed parameter is finite and unique");
+    let values = parameters.instantiate();
+
+    let catalogue = catalogues::animation();
+    let mut authored = Graph::new();
+    let idle = authored
+        .add(&catalogue, "animation.clip", glam::Vec2::new(20.0, 20.0))
+        .expect("the catalogue contains Clip");
+    let walk = authored
+        .add(&catalogue, "animation.clip", glam::Vec2::new(20.0, 180.0))
+        .expect("the catalogue contains Clip");
+    let run = authored
+        .add(&catalogue, "animation.clip", glam::Vec2::new(20.0, 340.0))
+        .expect("the catalogue contains Clip");
+    authored.node_mut(idle).unwrap().literals.extend([
+        (0, "1".into()),
+        (1, Playback::LOOPING.time_scale().to_string()),
+    ]);
+    authored.node_mut(walk).unwrap().literals.extend([
+        (0, "2".into()),
+        (1, Playback::LOOPING.time_scale().to_string()),
+    ]);
+    authored.node_mut(run).unwrap().literals.extend([
+        (0, "3".into()),
+        (1, Playback::LOOPING.time_scale().to_string()),
+    ]);
+    let blend = authored
+        .add(
+            &catalogue,
+            "animation.blend1d3",
+            glam::Vec2::new(280.0, 180.0),
+        )
+        .expect("the catalogue contains three-sample Blend 1D");
+    authored.node_mut(blend).unwrap().literals.extend([
+        (3, "0.0".into()),
+        (4, "0.5".into()),
+        (5, "1.0".into()),
+        (6, "speed".into()),
+        (7, "locomotion".into()),
+        (8, "1".into()),
+    ]);
+    let output = authored
+        .add(
+            &catalogue,
+            "animation.output",
+            glam::Vec2::new(540.0, 180.0),
+        )
+        .expect("the catalogue contains Animation Output");
+    for (from, to) in [
+        (
+            somnium_ui::graph::PinRef::output(idle, 0),
+            somnium_ui::graph::PinRef::input(blend, 0),
+        ),
+        (
+            somnium_ui::graph::PinRef::output(walk, 0),
+            somnium_ui::graph::PinRef::input(blend, 1),
+        ),
+        (
+            somnium_ui::graph::PinRef::output(run, 0),
+            somnium_ui::graph::PinRef::input(blend, 2),
+        ),
+        (
+            somnium_ui::graph::PinRef::output(blend, 0),
+            somnium_ui::graph::PinRef::input(output, 0),
+        ),
+    ] {
+        authored
+            .connect(&catalogue, from, to)
+            .expect("the authored pose pins have the same opaque type");
+    }
+    let graph = compile_animation(
+        &authored,
+        &catalogue,
+        GraphId(1),
+        1,
+        &skeleton,
+        vec![
+            make_clip(1, 1.0, 0.0),
+            make_clip(2, 1.0, 1.4),
+            make_clip(3, 0.55, 2.5),
+        ],
+        parameters,
+    )
+    .expect("the public graph compiler accepts the slice's authored graph");
+    (
+        WalkCycle {
+            skeleton,
+            graph,
+            animation_entity: somnium_core::Entity::DANGLING,
+            cache: somnium_anim::PoseCache::default(),
+            elapsed: 0.0,
+            root_x: 0.0,
+        },
+        values,
+    )
 }
 
 /// `winit`'s pressed state, named so the match above reads as intent.

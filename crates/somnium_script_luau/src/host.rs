@@ -27,7 +27,9 @@ use somnium_script::backend::{
     Callback, CallbackMask, Diagnostic, Diagnostics, ScriptError, ScriptFieldSchema, ScriptSchema,
     ScriptSource, Severity,
 };
-use somnium_script::command::{CommandBuffer, ForceMode, LogLevel, ScriptCommand};
+use somnium_script::command::{
+    AnimationParameterValue, CommandBuffer, ForceMode, LogLevel, ScriptCommand,
+};
 use somnium_script::ids::ScriptAssetId;
 use somnium_script::snapshot::{ScriptSnapshot, WorldView};
 use somnium_script::value::ScriptValue;
@@ -643,6 +645,76 @@ pub fn build_ctx<'scope, 'env>(
                         ForceMode::Force
                     },
                 });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    // ── Animation graph parameters ───────────────────────────────
+    // Four typed calls keep Luau's single number representation from making
+    // an authored integer parameter indistinguishable from a float.
+    ctx.set(
+        "setAnimationBool",
+        scope.create_function(
+            move |_, (_ctx, entity, name, value): (Table, EntityHandle, String, bool)| {
+                commands
+                    .borrow_mut()
+                    .push(ScriptCommand::SetAnimationParameter {
+                        entity: entity.0,
+                        name,
+                        value: AnimationParameterValue::Bool(value),
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    ctx.set(
+        "setAnimationFloat",
+        scope.create_function(
+            move |_, (_ctx, entity, name, value): (Table, EntityHandle, String, f64)| {
+                let value = value as f32;
+                if !value.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "animation float must be finite and fit in f32".into(),
+                    ));
+                }
+                commands
+                    .borrow_mut()
+                    .push(ScriptCommand::SetAnimationParameter {
+                        entity: entity.0,
+                        name,
+                        value: AnimationParameterValue::Float(value),
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    ctx.set(
+        "setAnimationInt",
+        scope.create_function(
+            move |_, (_ctx, entity, name, value): (Table, EntityHandle, String, i64)| {
+                commands
+                    .borrow_mut()
+                    .push(ScriptCommand::SetAnimationParameter {
+                        entity: entity.0,
+                        name,
+                        value: AnimationParameterValue::Int(value),
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    ctx.set(
+        "triggerAnimation",
+        scope.create_function(
+            move |_, (_ctx, entity, name): (Table, EntityHandle, String)| {
+                commands
+                    .borrow_mut()
+                    .push(ScriptCommand::SetAnimationParameter {
+                        entity: entity.0,
+                        name,
+                        value: AnimationParameterValue::Trigger,
+                    });
                 Ok(())
             },
         )?,

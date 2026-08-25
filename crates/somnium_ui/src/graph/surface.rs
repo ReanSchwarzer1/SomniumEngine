@@ -104,6 +104,7 @@ impl GraphHistory {
 }
 
 /// One reusable graph editing surface. Consumers contribute only a catalogue.
+#[derive(Clone)]
 pub struct GraphSurface {
     pub graph: Graph,
     pub catalogue: Catalogue,
@@ -142,6 +143,47 @@ impl GraphSurface {
             self.selection.select_only(id);
         }
         created
+    }
+
+    /// Commit one unconnected input's authored value as a single undo step.
+    ///
+    /// Literal text deliberately remains feature-neutral here: the catalogue
+    /// owner validates it when compiling the graph. Connected inputs cannot be
+    /// edited because their value is supplied by the wire.
+    pub fn set_literal(&mut self, node: NodeId, pin: u16, value: impl Into<String>) -> bool {
+        let value = value.into();
+        let input = self
+            .graph
+            .node(node)
+            .and_then(|node| self.catalogue.get(&node.archetype))
+            .and_then(|archetype| archetype.inputs.get(pin as usize));
+        let valid = input.is_some()
+            && input.is_none_or(|input| {
+                input.range.is_none_or(|(min, max)| {
+                    let Ok(value) = value.trim().parse::<f64>() else {
+                        return false;
+                    };
+                    let (Ok(min), Ok(max)) = (min.parse::<f64>(), max.parse::<f64>()) else {
+                        return false;
+                    };
+                    value.is_finite() && value >= min && value <= max
+                })
+            })
+            && self.graph.input_source(PinRef::input(node, pin)).is_none();
+        if !valid {
+            return false;
+        }
+        self.history
+            .apply(&mut self.graph, "Edit Graph Literal", |graph| {
+                let Some(node) = graph.node_mut(node) else {
+                    return false;
+                };
+                if node.literals.get(&pin) == Some(&value) {
+                    return false;
+                }
+                node.literals.insert(pin, value);
+                true
+            })
     }
 
     pub fn add_comment(&mut self, at: Vec2, size: Vec2, text: impl Into<String>) -> Option<NodeId> {

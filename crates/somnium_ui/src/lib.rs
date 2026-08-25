@@ -443,6 +443,8 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
+    /// Production animation graph/state-machine surface shown by the Animation workspace.
+    animation_graph_editor: NodeHandle,
     /// Selection readout floating over the render, bottom-left.
     vp_overlay: NodeHandle,
     vp_overlay_text: NodeHandle,
@@ -655,6 +657,7 @@ pub struct UiManager {
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
+    animation_graph_editor: NodeHandle,
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
     profiler_toggle_lbl: NodeHandle,
@@ -1290,6 +1293,7 @@ impl UiManager {
             selected_entity: None,
             next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
+            animation_graph_editor: layout.animation_graph_editor,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
             profiler_toggle_lbl: layout.profiler_toggle_lbl,
@@ -1582,10 +1586,31 @@ impl UiManager {
     /// splitter drag, so the choice survives a restart.
     pub fn set_workspace(&mut self, workspace: crate::workspace::Workspace) {
         self.active_workspace = workspace;
+        self.native_ui.set_visibility(
+            self.animation_graph_editor,
+            workspace == crate::workspace::Workspace::Animation,
+        );
         let (w, h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let preset = workspace.preset(w, h);
         self.apply_workspace_layout(preset, w);
         self.push_toast(&format!("{} workspace", workspace.label()));
+    }
+
+    /// Open an authored animation state machine on the shipped graph surface.
+    ///
+    /// The graph control becomes the document owner; the shell does not mirror
+    /// the graph or transition overlay into a second editor-side model.
+    pub fn edit_animation_state_machine(
+        &mut self,
+        document: crate::graph::AnimationStateMachineDocument,
+    ) {
+        self.native_ui.send(
+            crate::graph::GraphEditorMessage::set_state_machine_document(
+                self.animation_graph_editor,
+                document,
+            ),
+        );
+        self.set_workspace(crate::workspace::Workspace::Animation);
     }
 
     /// Return the current workspace to its shipped arrangement.
@@ -5645,6 +5670,16 @@ impl UiManager {
             (h.foliage_smax, FoliageBrushField::ScaleMax),
         ];
         for msg in msgs {
+            if matches!(
+                msg.data::<crate::graph::GraphEditorMessage>(),
+                Some(
+                    crate::graph::GraphEditorMessage::Changed(_)
+                        | crate::graph::GraphEditorMessage::StateMachineChanged(_)
+                )
+            ) {
+                self.set_scene_dirty(true);
+                continue;
+            }
             if self.handle_preferences_message(&msg) {
                 continue;
             }
@@ -6848,6 +6883,28 @@ impl CollapseRules {
 #[cfg(test)]
 mod elysium_tests {
     use super::*;
+
+    #[test]
+    fn shipped_shell_contains_the_animation_graph_workspace_surface() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        let editor = ui
+            .nodes
+            .try_borrow(layout.animation_graph_editor.transmute())
+            .unwrap();
+        assert_eq!(editor.widget.parent, layout.viewport_handle);
+        assert!(
+            !editor.widget.visibility,
+            "Layout starts on the 3D viewport"
+        );
+        assert!(
+            crate::commands::registry()
+                .get("editor.workspace.animation")
+                .is_some(),
+            "the Window menu/palette can reveal the production graph control"
+        );
+    }
 
     #[test]
     fn details_shows_exactly_one_state_at_a_time() {

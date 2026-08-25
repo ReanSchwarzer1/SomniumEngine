@@ -20,4 +20,6 @@ somnium_core = { workspace = true }
 # the engine's. If a later track cannot reach its own feature from this list
 # without adding a reach-through, that track's API is wrong.
 somnium_ui = { workspace = true }
+somnium_anim = { workspace = true }
+somnium_script = { workspace = true }
 glam = { workspace = true }

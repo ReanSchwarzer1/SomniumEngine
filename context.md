@@ -311,9 +311,34 @@
 >   existing `.sommat` `MaterialAsset` plus generated WGSL registered through
 >   the single MORROWIND-C `ShaderSystem`; `vvardenfell` exercises that public
 >   boundary without a renderer reach-through.
+>   **MORROWIND-V completed animation clips, blend graphs and state machines.**
+>   `somnium_anim` now has validated clip tracks with looping/time scale,
+>   authored `Blend1D` and triangulated `Blend2D`, masked layers, typed
+>   parameters and triggers, stable-leader sync tracks, state transitions and a
+>   bounded composite pose cache. Graph and machine versions reject stale live
+>   instances instead of indexing replacement definitions. Forced sync is
+>   validated through every nested blend/layer/cache leaf, and cached poses are
+>   separated by generation, evaluation lane, graph id, graph version and node.
+>   MORROWIND-K's animation catalogue compiles output- and state-reachable pose
+>   nodes into this UI-neutral asset, retaining a durable authored/runtime node
+>   map and caller-owned graph revision. The same surface owns versioned cyclic
+>   state-machine transition overlays and their undo/redo history, while pose
+>   wires remain a DAG. Its catalogue covers idle/walk/run blends,
+>   multi-triangle 2D blends, authored sync leaders, bone masks and
+>   parameter-driven layer weights. The shipped Animation workspace owns this
+>   real graph control: labelled/ranged literal fields, Alt-click initial state,
+>   Shift-drag transition creation, and a selectable in-canvas transition
+>   inspector for blend time, sync track, typed conditions and deletion.
+>   Luau reaches typed bool/float/int/trigger parameters through the existing
+>   deferred command boundary and a game-installed animation router. The
+>   `vvardenfell` slice attaches a real Luau script and evaluates a synced
+>   idle/walk/run graph from that same live parameter set using only public
+>   APIs. No rendered crowd or foot-slide PNG is claimed here; the
+>   thousand-character measurement left open by U still needs an authored
+>   skinned crowd scene rather than a synthetic runtime test.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
->   (**1,694 passed, 0 failed**, against a floor of 945).
+>   (**1,808 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

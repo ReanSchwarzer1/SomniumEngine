@@ -33,6 +33,10 @@
 
 use glam::{Mat4, Quat, Vec3};
 
+mod runtime;
+
+pub use runtime::*;
+
 /// A joint's local transform. Separate components rather than a matrix, because
 /// blending is defined on these and not on matrices: interpolating two matrices
 /// componentwise shears anything that was rotated.
@@ -462,3 +466,6 @@ impl Skin {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runtime_tests;
