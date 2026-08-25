@@ -3839,8 +3839,18 @@ dependencies = [
  "sha2",
  "somnium_anim",
  "somnium_ecs",
+ "somnium_jobs",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "somnium_assetcook"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "somnium_asset",
+ "somnium_jobs",
 ]
 
 [[package]]
@@ -4616,7 +4626,9 @@ version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
  "somnium_anim",
+ "somnium_asset",
  "somnium_core",
+ "somnium_jobs",
  "somnium_script",
  "somnium_ui",
 ]

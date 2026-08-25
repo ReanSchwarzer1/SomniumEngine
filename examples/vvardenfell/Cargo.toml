@@ -22,4 +22,6 @@ somnium_core = { workspace = true }
 somnium_ui = { workspace = true }
 somnium_anim = { workspace = true }
 somnium_script = { workspace = true }
+somnium_asset = { workspace = true }
+somnium_jobs = { workspace = true }
 glam = { workspace = true }

@@ -4,6 +4,7 @@
 //! Somnium-native types (`LoadedScene`) that the renderer can upload
 //! without ever seeing `gltf::` crate types directly.
 
+pub mod cook;
 pub mod database;
 pub mod material;
 pub mod preview;

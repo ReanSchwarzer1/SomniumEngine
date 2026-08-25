@@ -336,9 +336,24 @@
 >   APIs. No rendered crowd or foot-slide PNG is claimed here; the
 >   thousand-character measurement left open by U still needs an authored
 >   skinned crowd scene rather than a synthetic runtime test.
+>   **MORROWIND-Q opened Track 4 with a deterministic native asset cook.**
+>   `somnium_asset::cook` preserves the existing path-derived `AssetId` while
+>   producing versioned, integrity-checked mesh, texture, audio, scene, prefab,
+>   shader and material payload families. A sorted dependency graph and
+>   SHA-256 recipe key make the cache incremental: changing a texture recooks
+>   its material reverse-closure while an unrelated mesh remains cached.
+>   Artifact and manifest bytes exclude absolute paths and timestamps and are
+>   identical across clean output/cache roots. Development and build resolvers
+>   return the same native payload and id; build mode continues after the
+>   source tree is removed. `somnium_assetcook` is the thin standalone tool,
+>   and both it and the `vvardenfell` proof submit the cook through
+>   `somnium_jobs` with an explicit priority and deadline. Independent blobs
+>   plus a replaceable manifest leave a live-update seam without implementing
+>   delivery in this sub-phase. Defold was reclassified as strict under the
+>   Defold License 1.0 and used for architecture only.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
->   (**1,808 passed, 0 failed**, against a floor of 945).
+>   (**1,816 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

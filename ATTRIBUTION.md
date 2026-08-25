@@ -2009,6 +2009,7 @@ carrying forward: *check the header of the file you are actually reading.*
 | `FlaxEngine-master` | Flax EULA, proprietary — `LICENSE.md` is a pointer to <https://flaxengine.com/licensing> | **Strict — reclassified by MORROWIND-A** | The plan's §6.6 implied Flax was permissive. It is not. Seam 4a's canvas idea and Seam 8a's graph surface are both re-sourced to permissive references (Godot `GraphEdit`, Fyrox `absm/`), with Flax demoted to a secondary architectural read. |
 | `Daemon-master` | Root `LICENSE.txt` is BSD-3-Clause; `src/engine/renderer/gl_shader.cpp` carries its own **GPL-2.0-or-later** header | **Strict** | Readable for MORROWIND-C's permutation manager; nothing transcribed. `terra-main/rshader` (Apache-2.0) is the primary reference instead. |
 | `luanti-master` | LGPL-2.1+ | **Strict** | Track 4's block emerge and streaming. Read only. |
+| `defold-dev` | Defold License 1.0 | **Strict — classified by MORROWIND-Q** | Architecture only. Its engine-product commercialisation restriction is incompatible with treating the source as permissive; no code, identifiers, constants or layouts are copied. |
 | `korge-main` | Mixed, declared per-library at the root | **Strict until the subtree is checked** | MORROWIND-N checks the specific subtree it reads. |
 | `fyrox/Fyrox-master` | MIT | Permissive | The primary reference for Tracks 1 and 2. |
 | `Esoterica-main` | MIT | Permissive | Track 5's animation node list. |
@@ -2358,3 +2359,21 @@ surface. MORROWIND-V reuses MORROWIND-K's `GraphSurface` for state layout and
 stores cyclic transition overlays separately, preserving the pose graph's DAG
 invariant. The authored document compiles to `somnium_anim::StateMachine`; it
 does not introduce a second widget, object model or serializer.
+
+### 13H.19 Defold — cook and resource architecture, MORROWIND-Q
+
+*Architecture-only read; Defold License 1.0, strict.* The standalone per-kind
+cooker boundary, manifest-selected resources and independently addressable
+content used by live update informed the questions MORROWIND-Q had to answer.
+The license forbids treating this source as a permissive implementation
+reference for a commercial game-engine product. Somnium therefore copies no
+Defold code, identifiers, constants, schemas, binary layouts or directory
+structure.
+
+Somnium's implementation is independent Rust over its existing path-derived
+`AssetId` and `somnium_jobs`: one versioned SHA-256 envelope, distinct native
+payload families, sorted dependency recipes, a deterministic JSON manifest and
+content-addressed cache entries. An artifact is a standalone immutable blob;
+replacing the manifest can select newly downloaded blobs later, so the format
+does not preclude live update, but MORROWIND-Q intentionally implements no
+network delivery or post-ship patch mechanism.

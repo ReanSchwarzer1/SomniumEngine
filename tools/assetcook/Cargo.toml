@@ -1,0 +1,13 @@
+[package]
+name = "somnium_assetcook"
+description = "MORROWIND-Q deterministic native asset cooker."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+somnium_asset = { workspace = true }
+somnium_jobs = { workspace = true }
+serde_json = { workspace = true }

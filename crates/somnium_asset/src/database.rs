@@ -116,6 +116,7 @@ pub enum AssetKind {
     Shader,
     Font,
     Json,
+    Prefab,
     Unknown,
 }
 
@@ -138,6 +139,7 @@ impl AssetKind {
             Self::Shader => "Shader",
             Self::Font => "Font",
             Self::Json => "JSON",
+            Self::Prefab => "Prefab",
             Self::Unknown => "File",
         }
     }
@@ -501,6 +503,7 @@ pub fn classify(path: &Path, is_dir: bool) -> AssetKind {
         "gltf" | "glb" => AssetKind::Mesh,
         "sommat" => AssetKind::Material,
         "somnium" => AssetKind::Scene,
+        "somprefab" => AssetKind::Prefab,
         "luau" | "lua" | "rs" => AssetKind::Script,
         "wav" | "ogg" | "mp3" | "flac" => AssetKind::Audio,
         "wgsl" | "hlsl" | "glsl" => AssetKind::Shader,

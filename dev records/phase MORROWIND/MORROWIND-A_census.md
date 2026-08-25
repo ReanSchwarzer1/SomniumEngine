@@ -18,14 +18,14 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 56,288 | +6,082 | 32.0% | 377 | +49 | 85 | 52 |
-| `somnium_ui` | 54,304 | +26,774 | 30.9% | 567 | +352 | 90 | 2 |
+| `somnium_renderer` | 56,288 | +6,082 | 31.9% | 377 | +49 | 85 | 52 |
+| `somnium_ui` | 54,304 | +26,774 | 30.7% | 567 | +352 | 90 | 2 |
 | `somnium_core` | 29,773 | +10,553 | 16.9% | 347 | +130 | 40 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 3.0% | 69 | +15 | 9 | 0 |
+| `somnium_asset` | 4,915 | +3,276 | 2.8% | 35 | +29 | 9 | 0 |
 | `somnium_script` | 4,878 | +63 | 2.8% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,754 | +297 | 2.7% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.5% | 46 | +46 | 4 | 0 |
-| `somnium_asset` | 3,936 | +2,297 | 2.2% | 27 | +21 | 8 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.8% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.1% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.1% | 57 | +57 | 5 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,000 | — | 0.6% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **175,699** | +61,807 | | **1774** | +829 | | |
+| **Total** | **176,678** | +62,786 | | **1782** | +837 | | |
 
-The top three crates are **79.9%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **79.4%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,758 lines** (+112 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -55,8 +55,8 @@ panel, which §8 says is not a finished sub-phase.
 | `somnium_script` | 125 | 34 | 9 | 3 | 3 | 18 | 11 | **203** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
+| `somnium_asset` | 60 | 31 | 8 | 0 | 0 | 11 | 5 | **115** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
-| `somnium_asset` | 46 | 20 | 5 | 0 | 0 | 10 | 4 | **85** |
 | `somnium_shader` | 48 | 11 | 2 | 0 | 0 | 1 | 3 | **65** |
 | `somnium_audio` | 31 | 10 | 2 | 0 | 0 | 8 | 5 | **56** |
 | `somnium_i18n` | 34 | 5 | 4 | 0 | 1 | 0 | 4 | **48** |
@@ -102,7 +102,7 @@ is a system this phase still owes.
 | `action_map` | 1 | 0 | +1 | As above. |
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
-| `prefab` | 3 | 2 | +1 | Both are comments in the scripting crate. No prefab system (Track 3). |
+| `prefab` | 5 | 2 | +3 | Both are comments in the scripting crate. No prefab system (Track 3). |
 | `dock` | 6 | 5 | +1 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 11 | 1 | +10 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |

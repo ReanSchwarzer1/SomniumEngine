@@ -62,6 +62,7 @@ not require revisiting a shipped phase.
 | `FlaxEngine-master` | `LICENSE.md` | **Proprietary (Flax EULA)** | **Strict — added by this audit** | As Unreal. See above. |
 | `Daemon-master` | `LICENSE.txt` (BSD-3-Clause) **but see below** | **GPL-2.0-or-later for the file that matters** | **Strict** | The root license is BSD-3-Clause; `src/engine/renderer/gl_shader.cpp:1–21` carries its own GPL-2.0-or-later header, and `GPL.txt` sits beside `COPYING.txt` at the root. **The root file does not govern the file MORROWIND-C wants to read.** Read only; `terra-main/rshader` (Apache-2.0) is the primary reference instead. |
 | `luanti-master` | `LICENSE.txt` | **LGPL-2.1+** (code; assets vary) | **Strict** | Relevant to Track 4's block emerge and streaming. Read only. |
+| `defold-dev` | `LICENSE.txt` | **Defold License 1.0** | **Strict — added by MORROWIND-Q** | Architecture only. Its restriction on commercialising the work or a derivative as a game-engine product makes this non-permissive for Somnium. No identifiers, layouts, constants or code are copied. |
 | `fyrox/Fyrox-master` | `LICENSE.md` | **MIT** | Permissive | Patterns, cited. The MORROWIND-A diff is built on this. |
 | `Esoterica-main` | `LICENSE.md` | **MIT** (Bobby Anguelov, 2022–2024) | Permissive | Track 5's animation node list (§6.3). |
 | `stride-master` | `LICENSE.md` | **MIT** (.NET Foundation) | Permissive | GHOSTFENCE's golden-image model (§10). |
@@ -74,9 +75,10 @@ not require revisiting a shipped phase.
 
 ## The three rules a sub-phase needs to remember
 
-1. **Five references are strict, not three.** Unreal, Flax, Daemon, Luanti —
-   and Korge is per-subtree, so treat it as strict until the subtree is checked.
-   Two of those five were found by *not* trusting the root license file: Flax's
+1. **Six references are strict, not three.** Unreal, Flax, Daemon, Luanti,
+   Defold — and Korge is per-subtree, so treat it as strict until the subtree is
+   checked. Three of those six were found by reading beyond an assumed
+   permissive label: Flax's
    root file is a pointer to a EULA, and Daemon's root file is BSD over a tree
    whose relevant file is GPL. **Check the header of the file you are actually
    reading**, which is the only rule in this document that generalises.

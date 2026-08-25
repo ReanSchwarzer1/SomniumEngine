@@ -57,7 +57,12 @@
 mod hud;
 
 use hud::{Hud, HudTree};
+use somnium_asset::cook::{
+    AssetLoadMode, AssetResolver, CookConfig, CookKind, CookRequest, LoadedNativeAsset,
+    default_cook_deadline, submit_cook,
+};
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
+use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
 use somnium_ui::runtime::canvas::SafeArea;
 
@@ -97,6 +102,9 @@ struct Vvardenfell {
     /// renderer internals. MORROWIND-U already owns the separate pose-to-GPU
     /// palette seam; this slice records the sampled root for headless evidence.
     walk: Option<WalkCycle>,
+    /// MORROWIND-Q. The shader resolved from the build representation after
+    /// passing through the public, job-scheduled native cook API.
+    cooked_shader: Option<LoadedNativeAsset>,
 }
 
 impl GameApp for Vvardenfell {
@@ -203,6 +211,52 @@ impl GameApp for Vvardenfell {
             }));
         self.walk = Some(walk);
         println!("  animation graph -> synced idle/walk/run blend");
+
+        // MORROWIND-Q. Exercise the same public cook and resolver path used by
+        // the standalone tool. The source root is configuration; neither it
+        // nor its timestamps enter the manifest or artifact bytes.
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the example lives under the workspace root");
+        let derived = workspace.join("target/vvardenfell-native-cook");
+        let request = CookRequest {
+            source: "crates/somnium_renderer/src/shaders/census.wgsl".into(),
+            kind: CookKind::Shader,
+            dependencies: vec![],
+        };
+        let config = CookConfig {
+            source_root: workspace.into(),
+            output_root: derived.join("build"),
+            cache_root: derived.join("cache"),
+            cooker_version: 1,
+        };
+        let mut jobs = JobSystem::single_threaded();
+        let report = submit_cook(
+            &mut jobs,
+            config.clone(),
+            vec![request.clone()],
+            JobPriority::User,
+            default_cook_deadline(),
+        )
+        .expect("the cook job can be submitted")
+        .try_take()
+        .expect("single-threaded jobs complete inline")
+        .expect("the slice shader cooks");
+        let loaded = AssetResolver::new(
+            config.source_root,
+            config.output_root,
+            report.manifest,
+            AssetLoadMode::Build,
+        )
+        .load(request.asset_id())
+        .expect("the cooked shader resolves by its stable AssetId");
+        println!(
+            "  native cook -> {} bytes for {}",
+            loaded.payload.len(),
+            loaded.asset
+        );
+        self.cooked_shader = Some(loaded);
     }
 
     fn on_update(&mut self, ctx: &mut EngineContext) {
