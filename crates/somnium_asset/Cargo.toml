@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# MORROWIND-U. The pose seam: an importer that reads a skin needs the types a
+# skin is made of, and they live in a crate with no renderer dependency.
+somnium_anim = { workspace = true }
 gltf      = { workspace = true }
 image     = { workspace = true }
 exr       = { workspace = true }

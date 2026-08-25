@@ -15,6 +15,9 @@ glam         = { workspace = true }
 tracing      = { workspace = true }
 pollster     = { workspace = true }
 somnium_ui   = { workspace = true }
+# MORROWIND-U. Seam 7: the renderer takes matrices, and the crate that produces
+# them has no renderer dependency of its own. This edge points one way.
+somnium_anim = { workspace = true }
 bytemuck     = { workspace = true }
 somnium_shader = { workspace = true }
 # wgpu's own front end, already in the graph through wgpu. A regular dependency

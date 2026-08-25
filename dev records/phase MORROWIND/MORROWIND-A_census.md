@@ -18,24 +18,25 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 54,937 | +4,731 | 33.7% | 352 | +24 | 82 | 51 |
-| `somnium_ui` | 47,874 | +20,344 | 29.4% | 528 | +313 | 80 | 2 |
-| `somnium_core` | 29,631 | +10,411 | 18.2% | 345 | +128 | 40 | 0 |
+| `somnium_renderer` | 56,288 | +6,082 | 34.0% | 377 | +49 | 85 | 52 |
+| `somnium_ui` | 47,874 | +20,344 | 28.9% | 528 | +313 | 80 | 2 |
+| `somnium_core` | 29,631 | +10,411 | 17.9% | 345 | +128 | 40 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 3.2% | 69 | +15 | 9 | 0 |
-| `somnium_script` | 4,850 | +35 | 3.0% | 55 | — | 12 | 0 |
+| `somnium_script` | 4,850 | +35 | 2.9% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,608 | +151 | 2.8% | 58 | — | 9 | 0 |
-| `somnium_asset` | 3,786 | +2,147 | 2.3% | 27 | +21 | 8 | 0 |
+| `somnium_asset` | 3,936 | +2,297 | 2.4% | 27 | +21 | 8 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.9% | 66 | +66 | 6 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.2% | 57 | +57 | 5 | 0 |
 | `somnium_shader` | 1,930 | +1,930 | 1.2% | 34 | +34 | 5 | 0 |
 | `somnium_jobs` | 1,630 | +1,630 | 1.0% | 17 | +17 | 5 | 0 |
 | `somnium_audio` | 1,516 | +1,423 | 0.9% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,000 | — | 0.6% | 11 | — | 6 | 0 |
+| `somnium_anim` | 861 | +861 | 0.5% | 22 | +22 | 2 | 0 |
 | `somnium_physics` | 580 | — | 0.4% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **163,034** | +49,142 | | **1660** | +715 | | |
+| **Total** | **165,396** | +51,504 | | **1707** | +762 | | |
 
-The top three crates are **81.2%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.9%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,758 lines** (+112 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 892 | 199 | 88 | 8 | 10 | 167 | 79 | **1443** |
-| `somnium_renderer` | 543 | 128 | 6 | 1 | 2 | 111 | 80 | **871** |
+| `somnium_renderer` | 559 | 134 | 7 | 1 | 2 | 112 | 82 | **897** |
 | `somnium_core` | 270 | 90 | 15 | 3 | 2 | 58 | 37 | **475** |
 | `somnium_script` | 125 | 34 | 8 | 3 | 3 | 18 | 11 | **202** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
@@ -62,11 +63,12 @@ panel, which §8 says is not a finished sub-phase.
 | `somnium_physics` | 24 | 4 | 2 | 0 | 0 | 3 | 6 | **39** |
 | `somnium_script_luau` | 25 | 5 | 0 | 0 | 0 | 3 | 4 | **37** |
 | `somnium_voxel` | 16 | 6 | 1 | 0 | 1 | 6 | 5 | **35** |
+| `somnium_anim` | 21 | 6 | 0 | 0 | 1 | 4 | 0 | **32** |
 | `somnium_physics_sys` | 28 | 1 | 0 | 0 | 0 | 0 | 0 | **29** |
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **51 WGSL files, 13,422 lines** (+3 files, +1,343 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **53 files, 13,891 lines**.
+`somnium_renderer` ships **52 WGSL files, 13,546 lines** (+4 files, +1,467 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **54 files, 14,015 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
@@ -91,9 +93,9 @@ is a system this phase still owes.
 
 | Term | Files | Plan | Δ | Reading |
 |---|---:|---:|---:|---|
-| `bone` | 0 | 0 | — | No skeletal animation of any kind (Track 5). |
-| `armature` | 0 | 0 | — | As above. |
-| `skin` | 19 | 8 | +11 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
+| `bone` | 1 | 0 | +1 | No skeletal animation of any kind (Track 5). |
+| `armature` | 1 | 0 | +1 | As above. |
+| `skin` | 29 | 8 | +21 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |
 | `pathfind` | 0 | 0 | — | As above. |
 | `gamepad` | 6 | 0 | +6 | No input abstraction (Track 8, Seam 5). |

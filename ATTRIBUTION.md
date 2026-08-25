@@ -2271,3 +2271,39 @@ WCAG's contrast ratio formula and its AA/AAA thresholds are a W3C specification;
 `theme.rs` already implements the ratio and Zeta already certifies against it.
 MORROWIND-I's `high_contrast` adds only the search that walks an existing
 certified colour to the enhanced threshold.
+
+### 13H.16 glTF, Esoterica and the skinning literature — MORROWIND-U
+
+**glTF 2.0** (Khronos, CC-BY 4.0 specification) is the format `somnium_asset`
+reads and the source of three constraints Somnium adopts rather than invents:
+four joint influences per vertex in one attribute set, an absent
+`inverseBindMatrices` accessor meaning identity, and a joint hierarchy given
+implicitly through the node graph. The `gltf` crate (MIT/Apache-2.0) was already
+a workspace dependency.
+
+*Read for pattern only; MIT.* **Esoterica**
+(`Esoterica-main/Code/Engine/Animation/`) is the plan's named reference for
+Track 5, and §6.3 calls its runtime node list *"the spec"*. MORROWIND-U used it
+for one thing: the confirmation that a pose is stored as **decomposed
+transforms** rather than matrices, because blending is defined on translation,
+rotation and scale and interpolating matrices componentwise shears anything that
+was rotated. Somnium's `Transform::blend` slerps rotation for the same reason.
+Its node list is MORROWIND-V's input, not this sub-phase's.
+
+The **skin-to-buffer versus skin-in-shader** decision is not from a reference.
+Both designs are common knowledge; what decided it is specific to Somnium's
+tree — that ray tracing reads positions straight out of the shared geometry pool
+(`geometry.rs:122`) and would trace a character's rest pose, and that eight
+shader modules besides the skinning kernel index `vertices[`. The reasoning and
+the measured cost are in `crates/somnium_renderer/src/skinning.rs` and in
+`dev records/phase MORROWIND/MORROWIND-U.md`.
+
+The **normal transform** shortcut — using the skinning matrix's upper 3x3 rather
+than its inverse transpose — is universal in real-time skinning and is exact for
+rigid joints. It is cited here because Appendix A.3.4 asks for it to be written
+down rather than left looking like an oversight.
+
+IEEE 754 binary16 conversion is written out in `skinning.rs` rather than taken
+from the `half` crate, because it has to agree bit for bit with WGSL's
+`pack2x16float` — which is a thing to test against rather than to trust a crate
+about.

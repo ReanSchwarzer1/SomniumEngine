@@ -3817,6 +3817,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "somnium_anim"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+]
+
+[[package]]
 name = "somnium_asset"
 version = "0.1.0"
 dependencies = [
@@ -3830,6 +3837,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "somnium_anim",
  "somnium_ecs",
  "tracing",
  "ureq",
@@ -3932,6 +3940,7 @@ dependencies = [
  "naga",
  "pollster 0.3.0",
  "rayon",
+ "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
  "somnium_shader",

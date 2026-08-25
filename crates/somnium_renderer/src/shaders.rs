@@ -87,6 +87,7 @@ impl Shaders {
         register_modules!(
             system,
             "atmosphere.wgsl",
+            "skinning.wgsl",
             "atmosphere_lut.wgsl",
             "auto_exposure.wgsl",
             "bloom.wgsl",

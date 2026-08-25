@@ -31,6 +31,7 @@ pub mod profiler;
 pub mod renderer;
 pub mod shaders;
 pub mod shadow;
+pub mod skinning;
 pub mod terrain;
 pub mod texture_pool;
 pub mod timing;

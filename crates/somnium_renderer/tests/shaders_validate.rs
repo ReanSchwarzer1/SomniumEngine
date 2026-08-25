@@ -85,6 +85,10 @@ fn every_composed_root_validates() {
         "ibl_gen.wgsl",
         "dof.wgsl",
         "gtao.wgsl",
+        // MORROWIND-U. Composes global_pool.wgsl for `Vertex`, which is the
+        // point: the posed vertices it writes have the same layout as every
+        // other vertex in the pool, because they are in the same pool.
+        "skinning.wgsl",
     ] {
         check(root, &shaders.source_or_panic(root));
     }

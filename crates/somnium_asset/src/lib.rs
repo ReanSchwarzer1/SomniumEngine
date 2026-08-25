@@ -103,6 +103,18 @@ pub struct LoadedMaterial {
 pub struct LoadedMesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// MORROWIND-U. Per-vertex skin binding, when the primitive has `JOINTS_0`
+    /// and `WEIGHTS_0`.
+    ///
+    /// A **parallel array rather than a wider `Vertex`**, and that is the whole
+    /// design decision: `Vertex` is 32 bytes in `GeometryPool`'s shared buffer,
+    /// which every pass in the renderer reads and which ray tracing reads
+    /// positions straight out of (`geometry.rs:122`). Widening it to carry four
+    /// joints and four weights would cost 24 bytes on **every** vertex in the
+    /// world — terrain, foliage, props — to serve the handful that are skinned.
+    ///
+    /// `None` for the overwhelming majority of meshes, which is the point.
+    pub skin: Option<somnium_anim::Skin>,
 }
 
 /// A scene node flattened to world-space. Mesh/material indices reference
@@ -121,6 +133,14 @@ pub struct LoadedScene {
     pub materials: Vec<LoadedMaterial>,
     pub textures: Vec<LoadedTexture>,
     pub nodes: Vec<SceneNode>,
+    /// MORROWIND-U. One per glTF `skin`, indexed by `SkeletonId`.
+    ///
+    /// Joints are **reordered** by `Skeleton::new` so every parent precedes its
+    /// children, and every vertex joint index in `LoadedMesh::skin` has already
+    /// been remapped to match. A caller never sees the authored order, which is
+    /// deliberate: the invariant is worth nothing if it holds in the skeleton
+    /// and not in the vertices that index it.
+    pub skeletons: Vec<somnium_anim::Skeleton>,
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -246,6 +266,98 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
         });
     }
 
+    // 2.5. Skins (MORROWIND-U) -------------------------------------------
+    //
+    // Before meshes, because a primitive's `JOINTS_0` indices refer to the
+    // *authored* joint order and `Skeleton::new` reorders. The remap has to
+    // exist before a vertex is read, or the invariant holds in the skeleton and
+    // not in the thing that indexes it.
+    //
+    // glTF has no way to say which skin a *primitive* uses — a skin is on a
+    // node. Somnium's `LoadedMesh` is per-primitive, so the association is made
+    // in the node walk below and a primitive reachable from two nodes with
+    // different skins takes the first, which is a case no exporter produces and
+    // which would be ambiguous if one did.
+    let mut joint_remaps: Vec<Vec<u16>> = Vec::new();
+    for skin in document.skins() {
+        let reader = skin.reader(|buf| Some(&buffers[buf.index()]));
+        let joints: Vec<gltf::Node> = skin.joints().collect();
+
+        // glTF gives a joint's parent implicitly, through the node hierarchy.
+        // Invert it: a child's index in `joints` maps back to whichever joint
+        // lists it as a child.
+        let node_to_joint: HashMap<usize, u16> = joints
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.index(), index as u16))
+            .collect();
+        let mut parents = vec![somnium_anim::NO_PARENT; joints.len()];
+        for (index, node) in joints.iter().enumerate() {
+            for child in node.children() {
+                if let Some(&child_joint) = node_to_joint.get(&child.index()) {
+                    parents[child_joint as usize] = index as u16;
+                }
+            }
+        }
+
+        let inverse_bind: Vec<Mat4> = match reader.read_inverse_bind_matrices() {
+            Some(matrices) => matrices.map(|m| Mat4::from_cols_array_2d(&m)).collect(),
+            // The spec says an absent accessor means identity for every joint,
+            // which is a skeleton already at its bind pose.
+            None => vec![Mat4::IDENTITY; joints.len()],
+        };
+
+        let rest: Vec<somnium_anim::Transform> = joints
+            .iter()
+            .map(|node| {
+                let (translation, rotation, scale) = node.transform().decomposed();
+                somnium_anim::Transform {
+                    translation: Vec3::from(translation),
+                    rotation: glam::Quat::from_array(rotation),
+                    scale: Vec3::from(scale),
+                }
+            })
+            .collect();
+
+        let names: Vec<String> = joints
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                node.name().unwrap_or("joint").to_string()
+                    + &{
+                        // Names are not unique in glTF and `Skeleton::find` is by name,
+                        // so a duplicate would make lookup silently pick the first.
+                        // Suffixing only on collision would be prettier and would also
+                        // make the name depend on file order; suffixing never is worse.
+                        // This is the compromise: index-suffixed, always, and stated.
+                        format!("#{index}")
+                    }
+            })
+            .collect();
+
+        let id = somnium_anim::SkeletonId(scene.skeletons.len() as u32);
+        match somnium_anim::Skeleton::new(id, names, parents, inverse_bind, rest) {
+            Some((skeleton, remap)) => {
+                scene.skeletons.push(skeleton);
+                joint_remaps.push(remap);
+            }
+            None => {
+                return Err(format!(
+                    "Skin '{}' has a malformed joint hierarchy (a cycle, or a parent out of range)",
+                    skin.name().unwrap_or("?")
+                ));
+            }
+        }
+    }
+
+    // Which skin each mesh is used with, from the node hierarchy.
+    let mut mesh_skin: HashMap<usize, usize> = HashMap::new();
+    for node in document.nodes() {
+        if let (Some(mesh), Some(skin)) = (node.mesh(), node.skin()) {
+            mesh_skin.entry(mesh.index()).or_insert(skin.index());
+        }
+    }
+
     // 3. Meshes (one LoadedMesh per glTF primitive) ----------------------
     // Map (mesh_index, prim_index) → index into scene.meshes
     let mut prim_to_loaded: HashMap<(usize, usize), usize> = HashMap::new();
@@ -300,11 +412,49 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 generate_flat_normals(&mut vertices, &indices);
             }
 
+            // MORROWIND-U. Skin binding, if this primitive has one *and* the
+            // mesh is used by a node with a skin. Both halves are required:
+            // JOINTS_0 without a skin is data with nothing to index into.
+            let skin = mesh_skin.get(&mesh.index()).and_then(|&skin_index| {
+                let remap = joint_remaps.get(skin_index)?;
+                let joints: Vec<[u16; 4]> = reader.read_joints(0)?.into_u16().collect();
+                let weights: Vec<[f32; 4]> = reader.read_weights(0)?.into_f32().collect();
+                let bindings = (0..vertices.len())
+                    .map(|i| {
+                        let (Some(j), Some(w)) = (joints.get(i), weights.get(i)) else {
+                            // A vertex past the end of either accessor. Bound to
+                            // the root rather than to nothing, per
+                            // `SkinBinding::UNSKINNED`: zero weights put the
+                            // vertex at the origin and read as a spike.
+                            return somnium_anim::SkinBinding::UNSKINNED;
+                        };
+                        let influences: Vec<(u16, f32)> = (0..4)
+                            .filter_map(|k| {
+                                let authored = j[k] as usize;
+                                // A joint index past the skeleton is a broken
+                                // file; dropping the influence is better than
+                                // reading past the palette on the GPU.
+                                remap.get(authored).map(|&mapped| (mapped, w[k]))
+                            })
+                            .collect();
+                        somnium_anim::SkinBinding::from_influences(&influences)
+                    })
+                    .collect();
+                Some(somnium_anim::Skin {
+                    skeleton: somnium_anim::SkeletonId(skin_index as u32),
+                    bindings,
+                })
+            });
+
             let loaded_idx = scene.meshes.len();
             prim_to_loaded.insert((mesh.index(), prim_idx), loaded_idx);
 
             let _ = prim_count; // used above for naming
-            scene.meshes.push(LoadedMesh { vertices, indices });
+            scene.meshes.push(LoadedMesh {
+                vertices,
+                indices,
+                skin,
+            });
         }
     }
 

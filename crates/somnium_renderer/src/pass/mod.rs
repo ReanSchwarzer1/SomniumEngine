@@ -27,6 +27,7 @@ pub mod restir;
 pub mod restir_gi;
 pub mod shading;
 pub mod shadow;
+pub mod skin;
 pub mod spd;
 pub mod taa;
 pub mod terrain_clipmap;
