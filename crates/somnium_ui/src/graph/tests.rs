@@ -555,6 +555,124 @@ fn retained_graph_control_draws_nodes_pins_and_the_bezier_wire() {
     );
 }
 
+fn graph_node_rects(ui: &crate::ui::UserInterface) -> Vec<Rect> {
+    let raised = crate::theme::active().semantic.surface.raised.bytes();
+    let mut rects: Vec<_> = ui
+        .draw_ctx
+        .instances
+        .iter()
+        .filter(|primitive| primitive.fill_a == raised)
+        .map(|primitive| {
+            Rect::new(
+                primitive.rect[0],
+                primitive.rect[1],
+                primitive.rect[2],
+                primitive.rect[3],
+            )
+        })
+        .collect();
+    rects.sort_by(|left, right| left.x.total_cmp(&right.x));
+    rects
+}
+
+fn wheel_zoomed_graph(delta: winit::event::MouseScrollDelta, repeats: usize) -> Vec<Rect> {
+    use winit::event::{DeviceId, TouchPhase, WindowEvent};
+
+    let (catalogue, graph, _, _) = two_node_graph();
+    let mut ui = crate::ui::UserInterface::new(640.0, 360.0);
+    let editor = super::GraphEditorBuilder::new(
+        crate::widget::WidgetBuilder::new()
+            .with_width(640.0)
+            .with_height(360.0),
+        catalogue,
+    )
+    .with_graph(graph)
+    .build();
+    ui.add_node(editor, ui.root());
+    ui.perform_layout();
+    ui.process_os_event(&WindowEvent::CursorMoved {
+        device_id: DeviceId::dummy(),
+        position: winit::dpi::PhysicalPosition::new(200.0, 150.0),
+    });
+    for _ in 0..repeats {
+        assert!(ui.process_os_event(&WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta,
+            phase: TouchPhase::Moved,
+        }));
+        ui.update();
+    }
+    ui.draw();
+    graph_node_rects(&ui)
+}
+
+#[test]
+fn one_routed_wheel_line_zooms_ten_percent_about_the_cursor() {
+    let nodes = wheel_zoomed_graph(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0), 1);
+    let scalar = nodes.first().expect("the scalar node is drawn");
+
+    assert!((scalar.w - 198.0).abs() < 0.01, "one tick: {scalar:?}");
+    assert!(
+        (scalar.x - 2.0).abs() < 0.01,
+        "cursor-anchored x: {scalar:?}"
+    );
+    assert!(
+        (scalar.y - 18.0).abs() < 0.01,
+        "cursor-anchored y: {scalar:?}"
+    );
+}
+
+#[test]
+fn routed_line_and_pixel_wheel_deltas_have_the_same_smooth_scale() {
+    let line = wheel_zoomed_graph(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0), 1);
+    let pixels = wheel_zoomed_graph(
+        winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 20.0)),
+        1,
+    );
+    let pixel_quarters = wheel_zoomed_graph(
+        winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 5.0)),
+        4,
+    );
+
+    assert_eq!(line.len(), pixels.len());
+    assert_eq!(line.len(), pixel_quarters.len());
+    for ((line, pixels), quarters) in line.iter().zip(&pixels).zip(&pixel_quarters) {
+        for (actual, expected) in [line.x, line.y, line.w, line.h]
+            .into_iter()
+            .zip([pixels.x, pixels.y, pixels.w, pixels.h])
+        {
+            assert!((actual - expected).abs() < 0.01);
+        }
+        for (actual, expected) in [line.x, line.y, line.w, line.h]
+            .into_iter()
+            .zip([quarters.x, quarters.y, quarters.w, quarters.h])
+        {
+            assert!((actual - expected).abs() < 0.01);
+        }
+    }
+}
+
+#[test]
+fn routed_extreme_pixel_deltas_stop_at_graph_zoom_bounds() {
+    let maximum = wheel_zoomed_graph(
+        winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
+            0.0,
+            1_000_000.0,
+        )),
+        1,
+    );
+    let minimum = wheel_zoomed_graph(
+        winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
+            0.0,
+            -1_000_000.0,
+        )),
+        1,
+    );
+
+    assert!((maximum[0].w - 180.0 * GraphView::MAX_ZOOM).abs() < 0.01);
+    assert!((minimum[0].w - 180.0 * GraphView::MIN_ZOOM).abs() < 0.01);
+}
+
 #[test]
 fn routed_graph_literal_edit_is_visible_and_undoable() {
     let (catalogue, graph, scalar, _) = two_node_graph();

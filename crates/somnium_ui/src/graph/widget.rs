@@ -8,7 +8,9 @@ use super::{
 };
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, MouseButton, NodeHandle, UiMessage, WidgetMessage},
+    message::{
+        MessageDirection, MouseButton, NodeHandle, UiMessage, WHEEL_DELTA_PER_LINE, WidgetMessage,
+    },
     node::{Control, CursorKind, LayoutCtx, UiNode},
     path::{Path, Stroke},
     primitive::Primitive,
@@ -29,6 +31,22 @@ const TRANSITION_LABEL_WIDTH: f32 = 176.0;
 const TRANSITION_LABEL_HEIGHT: f32 = 20.0;
 const TRANSITION_PANEL_WIDTH: f32 = 292.0;
 const TRANSITION_PANEL_HEIGHT: f32 = 190.0;
+/// A single wheel line changes graph scale by ten percent. Routed wheel
+/// messages are in logical pixels, so pixel-delta trackpads contribute
+/// fractions of this exponent instead of jumping a whole notch per pixel.
+const ZOOM_PER_WHEEL_LINE: f32 = 1.1;
+
+fn wheel_zoom_factor(delta: f32) -> Option<f32> {
+    if !delta.is_finite() {
+        return None;
+    }
+    // Keep the factor finite even for synthetic or broken-device deltas. This
+    // span can reach either GraphView bound from the other in one event; the
+    // view itself remains the single authority that clamps the final zoom.
+    let max_exponent = (super::GraphView::MAX_ZOOM / super::GraphView::MIN_ZOOM).ln();
+    let exponent = (delta / WHEEL_DELTA_PER_LINE) * ZOOM_PER_WHEEL_LINE.ln();
+    Some(exponent.clamp(-max_exponent, max_exponent).exp())
+}
 
 /// Messages understood or emitted by [`GraphEditor`].
 #[derive(Clone)]
@@ -1092,8 +1110,10 @@ impl Control for GraphEditor {
         match message {
             WidgetMessage::MouseWheel { pos, delta, .. } => {
                 let local = Self::local(widget, pos);
-                self.surface_mut().view.zoom_at(local, 1.1_f32.powf(delta));
-                msg.handled = true;
+                if let Some(factor) = wheel_zoom_factor(delta) {
+                    self.surface_mut().view.zoom_at(local, factor);
+                    msg.handled = true;
+                }
             }
             WidgetMessage::MouseDown {
                 pos,

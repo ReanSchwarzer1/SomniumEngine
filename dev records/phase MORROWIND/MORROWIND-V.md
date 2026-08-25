@@ -105,3 +105,15 @@ GPU measurement.
 Esoterica's MIT animation runtime and Fyrox's MIT ABSM editor were read for
 permissive patterns. The clean-room distinctions are in `ATTRIBUTION.md`
 §13H.18; Flax remains excluded under §13H.17.
+
+## Animation workspace wheel correction — 2026-08-25
+
+One OS wheel line was normalized to 20 logical pixels by the routed UI layer,
+then `GraphEditor` interpreted those pixels as 20 notches. A single tick
+therefore requested `1.1^20` (about 6.73×) and immediately hit the 4× clamp.
+Graph zoom now divides routed pixels by the shared pixels-per-line constant:
+one wheel line is a cursor-anchored 1.10× step, high-resolution pixel deltas are
+proportional, and synthetic extremes remain finite inside 0.1×..4×.
+
+All **41** graph tests passed, including routed line/pixel equivalence,
+four quarter-deltas equalling one line and bound clamping.

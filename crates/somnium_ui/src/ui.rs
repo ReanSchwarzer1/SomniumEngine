@@ -14,7 +14,9 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
+    message::{
+        MessageDirection, Modifiers, NodeHandle, UiMessage, WHEEL_DELTA_PER_LINE, WidgetMessage,
+    },
     node::{Control, LayoutCtx, UiNode},
     pool::Pool,
     types::{HorizontalAlignment, Rect, VerticalAlignment},
@@ -1649,7 +1651,7 @@ impl UserInterface {
                 }
                 if hit.is_some() {
                     let d = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => *y * 20.0,
+                        MouseScrollDelta::LineDelta(_, y) => *y * WHEEL_DELTA_PER_LINE,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
                     };
                     self.send(UiMessage::new(

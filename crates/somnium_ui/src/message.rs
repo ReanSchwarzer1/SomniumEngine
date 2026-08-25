@@ -10,6 +10,14 @@ use std::any::Any;
 pub use winit::event::MouseButton;
 pub use winit::keyboard::KeyCode;
 
+/// Logical wheel delta produced by one platform `LineDelta` unit.
+///
+/// Routed wheel messages use logical pixels so scroll viewers and high-resolution
+/// trackpads share one unit. Controls whose gesture is expressed in wheel lines
+/// (such as graph zoom) divide by this value instead of treating pixels as
+/// notches.
+pub const WHEEL_DELTA_PER_LINE: f32 = 20.0;
+
 /// Modifier keys captured at the OS-event boundary and delivered with input.
 ///
 /// Keeping this on the message makes routed input self-contained: a widget can
@@ -103,6 +111,7 @@ pub enum WidgetMessage {
     },
     MouseWheel {
         pos: Vec2,
+        /// Logical pixels. One OS line unit is [`WHEEL_DELTA_PER_LINE`].
         delta: f32,
         mods: Modifiers,
     },
