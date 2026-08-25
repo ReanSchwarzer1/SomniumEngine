@@ -22,6 +22,11 @@ pub struct TabControl {
 }
 
 impl Control for TabControl {
+    // MORROWIND-I.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::TabList
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let header = 22.0;
         for (i, &ch) in widget.children.iter().enumerate() {

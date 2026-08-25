@@ -593,6 +593,9 @@ pub struct Engine<G: GameApp> {
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
     ui_manager: Option<UiManager>,
+    /// MORROWIND-I. The platform screen-reader adapter, attached to the window
+    /// before it is shown. `None` in a headless run.
+    a11y: Option<crate::a11y_bridge::A11yBridge>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
     jobs: JobSystem,
     asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
@@ -856,6 +859,7 @@ impl<G: GameApp + 'static> Engine<G> {
             render_ctx: None,
             renderer: None,
             ui_manager: None,
+            a11y: None,
             jobs: JobSystem::default(),
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
@@ -2174,6 +2178,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             .with_title("Somnium Engine")
             .with_inner_size(size)
             .with_resizable(self.config.resizable)
+            // MORROWIND-I. Created invisible and shown at the end of this
+            // block. `accesskit_winit` *panics* if its adapter is attached to a
+            // window that has already been shown, so the accessibility adapter
+            // has to be built in the gap. It is a better startup regardless:
+            // the window appears painted rather than appearing and then
+            // painting.
+            .with_visible(false)
             .with_decorations(false);
         #[cfg(target_os = "windows")]
         {
@@ -2182,6 +2193,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
+                // MORROWIND-I, in the gap before the window is shown.
+                self.a11y = Some(crate::a11y_bridge::A11yBridge::new(event_loop, &window));
+
                 let window = Arc::new(window);
                 if std::env::var("SOMNIUM_MAXIMIZE").as_deref() == Ok("1") {
                     window.set_maximized(true);
@@ -2203,6 +2217,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
+
+                // MORROWIND-I. Everything is initialised; show the window.
+                window.set_visible(true);
 
                 self.state = LifecycleState::Running;
                 // Craft defect C11's other half: work that survived a crash is
@@ -2449,6 +2466,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     }
                 }
             }
+        }
+
+        // ── 2.9 Accessibility (MORROWIND-I) ──────────────────────────────────
+        //
+        // Every event, not only the ones that look relevant: the adapter tracks
+        // window focus and geometry, and a reader whose idea of where the
+        // window is has gone stale points at the wrong place on screen. Before
+        // the early returns below for the same reason.
+        if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
+            a11y.process_event(window, &event);
         }
 
         // ── 3. Route to native UI; return early if consumed ──────────────────
@@ -3557,6 +3584,42 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 game: self.game.as_mut(),
             };
             r.render_with_game_ui(c, ui, window, Some(&mut adapter));
+        }
+
+        // ── Accessibility preferences (MORROWIND-I) ──────────────────────────
+        //
+        // The platform first, the preference over it. Applied every frame
+        // rather than on change because `set_a11y_settings` is two stores and a
+        // bool compare, and a change-detection path would be more code than the
+        // thing it avoids.
+        if let Some(ui) = self.ui_manager.as_mut() {
+            let editor = self.settings.editor();
+            let platform = somnium_ui::A11ySettings::from_platform();
+            let wanted = somnium_ui::A11ySettings {
+                reduced_motion: platform.reduced_motion || editor.reduced_motion,
+                high_contrast: platform.high_contrast || editor.high_contrast,
+            };
+            if ui.a11y_settings() != wanted {
+                ui.set_a11y_settings(wanted);
+            }
+        }
+
+        // ── Accessibility tree (MORROWIND-I) ─────────────────────────────────
+        //
+        // After the render call, because that is what ran layout: a tree
+        // published before layout carries last frame's bounds, and a reader
+        // pointing one frame behind is a reader pointing at the wrong control
+        // during exactly the interactions that move things.
+        //
+        // Gated on `is_active`, so a run with no screen reader attached — which
+        // is almost every run — pays one lock acquisition per frame and does
+        // not walk the widget tree at all.
+        if let Some(a11y) = self.a11y.as_mut() {
+            if a11y.is_active() {
+                if let Some(ui) = self.ui_manager.as_ref() {
+                    a11y.publish(ui.a11y_tree());
+                }
+            }
         }
 
         // ── Drain editor events and apply to ECS ──────────────────────────────

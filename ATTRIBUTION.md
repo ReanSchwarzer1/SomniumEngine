@@ -2237,3 +2237,37 @@ CONTROL-K's `Curve` (`crates/somnium_ecs/src/curve.rs`) is a Somnium type and is
 consumed, not referenced — `Easing::Curve` holds an index into an animator's
 library so the same curve an author drags in the editor is the one a widget
 eases along.
+
+### 13H.15 AccessKit and Godot 4.5 — MORROWIND-I
+
+**`accesskit` 0.24.1 and `accesskit_winit` 0.33.2 are dependencies, not
+references** (Apache-2.0/MIT). They are the cross-platform accessibility layer —
+UI Automation on Windows, NSAccessibility on macOS, AT-SPI on Linux — and
+Somnium consumes them the way `somnium_audio` consumes Kira: exposure and
+design, not reimplementation. `accesskit_winit` 0.33.2 requires `winit ^0.30.5`,
+which Somnium already satisfies at 0.30.13, so no windowing bump was needed.
+
+*Read for pattern only.* **Godot 4.5's AccessKit integration** is the precedent
+`phase_MORROWIND.md` §6.9.2 names, and its value is that it exists: it is the
+proof that a self-rendered UI can reach a screen reader through this layer, and
+it is what moved MORROWIND-I from speculative to precedented. No Godot source
+was copied; what was taken is the knowledge that the approach works and the
+shape of the problem it solves.
+
+*Read for pattern only; MIT.* `bevy/bevy-main/crates/bevy_a11y/` is the plan's
+named reference for the Rust integration shape. Somnium's answer diverges on the
+part that matters: Bevy models accessibility nodes as ECS components authored
+alongside widgets, and Somnium **derives** the tree from the widget tree through
+four defaulted `Control` hooks. The reason is Somnium-specific — its widgets are
+`dyn Control` in a pool rather than entities, and a parallel authored tree would
+be a second thing to keep in step with the first.
+
+The **collapse rule** (a node with no role, name or value contributes its
+children instead of itself) is not from a reference. It is the answer to a
+problem any retained-mode UI has and is stated here because it is the single
+decision that makes the output navigable rather than merely correct.
+
+WCAG's contrast ratio formula and its AA/AAA thresholds are a W3C specification;
+`theme.rs` already implements the ratio and Zeta already certifies against it.
+MORROWIND-I's `high_contrast` adds only the search that walks an existing
+certified colour to the enhanced threshold.

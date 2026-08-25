@@ -45,6 +45,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 /// Core application lifecycle and event loop management.
+pub mod a11y_bridge;
 pub mod app;
 pub mod autosave;
 pub mod character;
@@ -125,6 +126,11 @@ pub use winit::keyboard::{KeyCode, PhysicalKey};
 // the crate it already depends on. `UiCanvas` is the tree, `GameUiFrame` is the
 // moment it gets drawn in, and a game that needs neither pays nothing for them.
 pub use somnium_ui::{Easing, GameUiFrame, Motion, Spring, Transition, UiCanvas};
+// MORROWIND-I. A game declaring a role on its own widget, or turning reduced
+// motion on from an options screen, reaches both through the crate it depends
+// on already.
+pub use a11y_bridge::A11yBridge;
+pub use somnium_ui::a11y::{A11ySettings, A11yTree, Announcement, Politeness, Role, Toggled};
 
 // Re-export core ECS types so game code can use them from `somnium_core`.
 pub use somnium_ecs::{Component, ComponentBundle, Entity, World};

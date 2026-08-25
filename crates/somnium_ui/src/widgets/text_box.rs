@@ -37,6 +37,16 @@ pub struct TextBox {
 }
 
 impl Control for TextBox {
+    // MORROWIND-I. A text box's *value* is its contents and its *name* is the
+    // label beside it, which this control does not own — hence no `a11y_name`.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::TextInput
+    }
+
+    fn a11y_value(&self) -> Option<String> {
+        Some(self.text.clone())
+    }
+
     fn is_keyboard_focusable(&self) -> bool {
         true
     }

@@ -60,6 +60,13 @@ impl ToastHost {
 }
 
 impl Control for ToastHost {
+    // MORROWIND-I. A toast is the reason `Politeness` exists: it appears
+    // without taking focus, so a reader that only speaks on focus change never
+    // mentions it, and the user never learns that the save failed.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Alert
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         available
     }

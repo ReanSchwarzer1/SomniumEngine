@@ -42,6 +42,12 @@ pub struct Popup {
 }
 
 impl Control for Popup {
+    // MORROWIND-I. A popup that has taken focus is a dialog to a reader,
+    // whatever it looks like.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Dialog
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         if !self.is_open {
             return Vec2::ZERO;

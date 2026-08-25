@@ -43,6 +43,11 @@ pub struct ComboBox {
 }
 
 impl Control for ComboBox {
+    // MORROWIND-I.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::ComboBox
+    }
+
     fn is_keyboard_focusable(&self) -> bool {
         true
     }

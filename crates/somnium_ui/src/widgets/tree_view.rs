@@ -69,6 +69,13 @@ pub struct TreeView {
 }
 
 impl Control for TreeView {
+    // MORROWIND-I. A tree of selectable rows reads as a list: Somnium's
+    // outliner is the case, and `Role::List` is what a reader can navigate
+    // with its list commands.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::List
+    }
+
     fn is_keyboard_focusable(&self) -> bool {
         true
     }

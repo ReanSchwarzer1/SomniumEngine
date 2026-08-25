@@ -623,6 +623,11 @@ pub fn editor_settings_schema() -> ComponentSchema {
             select_only { group: "Gizmo" },
             tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface" },
             show_statistics { group: "Interface" },
+            // MORROWIND-I. In the schema rather than in a hand-written panel,
+            // per CONTROL-B's property seam: a preference the editor can show
+            // and a game can read are the same declaration.
+            reduced_motion { group: "Accessibility" },
+            high_contrast { group: "Accessibility" },
         }
     }
 }

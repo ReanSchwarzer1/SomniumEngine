@@ -58,6 +58,10 @@ FROZEN_TOOLCHAIN = {
 SPAWN_EXEMPTIONS = {
     "crates/somnium_jobs/": "the job system itself — this is the one place a pool is allowed.",
     "crates/somnium_ui/src/theme.rs": "a single-shot test asserting the theme is visible from another thread.",
+    "crates/somnium_core/src/a11y_bridge.rs": (
+        "a single-shot test proving AccessKit handlers work off the main thread "
+        "- which is the contract, since the platform calls them there."
+    ),
 }
 
 # Second-implementation bans from S10 and §11 row 12. Each is a symbol that

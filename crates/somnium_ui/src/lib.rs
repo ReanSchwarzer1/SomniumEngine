@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod color;
 pub mod commands;
 pub mod debug;
@@ -51,6 +52,9 @@ pub use runtime::{GameUi, GameUiFrame, UiCanvas};
 // canvas that drives it: a game reaching for a spring should not have to know
 // which module Phase 27 happened to put the animator in.
 pub use motion::{CurveId, Easing, Motion, Spring, Transition, TransitionStep};
+// MORROWIND-I. The accessibility vocabulary at the top level, because a game
+// setting a role on its own widget should not have to find the module.
+pub use a11y::{A11ySettings, A11yTree, Announcement, Politeness, Role, Toggled};
 
 pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
@@ -4694,6 +4698,25 @@ impl UiManager {
             .send(ButtonMessage::set_selected(self.pause_button, state == 2));
         self.native_ui
             .send(ButtonMessage::set_selected(self.stop_button, state == 0));
+    }
+
+    /// The editor shell's accessibility tree. MORROWIND-I.
+    ///
+    /// Built on demand rather than maintained: the shell rebuilds widgets
+    /// freely, and a cached tree would be one more thing that can be stale in a
+    /// system whose whole failure mode is staleness nobody sighted can see.
+    pub fn a11y_tree(&self) -> crate::a11y::A11yTree {
+        self.native_ui.a11y_tree()
+    }
+
+    /// Apply accessibility preferences to the shell. MORROWIND-I.
+    pub fn set_a11y_settings(&mut self, settings: crate::a11y::A11ySettings) {
+        self.native_ui.set_a11y_settings(settings);
+    }
+
+    /// The accessibility preferences in force.
+    pub fn a11y_settings(&self) -> crate::a11y::A11ySettings {
+        self.native_ui.a11y_settings()
     }
 
     pub fn is_immersive(&self) -> bool {

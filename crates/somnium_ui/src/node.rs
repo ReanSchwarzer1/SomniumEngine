@@ -171,6 +171,44 @@ impl CursorKind {
 /// The behavior interface every widget type must implement.
 /// Analogous to Fyrox's `Control` trait in fyrox-ui/src/control.rs.
 pub trait Control: Send + 'static {
+    // ── MORROWIND-I: accessibility ──────────────────────────────────────────
+    //
+    // Three defaulted hooks rather than a registry, because the control already
+    // knows all three answers and anything else would be a second place for
+    // them to be wrong. A widget that overrides none of them is presentational,
+    // which is the right default: a border *is* presentational, and so are most
+    // of the 28 widget types in this crate.
+
+    /// What this control is, to a screen reader.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Group
+    }
+
+    /// What a *user* would call this control.
+    ///
+    /// Not `Widget::name`, which is what a developer called it. A control that
+    /// contains its own label — a button, a check box — returns it here; one
+    /// whose label is a sibling returns `None` and relies on the widget's
+    /// tooltip, which for an icon-only control is the best name available and
+    /// is already authored.
+    fn a11y_name(&self) -> Option<String> {
+        None
+    }
+
+    /// The control's current value, where the role implies one.
+    ///
+    /// A slider's number, a text box's contents, a combo box's selection.
+    /// Returned as a string because this is the string a reader will speak, and
+    /// formatting it here keeps "40 percent" from being computed twice.
+    fn a11y_value(&self) -> Option<String> {
+        None
+    }
+
+    /// Checked state, for a checkable control.
+    fn a11y_toggled(&self) -> Option<crate::a11y::Toggled> {
+        None
+    }
+
     /// Bottom-up measure: return desired size given available space.
     /// Containers must call `ctx.measure_child()` for each child here.
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {

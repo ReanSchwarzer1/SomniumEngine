@@ -19,6 +19,7 @@ fontdue    = { workspace = true }
 resvg      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+accesskit = "0.24.1"
 
 [dev-dependencies]
 # wgpu's own front end, already in the graph through wgpu. `somnium_renderer`
