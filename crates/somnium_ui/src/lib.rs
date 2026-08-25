@@ -27,6 +27,7 @@ pub mod style;
 pub mod text;
 pub mod theme;
 pub mod thumbnail;
+pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
@@ -443,8 +444,14 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
-    /// Production animation graph/state-machine surface shown by the Animation workspace.
+    /// Hidden composite shown by the Animation workspace.
+    animation_workspace: NodeHandle,
+    /// Production animation graph/state-machine surface inside that composite.
     animation_graph_editor: NodeHandle,
+    /// Production track timeline and its retained CONTROL-K child.
+    animation_timeline: crate::timeline::TimelineEditorHandles,
+    /// Last authored timeline emitted by the retained control.
+    animation_timeline_document: crate::timeline::TimelineDocument,
     /// Selection readout floating over the render, bottom-left.
     vp_overlay: NodeHandle,
     vp_overlay_text: NodeHandle,
@@ -657,7 +664,10 @@ pub struct UiManager {
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
+    animation_workspace: NodeHandle,
     animation_graph_editor: NodeHandle,
+    animation_timeline: crate::timeline::TimelineEditorHandles,
+    animation_timeline_document: crate::timeline::TimelineDocument,
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
     profiler_toggle_lbl: NodeHandle,
@@ -1293,7 +1303,10 @@ impl UiManager {
             selected_entity: None,
             next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
+            animation_workspace: layout.animation_workspace,
             animation_graph_editor: layout.animation_graph_editor,
+            animation_timeline: layout.animation_timeline,
+            animation_timeline_document: layout.animation_timeline_document,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
             profiler_toggle_lbl: layout.profiler_toggle_lbl,
@@ -1587,7 +1600,7 @@ impl UiManager {
     pub fn set_workspace(&mut self, workspace: crate::workspace::Workspace) {
         self.active_workspace = workspace;
         self.native_ui.set_visibility(
-            self.animation_graph_editor,
+            self.animation_workspace,
             workspace == crate::workspace::Workspace::Animation,
         );
         let (w, h) = (self.window_size.0 as f32, self.window_size.1 as f32);
@@ -1611,6 +1624,25 @@ impl UiManager {
             ),
         );
         self.set_workspace(crate::workspace::Workspace::Animation);
+    }
+
+    /// Open a track document on MORROWIND-L's shared timeline in the shipped
+    /// Animation workspace.
+    pub fn edit_animation_timeline(&mut self, document: crate::timeline::TimelineDocument) {
+        self.animation_timeline_document = document.clone();
+        self.native_ui
+            .send(crate::timeline::TimelineEditorMessage::set_document(
+                self.animation_timeline.editor,
+                document,
+            ));
+        self.set_workspace(crate::workspace::Workspace::Animation);
+    }
+
+    /// Latest authored timeline, including live edits from the embedded curve
+    /// editor. The animation asset owner reads this when saving.
+    #[must_use]
+    pub fn animation_timeline_document(&self) -> &crate::timeline::TimelineDocument {
+        &self.animation_timeline_document
     }
 
     /// Return the current workspace to its shipped arrangement.
@@ -5670,6 +5702,14 @@ impl UiManager {
             (h.foliage_smax, FoliageBrushField::ScaleMax),
         ];
         for msg in msgs {
+            if msg.destination == self.animation_timeline.editor
+                && let Some(crate::timeline::TimelineEditorMessage::Changed(document)) =
+                    msg.data::<crate::timeline::TimelineEditorMessage>()
+            {
+                self.animation_timeline_document = document.clone();
+                self.set_scene_dirty(true);
+                continue;
+            }
             if matches!(
                 msg.data::<crate::graph::GraphEditorMessage>(),
                 Some(
@@ -6885,19 +6925,55 @@ mod elysium_tests {
     use super::*;
 
     #[test]
-    fn shipped_shell_contains_the_animation_graph_workspace_surface() {
+    fn shipped_animation_workspace_contains_both_retained_editors() {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        let editor = ui
-            .nodes
-            .try_borrow(layout.animation_graph_editor.transmute())
-            .unwrap();
-        assert_eq!(editor.widget.parent, layout.viewport_handle);
-        assert!(
-            !editor.widget.visibility,
-            "Layout starts on the 3D viewport"
+        {
+            let workspace = ui
+                .nodes
+                .try_borrow(layout.animation_workspace.transmute())
+                .unwrap();
+            assert_eq!(workspace.widget.parent, layout.viewport_handle);
+            assert!(
+                !workspace.widget.visibility,
+                "Layout starts on the 3D viewport"
+            );
+        }
+
+        {
+            let graph = ui
+                .nodes
+                .try_borrow(layout.animation_graph_editor.transmute())
+                .unwrap();
+            assert_eq!(graph.widget.parent, layout.animation_workspace);
+            assert!(
+                graph.widget.visibility,
+                "the composite parent exclusively owns workspace visibility"
+            );
+        }
+
+        assert_eq!(
+            ui.parent_of(layout.animation_timeline.editor),
+            Some(layout.animation_workspace)
         );
+        assert_eq!(
+            ui.parent_of(layout.animation_timeline.curve_editor),
+            Some(layout.animation_timeline.editor)
+        );
+        assert!(
+            ui.nodes
+                .try_borrow(layout.animation_timeline.editor.transmute())
+                .unwrap()
+                .widget
+                .visibility
+        );
+
+        ui.set_visibility(layout.animation_workspace, true);
+        ui.perform_layout();
+        assert!(ui.is_globally_visible(layout.animation_graph_editor));
+        assert!(ui.is_globally_visible(layout.animation_timeline.editor));
+        assert!(ui.is_globally_visible(layout.animation_timeline.curve_editor));
         assert!(
             crate::commands::registry()
                 .get("editor.workspace.animation")

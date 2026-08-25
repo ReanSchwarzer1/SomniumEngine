@@ -67,6 +67,7 @@ use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
 use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
 use somnium_ui::runtime::canvas::SafeArea;
+use somnium_ui::timeline::{self, CurveKey, TimelineSurface};
 
 struct WalkCycle {
     skeleton: somnium_anim::Skeleton,
@@ -112,6 +113,9 @@ struct Vvardenfell {
     /// MORROWIND-S. The engine-neutral cell owner exercised with a real
     /// schema-serialized ECS actor rather than a parallel streaming DTO.
     partition: Option<WorldPartition>,
+    /// MORROWIND-L. Stable digest of animation and UI-motion timeline assets
+    /// authored and round-tripped solely through `somnium_ui`'s public API.
+    timeline_evidence: u64,
 }
 
 impl GameApp for Vvardenfell {
@@ -184,6 +188,9 @@ impl GameApp for Vvardenfell {
             compiled.wgsl.len()
         );
         self.graph_material = Some(compiled);
+
+        self.timeline_evidence = build_timeline_evidence();
+        println!("  timeline evidence -> {:016x}", self.timeline_evidence);
 
         let (mut walk, parameters) = build_walk_cycle();
         let script_asset = somnium_script::ids::ScriptAssetId::mint();
@@ -396,6 +403,67 @@ impl GameApp for Vvardenfell {
     }
 }
 
+/// MORROWIND-L's second-example proof. Both consumers author the same shared
+/// timeline model, then survive the public versioned asset boundary byte for
+/// byte. The digest is retained on `Vvardenfell` so headless runs have one
+/// deterministic value to compare without exposing editor internals.
+fn build_timeline_evidence() -> u64 {
+    let animation_catalogue = timeline::catalogues::animation();
+    let mut animation = TimelineSurface::new(animation_catalogue.clone(), 8.0);
+    let actors = animation.add_group("Actors", None).expect("valid group");
+    let body = animation
+        .add_track("animation.clip", "Body", Some(actors))
+        .expect("the animation catalogue contains its clip track");
+    animation
+        .add_media(body, "animation-clip", "walk.anim", 0.5, 4.0)
+        .expect("the clip kind belongs to the animation track");
+    animation
+        .add_marker(2.0, "Left foot")
+        .expect("the marker lies in the document");
+    animation
+        .add_keyframe(body, 0, CurveKey::new(2.0, 0.75))
+        .expect("weight is the animation track's first channel");
+    let animation_document = animation.document().clone();
+    let animation_json = timeline::to_json(&animation_document).expect("timeline serializes");
+    let animation_loaded = timeline::from_json(&animation_json, &animation_catalogue)
+        .expect("animation timeline round-trips under its catalogue");
+    assert_eq!(
+        timeline::to_json(&animation_loaded).expect("loaded timeline serializes"),
+        animation_json
+    );
+
+    let ui_catalogue = timeline::catalogues::ui_motion();
+    let mut ui_motion = TimelineSurface::new(ui_catalogue.clone(), 1.0);
+    let interface = ui_motion.add_group("Interface", None).expect("valid group");
+    let panel = ui_motion
+        .add_track("ui.motion", "Quest Panel", Some(interface))
+        .expect("the UI catalogue contains its motion track");
+    ui_motion
+        .add_media(panel, "ui-motion", "quest-panel.somui", 0.0, 1.0)
+        .expect("the UI-motion kind belongs to the UI track");
+    ui_motion
+        .add_marker(0.5, "Readable")
+        .expect("the marker lies in the document");
+    ui_motion
+        .add_keyframe(panel, 0, CurveKey::new(0.25, 0.4))
+        .expect("opacity is the UI track's first channel");
+    let ui_document = ui_motion.document().clone();
+    let ui_json = timeline::to_json(&ui_document).expect("timeline serializes");
+    let ui_loaded = timeline::from_json(&ui_json, &ui_catalogue)
+        .expect("UI-motion timeline round-trips under its catalogue");
+    assert_eq!(
+        timeline::to_json(&ui_loaded).expect("loaded timeline serializes"),
+        ui_json
+    );
+
+    animation_json
+        .bytes()
+        .chain(ui_json.bytes())
+        .fold(0xcbf2_9ce4_8422_2325, |digest, byte| {
+            (digest ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
 fn build_walk_cycle() -> (WalkCycle, somnium_anim::ParameterSet) {
     use glam::{Mat4, Quat, Vec3};
     use somnium_anim::{
@@ -558,6 +626,16 @@ fn winit_state_pressed() -> somnium_core::ElementState {
 
 fn tab_key() -> somnium_core::PhysicalKey {
     somnium_core::PhysicalKey::Code(somnium_core::KeyCode::Tab)
+}
+
+#[cfg(test)]
+mod morrowind_l_tests {
+    #[test]
+    fn timeline_evidence_is_deterministic() {
+        let first = super::build_timeline_evidence();
+        assert_ne!(first, 0);
+        assert_eq!(first, super::build_timeline_evidence());
+    }
 }
 
 fn main() {

@@ -100,6 +100,10 @@ pub struct CurveEditor {
     /// Snap increment used while `Ctrl` is held.
     snap_t: f32,
     snap_v: f32,
+    /// Optional retained-control owner for composite widgets. Standalone
+    /// editors leave this empty and continue to expose only `FromWidget`
+    /// output; an embedded editor also routes the same value to its owner.
+    value_target: NodeHandle,
 }
 
 impl CurveEditor {
@@ -166,14 +170,22 @@ impl CurveEditor {
     }
 
     fn emit(&self, widget: &Widget, emit: &mut Vec<UiMessage>, live: bool) {
+        let value = CurveEditorMessage::Value {
+            curve: self.curve.clone(),
+            live,
+        };
         emit.push(UiMessage::new(
             widget.handle,
             MessageDirection::FromWidget,
-            CurveEditorMessage::Value {
-                curve: self.curve.clone(),
-                live,
-            },
+            value.clone(),
         ));
+        if self.value_target.is_some() {
+            emit.push(UiMessage::new(
+                self.value_target,
+                MessageDirection::ToWidget,
+                value,
+            ));
+        }
     }
 
     /// A preset, rescaled from its unit shape into this field's declared
@@ -528,6 +540,7 @@ pub struct CurveEditorBuilder {
     domain_v: (f32, f32),
     font_id: u8,
     height: f32,
+    value_target: NodeHandle,
 }
 
 impl CurveEditorBuilder {
@@ -540,6 +553,7 @@ impl CurveEditorBuilder {
             domain_v: (0.0, 1.0),
             font_id: 0,
             height: 96.0,
+            value_target: NodeHandle::NONE,
         }
     }
 
@@ -579,6 +593,14 @@ impl CurveEditorBuilder {
         self
     }
 
+    /// Route value changes to a retained composite owner in addition to the
+    /// editor's ordinary `FromWidget` output.
+    #[must_use]
+    pub fn with_value_target(mut self, target: NodeHandle) -> Self {
+        self.value_target = target;
+        self
+    }
+
     #[must_use]
     pub fn build(self) -> UiNode {
         let mut editor = CurveEditor {
@@ -597,6 +619,7 @@ impl CurveEditorBuilder {
             height: self.height,
             snap_t: (self.domain_t.1 - self.domain_t.0) / 24.0,
             snap_v: (self.domain_v.1 - self.domain_v.0) / 20.0,
+            value_target: self.value_target,
         };
         editor.frame_domain();
         UiNode::new(self.widget.build(), Box::new(editor))
@@ -630,6 +653,7 @@ mod tests {
             height: 96.0,
             snap_t: 0.25,
             snap_v: 0.25,
+            value_target: NodeHandle::NONE,
         };
         e.view_t = (0.0, 1.0);
         e.view_v = (0.0, 1.0);

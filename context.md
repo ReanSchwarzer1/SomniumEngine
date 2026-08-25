@@ -336,6 +336,16 @@
 >   APIs. No rendered crowd or foot-slide PNG is claimed here; the
 >   thousand-character measurement left open by U still needs an authored
 >   skinned crowd scene rather than a synthetic runtime test.
+>   **MORROWIND-L completed the one reusable timeline.**
+>   `somnium_ui::timeline` is an archetype-driven, versioned track/media model
+>   with groups, clips, channels and CONTROL-K curves, markers, playhead,
+>   scrubbing, cursor-anchored zoom, snapping and bounded undo/redo. The shipped
+>   Animation workspace is now one splitter containing V's graph and L's
+>   timeline; its selected channel embeds the existing retained CurveEditor as
+>   a real child and routes values directly without shell forwarding. Animation
+>   and UI-motion catalogues prove it is not an animation-only sequencer.
+>   `vvardenfell` authors and byte-stably round-trips both consumers through
+>   public APIs and retains a deterministic evidence digest.
 >   **MORROWIND-Q opened Track 4 with a deterministic native asset cook.**
 >   `somnium_asset::cook` preserves the existing path-derived `AssetId` while
 >   producing versioned, integrity-checked mesh, texture, audio, scene, prefab,

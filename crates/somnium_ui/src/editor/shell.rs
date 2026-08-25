@@ -944,18 +944,50 @@ pub(crate) fn build_editor_layout(
         blend_seconds: 0.2,
         sync_track: Some("locomotion".into()),
     });
-    let animation_graph = crate::graph::GraphEditorBuilder::new(
+    // K and L are one Animation workspace, not two mutually exclusive tools.
+    // The container owns visibility; both retained editors stay visible inside
+    // it so switching workspaces cannot leave half of the authoring surface
+    // hidden when the parent is shown again.
+    let animation_workspace = SplitterBuilder::new(
         WidgetBuilder::new()
             .with_visibility(false)
-            .with_tooltip(
-                "Animation Graph — click a value to edit; Alt-click a State to make it initial; Shift-drag between States to add a transition",
-            ),
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(SplitterOrientation::Vertical)
+    .with_first_size(360.0)
+    .with_min_first(180.0)
+    .with_min_second(260.0)
+    .build();
+    let animation_workspace = ui.add_node(animation_workspace, viewport_handle);
+
+    let animation_graph = crate::graph::GraphEditorBuilder::new(
+        WidgetBuilder::new().with_tooltip(
+            "Animation Graph — click a value to edit; Alt-click a State to make it initial; Shift-drag between States to add a transition",
+        ),
         animation_catalogue,
     )
     .with_state_machine_document(animation_document)
     .with_font(font_id)
     .build();
-    let animation_graph_editor = ui.add_node(animation_graph, viewport_handle);
+    let animation_graph_editor = ui.add_node(animation_graph, animation_workspace);
+
+    let animation_timeline_catalogue = crate::timeline::catalogues::animation();
+    let mut animation_timeline_surface =
+        crate::timeline::TimelineSurface::new(animation_timeline_catalogue.clone(), 10.0);
+    animation_timeline_surface
+        .add_track("animation.clip", "Base Layer", None)
+        .expect("the built-in timeline catalogue contains Animation");
+    let animation_timeline_document = animation_timeline_surface.document().clone();
+    let animation_timeline = crate::timeline::TimelineEditorBuilder::new(
+        WidgetBuilder::new().with_tooltip(
+            "Animation Timeline — scrub, zoom, snap clips and edit the selected channel curve",
+        ),
+        animation_timeline_catalogue,
+    )
+    .with_document(animation_timeline_document.clone())
+    .with_font(font_id)
+    .build(ui, animation_workspace)
+    .expect("the shipped animation timeline matches its catalogue");
 
     // Right panel: two sections (outliner top, inspector bottom)
     let right_border = BorderBuilder::new(
@@ -1712,7 +1744,10 @@ pub(crate) fn build_editor_layout(
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
+        animation_workspace,
         animation_graph_editor,
+        animation_timeline,
+        animation_timeline_document,
         vp_overlay: vp_overlay_h,
         vp_overlay_text,
         profiler_panel,

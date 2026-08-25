@@ -2421,3 +2421,17 @@ not selected: Somnium's shipped maps need kilometre-scale precision, not
 planet-scale coordinates. Integer cells plus small local floats keep authored
 positions reversible on the CPU and let every existing shader remain
 camera-relative. Shader double emulation remains a possible planet-scale tier.
+
+### 13H.23 One timeline and its retained curve child, MORROWIND-L
+
+*Framework vocabulary; independently implemented.* Flax Timeline was read for
+the track/group/media vocabulary and O3DE Maestro for the separation between a
+consumer catalogue and the shared sequencer. Flax is proprietary under
+§13H.0 and supplied no code, identifiers, constants, layouts or comments.
+O3DE is Apache-2.0; no O3DE code was copied.
+
+The retained control follows the same permissive Fyrox message/layout patterns
+already attributed for `somnium_ui`, while the numeric channel is the existing
+CONTROL-K `CurveEditor` and `somnium_ecs::curve::Curve`. The document,
+archetype catalogue, snapping/history rules, deterministic serialization,
+Animation workspace composition and Vvardenfell consumers are original Rust.
