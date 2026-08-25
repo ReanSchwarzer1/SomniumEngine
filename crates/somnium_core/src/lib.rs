@@ -90,6 +90,8 @@ pub mod time;
 pub mod time_of_day;
 /// Phase CONTROL-N: weather and the wetness it leaves.
 pub mod weather;
+/// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.
+pub mod world_partition;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
@@ -136,7 +138,7 @@ pub use a11y_bridge::A11yBridge;
 pub use somnium_ui::a11y::{A11ySettings, A11yTree, Announcement, Politeness, Role, Toggled};
 
 // Re-export core ECS types so game code can use them from `somnium_core`.
-pub use somnium_ecs::{Component, ComponentBundle, Entity, World};
+pub use somnium_ecs::{Component, ComponentBundle, Entity, PersistentId, World};
 pub use somnium_ecs::{ComponentId, ComponentSet};
 
 /// ECS Component for a mesh instance.

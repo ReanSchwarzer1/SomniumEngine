@@ -363,9 +363,24 @@
 >   bytes, reason and every requester without exposing policy to UI code.
 >   `vvardenfell` demonstrates the public Q/R path from cook job to immediate
 >   placeholder to budgeted build-artifact replacement.
+>   **MORROWIND-S added world partition and cell-owned entity streaming.**
+>   `WorldPartition` hashes double-precision positions into configurable
+>   integer cells. Camera, player and explicit-volume sources declare radius,
+>   shape and priority; their deterministic union is the only runtime
+>   want-state, while an undoable editor pin is the explicit authored override.
+>   Load and transactional unload I/O are named priority/deadline jobs and are
+>   cancelled when want-state reverses. A cell index owns sorted derived
+>   `AssetId`s and one file per actor. Those actor files use the existing
+>   schema scene serializer, retained unknowns and `PersistentId`, so real ECS
+>   components and cross-cell identity survive unload rather than passing
+>   through a streaming-only DTO. Despawn occurs only after persistence
+>   succeeds. The editor model exposes sorted load states and world-aligned grid
+>   segments plus undoable pin/unpin. The required 100 unload/reload loop keeps
+>   both loaded and unloaded entity-count baselines exact and restores `Name`
+>   and `Transform` through the registered schema on every iteration.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
->   (**1,826 passed, 0 failed**, against a floor of 945).
+>   (**1,831 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

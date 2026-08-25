@@ -2391,3 +2391,19 @@ the old complete value published.
 The phase plan cites Flax content streaming for secondary architectural
 context. Flax is proprietary under the audit in §13H.0 and supplied no code,
 identifiers, constants, layouts or file structure to this implementation.
+
+### 13H.21 Cell streaming and entity ownership, MORROWIND-S
+
+*Architecture-only reads, strict.* Unreal World Partition and Luanti's active
+versus static object lifecycle were used only to frame the ownership question.
+Unreal is proprietary and Luanti is LGPL-2.1+; Somnium copies neither source,
+identifiers, constants, layouts nor comments. UE data layers and content
+bundles are explicitly not implemented.
+
+Somnium's implementation is native Rust over its existing `World`,
+`PersistentId`, schema scene serializer and `somnium_jobs`. A cell index owns
+sorted derived `AssetId`s and separate schema-driven actor documents. Workers
+perform cancellable/deadlined I/O; main-thread completion installs entities or
+transactionally despawns them only after persistence succeeds. Camera, player
+and explicit-volume sources reduce to a deterministic spatial-hash want-state;
+editor pins are a separate undoable authored override.

@@ -402,14 +402,33 @@ fn attachment_from_json(
 /// minting the id now.
 pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::Value {
     let all: Vec<Entity> = world.entities().collect();
-    for entity in &all {
+    entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")
+}
+
+/// Serialize only the named live entities through the same registered schema
+/// and retained-unknown path as a complete scene.
+///
+/// This is the MORROWIND-S cell boundary: a streaming actor is not an opaque
+/// parallel DTO. It is the same entity document Save Scene writes.
+pub fn entities_to_json(
+    world: &mut World,
+    registry: &TypeRegistry,
+    selected: &[Entity],
+) -> Result<serde_json::Value, SceneError> {
+    let mut unique_entities = std::collections::HashSet::new();
+    for entity in selected {
+        if !world.is_alive(*entity) || !unique_entities.insert(*entity) {
+            return Err(SceneError::Malformed(
+                "cell selection contains a dead or duplicate entity".into(),
+            ));
+        }
         let _ = world.ensure_persistent_id(*entity);
     }
 
     // Sort by persistent id so the file is stable: two saves of an
     // unchanged world must produce the same bytes, or every scene diff is
     // noise.
-    let mut ordered: Vec<(PersistentId, Entity)> = all
+    let mut ordered: Vec<(PersistentId, Entity)> = selected
         .iter()
         .filter_map(|&e| world.persistent_id(e).map(|id| (id, e)))
         .collect();
@@ -477,7 +496,13 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         })
         .collect();
 
-    serde_json::json!({ "version": SCENE_VERSION, "entities": entities })
+    let ids: std::collections::BTreeSet<_> = ordered.iter().map(|(id, _)| *id).collect();
+    if ids.len() != ordered.len() {
+        return Err(SceneError::Malformed(
+            "cell selection contains duplicate persistent ids".into(),
+        ));
+    }
+    Ok(serde_json::json!({ "version": SCENE_VERSION, "entities": entities }))
 }
 
 /// Write a version-2 scene to disk.
@@ -564,24 +589,42 @@ pub fn scene_from_json(
     let mut report = LoadReport::default();
 
     // Pass one: identity only.
+    let existing: BTreeMap<PersistentId, Entity> = world
+        .entities()
+        .filter_map(|entity| world.persistent_id(entity).map(|id| (id, entity)))
+        .collect();
+    let ids: Vec<_> = entities_json
+        .iter()
+        .map(|entry| {
+            entry
+                .get("persistent_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(PersistentId::parse_hex)
+                .ok_or_else(|| SceneError::Malformed("entity without a persistent id".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    for id in &ids {
+        if id.is_none() || existing.contains_key(id) || unique.len() != ids.len() {
+            return Err(SceneError::Malformed(format!(
+                "duplicate persistent id {id}"
+            )));
+        }
+    }
     let mut by_id: BTreeMap<PersistentId, Entity> = BTreeMap::new();
-    for entry in entities_json {
-        let Some(id) = entry
-            .get("persistent_id")
-            .and_then(serde_json::Value::as_str)
-            .and_then(PersistentId::parse_hex)
-        else {
-            return Err(SceneError::Malformed(
-                "entity without a persistent id".into(),
-            ));
-        };
+    for id in ids {
         let entity = world.spawn((id,));
         by_id.insert(id, entity);
         report.entities.push(entity);
     }
 
     let resolved = by_id.clone();
-    let resolve = move |id: PersistentId| resolved.get(&id).copied();
+    let resolve = move |id: PersistentId| {
+        resolved
+            .get(&id)
+            .copied()
+            .or_else(|| existing.get(&id).copied())
+    };
 
     // Pass two: components and scripts.
     for (entry, &entity) in entities_json.iter().zip(&report.entities) {

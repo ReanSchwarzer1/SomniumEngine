@@ -307,6 +307,12 @@ impl<T> JobHandle<T> {
         self.state.cancelled.store(true, AtomicOrdering::Release);
     }
 
+    /// Whether cooperative cancellation has been requested for this handle.
+    #[must_use]
+    pub fn cancellation_requested(&self) -> bool {
+        self.state.cancelled.load(AtomicOrdering::Acquire)
+    }
+
     /// Read status without blocking.
     #[must_use]
     pub fn snapshot(&self) -> JobSnapshot {

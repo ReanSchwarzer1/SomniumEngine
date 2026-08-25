@@ -62,6 +62,7 @@ use somnium_asset::cook::{
     submit_cook,
 };
 use somnium_asset::residency::{AssetHandle, AssetRequest, ResidencyConfig, ResidencyManager};
+use somnium_core::world_partition::{ActorRecord, CellCoord, PartitionStore, WorldPartition};
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
 use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
@@ -108,6 +109,9 @@ struct Vvardenfell {
     cooked_shader: Option<AssetHandle>,
     /// The one policy owner for the slice's resident cooked data.
     asset_residency: Option<ResidencyManager>,
+    /// MORROWIND-S. The engine-neutral cell owner exercised with a real
+    /// schema-serialized ECS actor rather than a parallel streaming DTO.
+    partition: Option<WorldPartition>,
 }
 
 impl GameApp for Vvardenfell {
@@ -276,6 +280,41 @@ impl GameApp for Vvardenfell {
         );
         self.cooked_shader = Some(handle);
         self.asset_residency = Some(residency);
+
+        let cell = CellCoord::default();
+        let actor_id = somnium_core::PersistentId::from_raw(0x5641_5244_454e_4645_4c4c_0000_0001);
+        let staged = ctx.world.spawn((
+            actor_id,
+            somnium_core::Name::new("Balmora cell marker"),
+            somnium_core::Transform::from_translation(glam::Vec3::new(8.0, 0.0, 8.0)),
+        ));
+        let document = somnium_core::scene_schema::entities_to_json(
+            ctx.world,
+            &somnium_core::reflect_registry::component_registry(),
+            &[staged],
+        )
+        .expect("the streamed actor uses the registered scene schema");
+        ctx.world.despawn(staged);
+        let store = PartitionStore::new(derived.join("partition"));
+        store
+            .save_cell_with_derived(
+                cell,
+                &[ActorRecord {
+                    id: actor_id,
+                    position: [8.0, 0.0, 8.0],
+                    document,
+                }],
+                &[request.asset_id()],
+            )
+            .expect("the slice cell and its derived shader persist");
+        let mut partition = WorldPartition::new(store, 64.0);
+        partition.pin(cell);
+        partition
+            .update(ctx.world, &mut jobs, default_cook_deadline())
+            .expect("the cell load uses the shared job contract");
+        assert!(ctx.world.entity_by_persistent_id(actor_id).is_some());
+        println!("  world partition -> one schema actor resident in {cell:?}");
+        self.partition = Some(partition);
     }
 
     fn on_update(&mut self, ctx: &mut EngineContext) {
