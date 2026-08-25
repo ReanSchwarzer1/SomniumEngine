@@ -243,6 +243,59 @@
 >   game got the world, physics, audio and the renderer, and no way to submit a
 >   widget tree — so it could neither draw a HUD nor receive input into one.
 >   Found by E, confirmed by F, and walked past by AE/AG/AH.
+>   **MORROWIND-E2 is the hook**, and it is not a sub-phase the plan contains —
+>   §8 lists six in Track 1 and none of them is *"let a game put the UI on
+>   screen"*, because the plan assumed a runtime UI framework implies a way to
+>   reach it. The engine owns the moment, the game owns the trees: build in
+>   `on_render` (which has the whole `EngineContext`), draw in `on_render_ui`
+>   (which has the open encoder), plus `on_os_event` for the raw `WindowEvent`
+>   the runtime UI's hit-testing needs. It runs at renderer pass 9, before the
+>   editor shell, in its own `Game UI` profiler zone. **`vvardenfell` draws its
+>   HUD instead of printing it.** E2 also found that MORROWIND-E's anchors had
+>   no output — `Canvas::place` resolved an `Anchoring` to a `Rect` and nothing
+>   consumed it, because E's tests asserted on the rectangles rather than on the
+>   tree — and that **GHOSTFENCE had never been able to run on Windows**: three
+>   `subprocess.run(text=True)` calls decoded cargo's UTF-8 as the ANSI code
+>   page and crashed the gate before it printed a row.
+>   **MORROWIND-E2b took the golden reference** GHOSTFENCE had been promising
+>   since MORROWIND-A. The capture is the whole swapchain after the UI pass, so
+>   it contains a stochastic viewport, an fps counter and whatever toast was up;
+>   a golden entry therefore names the **region** of chrome it is evidence for —
+>   `menu-bar`, `sculpt-panel`, `toolbar`. Verified across two independent GPU
+>   runs. **This unblocks MORROWIND-G's shaper**, which is the largest piece of
+>   unfinished Track 1 work and whose only blocker was Appendix A.5's demand for
+>   an A/B against a reference image. It also found that
+>   **`dev records/phase MORROWIND/` had been gitignored since MORROWIND-A** —
+>   the census, the Fyrox diff, the license audit, every sub-phase record and
+>   `phase_MORROWIND.md` itself existed on one disk and in no commit.
+>   **MORROWIND-H** generalised Phase 27's `motion.rs` into a runtime system:
+>   `Motion::Spring` beside `Motion::Timed` (a normalised eased curve is a
+>   *shape* and cannot carry velocity through a retarget, which is what an
+>   interrupted drawer needs), `Easing::Curve(CurveId)` resolving CONTROL-K
+>   curves, staggering, and `Transition`/`reversed()` so an enter and its exit
+>   are one declaration. It found the same class of bug as E2 — **`UiCanvas`
+>   never ticked motion**, so a game's tweens sat at their origin forever — and
+>   `Spring::overshoots()` caught a `SNAPPY` preset that had shipped its first
+>   draft underdamped.
+>   **MORROWIND-I closed Track 1** with an accessibility tree: four defaulted
+>   `Control` hooks (role, name, value, toggled), a collapse rule that turns a
+>   border-in-a-panel-in-a-text-node into `button → label`, focus announcements
+>   in name/role/value/state order, reduced motion and high contrast as
+>   `EditorSettings` fields with schema rows, and the real platform adapter —
+>   `accesskit_winit` 0.33.2 wants `winit ^0.30.5` and Somnium is on 0.30.13, so
+>   no windowing bump was needed. High contrast **reuses Zeta's certified pairs**
+>   rather than inventing a palette: it walks an existing foreground toward the
+>   pole its background is not until the ratio clears 7:1. The window is now
+>   created invisible and shown once initialised, because `accesskit_winit`
+>   panics on an already-shown window — a better startup regardless, and the
+>   golden capture still matching is what proves it. **Not claimed: that a real
+>   screen reader reads it well.** No NVDA/JAWS/VoiceOver session was run.
+>   **Track 1 (VIVEC) is closed.** One item stays open inside it and is recorded
+>   rather than dropped: MORROWIND-G's shaper, decided (`cosmic-text`) and behind
+>   `SOMNIUM_UI_SHAPER`, default off.
+>   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
+>   shader-budget, one-job-system, no-second-system, golden-images, tests
+>   (**1,694 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.
