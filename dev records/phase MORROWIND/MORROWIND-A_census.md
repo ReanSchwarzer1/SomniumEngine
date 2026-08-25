@@ -18,25 +18,25 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 56,288 | +6,082 | 34.0% | 377 | +49 | 85 | 52 |
-| `somnium_ui` | 47,874 | +20,344 | 28.9% | 528 | +313 | 80 | 2 |
-| `somnium_core` | 29,631 | +10,411 | 17.9% | 345 | +128 | 40 | 0 |
-| `somnium_ecs` | 5,227 | +1,209 | 3.2% | 69 | +15 | 9 | 0 |
+| `somnium_renderer` | 56,288 | +6,082 | 33.3% | 377 | +49 | 85 | 52 |
+| `somnium_ui` | 51,387 | +23,857 | 30.4% | 561 | +346 | 89 | 2 |
+| `somnium_core` | 29,631 | +10,411 | 17.5% | 345 | +128 | 40 | 0 |
+| `somnium_ecs` | 5,227 | +1,209 | 3.1% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,850 | +35 | 2.9% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,608 | +151 | 2.8% | 58 | — | 9 | 0 |
-| `somnium_asset` | 3,936 | +2,297 | 2.4% | 27 | +21 | 8 | 0 |
+| `somnium_script_luau` | 4,608 | +151 | 2.7% | 58 | — | 9 | 0 |
+| `somnium_asset` | 3,936 | +2,297 | 2.3% | 27 | +21 | 8 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.9% | 66 | +66 | 6 | 0 |
+| `somnium_shader` | 1,968 | +1,968 | 1.2% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.2% | 57 | +57 | 5 | 0 |
-| `somnium_shader` | 1,930 | +1,930 | 1.2% | 34 | +34 | 5 | 0 |
 | `somnium_jobs` | 1,630 | +1,630 | 1.0% | 17 | +17 | 5 | 0 |
 | `somnium_audio` | 1,516 | +1,423 | 0.9% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,000 | — | 0.6% | 11 | — | 6 | 0 |
 | `somnium_anim` | 861 | +861 | 0.5% | 22 | +22 | 2 | 0 |
-| `somnium_physics` | 580 | — | 0.4% | 1 | — | 8 | 0 |
+| `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **165,396** | +51,504 | | **1707** | +762 | | |
+| **Total** | **168,947** | +55,055 | | **1741** | +796 | | |
 
-The top three crates are **80.9%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **81.3%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,758 lines** (+112 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,14 +49,14 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 892 | 199 | 88 | 8 | 10 | 167 | 79 | **1443** |
+| `somnium_ui` | 1002 | 218 | 97 | 8 | 10 | 170 | 87 | **1592** |
 | `somnium_renderer` | 559 | 134 | 7 | 1 | 2 | 112 | 82 | **897** |
 | `somnium_core` | 270 | 90 | 15 | 3 | 2 | 58 | 37 | **475** |
 | `somnium_script` | 125 | 34 | 8 | 3 | 3 | 18 | 11 | **202** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
 | `somnium_asset` | 46 | 20 | 5 | 0 | 0 | 10 | 4 | **85** |
-| `somnium_shader` | 46 | 11 | 2 | 0 | 0 | 1 | 3 | **63** |
+| `somnium_shader` | 48 | 11 | 2 | 0 | 0 | 1 | 3 | **65** |
 | `somnium_audio` | 31 | 10 | 2 | 0 | 0 | 8 | 5 | **56** |
 | `somnium_i18n` | 34 | 5 | 4 | 0 | 1 | 0 | 4 | **48** |
 | `somnium_jobs` | 33 | 10 | 3 | 0 | 1 | 0 | 0 | **47** |

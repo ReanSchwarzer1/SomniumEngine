@@ -7,6 +7,7 @@ pub mod draw;
 pub mod editor;
 pub mod editor_event;
 pub mod font;
+pub mod graph;
 pub mod icon_svg;
 pub mod icons;
 pub mod layout_persist;

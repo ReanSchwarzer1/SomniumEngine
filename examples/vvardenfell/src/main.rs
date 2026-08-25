@@ -58,6 +58,7 @@ mod hud;
 
 use hud::{Hud, HudTree};
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
+use somnium_ui::graph::{Graph, catalogues, material};
 use somnium_ui::runtime::canvas::SafeArea;
 
 /// The slice's game state.
@@ -77,6 +78,9 @@ struct Vvardenfell {
     hud: Option<HudTree>,
     /// The world-space name-plate, its own canvas because it is its own space.
     plate: Option<somnium_core::UiCanvas>,
+    /// MORROWIND-K. The first graph consumer compiled through public APIs into
+    /// the same material asset used by property authoring.
+    graph_material: Option<material::CompiledMaterialGraph>,
 }
 
 impl GameApp for Vvardenfell {
@@ -120,6 +124,35 @@ impl GameApp for Vvardenfell {
             plate_layout.logical_size.x, plate_layout.logical_size.y
         );
         self.plate = Some(somnium_core::UiCanvas::with_canvas(plate, viewport));
+
+        let catalogue = catalogues::material();
+        let mut graph = Graph::new();
+        let colour = graph
+            .add(&catalogue, "material.color", glam::Vec2::new(32.0, 48.0))
+            .expect("the built-in material catalogue contains Colour");
+        let output = graph
+            .add(&catalogue, "material.surface", glam::Vec2::new(340.0, 48.0))
+            .expect("the built-in material catalogue contains Material Surface");
+        graph
+            .node_mut(colour)
+            .expect("the node was just inserted")
+            .literals
+            .insert(0, "0.32,0.46,0.24,1.0".into());
+        graph
+            .connect(
+                &catalogue,
+                somnium_ui::graph::PinRef::output(colour, 0),
+                somnium_ui::graph::PinRef::input(output, 0),
+            )
+            .expect("Colour connects to Material Surface base colour");
+        let compiled = material::compile(&graph, &catalogue, &Default::default())
+            .expect("the slice's material graph is valid");
+        println!(
+            "  material graph -> base {:?}, {} WGSL bytes",
+            compiled.material.base_color.0,
+            compiled.wgsl.len()
+        );
+        self.graph_material = Some(compiled);
     }
 
     fn on_update(&mut self, _ctx: &mut EngineContext) {

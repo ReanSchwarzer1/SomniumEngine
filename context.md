@@ -293,6 +293,24 @@
 >   **Track 1 (VIVEC) is closed.** One item stays open inside it and is recorded
 >   rather than dropped: MORROWIND-G's shaper, decided (`cosmic-text`) and behind
 >   `SOMNIUM_UI_SHAPER`, default off.
+>   **MORROWIND-U opened Track 5 (DWEMER).** `somnium_anim` now owns skeletons,
+>   decomposed poses and four-weight skin bindings; `somnium_asset` imports and
+>   remaps glTF skins; and one compute dispatch writes posed vertices back into
+>   the shared geometry pool before culling. The renderer sees only matrix
+>   palettes, preserving Seam 7. Skin-to-buffer is the chosen design, with a
+>   2,000,000-vertex default budget; the required thousand-character comparison
+>   remains explicitly unmeasured until V supplies animated crowds.
+>   **MORROWIND-K completed the shared graph surface.** `somnium_ui::graph`
+>   contains one archetype-driven graph model and one retained-mode
+>   `GraphEditor`: typed pins, transactional reconnect/reroute, cubic wires on
+>   MORROWIND-D's path stream, selection, pan/zoom, comments, nested groups,
+>   alignment, copy/paste, sub-graph breadcrumbs, versioned deterministic JSON,
+>   and CONTROL-A2 Edit-command routing with one history entry per gesture.
+>   Material and animation catalogues prove the substrate is feature-neutral.
+>   The first consumer compiles only material-root-reachable nodes into the
+>   existing `.sommat` `MaterialAsset` plus generated WGSL registered through
+>   the single MORROWIND-C `ShaderSystem`; `vvardenfell` exercises that public
+>   boundary without a renderer reach-through.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
 >   (**1,694 passed, 0 failed**, against a floor of 945).

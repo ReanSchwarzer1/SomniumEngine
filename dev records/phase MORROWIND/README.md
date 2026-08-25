@@ -12,6 +12,7 @@ folder has a generator and a gate in it before it has a single image.
 | `MORROWIND-A_fyrox_diff.md` | MORROWIND-A, by hand from a module-by-module read | — |
 | `MORROWIND-A_license_audit.md` | MORROWIND-A, by hand from the license files | — |
 | `MORROWIND-A.md` | the sub-phase record | — |
+| `MORROWIND-K.md` | shared graph surface and material compiler record | — |
 | `golden/` | a windowed GPU capture, once one has been taken | see below |
 
 ## The rule this folder runs on

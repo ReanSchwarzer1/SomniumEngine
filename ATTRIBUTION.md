@@ -2307,3 +2307,34 @@ IEEE 754 binary16 conversion is written out in `skinning.rs` rather than taken
 from the `half` crate, because it has to agree bit for bit with WGSL's
 `pack2x16float` — which is a thing to test against rather than to trust a crate
 about.
+
+### 13H.17 Godot, Fyrox and O3DE — one graph surface, MORROWIND-K
+
+*Read for pattern only; MIT.* **Godot**
+(`scene/gui/graph_edit.{h,cpp}` and `scene/gui/graph_node.{h,cpp}`) was the
+primary permissive reference for keeping the view transform, selection and
+connection gestures in the control while keeping authored nodes and wires in a
+separate model. Somnium does not adopt Godot's object model, signal names or
+serialization; `Graph`, `GraphView` and `GraphEditor` are native retained-mode
+Rust types over Somnium's existing pool, messages and MORROWIND-D path stream.
+
+*Read for pattern only; MIT.* **Fyrox** (`editor/src/plugins/absm/`) was read
+because its editor sits on the same retained-mode ancestry as `somnium_ui`. It
+confirmed that an animation state-machine tool should be a catalogue and
+consumer of a shared authoring substrate, not a second graph widget. No source
+was copied; Somnium's catalogue, monotonic `NodeId`, transactional reconnect,
+and versioned JSON asset are independent implementations.
+
+*Read for pattern only; Apache-2.0.* **O3DE** (`Gems/GraphModel`,
+`Gems/GraphCanvas`, and the Material Canvas material-graph compiler) supplied
+the framework-versus-tool boundary and the compile-to-runtime-object pattern.
+Somnium's first consumer compiles the root-reachable portion of a graph into
+CONTROL-D's existing `MaterialAsset` plus generated WGSL registered with the
+single MORROWIND-C `ShaderSystem`; it does not introduce an editor-only
+material DTO or a second shader cache.
+
+**Flax was not used.** MORROWIND-A's license audit found the locally mirrored
+Flax source proprietary even though the phase plan had treated its graph
+surface as a permissive reference. Its architecture remains historical plan
+context only; the implementation was re-sourced to the three permissive
+references above before code was written.

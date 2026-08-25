@@ -178,6 +178,11 @@ impl ShaderSystem {
         self.registry.register(name, source)
     }
 
+    /// Register an authored WGSL module under its own cache identity.
+    pub fn register_generated(&mut self, source: impl Into<String>) -> ModuleId {
+        self.registry.register_generated(source)
+    }
+
     /// Register a module and watch its file for changes.
     ///
     /// `source` is the compiled-in text (from `include_str!`, so a release

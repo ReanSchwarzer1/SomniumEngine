@@ -184,6 +184,21 @@ impl Registry {
         id
     }
 
+    /// Register generated source that has no durable include name.
+    ///
+    /// Runtime-authored material graphs need independent module ids, but their
+    /// asset-derived names are not `'static`. Keeping them anonymous avoids
+    /// leaking one string per reload and prevents one graph from replacing
+    /// another under a shared name.
+    pub fn register_generated(&mut self, source: impl Into<String>) -> ModuleId {
+        let id = ModuleId(self.modules.len() as u32);
+        self.modules.push(Module {
+            name: "generated-material-graph",
+            source: source.into(),
+        });
+        id
+    }
+
     /// Give a define bit a name, for reports and diagnostics.
     pub fn register_define(&mut self, bit: u32, name: &'static str) {
         let index = bit as usize;
@@ -668,6 +683,24 @@ mod tests {
             r.resolve(first, Defines::NONE)
                 .unwrap()
                 .contains("let x = 1")
+        );
+    }
+
+    #[test]
+    fn generated_modules_are_independent_and_cannot_shadow_named_modules() {
+        let mut r = registry();
+        let named = r.register("material.wgsl", "fn named() {}\n");
+        let first = r.register_generated("fn first() {}\n");
+        let second = r.register_generated("fn second() {}\n");
+
+        assert_ne!(first, second);
+        assert_ne!(first, named);
+        assert_eq!(r.id("material.wgsl"), Some(named));
+        assert_eq!(r.id("generated-material-graph"), None);
+        assert_eq!(r.resolve(first, Defines::NONE).unwrap(), "fn first() {}\n");
+        assert_eq!(
+            r.resolve(second, Defines::NONE).unwrap(),
+            "fn second() {}\n"
         );
     }
 

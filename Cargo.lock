@@ -3991,6 +3991,7 @@ dependencies = [
  "serde_json",
  "somnium_asset",
  "somnium_ecs",
+ "somnium_shader",
  "tracing",
  "wgpu",
  "winit",
