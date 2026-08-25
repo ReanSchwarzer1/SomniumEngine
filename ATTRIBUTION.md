@@ -2407,3 +2407,17 @@ perform cancellable/deadlined I/O; main-thread completion installs entities or
 transactionally despawns them only after persistence succeeds. Camera, player
 and explicit-volume sources reduce to a deterministic spatial-hash want-state;
 editor pins are a separate undoable authored override.
+
+### 13H.22 HLOD, impostors and floating origin, MORROWIND-T
+
+*Read for pattern only; permissive.* Terra's Rust billboard work and the
+`bevy_terrain` big-space model informed the offline-octahedral-atlas and CPU
+integer-grid questions. Somnium's bakes, binary-neutral proxy data and
+`GlobalPosition` implementation are independent Rust and copy no code,
+constants or layouts.
+
+The alternative soft-double shader technique was evaluated and deliberately
+not selected: Somnium's shipped maps need kilometre-scale precision, not
+planet-scale coordinates. Integer cells plus small local floats keep authored
+positions reversible on the CPU and let every existing shader remain
+camera-relative. Shader double emulation remains a possible planet-scale tier.

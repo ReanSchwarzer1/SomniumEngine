@@ -378,9 +378,20 @@
 >   segments plus undoable pin/unpin. The required 100 unload/reload loop keeps
 >   both loaded and unloaded entity-count baselines exact and restores `Name`
 >   and `Transform` through the registered schema on every iteration.
+>   **MORROWIND-T closed Track 4 with HLOD, impostors and a floating origin.**
+>   The asset cook can merge per-cell proxy geometry, transform normals,
+>   enforce a triangle budget, merge representative material colour and retain
+>   sorted source dependencies. Offline square captures pack deterministically
+>   by signed octahedral direction into a billboard atlas. Large-world
+>   positions use exact CPU integer cells plus small local f32 offsets; a
+>   camera-aligned cell rebase changes only the render origin, never authored
+>   data. This CPU design was selected over shader soft-double because it is
+>   reversible, contains complexity outside every shader and preserves
+>   centimetre differences at 10,000 km; soft-double is deferred to a future
+>   planet-scale tier.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
->   (**1,831 passed, 0 failed**, against a floor of 945).
+>   (**1,835 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

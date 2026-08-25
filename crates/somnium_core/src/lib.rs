@@ -73,6 +73,8 @@ pub mod reflect_registry;
 /// needs it, and the dependency edge runs this way.
 pub use somnium_asset::scene_file;
 
+/// MORROWIND-T: CPU integer-grid floating origin and camera-relative values.
+pub mod floating_origin;
 pub mod scene_schema;
 pub mod scene_serial;
 pub mod script_bridge;

@@ -10,6 +10,8 @@ pub mod material;
 pub mod preview;
 pub mod residency;
 pub mod scene_file;
+/// MORROWIND-T offline HLOD and octahedral-impostor baking.
+pub mod world_bake;
 
 use std::collections::HashMap;
 use std::path::Path;
