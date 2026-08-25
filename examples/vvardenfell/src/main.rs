@@ -58,9 +58,10 @@ mod hud;
 
 use hud::{Hud, HudTree};
 use somnium_asset::cook::{
-    AssetLoadMode, AssetResolver, CookConfig, CookKind, CookRequest, LoadedNativeAsset,
-    default_cook_deadline, submit_cook,
+    AssetLoadMode, AssetResolver, CookConfig, CookKind, CookRequest, default_cook_deadline,
+    submit_cook,
 };
+use somnium_asset::residency::{AssetHandle, AssetRequest, ResidencyConfig, ResidencyManager};
 use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
 use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
@@ -102,9 +103,11 @@ struct Vvardenfell {
     /// renderer internals. MORROWIND-U already owns the separate pose-to-GPU
     /// palette seam; this slice records the sampled root for headless evidence.
     walk: Option<WalkCycle>,
-    /// MORROWIND-Q. The shader resolved from the build representation after
-    /// passing through the public, job-scheduled native cook API.
-    cooked_shader: Option<LoadedNativeAsset>,
+    /// MORROWIND-Q/R. A stable handle that began as a placeholder and was
+    /// atomically replaced from the cooked build representation.
+    cooked_shader: Option<AssetHandle>,
+    /// The one policy owner for the slice's resident cooked data.
+    asset_residency: Option<ResidencyManager>,
 }
 
 impl GameApp for Vvardenfell {
@@ -243,20 +246,36 @@ impl GameApp for Vvardenfell {
         .try_take()
         .expect("single-threaded jobs complete inline")
         .expect("the slice shader cooks");
-        let loaded = AssetResolver::new(
+        let resolver = std::sync::Arc::new(AssetResolver::new(
             config.source_root,
             config.output_root,
             report.manifest,
             AssetLoadMode::Build,
-        )
-        .load(request.asset_id())
-        .expect("the cooked shader resolves by its stable AssetId");
+        ));
+        let residency = ResidencyManager::new(ResidencyConfig {
+            byte_budget: 1024 * 1024,
+            upload_budget_per_frame: 64 * 1024,
+        });
+        let handle = residency
+            .request_resolved(
+                &mut jobs,
+                resolver,
+                AssetRequest::new(request.asset_id(), CookKind::Shader, "Vvardenfell census"),
+            )
+            .expect("a residency request returns its placeholder immediately");
+        assert!(handle.is_placeholder());
+        jobs.drain_completions(std::time::Duration::from_millis(5));
+        let upload = residency.process_frame();
+        let loaded = handle.current();
+        assert!(!loaded.placeholder);
         println!(
-            "  native cook -> {} bytes for {}",
+            "  native cook/residency -> {} bytes for {} ({} upload)",
             loaded.payload.len(),
-            loaded.asset
+            loaded.asset,
+            upload.uploaded_bytes
         );
-        self.cooked_shader = Some(loaded);
+        self.cooked_shader = Some(handle);
+        self.asset_residency = Some(residency);
     }
 
     fn on_update(&mut self, ctx: &mut EngineContext) {

@@ -15,6 +15,7 @@ folder has a generator and a gate in it before it has a single image.
 | `MORROWIND-K.md` | shared graph surface and material compiler record | — |
 | `MORROWIND-V.md` | clips, blend graphs, state machines and sync record | — |
 | `MORROWIND-Q.md` | deterministic native asset cook, cache and resolver record | — |
+| `MORROWIND-R.md` | budgeted residency, placeholders and cooked hot reload | — |
 | `golden/` | a windowed GPU capture, once one has been taken | see below |
 
 ## The rule this folder runs on

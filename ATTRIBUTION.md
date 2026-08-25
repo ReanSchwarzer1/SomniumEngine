@@ -2377,3 +2377,17 @@ content-addressed cache entries. An artifact is a standalone immutable blob;
 replacing the manifest can select newly downloaded blobs later, so the format
 does not preclude live update, but MORROWIND-Q intentionally implements no
 network delivery or post-ship patch mechanism.
+
+### 13H.20 Residency and cooked hot reload, MORROWIND-R
+
+MORROWIND-R is an independent Rust policy layer over Q's cooked resolver and
+the existing `somnium_jobs` main-thread apply boundary. Least-recently-used
+eviction, explicit byte/upload budgets, per-LOD keys and stable atomic handles
+are conventional cache techniques; no third-party implementation was copied.
+The polling watcher follows Somnium's own MORROWIND-B debounced asset scan and
+MORROWIND-C transactional shader replacement precedent: a failed reload keeps
+the old complete value published.
+
+The phase plan cites Flax content streaming for secondary architectural
+context. Flax is proprietary under the audit in §13H.0 and supplied no code,
+identifiers, constants, layouts or file structure to this implementation.

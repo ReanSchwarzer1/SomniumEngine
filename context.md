@@ -351,9 +351,21 @@
 >   plus a replaceable manifest leave a live-update seam without implementing
 >   delivery in this sub-phase. Defold was reclassified as strict under the
 >   Defold License 1.0 and used for architecture only.
+>   **MORROWIND-R added budgeted cooked-asset residency and hot reload.**
+>   `ResidencyManager` returns a typed placeholder immediately, performs
+>   resolver I/O through `somnium_jobs`, meters installation with a per-frame
+>   upload budget and atomically publishes only complete values. A deterministic
+>   LRU enforces the byte budget; mesh LODs are independent residency keys, so
+>   coarse geometry can remain while LOD 0 is absent. Stable handles swap back
+>   to placeholders on eviction. The unified cooked watcher covers every Q
+>   kind, and failed or stale reloads retain the old resident revision.
+>   `ResidencySnapshot` is the editor panel model and answers loaded state,
+>   bytes, reason and every requester without exposing policy to UI code.
+>   `vvardenfell` demonstrates the public Q/R path from cook job to immediate
+>   placeholder to budgeted build-artifact replacement.
 >   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
 >   shader-budget, one-job-system, no-second-system, golden-images, tests
->   (**1,816 passed, 0 failed**, against a floor of 945).
+>   (**1,826 passed, 0 failed**, against a floor of 945).
 >   **The license audit reclassified Flax as proprietary**, which the
 >   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
 >   re-sourced to Godot and Fyrox as a result.

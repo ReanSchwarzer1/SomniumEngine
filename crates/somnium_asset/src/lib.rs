@@ -8,6 +8,7 @@ pub mod cook;
 pub mod database;
 pub mod material;
 pub mod preview;
+pub mod residency;
 pub mod scene_file;
 
 use std::collections::HashMap;
