@@ -2435,3 +2435,19 @@ already attributed for `somnium_ui`, while the numeric channel is the existing
 CONTROL-K `CurveEditor` and `somnium_ecs::curve::Curve`. The document,
 archetype catalogue, snapping/history rules, deterministic serialization,
 Animation workspace composition and Vvardenfell consumers are original Rust.
+
+### 13H.24 Sparse virtual shadow maps, MORROWIND-Z
+
+*Published implementation reference.* J. Stephano's public **Sparse Virtual
+Shadow Maps** write-up supplied the sparse page-table, frame-marker and page
+management model. Somnium's implementation is independent Rust/wgpu: a bounded
+deterministic allocator, directional clipmap projections, revision-based
+invalidation, a persistent physical depth atlas, page-table upload, per-page
+raster and shared opaque/terrain/water sampling with explicit CSM fallback.
+No source code was copied or translated.
+
+*Architecture-only read; proprietary.* Unreal Engine's
+`VirtualShadowMaps/` source was used only to frame cache invalidation and
+directional clipmap responsibilities. It supplied no code, identifiers,
+constants, layouts or comments. A fresh search on 2026-08-25 again found no
+mature production Rust/wgpu VSM implementation suitable for adaptation.

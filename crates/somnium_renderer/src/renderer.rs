@@ -68,6 +68,19 @@ pub struct SomniumRenderer {
     pub shadow_resources: ShadowMapResources,
     /// Depth-only shadow render pass (4 cascades).
     pub shadow_pass: ShadowPass,
+    /// Authored directional-light CSM/VSM request. CSM is the measured default.
+    pub directional_shadow_policy: crate::shadow::virtual_map::ShadowLightPolicy,
+    /// Software-sparse page allocator shared by the portable and GPU paths.
+    pub virtual_shadow_cache: crate::shadow::virtual_map::VirtualShadowMap,
+    /// Allocated lazily: a CSM-only scene pays no second shadow-atlas memory.
+    pub virtual_shadow_gpu: Option<crate::shadow::virtual_map::VirtualShadowGpu>,
+    /// Page raster work prepared from screen-visible receivers this frame.
+    pub virtual_shadow_work: Vec<crate::shadow::virtual_map::RenderPage>,
+    /// Honest branch gate: resources alone do not make VSM sampleable.
+    virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness,
+    /// Explicit content revision for in-place mesh edits whose offsets/counts
+    /// remain stable and therefore cannot be discovered by hashing commands.
+    virtual_shadow_caster_content_revision: u64,
 
     /// Global geometry storage.
     pub geometry: GeometryPool,
@@ -751,6 +764,15 @@ impl SomniumRenderer {
             shading_pass,
             shadow_resources,
             shadow_pass,
+            directional_shadow_policy: crate::shadow::virtual_map::ShadowLightPolicy::default(),
+            virtual_shadow_cache: crate::shadow::virtual_map::VirtualShadowMap::new(
+                crate::shadow::virtual_map::VirtualShadowConfig::default(),
+            )
+            .expect("built-in virtual shadow configuration must be valid"),
+            virtual_shadow_gpu: None,
+            virtual_shadow_work: Vec::with_capacity(64),
+            virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness::default(),
+            virtual_shadow_caster_content_revision: 0,
             geometry,
             materials_pool,
             texture_pool,
@@ -1297,6 +1319,54 @@ impl SomniumRenderer {
     pub fn set_directional_light(&mut self, direction: glam::Vec3, color: glam::Vec3) {
         self.light_direction = direction.normalize();
         self.light_color = color;
+    }
+
+    /// Preserve the per-light authored shadow choice.
+    ///
+    /// `Virtual` resolves to the safe CSM branch until
+    /// [`Self::directional_shadow_technique`] reports every GPU stage ready.
+    pub fn set_directional_shadow_policy(
+        &mut self,
+        policy: crate::shadow::virtual_map::ShadowLightPolicy,
+    ) {
+        self.directional_shadow_policy = policy;
+    }
+
+    /// Lazily allocate the physical page pool and shader-visible page table.
+    /// A CSM-only scene never calls this and pays no VSM memory cost.
+    pub fn enable_virtual_shadow_resources(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        config: crate::shadow::virtual_map::VirtualShadowConfig,
+    ) -> Result<(), &'static str> {
+        let cache = crate::shadow::virtual_map::VirtualShadowMap::new(config)?;
+        let gpu = crate::shadow::virtual_map::VirtualShadowGpu::new(device, queue, config)?;
+        self.shading_pass
+            .set_virtual_shadow_resources(device, &self.vis_pass.view, &gpu);
+        self.water_pass.set_virtual_shadow_resources(&gpu);
+        self.virtual_shadow_cache = cache;
+        self.virtual_shadow_gpu = Some(gpu);
+        self.virtual_shadow_readiness = crate::shadow::virtual_map::VirtualShadowReadiness {
+            gpu_resources: true,
+            page_raster: true,
+            shading_sample: true,
+        };
+        Ok(())
+    }
+
+    /// Effective production branch, after capability/completeness fallback.
+    #[must_use]
+    pub fn directional_shadow_technique(&self) -> crate::shadow::virtual_map::ShadowTechnique {
+        self.directional_shadow_policy
+            .effective(self.virtual_shadow_readiness)
+    }
+
+    /// Invalidate cached VSM depth after an in-place caster geometry edit.
+    /// Transform/index/range changes are detected automatically each frame.
+    pub fn invalidate_virtual_shadow_casters(&mut self) {
+        self.virtual_shadow_caster_content_revision =
+            self.virtual_shadow_caster_content_revision.wrapping_add(1);
     }
 
     /// Add a local light (Point or Spot) for this frame (Phase 13C).
@@ -2708,15 +2778,48 @@ impl SomniumRenderer {
         // them reach the atlas. Phase CR-E also drops casters that miss every
         // cascade volume. See `rebuild_shadow_casters`.
         self.rebuild_shadow_casters();
+        self.prepare_virtual_shadow_cache(&ctx.queue, &cascades);
         self.profiler.counters.shadow_casters =
             u32::try_from(self.shadow_caster_scratch.len()).unwrap_or(u32::MAX);
+        if !self.virtual_shadow_work.is_empty() {
+            let clear_atlas = self
+                .virtual_shadow_gpu
+                .as_mut()
+                .is_some_and(crate::shadow::virtual_map::VirtualShadowGpu::take_full_clear);
+            self.profiler.begin(&mut encoder, "VSM Pages");
+            self.shadow_pass.record_virtual(
+                &ctx.queue,
+                &mut encoder,
+                self.virtual_shadow_gpu
+                    .as_ref()
+                    .expect("VSM work requires physical resources"),
+                &self.global_pool.bind_group,
+                &self.shadow_caster_scratch,
+                &self.virtual_shadow_work,
+                clear_atlas,
+            );
+            self.profiler.end(&mut encoder);
+        }
         self.profiler.begin(&mut encoder, "Shadows");
-        self.shadow_pass.record(
-            &mut encoder,
-            &self.shadow_resources.atlas_view,
-            &self.global_pool.bind_group,
-            &self.shadow_caster_scratch,
-        );
+        match self.directional_shadow_technique() {
+            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_pass.record(
+                &mut encoder,
+                &self.shadow_resources.atlas_view,
+                &self.global_pool.bind_group,
+                &self.shadow_caster_scratch,
+            ),
+            crate::shadow::virtual_map::ShadowTechnique::Virtual => {
+                // Keep a coarse CSM render as the authored policy's
+                // last-resort page-miss fallback. Sparse page raster happened
+                // above; opaque, terrain, and water consumers sample it later.
+                self.shadow_pass.record(
+                    &mut encoder,
+                    &self.shadow_resources.atlas_view,
+                    &self.global_pool.bind_group,
+                    &self.shadow_caster_scratch,
+                );
+            }
+        }
         self.profiler.end(&mut encoder);
 
         // ── 5.5 Phase 15B/15E2: two-phase GPU instance culling ───────────────
@@ -4298,15 +4401,104 @@ impl SomniumRenderer {
     ///   which is why UE uses it in place of a per-asset shadow distance.
     ///
     /// UE applies it to whole-scene (CSM) shadows only and skips it for virtual
-    /// shadow maps, which need the draw for GPU-side caching. Somnium has only
-    /// the cascade path, so it applies everywhere.
+    /// shadow maps, which need the draw for GPU-side caching. Somnium follows
+    /// that split now: the measured CSM default keeps the threshold, while an
+    /// effective VSM light retains every caster for its demanded pages (and
+    /// therefore for the coarse CSM miss fallback rendered in the same frame).
     ///
     /// Phase CR-E: a caster that fails the **camera** frustum can still shadow
     /// into view. Those live in `shadow_only_queue` with instance indices after
     /// the vis draws. This method cascade-frustum-culls both lists; it never
     /// camera-culls a caster.
+    /// Build the software-sparse page plan from receivers that survived the
+    /// main-view submission.  This is screen-space demand at draw granularity:
+    /// off-screen objects never request pages, and very large queues are
+    /// deterministically reduced to 4k receiver samples before neighbourhood
+    /// expansion. A later depth-reduction compute pass can feed the same cache
+    /// at pixel-tile granularity without changing its allocation contract.
+    fn prepare_virtual_shadow_cache(
+        &mut self,
+        queue: &wgpu::Queue,
+        cascades: &[crate::shadow::cascade::CascadeData; crate::shadow::NUM_CASCADES],
+    ) {
+        use crate::shadow::virtual_map::{DirectionalClipmap, ShadowTechnique};
+
+        self.virtual_shadow_work.clear();
+        self.profiler.counters.virtual_shadow_pages = 0;
+        self.profiler.counters.virtual_shadow_resident = 0;
+        if self.directional_shadow_policy.technique != ShadowTechnique::Virtual
+            || self.virtual_shadow_gpu.is_none()
+        {
+            if let Some(gpu) = &self.virtual_shadow_gpu {
+                gpu.set_enabled(queue, false, self.directional_shadow_policy.csm_fallback);
+            }
+            return;
+        }
+
+        let pages_per_axis = self.virtual_shadow_cache.config().pages_per_axis();
+        let clipmaps =
+            std::array::from_fn::<_, { crate::shadow::NUM_CASCADES }, _>(|i| DirectionalClipmap {
+                view_proj: cascades[i].view_proj,
+                split_depth: cascades[i].split_depth,
+                pages_per_axis,
+            });
+        let light_revision = virtual_shadow_light_revision(self.light_direction, cascades);
+        let caster_revision = virtual_shadow_caster_revision(
+            self.draw_queue.iter().chain(self.shadow_only_queue.iter()),
+            self.virtual_shadow_caster_content_revision,
+        );
+        self.virtual_shadow_cache
+            .begin_frame(light_revision, caster_revision);
+
+        let stride = (self.draw_queue.len() / 4_096).max(1);
+        for command in self.draw_queue.iter().step_by(stride) {
+            // Demand is receiver-driven. A mesh that does not cast can still
+            // receive a shadow, so `casts_shadow` must not suppress its page.
+            let world = command.transform.transform_point3(glam::Vec3::ZERO);
+            let view_depth = -(self.view_matrix * world.extend(1.0)).z;
+            if let Some(page) = self.virtual_shadow_cache.request_screen_sample(
+                self.directional_shadow_policy.light_id,
+                world,
+                view_depth.max(0.0),
+                &clipmaps,
+            ) {
+                self.virtual_shadow_cache.request_neighbourhood(page, 1);
+            }
+        }
+        // Water shades in its forward pass, so it is not represented in the
+        // opaque draw queue above. Demand its receiver pages explicitly or a
+        // lake would always take the CSM fallback while its shore used VSM.
+        for (_, transform, _, _, _, _) in &self.water_queue {
+            let world = transform.transform_point3(glam::Vec3::ZERO);
+            let view_depth = -(self.view_matrix * world.extend(1.0)).z;
+            if let Some(page) = self.virtual_shadow_cache.request_screen_sample(
+                self.directional_shadow_policy.light_id,
+                world,
+                view_depth.max(0.0),
+                &clipmaps,
+            ) {
+                self.virtual_shadow_cache.request_neighbourhood(page, 1);
+            }
+        }
+        self.virtual_shadow_work = self.virtual_shadow_cache.resolve(&clipmaps);
+        self.profiler.counters.virtual_shadow_pages =
+            u32::try_from(self.virtual_shadow_work.len()).unwrap_or(u32::MAX);
+        self.profiler.counters.virtual_shadow_resident = self.virtual_shadow_cache.stats().resident;
+        if let Some(gpu) = &self.virtual_shadow_gpu {
+            gpu.upload_page_table(
+                queue,
+                &self.virtual_shadow_cache,
+                self.directional_shadow_policy.light_id,
+            );
+            gpu.set_enabled(queue, true, self.directional_shadow_policy.csm_fallback);
+        }
+    }
+
     fn rebuild_shadow_casters(&mut self) {
-        let threshold = self.shadow_radius_threshold;
+        let threshold = match self.directional_shadow_technique() {
+            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_radius_threshold,
+            crate::shadow::virtual_map::ShadowTechnique::Virtual => 0.0,
+        };
         let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
@@ -4340,6 +4532,49 @@ impl SomniumRenderer {
             );
         }
     }
+}
+
+fn virtual_shadow_light_revision(
+    direction: glam::Vec3,
+    cascades: &[crate::shadow::cascade::CascadeData; crate::shadow::NUM_CASCADES],
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |word: u32| {
+        hash ^= u64::from(word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for value in direction.to_array() {
+        mix(value.to_bits());
+    }
+    for cascade in cascades {
+        for value in cascade.view_proj.to_cols_array() {
+            mix(value.to_bits());
+        }
+        mix(cascade.split_depth.to_bits());
+    }
+    hash
+}
+
+fn virtual_shadow_caster_revision<'a>(
+    commands: impl IntoIterator<Item = &'a DrawCommand>,
+    content_revision: u64,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ content_revision;
+    let mut mix = |word: u32| {
+        hash ^= u64::from(word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for command in commands {
+        mix(command.vertex_offset);
+        mix(command.index_offset);
+        mix(command.index_count);
+        mix(command.material_id);
+        mix(u32::from(command.casts_shadow));
+        for value in command.transform.to_cols_array() {
+            mix(value.to_bits());
+        }
+    }
+    hash
 }
 
 /// Frozen per-frame instance-buffer partition.

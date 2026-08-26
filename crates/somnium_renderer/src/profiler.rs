@@ -120,6 +120,9 @@ pub struct FrameCounters {
     /// Draws that survived shadow-caster culling (Phase 24AE). Next to
     /// `draw_calls` because the pair is the whole story of the shadow pass.
     pub shadow_casters: u32,
+    /// Physical VSM tiles rasterised this frame and total resident tiles.
+    pub virtual_shadow_pages: u32,
+    pub virtual_shadow_resident: u32,
 }
 
 /// A scope opened this frame, before its timestamps have been read back.
@@ -928,6 +931,10 @@ impl GpuProfiler {
         out.push(format!(
             "{:<26} {} of {} draws",
             "shadow casters", c.shadow_casters, c.draw_calls
+        ));
+        out.push(format!(
+            "{:<26} {} rendered / {} resident",
+            "virtual shadow pages", c.virtual_shadow_pages, c.virtual_shadow_resident
         ));
         out
     }

@@ -117,6 +117,14 @@ struct Instance {
 @group(0) @binding(8) var<uniform> frame: WaterFrameData;
 @group(0) @binding(9) var reflection_tex: texture_2d_array<f32>;
 @group(0) @binding(10) var reflection_sampler: sampler;
+struct VirtualShadowParams {
+    geometry: vec4<u32>,
+    budget: vec4<u32>,
+}
+@group(0) @binding(11) var virtual_shadow_atlas: texture_depth_2d;
+@group(0) @binding(12) var virtual_shadow_sampler: sampler_comparison;
+@group(0) @binding(13) var<storage, read> virtual_shadow_pages: array<u32>;
+@group(0) @binding(14) var<uniform> virtual_shadow: VirtualShadowParams;
 
 @group(1) @binding(0) var<uniform> material: WaterMaterial;
 @group(1) @binding(1) var body_mask: texture_2d<f32>;
@@ -422,10 +430,40 @@ fn sample_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
     let cascade = get_cascade_index(view_depth);
     let clip = light.view_proj[cascade] * vec4<f32>(world_pos, 1.0);
     let ndc = clip.xyz / clip.w;
-    let uv = atlas_uv(cascade, vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5));
-    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
+    let level_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(level_uv < vec2<f32>(0.0)) || any(level_uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
         return 1.0;
     }
+
+    if virtual_shadow.budget.z != 0u {
+        let side = virtual_shadow.geometry.x;
+        let page_texels = virtual_shadow.geometry.y;
+        let atlas_texels = virtual_shadow.geometry.z;
+        if side > 0u && page_texels > 0u && atlas_texels > 0u {
+            let page = min(vec2<u32>(level_uv * f32(side)), vec2<u32>(side - 1u));
+            let table_index = cascade * side * side + page.y * side + page.x;
+            let physical = virtual_shadow_pages[table_index];
+            if physical != 0xffffffffu {
+                let physical_side = atlas_texels / page_texels;
+                let tile = vec2<u32>(physical % physical_side, physical / physical_side);
+                let half_texel = 0.5 / f32(page_texels);
+                let local = clamp(
+                    fract(level_uv * f32(side)),
+                    vec2<f32>(half_texel),
+                    vec2<f32>(1.0 - half_texel),
+                );
+                let virtual_uv = (vec2<f32>(tile) + local) / f32(physical_side);
+                return textureSampleCompare(
+                    virtual_shadow_atlas, virtual_shadow_sampler, virtual_uv, ndc.z - 0.0002,
+                );
+            }
+            if virtual_shadow.budget.w == 0u {
+                return 1.0;
+            }
+        }
+    }
+
+    let uv = atlas_uv(cascade, level_uv);
     let texel = 1.0 / light.shadow_map_size;
     var result = 0.0;
     for (var y = -1; y <= 1; y = y + 1) {

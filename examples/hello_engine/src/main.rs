@@ -1267,13 +1267,21 @@ impl GameApp for HelloGame {
                 -elevation.to_radians(),
                 0.0,
             );
+            let mut sun =
+                LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT);
+            // Track-7 timing harness. The authored/editor route remains the
+            // Light Details enum; this switch only makes unattended CSM/VSM
+            // A/B runs reproducible without rewriting a shipped scene.
+            if std::env::var("SOMNIUM_VIRTUAL_SHADOWS").as_deref() == Ok("1") {
+                sun.shadow_technique = LightShadowTechnique::Virtual;
+            }
             ctx.world.spawn((
                 Transform {
                     translation: Vec3::ZERO,
                     rotation: light_rot,
                     scale: Vec3::ONE,
                 },
-                LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT),
+                sun,
                 Name::new("SunLight"),
                 WorldTransform::identity(),
             ));
@@ -1832,7 +1840,7 @@ impl GameApp for HelloGame {
                 )
             });
         let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
-        if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+        if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
             let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
@@ -1871,6 +1879,25 @@ impl GameApp for HelloGame {
 
                         match light.light_type {
                             LightType::Directional => {
+                                let shadow_technique = if std::env::var("SOMNIUM_VIRTUAL_SHADOWS")
+                                    .as_deref()
+                                    == Ok("1")
+                                {
+                                    LightShadowTechnique::Virtual
+                                } else {
+                                    light.shadow_technique
+                                };
+                                if shadow_technique == LightShadowTechnique::Virtual
+                                    && renderer.virtual_shadow_gpu.is_none()
+                                {
+                                    if let Err(error) = renderer.enable_virtual_shadow_resources(
+                                        &render_ctx.device,
+                                        &render_ctx.queue,
+                                        somnium_renderer::shadow::virtual_map::VirtualShadowConfig::default(),
+                                    ) {
+                                        tracing::warn!(%error, "virtual shadow resources unavailable; using CSM");
+                                    }
+                                }
                                 // Phase 25M: the sun's illuminance is what
                                 // survives the trip through the atmosphere, so
                                 // it reddens as the sun drops and reaches zero
@@ -1887,6 +1914,16 @@ impl GameApp for HelloGame {
                                 renderer.set_directional_light(
                                     to_light,
                                     light.photometric_color() * survives,
+                                );
+                                renderer.set_directional_shadow_policy(
+                                    somnium_renderer::shadow::virtual_map::ShadowLightPolicy {
+                                        light_id: 0,
+                                        technique: match shadow_technique {
+                                            LightShadowTechnique::Cascaded => somnium_renderer::shadow::virtual_map::ShadowTechnique::Cascaded,
+                                            LightShadowTechnique::Virtual => somnium_renderer::shadow::virtual_map::ShadowTechnique::Virtual,
+                                        },
+                                        csm_fallback: true,
+                                    },
                                 );
                                 renderer.set_moon_intensity(light.moon_intensity);
                             }

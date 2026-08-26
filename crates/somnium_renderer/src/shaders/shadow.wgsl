@@ -45,9 +45,10 @@ struct DirectionalLight {
 
 struct CascadeUniform {
     index: u32,
-    _pad0: u32,
+    virtual_page: u32,
     _pad1: u32,
     _pad2: u32,
+    page_view_proj: mat4x4<f32>,
 }
 
 // @group(0) — GlobalResourcePool (bindings 0..6)
@@ -111,7 +112,10 @@ fn vs_main(
     let index     = indices[instance.index_offset + v_idx];
     let vert      = vertices[instance.vertex_offset + index];
     let world_pos = instance.model * vec4<f32>(vert.pos_x, vert.pos_y, vert.pos_z, 1.0);
-    let vp        = light.view_proj[cascade.index];
+    var vp        = light.view_proj[cascade.index];
+    if cascade.virtual_page != 0u {
+        vp = cascade.page_view_proj;
+    }
 
     var out: VOut;
     out.clip = vp * world_pos;

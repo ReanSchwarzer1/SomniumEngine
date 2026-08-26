@@ -388,6 +388,25 @@
 >   segments plus undoable pin/unpin. The required 100 unload/reload loop keeps
 >   both loaded and unloaded entity-count baselines exact and restores `Name`
 >   and `Transform` through the registered schema on every iteration.
+>   **S's initial evidence was API-complete but Hello Engine-incomplete; that
+>   integration gap is corrected.** Terrain now carries a reflected World
+>   Partition block with authored cell/radius/priority/pin controls and
+>   read-only, non-serialized live diagnostics in generated Details. The
+>   production coordinator follows the renderer's same-frame active camera,
+>   drains actors on terrain deletion, and drains/rebuilds when cell size
+>   changes. Create → Terrain and the default landscape attach it. Create → UI
+>   Canvas likewise creates a selectable reflected attachment, and Hello Engine
+>   visibly draws a game-owned public `UiCanvas`; Vvardenfell remains the
+>   boundary proof, not the only place runtime UI works.
+>   **MORROWIND-Z completed sparse virtual shadow maps.** Directional lights
+>   expose a generated-Details Cascaded/Virtual selector. Virtual uses a
+>   four-level clipmap page table, bounded deterministic allocation, persistent
+>   physical depth atlas, light/caster invalidation and per-page raster;
+>   opaque/terrain and water sample the same cache with explicit CSM page-miss
+>   fallback. Matched 120-sample `.somtime` rows and display-referred captures
+>   exist for Coastal-ground and Island. CSM remains the measured default on
+>   those two small maps; Virtual rendered 21 and 45 pages respectively and is
+>   retained as an authored quality/scaling choice.
 >   **MORROWIND-T closed Track 4 with HLOD, impostors and a floating origin.**
 >   The asset cook can merge per-cell proxy geometry, transform normals,
 >   enforce a triangle budget, merge representative material colour and retain

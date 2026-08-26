@@ -90,6 +90,17 @@ struct Decal {
 /// pays one uniform read.
 @group(1) @binding(23) var<uniform> decal_params: vec4<u32>;
 
+// MORROWIND-Z: software-sparse shadow cache. The params buffer keeps this path
+// disabled until allocation, page raster, and sampling are all live.
+struct VirtualShadowParams {
+    geometry: vec4<u32>, // pages/axis, page texels, atlas texels, clip levels
+    budget: vec4<u32>, // physical pages, render budget, enabled, CSM fallback
+}
+@group(1) @binding(24) var virtual_shadow_atlas: texture_depth_2d;
+@group(1) @binding(25) var virtual_shadow_sampler: sampler_comparison;
+@group(1) @binding(26) var<storage, read> virtual_shadow_pages: array<u32>;
+@group(1) @binding(27) var<uniform> virtual_shadow: VirtualShadowParams;
+
 /// Sun visibility through the cloud layer at a world position.
 ///
 /// Returns 1 — no shadow at all — when the cloud pass is off, when the point
@@ -847,6 +858,63 @@ fn sample_shadow_cascade(
     return shadow / f32(SHADOW_FILTER_SAMPLES);
 }
 
+/// Sparse-page lookup for the main opaque/terrain path.
+///
+/// Returns -1 when the page is absent. The caller then samples the resident
+/// CSM atlas, making a page-budget miss a coarse shadow rather than a flash of
+/// unshadowed geometry.
+fn sample_virtual_shadow(
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    view_depth: f32,
+) -> f32 {
+    if virtual_shadow.budget.z == 0u {
+        return -1.0;
+    }
+    let side = virtual_shadow.geometry.x;
+    let page_texels = virtual_shadow.geometry.y;
+    let atlas_texels = virtual_shadow.geometry.z;
+    let levels = virtual_shadow.geometry.w;
+    if side == 0u || page_texels == 0u || atlas_texels == 0u || levels == 0u {
+        return -1.0;
+    }
+
+    let level = min(get_cascade_index(view_depth), levels - 1u);
+    // The physical-page raster uses the same normal-offset convention as CSM.
+    let receiver = world_pos + normal * 0.01;
+    let clip = light.view_proj[level] * vec4<f32>(receiver, 1.0);
+    if abs(clip.w) <= 1e-6 {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0 {
+        return -1.0;
+    }
+
+    let virtual_texel = min(vec2<u32>(uv * f32(side)), vec2<u32>(side - 1u));
+    let table_index = level * side * side + virtual_texel.y * side + virtual_texel.x;
+    let physical = virtual_shadow_pages[table_index];
+    if physical == 0xffffffffu {
+        return select(1.0, -1.0, virtual_shadow.budget.w != 0u);
+    }
+
+    let physical_side = atlas_texels / page_texels;
+    let tile = vec2<u32>(physical % physical_side, physical / physical_side);
+    let local = fract(uv * f32(side));
+    // Keep hardware bilinear filtering half a texel inside this tile so it
+    // cannot read an unrelated neighbour from the physical pool.
+    let half_texel = 0.5 / f32(page_texels);
+    let page_uv = clamp(local, vec2<f32>(half_texel), vec2<f32>(1.0 - half_texel));
+    let atlas_uv = (vec2<f32>(tile) + page_uv) / f32(physical_side);
+    return textureSampleCompare(
+        virtual_shadow_atlas,
+        virtual_shadow_sampler,
+        atlas_uv,
+        ndc.z - 0.0002,
+    );
+}
+
 // ── Contact shadows (Phase 24X) ─────────────────────────────────────────────
 //
 // A shadow map cannot resolve contact. Its texels cover centimetres at best,
@@ -955,6 +1023,14 @@ fn contact_shadow(
 /// switch shows as a line across the ground where filter width and resolution
 /// change together, and it is far more obvious in motion than in a still.
 fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel: vec2<f32>) -> f32 {
+    let sparse = sample_virtual_shadow(world_pos, normal, view_depth);
+    if sparse >= 0.0 {
+        var result = sparse;
+        if enable_contact && (cluster_params.shading_mode & 4u) != 0u {
+            result = min(result, contact_shadow(world_pos, normal, normalize(light.direction), pixel));
+        }
+        return result;
+    }
     let cascade = get_cascade_index(view_depth);
     let near = select(light.cascade_splits[cascade - 1u], 0.0, cascade == 0u);
     let far = light.cascade_splits[cascade];

@@ -12,6 +12,7 @@
 //! ```
 
 pub mod cascade;
+pub mod virtual_map;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu;
