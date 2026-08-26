@@ -3,6 +3,19 @@
 **Complete, 2026-08-25; Hello Engine integration corrected 2026-08-25.**
 Track 4 (SILT STRIDER), after MORROWIND-R.
 
+**Details clarification, 2026-08-26.** The attachment is now labelled **Actor
+World Partition**, and its controls explicitly say Actor Cell/Load Radius.
+MORROWIND-S streams cell-owned ECS actors; it does not stream or hide the
+terrain resource's render chunks. Coastal rendering its visible landscape is
+therefore expected and is governed by terrain frustum/LOD, not these controls.
+
+**Hello UI Canvas visibility correction, 2026-08-26.** `UiCanvas::apply_canvas`
+now uses the retained tree's real resize path, updating the root bounds, clip
+and cached child layout instead of changing only `screen_size`. The starter
+canvas is centred clear of editor chrome and loads bundled Inter into its own
+font atlas. A post-editor-UI window capture proves the panel and the text
+`Hello Engine - UI Canvas` are both visible.
+
 ## Hello Engine integration correction
 
 The initial record proved the public partition API and Vvardenfell boundary but

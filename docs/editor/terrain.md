@@ -2,9 +2,11 @@
 
 Select a Terrain entity, then press **F6** (or use the Landscape toolbar button) to enter sculpt mode. The left **Sculpt** strip becomes the brush.
 
-## World partition streaming
+## Actor world partition streaming
 
-Terrain Details includes a generated **World Partition** panel. **Enabled**, **Cell Size**, **Load Radius**, and **Source Priority** control production cell streaming around the view that is actually rendered (the editor camera in Edit and the player camera in Play). **Manual Pin** can keep one cell resident while inspecting it. The read-only **Diagnostics** group reports wanted, loaded, and pending cells, resident actor count, and the current streaming status; these live counters are recomputed and are not stored in the scene.
+Terrain Details includes a generated **Actor World Partition** panel. **Stream Actors**, **Actor Cell Size**, **Actor Load Radius**, and **Source Priority** control cell-owned actor streaming around the view that is actually rendered (the editor camera in Edit and the player camera in Play). **Manual Pin** can keep one actor cell resident while inspecting it. The read-only **Diagnostics** group reports wanted, loaded, and pending cells, resident actor count, and the current streaming status; these live counters are recomputed and are not stored in the scene.
+
+This does **not** hide or stream the Terrain entity's mesh chunks. Coastal is one authored terrain resource, so its chunks continue through the terrain frustum/LOD pipeline and the visible landscape can span the whole map. World partition controls actors stored under `assets/world_partition`; terrain chunk residency/virtual terrain is a separate renderer feature.
 
 ## Brushes
 

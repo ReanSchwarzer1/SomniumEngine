@@ -15,10 +15,12 @@ pub use nav::{Direction, InputSource, NavAction, NavActions, NavCandidate, NavLi
 use crate::{
     message::NodeHandle,
     pass::UiPass,
+    types::{HorizontalAlignment, VerticalAlignment},
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{border::BorderBuilder, text::TextBuilder},
 };
+#[cfg(test)]
 use glam::Vec2;
 use winit::event::WindowEvent;
 use winit::window::Window;
@@ -52,10 +54,17 @@ pub struct UiCanvas {
 
 impl UiCanvas {
     pub fn new(width: f32, height: f32) -> Self {
+        let mut ui = UserInterface::new(width, height);
+        // Runtime canvases are standalone trees; they do not share the editor
+        // shell's atlas. Without a bundled default, Text nodes laid out but
+        // emitted no glyphs until every game happened to call `add_font`.
+        let font_id = ui
+            .add_font(include_bytes!("../../assets/fonts/Inter-Regular.ttf"))
+            .expect("bundled Inter runtime font parses");
         Self {
-            ui: UserInterface::new(width, height),
+            ui,
             pass: None,
-            font_id: 0,
+            font_id,
             canvas: Canvas::screen(),
             world_pixels_per_unit: 100.0,
             last_frame_at: None,
@@ -113,7 +122,11 @@ impl UiCanvas {
     /// result without a GPU.
     pub fn apply_canvas(&mut self, viewport: glam::Vec2) -> CanvasLayout {
         let layout = self.layout_for(viewport);
-        self.ui.screen_size = layout.logical_size;
+        // `screen_size` is not a standalone value: resize also updates the
+        // retained root's dimensions/clip and invalidates cached child layout.
+        // Assigning it directly left canvases created at 640x360 painting in a
+        // stale 640x360 root after switching to a 1920x1080 reference canvas.
+        self.ui.resize(layout.logical_size.x, layout.logical_size.y);
         layout
     }
 
@@ -277,7 +290,11 @@ impl UiCanvas {
             WidgetBuilder::new()
                 .with_width(280.0)
                 .with_height(64.0)
-                .with_desired_position(Vec2::new(40.0, 40.0))
+                // The old (40,40) sample landed entirely under Hello Engine's
+                // menu/toolbar and left dock. Centre it so the starter canvas
+                // is visibly proven in both Edit and Play.
+                .with_horizontal_alignment(HorizontalAlignment::Center)
+                .with_vertical_alignment(VerticalAlignment::Center)
                 .with_background(crate::theme::BG_HEADER)
                 .with_foreground(crate::theme::BORDER_DARK),
         )
@@ -432,6 +449,27 @@ mod tests {
         assert!(h.is_some());
         canvas.ui_mut().perform_layout();
         canvas.ui_mut().draw();
+    }
+
+    #[test]
+    fn pause_banner_is_visible_at_the_canvas_centre() {
+        // Hello Engine constructs its tree at 640x360, then the authored
+        // component changes it to a 1920x1080 scale-with-resolution canvas.
+        // This exact transition used to leave the retained root at 640x360.
+        let mut canvas = UiCanvas::new(640.0, 360.0);
+        let banner = canvas.add_pause_banner("Hello Engine - UI Canvas");
+        canvas.set_canvas(Canvas::scaled(Vec2::new(1920.0, 1080.0), 0.5));
+        canvas.apply_canvas(Vec2::new(1280.0, 720.0));
+        canvas.ui_mut().perform_layout();
+        let bounds = canvas.ui().screen_bounds(banner);
+        assert!((bounds.x - 820.0).abs() < 0.5, "not centred: {bounds:?}");
+        assert!((bounds.y - 508.0).abs() < 0.5, "not centred: {bounds:?}");
+        assert_eq!((bounds.w, bounds.h), (280.0, 64.0));
+        canvas.ui_mut().draw();
+        assert!(
+            !canvas.ui().draw_ctx.commands.is_empty(),
+            "the visible retained banner produced no GPU draw commands"
+        );
     }
 
     // ── MORROWIND-E2 ────────────────────────────────────────────────────────
