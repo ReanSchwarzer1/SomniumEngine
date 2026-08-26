@@ -103,7 +103,7 @@ export type SomniumFoliage = {
 --- `somnium.Light` (schema version 1).
 export type SomniumLight = {
 	light_type: number --[[ Directional | Point | Spot | Rect | Disc | Tube ]],
-	shadow_technique: number --[[ Cascaded (CSM) | Virtual (Experimental) ]],
+	shadow_technique: boolean,
 	color: Vec3,
 	intensity: number,
 	color_temperature_k: number,

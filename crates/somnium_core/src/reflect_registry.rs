@@ -147,22 +147,24 @@ impl ReflectField for LightType {
     }
 }
 
-const LIGHT_SHADOW_TECHNIQUE_NAMES: &[&str] = &["Cascaded (CSM)", "Virtual (Experimental)"];
-
 impl ReflectField for LightShadowTechnique {
     fn field_type() -> FieldType {
-        FieldType::Enum(LIGHT_SHADOW_TECHNIQUE_NAMES)
+        // There are exactly two authored choices. Presenting them as an enum
+        // made the common per-light operation look like a hidden mode selector
+        // in Details; a checkbox is the honest control.
+        FieldType::Bool
     }
 
     fn to_reflect(&self) -> ReflectValue {
-        ReflectValue::I64(match self {
-            Self::Cascaded => 0,
-            Self::Virtual => 1,
-        })
+        ReflectValue::Bool(matches!(self, Self::Virtual))
     }
 
     fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
         match value {
+            ReflectValue::Bool(false) => Ok(Self::Cascaded),
+            ReflectValue::Bool(true) => Ok(Self::Virtual),
+            // Accept the one-release enum encoding so scenes authored by the
+            // original MORROWIND-Z UI migrate without losing their choice.
             ReflectValue::I64(0) => Ok(Self::Cascaded),
             ReflectValue::I64(1) => Ok(Self::Virtual),
             ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
@@ -916,8 +918,8 @@ fn light_schema() -> ComponentSchema {
         LightComponent as "somnium.Light", display "Light", version 1,
         fields {
             light_type,
-            shadow_technique { group: "Shadows", display_name: "Technique",
-                doc: "Cascaded is the measured default. Virtual lazily allocates sparse shadow pages and uses CSM for unavailable pages or adapters." },
+            shadow_technique { group: "Shadows", display_name: "Virtual Shadows",
+                doc: "Off uses measured-default cascaded shadows. On lazily allocates virtual shadow pages and keeps CSM as the unavailable-page/adapter fallback." },
             color,
             intensity { min: 0.0 },
             color_temperature_k { min: 0.0, max: 20_000.0 },
@@ -994,12 +996,12 @@ fn terrain_schema() -> ComponentSchema {
 
 fn world_partition_schema() -> ComponentSchema {
     component_schema! {
-        WorldPartitionComponent as "somnium.WorldPartition", display "World Partition", version 1,
+        WorldPartitionComponent as "somnium.WorldPartition", display "Actor World Partition", version 1,
         fields {
-            enabled { group: "Streaming" },
-            cell_size { min: 1.0, soft_max: 1024.0, unit: "m", group: "Streaming" },
-            load_radius { min: 0.0, soft_max: 4096.0, unit: "m", group: "Streaming" },
-            source_priority { min: 0, max: 255, group: "Streaming" },
+            enabled { group: "Actor Streaming", display_name: "Stream Actors" },
+            cell_size { min: 1.0, soft_max: 1024.0, unit: "m", group: "Actor Streaming", display_name: "Actor Cell Size" },
+            load_radius { min: 0.0, soft_max: 4096.0, unit: "m", group: "Actor Streaming", display_name: "Actor Load Radius" },
+            source_priority { min: 0, max: 255, group: "Actor Streaming" },
             pin_cell { group: "Manual Pin" },
             pin_x { group: "Manual Pin" },
             pin_y { group: "Manual Pin" },
@@ -1137,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_fields_travel_as_named_variants() {
+    fn enum_and_shadow_toggle_fields_use_the_right_controls() {
         let registry = component_registry();
         let schema = registry.by_name("somnium.Light").unwrap();
         let field = schema.field_by_name("light_type").unwrap();
@@ -1148,10 +1150,8 @@ mod tests {
         assert_eq!(names[2], "Spot");
 
         let shadow = schema.field_by_name("shadow_technique").unwrap();
-        let FieldType::Enum(shadow_names) = &shadow.ty else {
-            panic!("shadow_technique should be an enum field");
-        };
-        assert_eq!(shadow_names, &LIGHT_SHADOW_TECHNIQUE_NAMES);
+        assert_eq!(shadow.ty, FieldType::Bool);
+        assert_eq!(shadow.display_name, Some("Virtual Shadows"));
 
         let mut world = World::new();
         let mut light = LightComponent::point(3.0, 10.0);
@@ -1161,8 +1161,13 @@ mod tests {
         assert_eq!(snap[&field.id], ReflectValue::I64(1), "Point is variant 1");
         assert_eq!(
             snap[&shadow.id],
-            ReflectValue::I64(1),
-            "Virtual is the authored shadow variant"
+            ReflectValue::Bool(true),
+            "Virtual is the checked shadow toggle"
+        );
+        assert_eq!(
+            LightShadowTechnique::from_reflect(&ReflectValue::I64(1), "shadow_technique").unwrap(),
+            LightShadowTechnique::Virtual,
+            "the original enum encoding remains loadable"
         );
     }
 

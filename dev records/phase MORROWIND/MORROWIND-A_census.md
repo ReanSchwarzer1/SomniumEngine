@@ -19,11 +19,11 @@ None of this is a Rust parser and it does not pretend to be one.
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `somnium_renderer` | 57,843 | +7,637 | 31.4% | 387 | +59 | 86 | 52 |
-| `somnium_ui` | 57,165 | +29,635 | 31.1% | 578 | +363 | 98 | 2 |
-| `somnium_core` | 31,463 | +12,243 | 17.1% | 356 | +139 | 42 | 0 |
+| `somnium_ui` | 57,204 | +29,674 | 31.1% | 579 | +364 | 98 | 2 |
+| `somnium_core` | 31,468 | +12,248 | 17.1% | 356 | +139 | 42 | 0 |
 | `somnium_asset` | 6,183 | +4,544 | 3.4% | 47 | +41 | 11 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.8% | 69 | +15 | 9 | 0 |
-| `somnium_script` | 4,878 | +63 | 2.7% | 55 | — | 12 | 0 |
+| `somnium_script` | 4,878 | +63 | 2.6% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,754 | +297 | 2.6% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.4% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.7% | 66 | +66 | 6 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **184,058** | +70,166 | | **1824** | +879 | | |
+| **Total** | **184,102** | +70,210 | | **1825** | +880 | | |
 
 The top three crates are **79.6%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -103,7 +103,7 @@ is a system this phase still owes.
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
 | `prefab` | 6 | 2 | +4 | Both are comments in the scripting crate. No prefab system (Track 3). |
-| `dock` | 6 | 5 | +1 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
+| `dock` | 7 | 5 | +2 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 11 | 1 | +10 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |
 

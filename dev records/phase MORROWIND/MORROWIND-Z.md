@@ -20,12 +20,17 @@ CSM path:
   explicit CSM fallback for missing pages or unavailable resources;
 - `VSM Pages`, scheduled-page and resident-page profiler/timing evidence.
 
-`Light > Shadows > Technique` is an editable generated-Details enum. Cascaded
-and Virtual survive snapshot/scene round trips. GPU resources are allocated
-lazily only after an authored light requests Virtual. The unattended
+`Light > Shadows > Virtual Shadows` is an editable generated-Details checkbox.
+Off/CSM and on/VSM survive snapshot/scene round trips. GPU resources are
+allocated lazily only after an authored light requests Virtual. The unattended
 `SOMNIUM_VIRTUAL_SHADOWS=1` switch is classified as a capture/timing harness;
 it overrides the effective demo sun without replacing the authored Details
 route.
+
+**Details correction, 2026-08-26.** Because there are only two choices, the
+generated control is now a **Virtual Shadows** checkbox: off is CSM and on is
+VSM. The reflected loader still accepts Z's original `0/1` enum encoding so
+scenes authored before this presentation correction retain their choice.
 
 The CSM-only small-caster threshold is disabled for effective VSM, because
 page caching—not projected-radius rejection—owns that cost. VSM demand includes
