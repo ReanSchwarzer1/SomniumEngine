@@ -103,6 +103,7 @@ export type SomniumFoliage = {
 --- `somnium.Light` (schema version 1).
 export type SomniumLight = {
 	light_type: number --[[ Directional | Point | Spot | Rect | Disc | Tube ]],
+	shadow_technique: number --[[ Cascaded (CSM) | Virtual (Experimental) ]],
 	color: Vec3,
 	intensity: number,
 	color_temperature_k: number,
@@ -292,6 +293,17 @@ export type SomniumTransform = {
 	scale: Vec3,
 }
 
+--- `somnium.UiCanvas` (schema version 1).
+export type SomniumUiCanvas = {
+	enabled: boolean,
+	space: number --[[ Screen | World | Overlay ]],
+	width: number,
+	height: number,
+	pixels_per_unit: number,
+	billboard: boolean,
+	layer: number,
+}
+
 --- `somnium.VoxelTerrain` (schema version 1).
 export type SomniumVoxelTerrain = {
 	radius_chunks: number,
@@ -355,6 +367,23 @@ export type SomniumWeather = {
 	particle_rate: number,
 }
 
+--- `somnium.WorldPartition` (schema version 1).
+export type SomniumWorldPartition = {
+	enabled: boolean,
+	cell_size: number,
+	load_radius: number,
+	source_priority: number,
+	pin_cell: boolean,
+	pin_x: number,
+	pin_y: number,
+	pin_z: number,
+	wanted_cells: number, -- engine-owned; reading only
+	loaded_cells: number, -- engine-owned; reading only
+	pending_cells: number, -- engine-owned; reading only
+	resident_actors: number, -- engine-owned; reading only
+	status: string, -- engine-owned; reading only
+}
+
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
 	buoyantVessel: SomniumBuoyantVessel?,
@@ -375,9 +404,11 @@ export type SelfComponents = {
 	terrain: SomniumTerrain?,
 	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,
+	uiCanvas: SomniumUiCanvas?,
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
 	weather: SomniumWeather?,
+	worldPartition: SomniumWorldPartition?,
 }
 
 --- Input as a fixed step sees it. Letters and digits are their uppercase

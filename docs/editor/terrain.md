@@ -2,6 +2,10 @@
 
 Select a Terrain entity, then press **F6** (or use the Landscape toolbar button) to enter sculpt mode. The left **Sculpt** strip becomes the brush.
 
+## World partition streaming
+
+Terrain Details includes a generated **World Partition** panel. **Enabled**, **Cell Size**, **Load Radius**, and **Source Priority** control production cell streaming around the view that is actually rendered (the editor camera in Edit and the player camera in Play). **Manual Pin** can keep one cell resident while inspecting it. The read-only **Diagnostics** group reports wanted, loaded, and pending cells, resident actor count, and the current streaming status; these live counters are recomputed and are not stored in the scene.
+
 ## Brushes
 
 Click a tool so it highlights. Keys **1–6** pick the same tools.

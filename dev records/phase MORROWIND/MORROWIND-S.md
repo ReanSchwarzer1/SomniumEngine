@@ -1,6 +1,24 @@
 # MORROWIND-S — world partition and cell ownership
 
-**Complete, 2026-08-25.** Track 4 (SILT STRIDER), after MORROWIND-R.
+**Complete, 2026-08-25; Hello Engine integration corrected 2026-08-25.**
+Track 4 (SILT STRIDER), after MORROWIND-R.
+
+## Hello Engine integration correction
+
+The initial record proved the public partition API and Vvardenfell boundary but
+did not connect that coordinator to the production engine loop. That omission
+is now closed. A terrain carries a reflected `WorldPartitionComponent` whose
+authored cell size, load radius, priority and manual pin appear in generated
+Details. Wanted/loaded/pending cells, resident actors and status are visible
+read-only diagnostics and are deliberately not serialized.
+
+The engine-owned coordinator runs after `GameApp::on_render`, follows the same-
+frame `renderer.camera_pos` used by the active editor/player view, and uses the
+one shared job system. Cell-size edits drain and rebuild the old grid; terrain
+deletion drains its streamed actors. Missing empty cells load as empty without
+creating thousands of directories. Hello Engine's default and Create → Terrain
+paths attach the component, so partitioning is usable without Vvardenfell or an
+environment variable.
 
 ## Cells and want-state
 

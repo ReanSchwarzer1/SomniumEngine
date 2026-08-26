@@ -1176,6 +1176,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.create.ui_canvas",
+            "Create UI Canvas",
+            "Create",
+            None,
+            "Create a runtime UI canvas root and attach it to a selectable entity.",
+            A::CreateEntity(C::UiCanvas),
+            CREATE,
+            always
+        ),
+        command!(
             "editor.create.environment",
             "Create Environment",
             "Create",

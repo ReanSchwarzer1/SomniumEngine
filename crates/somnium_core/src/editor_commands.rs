@@ -7,7 +7,8 @@
 
 use crate::{
     Children, LightComponent, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
-    TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent, WorldTransform,
+    TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent, WorldTransform,
 };
 use somnium_ecs::reflect::{
     ChangeScope, FieldFlags, FieldId, ReflectObject, ReflectValue, StableId,
@@ -742,6 +743,8 @@ pub struct EntitySnapshot {
     /// the first two already round-trip, so only the third is new here.
     pub decal: Option<crate::decal::DecalComponent>,
     pub terrain: Option<TerrainComponent>,
+    pub world_partition: Option<WorldPartitionComponent>,
+    pub ui_canvas: Option<UiCanvasComponent>,
     pub voxel_terrain: Option<VoxelTerrainComponent>,
     pub foliage: Option<crate::FoliageComponent>,
     pub water: Option<WaterComponent>,
@@ -766,6 +769,8 @@ impl EntitySnapshot {
                 .is_some(),
             decal: world.get::<crate::decal::DecalComponent>(entity).copied(),
             terrain: world.get::<TerrainComponent>(entity).copied(),
+            world_partition: world.get::<WorldPartitionComponent>(entity).cloned(),
+            ui_canvas: world.get::<UiCanvasComponent>(entity).copied(),
             voxel_terrain: world.get::<VoxelTerrainComponent>(entity).copied(),
             foliage: world.get::<crate::FoliageComponent>(entity).cloned(),
             water: world.get::<WaterComponent>(entity).copied(),
@@ -804,6 +809,10 @@ impl EntitySnapshot {
             ));
         }
 
+        if let Some(canvas) = self.ui_canvas {
+            return world.spawn((transform, name, wt, canvas));
+        }
+
         if let Some(water) = self.water {
             return match (self.mesh, self.mesh_kind, self.parent) {
                 (Some(mesh), Some(kind), Some(parent)) => {
@@ -826,7 +835,7 @@ impl EntitySnapshot {
         // Foliage rides along when present: the archetype ECS takes every
         // component at spawn time, so it cannot be attached afterwards.
         if let Some(terrain) = self.terrain {
-            return match (self.foliage, self.children) {
+            let entity = match (self.foliage, self.children) {
                 (Some(f), Some(children)) => {
                     world.spawn((transform, name, wt, terrain, f, children))
                 }
@@ -834,6 +843,10 @@ impl EntitySnapshot {
                 (None, Some(children)) => world.spawn((transform, name, wt, terrain, children)),
                 (None, None) => world.spawn((transform, name, wt, terrain)),
             };
+            if let Some(partition) = self.world_partition {
+                let _ = world.insert_component(entity, partition);
+            }
+            return entity;
         }
 
         // Voxel terrain: the game-layer driver is rebuilt from this component,
@@ -2586,6 +2599,11 @@ mod landscape_tests {
                 cell_size: 1.0,
                 height_scale: 1.0,
             }),
+            world_partition: Some(WorldPartitionComponent {
+                load_radius: 320.0,
+                ..WorldPartitionComponent::default()
+            }),
+            ui_canvas: None,
             voxel_terrain: None,
             foliage: None,
             water: None,
@@ -2609,6 +2627,8 @@ mod landscape_tests {
             mesh_kind: None,
             is_particle_emitter: false,
             terrain: None,
+            world_partition: None,
+            ui_canvas: None,
             voxel_terrain: None,
             foliage: None,
             water: Some(WaterComponent::great_lakes(
@@ -2636,6 +2656,13 @@ mod landscape_tests {
         );
         assert_eq!(world.entities().count(), 2);
         let terrain = selected.unwrap();
+        assert_eq!(
+            world
+                .get::<WorldPartitionComponent>(terrain)
+                .expect("landscape restores its streaming controls")
+                .load_radius,
+            320.0
+        );
         let child = world.get::<Children>(terrain).unwrap().as_slice()[0];
         assert_eq!(world.get::<Parent>(child).unwrap().entity, terrain);
         assert!(world.get::<WaterComponent>(child).is_some());
@@ -2644,6 +2671,38 @@ mod landscape_tests {
         assert_eq!(world.entities().count(), 0);
         assert!(stack.redo(&mut world, &mut selected));
         assert_eq!(world.entities().count(), 2);
+        let terrain = selected.unwrap();
+        assert!(world.get::<WorldPartitionComponent>(terrain).is_some());
+    }
+
+    #[test]
+    fn ui_canvas_create_undo_redo_preserves_authored_settings() {
+        let mut world = World::new();
+        let mut selected = None;
+        let mut stack = UndoStack::new(8);
+        let canvas = UiCanvasComponent {
+            width: 1280.0,
+            height: 720.0,
+            layer: 42,
+            ..UiCanvasComponent::default()
+        };
+        stack.push(
+            Box::new(CreateEntityCmd::new(EntitySnapshot {
+                name: Some(Name::new("HUD")),
+                ui_canvas: Some(canvas),
+                ..EntitySnapshot::default()
+            })),
+            &mut world,
+            &mut selected,
+        );
+
+        let created = selected.expect("create selects the canvas");
+        assert_eq!(world.get::<UiCanvasComponent>(created), Some(&canvas));
+        assert!(stack.undo(&mut world, &mut selected));
+        assert_eq!(world.entities().count(), 0);
+        assert!(stack.redo(&mut world, &mut selected));
+        let restored = selected.expect("redo reselects the canvas");
+        assert_eq!(world.get::<UiCanvasComponent>(restored), Some(&canvas));
     }
 
     #[test]

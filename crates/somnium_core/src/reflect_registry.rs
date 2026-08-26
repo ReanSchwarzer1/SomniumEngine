@@ -20,9 +20,10 @@ use somnium_ecs::{Entity, World};
 
 use crate::{
     BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
-    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
-    PostProcessComponent, TerrainComponent, Tonemapper, Transform, VoxelTerrainComponent,
-    WaterComponent,
+    LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
+    ParticleEmitter, PostProcessComponent, TerrainComponent, Tonemapper, Transform,
+    UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent,
 };
 
 // `MeshComponent` and `MaterialComponent` derive `Default` at their
@@ -146,6 +147,38 @@ impl ReflectField for LightType {
     }
 }
 
+const LIGHT_SHADOW_TECHNIQUE_NAMES: &[&str] = &["Cascaded (CSM)", "Virtual (Experimental)"];
+
+impl ReflectField for LightShadowTechnique {
+    fn field_type() -> FieldType {
+        FieldType::Enum(LIGHT_SHADOW_TECHNIQUE_NAMES)
+    }
+
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(match self {
+            Self::Cascaded => 0,
+            Self::Virtual => 1,
+        })
+    }
+
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Cascaded),
+            ReflectValue::I64(1) => Ok(Self::Virtual),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(1.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "LightShadowTechnique".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
 /// Variant names for [`MeshKind`].
 const MESH_KIND_NAMES: &[&str] = &["Cube", "Sphere", "Plane", "Cylinder"];
 
@@ -175,6 +208,40 @@ impl ReflectField for MeshKind {
             other => Err(ReflectError::TypeMismatch {
                 field,
                 expected: "MeshKind".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
+const UI_CANVAS_SPACE_NAMES: &[&str] = &["Screen", "World", "Overlay"];
+
+impl ReflectField for UiCanvasSpace {
+    fn field_type() -> FieldType {
+        FieldType::Enum(UI_CANVAS_SPACE_NAMES)
+    }
+
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(match self {
+            Self::Screen => 0,
+            Self::World => 1,
+            Self::Overlay => 2,
+        })
+    }
+
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Screen),
+            ReflectValue::I64(1) => Ok(Self::World),
+            ReflectValue::I64(2) => Ok(Self::Overlay),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(2.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "UiCanvasSpace".into(),
                 found: other.kind(),
             }),
         }
@@ -420,6 +487,8 @@ pub fn component_registry() -> TypeRegistry {
     crate::character::register(&mut registry);
     registry.register(sky_schema());
     registry.register(terrain_schema());
+    registry.register(world_partition_schema());
+    registry.register(ui_canvas_schema());
     registry.register(time_of_day_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
@@ -847,6 +916,8 @@ fn light_schema() -> ComponentSchema {
         LightComponent as "somnium.Light", display "Light", version 1,
         fields {
             light_type,
+            shadow_technique { group: "Shadows", display_name: "Technique",
+                doc: "Cascaded is the measured default. Virtual lazily allocates sparse shadow pages and uses CSM for unavailable pages or adapters." },
             color,
             intensity { min: 0.0 },
             color_temperature_k { min: 0.0, max: 20_000.0 },
@@ -921,6 +992,51 @@ fn terrain_schema() -> ComponentSchema {
     }
 }
 
+fn world_partition_schema() -> ComponentSchema {
+    component_schema! {
+        WorldPartitionComponent as "somnium.WorldPartition", display "World Partition", version 1,
+        fields {
+            enabled { group: "Streaming" },
+            cell_size { min: 1.0, soft_max: 1024.0, unit: "m", group: "Streaming" },
+            load_radius { min: 0.0, soft_max: 4096.0, unit: "m", group: "Streaming" },
+            source_priority { min: 0, max: 255, group: "Streaming" },
+            pin_cell { group: "Manual Pin" },
+            pin_x { group: "Manual Pin" },
+            pin_y { group: "Manual Pin" },
+            pin_z { group: "Manual Pin" },
+            // Live values belong in Details, but never in a scene. Keeping
+            // EDIT while marking the rows read-only makes them visible to the
+            // generated inspector; SCRIPT_READ makes diagnostics useful to
+            // tooling without creating another API.
+            wanted_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            loaded_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            pending_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            resident_actors { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            status { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+        }
+    }
+}
+
+fn ui_canvas_schema() -> ComponentSchema {
+    component_schema! {
+        UiCanvasComponent as "somnium.UiCanvas", display "UI Canvas", version 1,
+        fields {
+            enabled { group: "Canvas" },
+            space { group: "Canvas" },
+            width { min: 0.01, soft_max: 3840.0, group: "Resolution" },
+            height { min: 0.01, soft_max: 2160.0, group: "Resolution" },
+            pixels_per_unit { min: 1.0, soft_max: 512.0, group: "World" },
+            billboard { group: "World" },
+            layer { min: -1000, max: 1000, group: "Canvas" },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,7 +1044,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 21);
+        assert_eq!(registry.len(), 23);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -951,9 +1067,11 @@ mod tests {
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",
+                "somnium.UiCanvas",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
                 "somnium.Weather",
+                "somnium.WorldPartition",
             ],
             "iteration is sorted by stable id, not by registration order"
         );
@@ -1029,10 +1147,23 @@ mod tests {
         assert_eq!(names[0], "Directional");
         assert_eq!(names[2], "Spot");
 
+        let shadow = schema.field_by_name("shadow_technique").unwrap();
+        let FieldType::Enum(shadow_names) = &shadow.ty else {
+            panic!("shadow_technique should be an enum field");
+        };
+        assert_eq!(shadow_names, &LIGHT_SHADOW_TECHNIQUE_NAMES);
+
         let mut world = World::new();
-        let e = world.spawn((LightComponent::point(3.0, 10.0),));
+        let mut light = LightComponent::point(3.0, 10.0);
+        light.shadow_technique = LightShadowTechnique::Virtual;
+        let e = world.spawn((light,));
         let snap = (schema.snapshot)(&world, e).unwrap();
         assert_eq!(snap[&field.id], ReflectValue::I64(1), "Point is variant 1");
+        assert_eq!(
+            snap[&shadow.id],
+            ReflectValue::I64(1),
+            "Virtual is the authored shadow variant"
+        );
     }
 
     #[test]

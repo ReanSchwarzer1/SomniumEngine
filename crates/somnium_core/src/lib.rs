@@ -214,6 +214,20 @@ pub enum LightType {
     Tube,
 }
 
+/// Authored shadow implementation for a light.
+///
+/// Virtual lazily requests the sparse physical-page path. The renderer
+/// preserves the choice but takes its explicit CSM fallback whenever resource
+/// creation, page raster, or sampling is unavailable on the active adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LightShadowTechnique {
+    /// Conventional cascaded shadow maps.
+    #[default]
+    Cascaded,
+    /// Experimental virtual shadow-map request with a cascaded fallback.
+    Virtual,
+}
+
 /// ECS component that marks an entity as a light source.
 ///
 /// Direction comes from the entity's `Transform.rotation`, and two opposite
@@ -244,6 +258,9 @@ pub enum LightType {
 pub struct LightComponent {
     /// Which kind of light this is (directional / point / spot).
     pub light_type: LightType,
+    /// Per-light CSM/VSM selection. Directional lights support both authored
+    /// values; local-light shadow rendering currently falls back to CSM/off.
+    pub shadow_technique: LightShadowTechnique,
     /// Linear-RGB color of the light.
     pub color: glam::Vec3,
     /// Physical light output (Phase 24A).
@@ -319,6 +336,7 @@ impl LightComponent {
     pub fn directional(intensity: f32) -> Self {
         Self {
             light_type: LightType::Directional,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -336,6 +354,7 @@ impl LightComponent {
     pub fn point(intensity: f32, range: f32) -> Self {
         Self {
             light_type: LightType::Point,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -353,6 +372,7 @@ impl LightComponent {
     pub fn spot(intensity: f32, range: f32, inner_angle: f32, outer_angle: f32) -> Self {
         Self {
             light_type: LightType::Spot,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -370,6 +390,7 @@ impl LightComponent {
     pub fn rect(intensity: f32, range: f32, half_width: f32, half_height: f32) -> Self {
         Self {
             light_type: LightType::Rect,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -387,6 +408,7 @@ impl LightComponent {
     pub fn disc(intensity: f32, range: f32, radius: f32) -> Self {
         Self {
             light_type: LightType::Disc,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -407,6 +429,7 @@ impl LightComponent {
     pub fn tube(intensity: f32, range: f32, half_length: f32, radius: f32) -> Self {
         Self {
             light_type: LightType::Tube,
+            shadow_technique: LightShadowTechnique::Cascaded,
             color: glam::Vec3::ONE,
             intensity,
             color_temperature_k: 0.0,
@@ -500,6 +523,117 @@ pub struct TerrainComponent {
     pub height_scale: f32,
 }
 impl somnium_ecs::Component for TerrainComponent {}
+
+/// Authored controls and live diagnostics for the terrain's world partition.
+///
+/// This component is the editor/runtime bridge: the terrain remains the
+/// spatial surface while [`world_partition::WorldPartition`] owns streamed
+/// actors. Runtime counters are refreshed by the engine and are read-only in
+/// generated Details.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldPartitionComponent {
+    /// Enable camera-driven cell streaming.
+    pub enabled: bool,
+    /// Edge length of one spatial-hash cell, in metres.
+    pub cell_size: f32,
+    /// Radius around the active camera that requests cells.
+    pub load_radius: f32,
+    /// Scheduling priority mapped onto the shared job system.
+    pub source_priority: u32,
+    /// Manually force one cell resident.
+    pub pin_cell: bool,
+    /// Manual pin coordinate.
+    pub pin_x: i64,
+    /// Manual pin coordinate.
+    pub pin_y: i64,
+    /// Manual pin coordinate.
+    pub pin_z: i64,
+    /// Cells currently requested by camera or editor pin.
+    pub wanted_cells: u32,
+    /// Cells with actors installed in the ECS.
+    pub loaded_cells: u32,
+    /// Cells with an asynchronous load/unload in flight.
+    pub pending_cells: u32,
+    /// Live actors owned by streamed cells.
+    pub resident_actors: u32,
+    /// Human-readable runtime state for the Details panel.
+    pub status: String,
+}
+
+impl Default for WorldPartitionComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cell_size: 64.0,
+            load_radius: 128.0,
+            source_priority: 128,
+            pin_cell: false,
+            pin_x: 0,
+            pin_y: 0,
+            pin_z: 0,
+            wanted_cells: 0,
+            loaded_cells: 0,
+            pending_cells: 0,
+            resident_actors: 0,
+            status: "Waiting for camera".into(),
+        }
+    }
+}
+
+impl somnium_ecs::Component for WorldPartitionComponent {}
+
+/// Space in which an authored UI canvas is attached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UiCanvasSpace {
+    /// Viewport-sized HUD/menu canvas.
+    #[default]
+    Screen,
+    /// Quad attached to the entity transform.
+    World,
+    /// Screen-sized marker projected from the entity position.
+    Overlay,
+}
+
+/// Discoverable ECS attachment for a runtime [`UiCanvas`].
+///
+/// The component describes placement and resolution. The game owns the widget
+/// tree, as required by the runtime UI seam; Hello Engine supplies a visible
+/// starter tree so Create → UI Canvas has an immediate result.
+///
+/// [`UiCanvas`]: somnium_ui::UiCanvas
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiCanvasComponent {
+    /// Whether the game should draw this canvas.
+    pub enabled: bool,
+    /// Placement mode used by the game-owned widget tree.
+    pub space: UiCanvasSpace,
+    /// Logical reference width for screen canvases, or world width in metres.
+    pub width: f32,
+    /// Logical reference height for screen canvases, or world height in metres.
+    pub height: f32,
+    /// Offscreen density used by world canvases.
+    pub pixels_per_unit: f32,
+    /// Face the active camera when attached in world space.
+    pub billboard: bool,
+    /// Stable draw layer value.
+    pub layer: i64,
+}
+
+impl Default for UiCanvasComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            space: UiCanvasSpace::Screen,
+            width: 1920.0,
+            height: 1080.0,
+            pixels_per_unit: 100.0,
+            billboard: true,
+            layer: 10,
+        }
+    }
+}
+
+impl somnium_ecs::Component for UiCanvasComponent {}
 
 /// Phase 17A: scatters foliage over the terrain on the same entity.
 ///

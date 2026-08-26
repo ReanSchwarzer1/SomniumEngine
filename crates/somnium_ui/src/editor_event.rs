@@ -14,6 +14,8 @@ pub enum CreateKind {
     Particle,
     Terrain,
     VoxelTerrain,
+    /// Runtime HUD, world-space panel, or projected overlay root.
+    UiCanvas,
     /// CONTROL-L/M/N. One entity carrying the scene's day cycle, sky and
     /// weather. One row rather than three because they are one authored
     /// object: coverage drives precipitation drives wetness, and splitting
@@ -37,6 +39,7 @@ impl CreateKind {
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
+            Self::UiCanvas => "UI Canvas",
             Self::Environment => "Environment",
         }
     }

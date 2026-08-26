@@ -1,3 +1,5 @@
+//! Application lifecycle and editor/runtime orchestration.
+
 use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
@@ -31,8 +33,8 @@ use crate::time::TimeState;
 use crate::{
     CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
     MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
-    TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent, WorldTransform,
-    look_rotation_neg_z, simulate_particles,
+    TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
 use somnium_ecs::World;
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -598,6 +600,11 @@ pub struct Engine<G: GameApp> {
     a11y: Option<crate::a11y_bridge::A11yBridge>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
     jobs: JobSystem,
+    /// MORROWIND-S production coordinator driven by the reflected component
+    /// attached to a terrain entity.
+    world_partition: Option<crate::world_partition::WorldPartition>,
+    world_partition_cell_size: f64,
+    world_partition_pin: Option<crate::world_partition::CellCoord>,
     asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
     next_asset_scan: std::time::Instant,
@@ -861,6 +868,9 @@ impl<G: GameApp + 'static> Engine<G> {
             ui_manager: None,
             a11y: None,
             jobs: JobSystem::default(),
+            world_partition: None,
+            world_partition_cell_size: 0.0,
+            world_partition_pin: None,
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             next_asset_scan: std::time::Instant::now(),
@@ -946,6 +956,178 @@ impl<G: GameApp + 'static> Engine<G> {
 }
 
 impl<G: GameApp> Engine<G> {
+    /// Drive the production partition from the terrain attachment and the
+    /// scene camera. This is intentionally engine-owned: it needs both the ECS
+    /// and the one shared job system, neither of which a UI panel should own.
+    fn update_world_partition(&mut self) {
+        use crate::world_partition::{
+            CellCoord, CellLoadState, PartitionStore, StreamingSource, StreamingSourceKind,
+            WorldPartition,
+        };
+
+        let owner = self.world.entities().find(|entity| {
+            self.world.get::<TerrainComponent>(*entity).is_some()
+                && self.world.get::<WorldPartitionComponent>(*entity).is_some()
+        });
+        let Some(owner) = owner else {
+            // Deleting/reloading the terrain must not strand streamed actors
+            // in the ECS. Drain the coordinator before dropping it; empty
+            // partitions disappear immediately.
+            if let Some(partition) = self.world_partition.as_mut() {
+                partition.remove_source(1);
+                if let Some(pin) = self.world_partition_pin.take() {
+                    partition.unpin(pin);
+                }
+                let _ = partition.update(
+                    &mut self.world,
+                    &mut self.jobs,
+                    std::time::Instant::now() + std::time::Duration::from_millis(100),
+                );
+                let drained = partition.diagnostics().iter().all(|cell| {
+                    cell.actor_count == 0
+                        && !matches!(
+                            cell.state,
+                            CellLoadState::Loading | CellLoadState::Unloading
+                        )
+                });
+                if drained {
+                    self.world_partition = None;
+                }
+            }
+            return;
+        };
+        let settings = self
+            .world
+            .get::<WorldPartitionComponent>(owner)
+            .cloned()
+            .expect("owner query required component");
+        let requested_cell_size = f64::from(settings.cell_size);
+        if !requested_cell_size.is_finite() || requested_cell_size <= 0.0 {
+            if let Some(component) = self.world.get_mut::<WorldPartitionComponent>(owner) {
+                component.status = "Cell size must be finite and positive".into();
+            }
+            return;
+        }
+
+        let can_rebuild = self.world_partition.as_ref().is_none_or(|partition| {
+            partition
+                .diagnostics()
+                .iter()
+                .all(|cell| cell.actor_count == 0)
+        });
+        if (self.world_partition.is_none()
+            || (self.world_partition_cell_size - requested_cell_size).abs() > f64::EPSILON)
+            && can_rebuild
+        {
+            self.world_partition = Some(WorldPartition::new(
+                PartitionStore::new(self.config.content_root.join("world_partition")),
+                requested_cell_size,
+            ));
+            self.world_partition_cell_size = requested_cell_size;
+            self.world_partition_pin = None;
+        }
+        let Some(partition) = self.world_partition.as_mut() else {
+            return;
+        };
+        let cell_size_change_pending =
+            (self.world_partition_cell_size - requested_cell_size).abs() > f64::EPSILON;
+
+        // A cell-size edit changes every coordinate. Drain the old grid before
+        // rebuilding it, otherwise an enabled source keeps the old actors
+        // resident forever and the Details control appears to do nothing.
+        let desired_pin = (!cell_size_change_pending && settings.pin_cell).then_some(CellCoord {
+            x: settings.pin_x,
+            y: settings.pin_y,
+            z: settings.pin_z,
+        });
+        if self.world_partition_pin != desired_pin {
+            if let Some(old) = self.world_partition_pin.take() {
+                partition.unpin(old);
+            }
+            if let Some(coord) = desired_pin {
+                partition.pin(coord);
+                self.world_partition_pin = Some(coord);
+            }
+        }
+
+        // The view is game-owned. In Hello Engine the Camera entity is an
+        // authored settings object and its Transform is not the moving editor
+        // camera (and during Play it is not the player camera either). The
+        // renderer is the one production handoff shared by all games: after
+        // `GameApp::on_render` its camera is the exact view this frame draws.
+        let camera_position = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.camera_pos.as_dvec3().to_array());
+        if settings.enabled && !cell_size_change_pending {
+            if let Some(position) = camera_position {
+                partition.set_source(StreamingSource {
+                    id: 1,
+                    position,
+                    radius: f64::from(settings.load_radius.max(0.0)),
+                    priority: settings.source_priority.min(u32::from(u8::MAX)) as u8,
+                    kind: StreamingSourceKind::Camera,
+                });
+            }
+        } else {
+            partition.remove_source(1);
+        }
+
+        let update_error = partition
+            .update(
+                &mut self.world,
+                &mut self.jobs,
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            )
+            .err();
+        let diagnostics = partition.diagnostics();
+        let loaded = diagnostics
+            .iter()
+            .filter(|cell| cell.state == CellLoadState::Loaded)
+            .count();
+        let pending = diagnostics
+            .iter()
+            .filter(|cell| {
+                matches!(
+                    cell.state,
+                    CellLoadState::Loading | CellLoadState::Unloading
+                )
+            })
+            .count();
+        let wanted = diagnostics
+            .iter()
+            .filter(|cell| cell.priority.is_some())
+            .count();
+        let actors = diagnostics
+            .iter()
+            .map(|cell| cell.actor_count)
+            .sum::<usize>();
+        if let Some(component) = self.world.get_mut::<WorldPartitionComponent>(owner) {
+            component.wanted_cells = u32::try_from(wanted).unwrap_or(u32::MAX);
+            component.loaded_cells = u32::try_from(loaded).unwrap_or(u32::MAX);
+            component.pending_cells = u32::try_from(pending).unwrap_or(u32::MAX);
+            component.resident_actors = u32::try_from(actors).unwrap_or(u32::MAX);
+            component.status = update_error.map_or_else(
+                || {
+                    if cell_size_change_pending {
+                        format!(
+                            "Changing cell size to {requested_cell_size:.1} m; unloading old grid"
+                        )
+                    } else if !settings.enabled && settings.pin_cell {
+                        "Camera streaming disabled; manual pin remains active".into()
+                    } else if !settings.enabled {
+                        "Camera streaming disabled; unloading cells".into()
+                    } else if camera_position.is_none() {
+                        "Waiting for the active renderer camera".into()
+                    } else {
+                        format!("{loaded} loaded, {pending} pending, {wanted} wanted")
+                    }
+                },
+                |error| format!("Streaming job rejected: {error:?}"),
+            );
+        }
+    }
+
     fn load_material_document(&mut self, asset_id: somnium_asset::database::AssetId) -> bool {
         if self.material_documents.contains_key(&asset_id) {
             return true;
@@ -2906,7 +3088,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             ctx.orbit_pivot = orbit_pivot;
             self.game.on_update(&mut ctx);
         }
-
         // Phase 16-C: the variable-rate script phase, and the one place
         // script output reaches the editor's Output Log.
         if self.simulation_clock.state == SimulationState::Playing {
@@ -3522,6 +3703,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 return;
             }
         }
+
+        // `on_render` is where a game publishes its active editor/player view
+        // through `renderer.set_view`. Stream from that same-frame position,
+        // not from a stale ECS settings transform or last frame's renderer.
+        self.update_world_partition();
 
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
@@ -4918,6 +5104,8 @@ impl<G: GameApp> Engine<G> {
                 environment: false,
                 decal: None,
                 terrain: None,
+                world_partition: None,
+                ui_canvas: None,
                 voxel_terrain: None,
                 foliage: None,
                 water: None,
@@ -6655,6 +6843,23 @@ impl<G: GameApp> Engine<G> {
                 self.after_selection_change();
             }
 
+            EditorEvent::CreateEntity(CreateKind::UiCanvas) => {
+                let snapshot = EntitySnapshot {
+                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    name: Some(Name::new("UI Canvas")),
+                    wt: Some(WorldTransform::identity()),
+                    ui_canvas: Some(UiCanvasComponent::default()),
+                    ..EntitySnapshot::default()
+                };
+                self.undo_stack.push(
+                    Box::new(CreateEntityCmd::new(snapshot)),
+                    &mut self.world,
+                    &mut self.selection.primary,
+                );
+                self.scene_dirty = true;
+                info!("Created runtime UI canvas entity");
+            }
+
             EditorEvent::CreateEntity(CreateKind::VoxelTerrain) => {
                 // The voxel world itself is owned by the game layer, which
                 // spins its streaming driver up when it sees this component
@@ -6671,6 +6876,8 @@ impl<G: GameApp> Engine<G> {
                     mesh_kind: None,
                     is_particle_emitter: false,
                     terrain: None,
+                    world_partition: None,
+                    ui_canvas: None,
                     voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
                     foliage: None,
                     water: None,
@@ -6869,6 +7076,8 @@ impl<G: GameApp> Engine<G> {
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
+                    world_partition: None,
+                    ui_canvas: None,
                     voxel_terrain: None,
                     foliage: None,
                     water: None,
@@ -7377,6 +7586,8 @@ impl<G: GameApp> Engine<G> {
                         // Terrains are not duplicated — two entities sharing
                         // one terrain_id would draw the same terrain twice.
                         terrain: None,
+                        world_partition: None,
+                        ui_canvas: None,
                         voxel_terrain: None,
                         foliage: None,
                         water,

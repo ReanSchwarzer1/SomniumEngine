@@ -7509,7 +7509,17 @@ mod zeta_layout_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        assert_eq!(layout.create_popup_items.len(), 15);
+        let expected_create_ids: Vec<_> = crate::commands::registry()
+            .menu(crate::commands::Menu::Create)
+            .into_iter()
+            .map(|command| command.id)
+            .collect();
+        let shell_create_ids: Vec<_> = layout
+            .create_popup_items
+            .iter()
+            .map(|(_, command_id)| *command_id)
+            .collect();
+        assert_eq!(shell_create_ids, expected_create_ids);
         for handle in [
             layout.save_button,
             layout.select_button,
@@ -7578,6 +7588,7 @@ mod must_not_break {
             CreateKind::Particle,
             CreateKind::Terrain,
             CreateKind::VoxelTerrain,
+            CreateKind::UiCanvas,
         ] {
             let command = crate::commands::registry()
                 .menu(crate::commands::Menu::Create)

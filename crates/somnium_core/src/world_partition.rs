@@ -242,10 +242,13 @@ impl PartitionStore {
     /// Load and validate a cell's actor documents.
     pub fn load_cell(&self, coord: CellCoord) -> Result<Vec<ActorRecord>, String> {
         let cell_root = self.cell_root(coord);
-        let index: CellIndex = serde_json::from_slice(
-            &fs::read(cell_root.join("cell.json")).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        let index_bytes = match fs::read(cell_root.join("cell.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        };
+        let index: CellIndex =
+            serde_json::from_slice(&index_bytes).map_err(|error| error.to_string())?;
         if index.version != 1 || index.coord != coord {
             return Err("cell index version or coordinate mismatch".into());
         }
@@ -584,6 +587,13 @@ impl WorldPartition {
             .iter()
             .filter_map(|(id, (owner, _))| (*owner == coord).then_some(*id))
             .collect();
+        // Empty spatial cells are a normal part of a camera radius. They have
+        // no authored state to persist and must not create thousands of empty
+        // directories as the camera moves.
+        if ids.is_empty() {
+            self.states.insert(coord, CellLoadState::Unloaded);
+            return Ok(());
+        }
         let registry = crate::reflect_registry::component_registry();
         let mut records = Vec::with_capacity(ids.len());
         for id in ids {
