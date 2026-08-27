@@ -114,3 +114,12 @@ sel.err
 assets/terrain/_source/
 assets/terrain/bc7/
 assets/.somnium/
+
+# ── Graphify knowledge graph ──────────────────────────────────────────────────
+# Keep the portable query graph and its human-readable report. Everything else
+# is regenerable cache/intermediate state or contains machine-local paths.
+/.graphify-tool-venv/
+/.graphify-uv-cache/
+/graphify-out/*
+!/graphify-out/graph.json
+!/graphify-out/GRAPH_REPORT.md
